@@ -18,6 +18,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allowed_services,
             allowed_nodes,
             allow_all_services,
+            allow_auto_connected_services,
             allow_all_nodes,
             platform,
             callback_url,
@@ -32,6 +33,10 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 None => None,
             };
 
+            let allowed_service_ids = match allowed_services.as_deref() {
+                Some(raw) => Some(resolve_allowed_services(&mut api, raw, org.as_deref()).await?),
+                None => None,
+            };
             // Browser-flow gate — opens the local wizard when a
             // browser is available, or the remote pairing transport
             // (code + URL) otherwise. `--terminal` and
@@ -54,8 +59,9 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     scopes: scopes.clone(),
                     expires_in_days,
                     allow_all_services,
+                    allow_auto_connected_services,
                     allow_all_nodes,
-                    allowed_services_csv: allowed_services.clone(),
+                    allowed_services_csv: allowed_service_ids.as_ref().map(|ids| ids.join(",")),
                     allowed_nodes_csv: allowed_nodes.clone(),
                     callback_url: callback_url.clone(),
                     org_id: org.clone(),
@@ -93,8 +99,11 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 body["expires_at"] = Value::String(expires.to_rfc3339());
             }
 
-            if let Some(services) = allowed_services {
-                let ids: Vec<&str> = services.split(',').map(|s| s.trim()).collect();
+            if allow_auto_connected_services {
+                body["allow_auto_connected_services"] = Value::Bool(true);
+                body["allow_all_services"] = Value::Bool(allow_all_services);
+            }
+            if let Some(ids) = allowed_service_ids {
                 body["allowed_service_ids"] = serde_json::json!(ids);
                 body["allow_all_services"] = Value::Bool(allow_all_services);
             } else if allow_all_services {
@@ -185,21 +194,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                             let id = key["id"].as_str().or(key["_id"].as_str()).unwrap_or("-");
                             let name = key["name"].as_str().unwrap_or("-");
                             let scopes = key["scopes"].as_str().unwrap_or("-");
-                            let services = if key["allow_all_services"].as_bool().unwrap_or(true) {
-                                "all".to_string()
-                            } else {
-                                key["allowed_services"]
-                                    .as_array()
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|s| {
-                                                s["slug"].as_str().or(s["label"].as_str())
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    })
-                                    .unwrap_or_else(|| "-".to_string())
-                            };
+                            let services = service_scope_display(key);
                             let nodes = if key["allow_all_nodes"].as_bool().unwrap_or(true) {
                                 "all".to_string()
                             } else {
@@ -246,15 +241,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     eprintln!("Expires:    {expires}");
                     eprintln!("Last Used:  {last_used}");
 
-                    if let Some(services) = key["allowed_service_ids"].as_array()
-                        && !services.is_empty()
-                    {
-                        let ids: Vec<&str> = services.iter().filter_map(|v| v.as_str()).collect();
-                        eprintln!("Allowed Services: {}", ids.join(", "));
-                    }
-                    if key["allow_all_services"].as_bool().unwrap_or(false) {
-                        eprintln!("Allowed Services: all");
-                    }
+                    eprintln!("Allowed Services: {}", service_scope_display(&key));
                     if let Some(nodes) = key["allowed_node_ids"].as_array()
                         && !nodes.is_empty()
                     {
@@ -319,9 +306,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
                 OutputFormat::Table => {
-                    let key = result["full_key"].as_str().unwrap_or("-");
-                    eprintln!("Key rotated!");
-                    eprintln!("New Key: {key}  (save this -- shown only once)");
+                    write_rotation_table(&mut std::io::stderr().lock(), &result)?;
                 }
             }
             Ok(())
@@ -358,6 +343,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             allowed_services,
             allowed_nodes,
             allow_all_services,
+            allow_auto_connected_services,
             allow_all_nodes,
             callback_url,
             auth,
@@ -373,12 +359,15 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                 body.insert("scopes".into(), Value::String(scopes));
             }
             if let Some(services) = allowed_services {
-                let ids: Vec<&str> = services.split(',').map(|s| s.trim()).collect();
+                let ids = resolve_allowed_services(&mut api, &services, None).await?;
                 body.insert("allowed_service_ids".into(), serde_json::json!(ids));
             }
             if let Some(nodes) = allowed_nodes {
                 let ids: Vec<&str> = nodes.split(',').map(|s| s.trim()).collect();
                 body.insert("allowed_node_ids".into(), serde_json::json!(ids));
+            }
+            if let Some(v) = allow_auto_connected_services {
+                body.insert("allow_auto_connected_services".into(), Value::Bool(v));
             }
             if let Some(v) = allow_all_services {
                 body.insert("allow_all_services".into(), Value::Bool(v));
@@ -405,6 +394,32 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             credential,
             auth,
         } => bind_credential(&auth, &id, &service, credential.as_deref()).await,
+        ApiKeyCommands::Operations {
+            id,
+            service,
+            allow_endpoints,
+            allow_rules,
+            all,
+            deny_all,
+            inputs,
+            auth,
+        } => {
+            let inputs = inputs
+                .map(|file| -> Result<Value> {
+                    let text = std::fs::read_to_string(&file)?;
+                    Ok(serde_json::from_str(&text)?)
+                })
+                .transpose()?;
+            let change = service.map(|service| OperationChange {
+                service,
+                allow_endpoints,
+                allow_rules,
+                all,
+                deny_all,
+                inputs,
+            });
+            key_operations(&auth, &id, change).await
+        }
         ApiKeyCommands::DurablePlan { file, auth } => {
             let body = read_json_contract(&file)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -501,6 +516,21 @@ fn confirm_durable_action(yes: bool, prompt: &str) -> Result<()> {
     anyhow::bail!("Cancelled")
 }
 
+fn write_rotation_table(writer: &mut impl Write, result: &Value) -> Result<()> {
+    let key = result["full_key"].as_str().unwrap_or("-");
+    if key.is_empty() && result["platform"].as_str() == Some("nyxid-assistant") {
+        writeln!(
+            writer,
+            "Key rotated. This key is managed by the NyxID assistant; \
+             the new secret is stored encrypted on the server and is never shown."
+        )?;
+    } else {
+        writeln!(writer, "Key rotated!")?;
+        writeln!(writer, "New Key: {key}  (save this -- shown only once)")?;
+    }
+    Ok(())
+}
+
 fn print_durable_value(output: &OutputFormat, value: &Value, label: &str) -> Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
@@ -550,6 +580,194 @@ async fn find_key_by_name(api: &mut ApiClient, name: &str) -> Result<Value> {
 }
 
 /// Resolve an API key identifier (ID or name) to a key ID string.
+struct OperationChange {
+    service: String,
+    allow_endpoints: Vec<String>,
+    allow_rules: Vec<String>,
+    all: bool,
+    deny_all: bool,
+    /// Value limits keyed by operation ID; None keeps saved limits.
+    inputs: Option<Value>,
+}
+
+/// Parse `METHOD:/path` into an explicit operation rule.
+fn parse_operation_rule(spec: &str) -> Result<Value> {
+    let (method, path) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Rule '{spec}' must look like GET:/items/{{id}}"))?;
+    let method = method.trim().to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "PATCH" | "DELETE"
+    ) || !path.starts_with('/')
+    {
+        anyhow::bail!("Rule '{spec}' must look like GET:/items/{{id}}");
+    }
+    Ok(serde_json::json!({"method": method, "path_template": path}))
+}
+
+/// Build the selection body for one service, pinned to its current revision.
+fn operation_selection(current: &Value, change: &OperationChange) -> Result<Value> {
+    if !change.all
+        && !change.deny_all
+        && change.allow_endpoints.is_empty()
+        && change.allow_rules.is_empty()
+    {
+        anyhow::bail!("Choose --all, --deny-all, --allow-endpoint or --allow");
+    }
+    let rules = change
+        .allow_rules
+        .iter()
+        .map(|spec| parse_operation_rule(spec))
+        .collect::<Result<Vec<_>>>()?;
+    // Keep saved limits for operations that stay selected unless replaced.
+    let inputs: serde_json::Map<String, Value> = match &change.inputs {
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => anyhow::bail!("--inputs must be a JSON object keyed by operation ID"),
+        None => current["inputs"]
+            .as_object()
+            .map(|saved| {
+                saved
+                    .iter()
+                    .filter(|(id, _)| change.allow_endpoints.contains(id))
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut selection = serde_json::json!({
+        "expected_revision": current["revision"].as_i64().unwrap_or(0),
+        "all_operations": change.all,
+        "endpoint_ids": change.allow_endpoints,
+        "rules": rules,
+    });
+    if !change.all && !inputs.is_empty() {
+        selection["inputs"] = Value::Object(inputs);
+    }
+    Ok(selection)
+}
+
+async fn key_operations(auth: &AuthArgs, id: &str, change: Option<OperationChange>) -> Result<()> {
+    let mut api = ApiClient::from_auth_checked(auth).await?;
+    let key_id = resolve_key_id(&mut api, id).await?;
+    let services: Vec<Value> = api.get(&format!("/api-keys/{key_id}/operations")).await?;
+    let Some(change) = change else {
+        match auth.output {
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&services)?),
+            OutputFormat::Table => print_operations(&services),
+        }
+        return Ok(());
+    };
+    let current = services
+        .iter()
+        .find(|row| {
+            row["service_id"].as_str() == Some(change.service.as_str())
+                || row["service_slug"].as_str() == Some(change.service.as_str())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("Service '{}' is not available to this key", change.service)
+        })?;
+    let service_id = current["service_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let body = operation_selection(current, &change)?;
+    let result: Value = api
+        .put(
+            &format!("/api-keys/{key_id}/operations/{service_id}"),
+            &body,
+        )
+        .await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Table => {
+            let name = current["service_name"].as_str().unwrap_or(&change.service);
+            if result["all_operations"].as_bool().unwrap_or(false) {
+                eprintln!("{name}: all operations allowed.");
+            } else {
+                let count = change.allow_endpoints.len() + change.allow_rules.len();
+                eprintln!(
+                    "{name}: limited to {count} operation(s) (revision {}).",
+                    result["revision"].as_i64().unwrap_or(0)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_operations(services: &[Value]) {
+    if services.is_empty() {
+        eprintln!("This key has no services to limit.");
+        return;
+    }
+    for service in services {
+        let name = service["service_name"].as_str().unwrap_or("-");
+        let slug = service["service_slug"].as_str().unwrap_or("-");
+        let selected: Vec<&str> = service["endpoint_ids"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let all = service["all_operations"].as_bool().unwrap_or(true);
+        eprintln!(
+            "\n{name} ({slug}) · revision {} · {}",
+            service["revision"].as_i64().unwrap_or(0),
+            if all {
+                "all operations".to_owned()
+            } else {
+                format!(
+                    "{} selected",
+                    selected.len() + service["rules"].as_array().map_or(0, Vec::len)
+                )
+            }
+        );
+        let limited = |id: &str| service["inputs"].get(id).is_some();
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL_CONDENSED);
+        table.set_header(vec![
+            "Allowed",
+            "Operation ID",
+            "Method",
+            "Path",
+            "Effect",
+            "Limits",
+        ]);
+        for op in service["operations"].as_array().into_iter().flatten() {
+            let op_id = op["endpoint_id"].as_str().unwrap_or("-");
+            let effect = if op["read_only"].as_bool().unwrap_or(false) {
+                "read"
+            } else if op["changes_existing"].as_bool().unwrap_or(false) {
+                "changes existing"
+            } else {
+                "write"
+            };
+            table.add_row(vec![
+                if all || selected.contains(&op_id) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                op_id,
+                op["method"].as_str().unwrap_or("-"),
+                op["path"].as_str().unwrap_or("-"),
+                effect,
+                if limited(op_id) { "values" } else { "" },
+            ]);
+        }
+        for rule in service["rules"].as_array().into_iter().flatten() {
+            table.add_row(vec![
+                "yes",
+                "(rule)",
+                rule["method"].as_str().unwrap_or("-"),
+                rule["path_template"].as_str().unwrap_or("-"),
+                "-",
+                "",
+            ]);
+        }
+        eprintln!("{table}");
+    }
+}
+
 async fn resolve_key_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
     // Try as a direct ID first (GET /api-keys/{id})
     if let Ok(key) = api.get::<Value>(&format!("/api-keys/{id_or_name}")).await
@@ -640,12 +858,304 @@ async fn bind_credential(
     Ok(())
 }
 
+/// UUIDs remain pass-through; resolving any slug refreshes the management catalog.
+async fn resolve_allowed_services(
+    api: &mut ApiClient,
+    raw: &str,
+    org: Option<&str>,
+) -> Result<Vec<String>> {
+    let refs: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    let rows: Value = if refs
+        .iter()
+        .any(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        api.get("/keys").await?
+    } else {
+        Value::Null
+    };
+    resolve_service_references(&refs, &rows, org)
+}
+
+fn resolve_service_references(
+    refs: &[&str],
+    response: &Value,
+    org: Option<&str>,
+) -> Result<Vec<String>> {
+    let rows = response
+        .get("keys")
+        .and_then(Value::as_array)
+        .or_else(|| response.as_array());
+    let mut ids = Vec::new();
+    for reference in refs {
+        let id = if uuid::Uuid::parse_str(reference).is_ok() {
+            reference.to_string()
+        } else {
+            let matches: Vec<&Value> = rows
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row["slug"].as_str() == Some(reference)
+                        && row["is_active"].as_bool() == Some(true)
+                        && org.is_none_or(|id| {
+                            row["credential_source"]["type"].as_str() == Some("org")
+                                && row["credential_source"]["org_id"].as_str() == Some(id)
+                        })
+                        && row["credential_source"]["allowed"].as_bool() != Some(false)
+                })
+                .collect();
+            match matches.as_slice() {
+                [row] => row["id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Service '{reference}' has no id"))?
+                    .to_string(),
+                [] => anyhow::bail!(
+                    "Unknown or unavailable service slug '{reference}'. Run `nyxid service list` to see available services."
+                ),
+                _ => anyhow::bail!("Ambiguous service slug '{reference}'; use a service UUID."),
+            }
+        };
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+pub(crate) fn service_scope_display(key: &Value) -> String {
+    if key["allow_all_services"].as_bool().unwrap_or(true) {
+        return "all".into();
+    }
+    let mut labels: Vec<String> = key["allowed_services"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|service| {
+            service["slug"]
+                .as_str()
+                .or(service["label"].as_str())
+                .map(|name| {
+                    if service["auto_connected"].as_bool().unwrap_or(false) {
+                        format!("{name} (Platform)")
+                    } else {
+                        name.to_string()
+                    }
+                })
+        })
+        .collect();
+    if labels.is_empty() {
+        labels.extend(
+            key["allowed_service_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    if key["allow_auto_connected_services"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        labels.push("Platform services: all auto-connected".into());
+    }
+    if labels.is_empty() {
+        "-".into()
+    } else {
+        labels.join(", ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::mock_auth;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn platform_scope_flags_parse_for_create_update_and_devices() {
+        use crate::cli::{Cli, Commands, DeviceCommands};
+        use clap::Parser;
+        let parsed = Cli::try_parse_from([
+            "nyxid",
+            "api-key",
+            "create",
+            "--allow-auto-connected-services",
+            "--allowed-services",
+            "search,github",
+        ])
+        .unwrap();
+        assert!(
+            matches!(parsed.command, Commands::ApiKey { command: ApiKeyCommands::Create { allow_auto_connected_services: true, allowed_services: Some(ref values), .. } } if values == "search,github")
+        );
+        for value in ["true", "false"] {
+            let parsed = Cli::try_parse_from([
+                "nyxid",
+                "api-key",
+                "update",
+                "id",
+                "--allow-auto-connected-services",
+                value,
+            ])
+            .unwrap();
+            assert!(
+                matches!(parsed.command, Commands::ApiKey { command: ApiKeyCommands::Update { allow_auto_connected_services: Some(flag), .. } } if flag == (value == "true"))
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "api-key",
+                "update",
+                "id",
+                "--allow-auto-connected-services"
+            ])
+            .is_err()
+        );
+        let parsed = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--allow-auto-connected-services",
+            "--service",
+            "search",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Device {
+                command: DeviceCommands::Approve {
+                    allow_auto_connected_services: true,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn platform_scope_slug_resolution_checks_active_rows_ambiguity_and_owner() {
+        let uuid = "00000000-0000-4000-8000-000000000001";
+        let rows = serde_json::json!({ "keys": [
+            { "id": "personal", "slug": "search", "is_active": true, "auto_connected": true },
+            { "id": "disabled", "slug": "search", "is_active": false },
+            { "id": "org", "slug": "shared", "is_active": true, "credential_source": { "type": "org", "org_id": "org-1", "allowed": true } },
+            { "id": "other", "slug": "shared", "is_active": true }
+        ] });
+        assert_eq!(
+            resolve_service_references(&[uuid, "search"], &rows, None).unwrap(),
+            vec![uuid, "personal"]
+        );
+        assert!(
+            resolve_service_references(&["missing"], &rows, None)
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown")
+        );
+        assert!(
+            resolve_service_references(&["shared"], &rows, None)
+                .unwrap_err()
+                .to_string()
+                .contains("Ambiguous")
+        );
+        assert_eq!(
+            resolve_service_references(&["shared"], &rows, Some("org-1")).unwrap(),
+            vec!["org"]
+        );
+        assert!(resolve_service_references(&["search"], &rows, Some("org-1")).is_err());
+        assert_eq!(
+            resolve_service_references(&[uuid], &Value::Null, None).unwrap(),
+            vec![uuid]
+        );
+    }
+
+    #[test]
+    fn platform_scope_table_marks_explicit_rows_and_future_grant() {
+        let key = serde_json::json!({ "allow_all_services": false, "allow_auto_connected_services": true,
+            "allowed_services": [{ "slug": "search", "auto_connected": true }, { "slug": "github" }] });
+        assert_eq!(
+            service_scope_display(&key),
+            "search (Platform), github, Platform services: all auto-connected"
+        );
+        assert_eq!(
+            service_scope_display(&serde_json::json!({ "allow_all_services": false })),
+            "-"
+        );
+    }
+
+    #[test]
+    fn allow_all_services_hides_the_ineffective_platform_grant() {
+        assert_eq!(
+            service_scope_display(&serde_json::json!({
+                "allow_all_services": true, "allow_auto_connected_services": true,
+                "allowed_services": [{ "slug": "search", "auto_connected": true }]
+            })),
+            "all"
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_scope_request_bodies_resolve_slug_and_preserve_false_update() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "keys": [
+                { "id": "platform-id", "slug": "search", "is_active": true, "auto_connected": true }
+            ] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/api/v1/api-keys"))
+            .and(body_json(serde_json::json!({ "name": "platform", "scopes": "proxy", "allowed_service_ids": ["platform-id"], "allow_all_services": false, "allow_auto_connected_services": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "key", "full_key": "test" }))).expect(1).mount(&server).await;
+        run(ApiKeyCommands::Create {
+            name: Some("platform".into()),
+            scopes: Some("proxy".into()),
+            expires_in_days: None,
+            allowed_services: Some("search".into()),
+            allowed_nodes: None,
+            allow_all_services: false,
+            allow_auto_connected_services: true,
+            allow_all_nodes: false,
+            platform: None,
+            callback_url: None,
+            org: None,
+            terminal: true,
+            no_wait: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/api-keys/key"))
+            .and(body_json(
+                serde_json::json!({ "allow_auto_connected_services": false }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ApiKeyCommands::Update {
+            id: "key".into(),
+            name: None,
+            scopes: None,
+            allowed_services: None,
+            allowed_nodes: None,
+            allow_all_services: None,
+            allow_auto_connected_services: Some(false),
+            allow_all_nodes: None,
+            callback_url: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+    }
 
     // --- Command-level integration tests (against a mock server) ---
 
@@ -675,6 +1185,7 @@ mod tests {
             allowed_services: None,
             allowed_nodes: None,
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             platform: Some("claude-code".to_string()),
             callback_url: None,
@@ -787,6 +1298,7 @@ mod tests {
             allowed_services: None,
             allowed_nodes: None,
             allow_all_services: None,
+            allow_auto_connected_services: None,
             allow_all_nodes: None,
             callback_url: None,
             auth: mock_auth(server.uri()),
@@ -910,6 +1422,18 @@ mod option_tests {
     #[tokio::test]
     async fn create_includes_scope_and_callback_fields() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "keys": [
+                { "id": "svc-a", "slug": "svc-a", "is_active": true, "auto_connected": true },
+                { "id": "svc-b", "slug": "svc-b", "is_active": true }
+            ] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
         Mock::given(method("POST"))
             .and(path("/api/v1/api-keys"))
             .and(body_partial_json(serde_json::json!({
@@ -934,6 +1458,7 @@ mod option_tests {
             allowed_services: Some("svc-a,svc-b".to_string()),
             allowed_nodes: Some("node-1".to_string()),
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             platform: None,
             callback_url: Some("https://cb.example".to_string()),
@@ -969,6 +1494,7 @@ mod option_tests {
             allowed_services: None,
             allowed_nodes: None,
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             platform: None,
             callback_url: None,
@@ -984,6 +1510,18 @@ mod option_tests {
     #[tokio::test]
     async fn update_includes_changed_scope_fields() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "keys": [
+                { "id": "svc-a", "slug": "svc-a", "is_active": true, "auto_connected": true },
+                { "id": "svc-b", "slug": "svc-b", "is_active": true }
+            ] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
         Mock::given(method("PUT"))
             .and(path("/api/v1/api-keys/key-1"))
             .and(body_partial_json(serde_json::json!({
@@ -1004,6 +1542,7 @@ mod option_tests {
             allowed_services: Some("svc-a".to_string()),
             allowed_nodes: None,
             allow_all_services: None,
+            allow_auto_connected_services: None,
             allow_all_nodes: Some(true),
             callback_url: Some("https://cb".to_string()),
             auth: mock_auth(server.uri()),
@@ -1071,6 +1610,7 @@ mod option_tests {
             allowed_services: None,
             allowed_nodes: None,
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             platform: None,
             callback_url: None,
@@ -1188,6 +1728,37 @@ mod option_tests {
         .expect("rotate table should succeed");
     }
 
+    #[test]
+    fn rotate_table_explains_private_assistant_keys_without_a_save_prompt() {
+        let mut output = Vec::new();
+        write_rotation_table(
+            &mut output,
+            &serde_json::json!({"full_key": "", "platform": "nyxid-assistant"}),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Key rotated. This key is managed by the NyxID assistant; \
+             the new secret is stored encrypted on the server and is never shown.\n"
+        );
+    }
+
+    #[test]
+    fn rotate_table_retains_normal_output_unless_both_managed_conditions_match() {
+        for (key, platform) in [("nyx_test", "nyxid-assistant"), ("", "codex")] {
+            let mut output = Vec::new();
+            write_rotation_table(
+                &mut output,
+                &serde_json::json!({"full_key": key, "platform": platform}),
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("Key rotated!\nNew Key: {key}  (save this -- shown only once)\n")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn update_clears_callback_url_with_empty_string() {
         let server = MockServer::start().await;
@@ -1207,6 +1778,7 @@ mod option_tests {
             allowed_services: None,
             allowed_nodes: None,
             allow_all_services: None,
+            allow_auto_connected_services: None,
             allow_all_nodes: None,
             callback_url: Some(String::new()),
             auth: crate::test_support::mock_auth(server.uri()),
@@ -1262,5 +1834,75 @@ mod option_tests {
         })
         .await
         .expect("bind with label should succeed");
+    }
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+
+    fn change(all: bool, deny_all: bool, endpoints: &[&str], rules: &[&str]) -> OperationChange {
+        OperationChange {
+            service: "calendar".into(),
+            allow_endpoints: endpoints.iter().map(|s| (*s).to_owned()).collect(),
+            allow_rules: rules.iter().map(|s| (*s).to_owned()).collect(),
+            all,
+            deny_all,
+            inputs: None,
+        }
+    }
+
+    #[test]
+    fn saved_limits_follow_operations_that_stay_selected() {
+        let current = serde_json::json!({"revision": 2, "inputs": {
+            "e1": {"query": {}}, "e2": {"path": {}}}});
+        let selection = operation_selection(&current, &change(false, false, &["e1"], &[])).unwrap();
+        assert_eq!(
+            selection["inputs"],
+            serde_json::json!({"e1": {"query": {}}})
+        );
+        let mut replaced = change(false, false, &["e1"], &[]);
+        replaced.inputs = Some(serde_json::json!({"e1": {"path": {}}}));
+        assert_eq!(
+            operation_selection(&current, &replaced).unwrap()["inputs"],
+            serde_json::json!({"e1": {"path": {}}})
+        );
+        assert!(
+            operation_selection(&current, &change(true, false, &[], &[]))
+                .unwrap()
+                .get("inputs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rules_parse_method_and_path() {
+        assert_eq!(
+            parse_operation_rule("get:/items/{id}").unwrap(),
+            serde_json::json!({"method": "GET", "path_template": "/items/{id}"})
+        );
+        assert!(parse_operation_rule("FETCH:/items").is_err());
+        assert!(parse_operation_rule("GET:items").is_err());
+        assert!(parse_operation_rule("/items").is_err());
+    }
+
+    #[test]
+    fn selections_pin_the_listed_revision() {
+        let current = serde_json::json!({"revision": 3});
+        assert_eq!(
+            operation_selection(&current, &change(false, false, &["e1"], &[])).unwrap(),
+            serde_json::json!({"expected_revision": 3, "all_operations": false,
+                "endpoint_ids": ["e1"], "rules": []})
+        );
+        assert_eq!(
+            operation_selection(&current, &change(false, true, &[], &[])).unwrap(),
+            serde_json::json!({"expected_revision": 3, "all_operations": false,
+                "endpoint_ids": [], "rules": []})
+        );
+        assert_eq!(
+            operation_selection(&current, &change(true, false, &[], &[])).unwrap()["all_operations"],
+            serde_json::json!(true)
+        );
+        assert!(operation_selection(&current, &change(false, false, &[], &[])).is_err());
     }
 }

@@ -110,8 +110,7 @@ pub async fn transition_oauth_key_to_dead(
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<bool> {
     let now = chrono::Utc::now();
-    let result = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .update_one(
             doc! {
                 "_id": &api_key.id,
@@ -159,18 +158,18 @@ pub async fn transition_legacy_oauth_keys_to_dead(
     error_message: &str,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<u64> {
-    let keys: Vec<UserApiKey> = db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "connection_id": null,
-            "credential_type": "oauth2",
-            "status": "active",
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let keys: Vec<UserApiKey> =
+        crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+            .find(doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "connection_id": null,
+                "credential_type": "oauth2",
+                "status": "active",
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut transitioned = 0;
     for key in &keys {
@@ -189,25 +188,25 @@ fn spawn_transition_side_effects(
     notifier: Option<ConnectionExpiryNotifier>,
 ) {
     tokio::spawn(async move {
-        let user_service = match db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &api_key.user_id,
-                "api_key_id": &api_key.id,
-            })
-            .sort(doc! { "created_at": 1, "_id": 1 })
-            .await
-        {
-            Ok(service) => service,
-            Err(error) => {
-                tracing::warn!(
-                    api_key_id = %api_key.id,
-                    error = %error,
-                    "Failed to resolve service metadata for expired connection"
-                );
-                None
-            }
-        };
+        let user_service =
+            match crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &api_key.user_id,
+                    "api_key_id": &api_key.id,
+                })
+                .sort(doc! { "created_at": 1, "_id": 1 })
+                .await
+            {
+                Ok(service) => service,
+                Err(error) => {
+                    tracing::warn!(
+                        api_key_id = %api_key.id,
+                        error = %error,
+                        "Failed to resolve service metadata for expired connection"
+                    );
+                    None
+                }
+            };
 
         let event_data = serde_json::json!({
             "user_id": &api_key.user_id,
@@ -351,6 +350,7 @@ mod tests {
     fn oauth_key(user_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            oauth_app_observation: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             label: "GitHub work account".to_string(),
@@ -381,14 +381,19 @@ mod tests {
     fn user_service(user_id: &str, api_key_id: &str) -> UserService {
         let now = Utc::now();
         UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: "github-work".to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: Some(api_key_id.to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("github-catalog".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -491,9 +496,13 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

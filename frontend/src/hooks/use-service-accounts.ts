@@ -368,3 +368,20 @@ export function useDisconnectSaService() {
     },
   });
 }
+
+export function useIssueCurationGrant() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ saId, data }: { saId: string; data: import("@/types/service-accounts").IssueCurationGrantRequest }) =>
+      api.post<ServiceAccount>(`/admin/service-accounts/${saId}/curation-grant`, data),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["admin", "service-accounts"] }); },
+  });
+}
+
+export function useRevokeCurationGrant() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (saId: string) => api.delete<ServiceAccount>(`/admin/service-accounts/${saId}/curation-grant`),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["admin", "service-accounts"] }); },
+  });
+}

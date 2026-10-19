@@ -303,6 +303,202 @@
           }
         }
       }
+    },
+    "/dm_conversations/with/{participant_id}/messages": {
+      "post": {
+        "operationId": "send_dm",
+        "summary": "Send a direct message",
+        "x-aevatar-tool": {
+          "name": "send_dm",
+          "description": "Send an X direct message to a participant. Requires dm.write, tweet.read and users.read; X returns 403 without the required scopes.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "participant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "media_id": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created direct message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dm_events": {
+      "get": {
+        "operationId": "list_dm_events",
+        "summary": "List direct message events",
+        "x-aevatar-tool": {
+          "name": "list_dm_events",
+          "description": "List X direct message events. Requires dm.read, tweet.read and users.read; X returns 403 without the required scopes.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "max_results",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pagination_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated values."
+          },
+          {
+            "name": "dm_event.fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated values."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct message events page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dm_conversations/with/{participant_id}/dm_events": {
+      "get": {
+        "operationId": "get_dm_conversation_with_user",
+        "summary": "Get direct message events with a user",
+        "x-aevatar-tool": {
+          "name": "get_dm_conversation_with_user",
+          "description": "Read X direct message events with a participant. Requires dm.read, tweet.read and users.read; X returns 403 without the required scopes.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "participant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "max_results",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pagination_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event_types",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated values."
+          },
+          {
+            "name": "dm_event.fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated values."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct message events page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

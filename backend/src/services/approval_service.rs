@@ -278,6 +278,85 @@ pub async fn evaluate_and_check(
     }))
 }
 
+/// An assistant approval bypass is returned to the dispatcher so its receipt
+/// is written only after successful execution. Explicit deny rules still win.
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_for_chat(
+    db: &Database,
+    actor: &str,
+    service_owner: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass: bool,
+    auto_connected: bool,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<(
+    ApprovalOutcome,
+    Option<super::assistant_acknowledgement_service::AutoAllowed>,
+)> {
+    use super::assistant_acknowledgement_service as acks;
+    let outcome = evaluate_and_check(
+        db,
+        actor,
+        service_owner,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass,
+        auto_connected,
+    )
+    .await?;
+    if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
+        && let Some(chat) = chat.filter(|chat| !chat.guest)
+        && acks::effective_access_mode(db, chat).await?
+            == crate::models::assistant_settings::AccessMode::Autopilot
+    {
+        let outcome = ApprovalOutcome::Allowed {
+            required: pending.resolution.required,
+        };
+        let receipt = Some(acks::AutoAllowed {
+            class: match descriptor.verb {
+                crate::models::service_approval_config::ApprovalVerb::Read => {
+                    acks::OwnerActionClass::Read
+                }
+                crate::models::service_approval_config::ApprovalVerb::Destructive => {
+                    acks::OwnerActionClass::Destructive
+                }
+                _ => acks::OwnerActionClass::Change,
+            },
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "approval",
+        });
+        return Ok((outcome, receipt));
+    }
+    Ok((outcome, None))
+}
+
+pub async fn record_chat_approval(
+    db: &Database,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+    auto: Option<super::assistant_acknowledgement_service::AutoAllowed>,
+    service_id: &str,
+    service_name: &str,
+    descriptor: &OperationDescriptor,
+) {
+    if let (Some(chat), Some(auto)) = (chat, auto) {
+        let operation = descriptor.operation_summary();
+        super::assistant_acknowledgement_service::record_auto_allowed(
+            db,
+            chat,
+            "service_approval",
+            &serde_json::json!({"service_id":service_id,"operation":operation}),
+            &auto,
+            &format!("{} on {}", operation, service_name),
+        )
+        .await;
+    }
+}
+
 pub async fn approval_notification_recipients(
     db: &Database,
     approval_owner_user_id: &str,
@@ -411,6 +490,7 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
     pub action_description: Option<String>,
     pub http_method: Option<String>,
@@ -423,6 +503,7 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            assistant_group: None,
             operation_summary: descriptor.operation_summary(),
             action_description: Some(descriptor.summary.clone()),
             http_method: descriptor.method.clone(),
@@ -459,14 +540,16 @@ pub async fn create_approval_request(
     notify_user_ids: Vec<String>,
     from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
-    let notify_user_ids = if notify_user_ids.is_empty() {
+    let notify_user_ids = if let Some(group) = &operation.assistant_group {
+        vec![group.actor_user_id.clone()]
+    } else if notify_user_ids.is_empty() {
         vec![user_id.to_string()]
     } else {
         notify_user_ids
     };
 
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let idempotency_key = operation
+    let mut idempotency_key = operation
         .exact_service
         .as_ref()
         .map(|binding| binding.request_key.clone())
@@ -480,6 +563,13 @@ pub async fn create_approval_request(
                 from_org_policy,
             )
         });
+    if let Some(group) = &operation.assistant_group {
+        // A card from another chain or private thread can never be coalesced.
+        idempotency_key = format!(
+            "{idempotency_key}:{}:{}",
+            group.conversation_id, group.request_id
+        );
+    }
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
         if let Some(binding) = operation.exact_service.as_ref()
@@ -531,6 +621,7 @@ pub async fn create_approval_request(
         let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
         let request = ApprovalRequest {
+            assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -770,6 +861,7 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         service_id: "tool_approval".to_string(),
@@ -870,6 +962,46 @@ pub async fn process_decision(
     idempotency_key: Option<&str>,
     decision_channel: &str,
 ) -> AppResult<ApprovalRequest> {
+    Box::pin(process_decision_with_access(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        request_id,
+        approved,
+        duration_sec,
+        idempotency_key,
+        decision_channel,
+        None,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_decision_with_access(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    fcm_auth: Option<Arc<FcmAuth>>,
+    apns_auth: Option<Arc<ApnsAuth>>,
+    request_id: &str,
+    approved: bool,
+    duration_sec: Option<i64>,
+    idempotency_key: Option<&str>,
+    decision_channel: &str,
+    snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<ApprovalRequest> {
+    let current = get_request(db, request_id).await?;
+    if let Some(binding) = &current.assistant_group {
+        super::org_group_service::authorize_approval(
+            db,
+            &current,
+            &binding.actor_user_id,
+            snapshot,
+        )
+        .await?;
+    }
     let now = Utc::now();
     let new_status = if approved { "approved" } else { "rejected" };
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
@@ -1102,19 +1234,7 @@ pub async fn expire_pending_requests(
     // the find() above and this update_many(). Without the status guard,
     // the sweep could overwrite an "approved" status back to "expired".
     let ids: Vec<&str> = expired.iter().map(|r| r.id.as_str()).collect();
-    let expire_result = db
-        .collection::<ApprovalRequest>(REQUESTS)
-        .update_many(
-            doc! { "_id": { "$in": &ids }, "status": "pending" },
-            doc! { "$set": {
-                "status": "expired",
-                "decided_at": sweep_time,
-                "decision_idempotency_key": &sweep_marker,
-            } },
-        )
-        .await?;
-
-    let count = expire_result.modified_count;
+    let count = expire_pending_ids(db, &ids, sweep_time, &sweep_marker).await?;
     if count == 0 {
         return Ok(0);
     }
@@ -1202,6 +1322,114 @@ pub async fn expire_pending_requests(
     }
 
     Ok(count)
+}
+
+/// Shared pending-only transition for time expiry and obsolete chat asks.
+async fn expire_pending_ids(
+    db: &Database,
+    ids: &[&str],
+    decided_at: bson::DateTime,
+    marker: &str,
+) -> AppResult<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .update_many(
+            doc! {"_id": {"$in": ids}, "status": "pending"},
+            doc! {"$set": {"status": "expired", "decided_at": decided_at,
+            "decision_idempotency_key": marker}},
+        )
+        .await?
+        .modified_count)
+}
+
+/// Retire only approvals bound to actual assistant credentials. General agent
+/// keys and explicit denials retain their lifecycle. Called on policy writes
+/// and startup, never while reading history or pending cards.
+pub(super) async fn retire_full_access_chat_requests(
+    db: &Database,
+    user: Option<&str>,
+    agent: Option<&str>,
+    modes: &mut super::assistant_acknowledgement_service::AccessModeCache,
+    sweep_time: bson::DateTime,
+) -> AppResult<()> {
+    use crate::models::{
+        api_key::{ApiKey, COLLECTION_NAME as KEYS},
+        assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+    };
+    let mut filter = doc! {"status": "pending", "requester_type": "user",
+    "requester_label": {"$ne": bson::Bson::Null}, "created_at": {"$lte": sweep_time}};
+    if let Some(user) = user {
+        filter.insert("requester_id", user);
+    }
+    let marker = format!("expiry:full-access:{}", uuid::Uuid::new_v4());
+    let mut identities = std::collections::HashMap::new();
+    loop {
+        let pending: Vec<_> = db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .find(filter.clone())
+            .sort(doc! {"_id": 1})
+            .limit(100)
+            .await?
+            .try_collect()
+            .await?;
+        let Some(last) = pending.last() else { break };
+        filter.insert("_id", doc! {"$gt": &last.id});
+        let mut ids = Vec::new();
+        for request in pending {
+            let Some(label) = request.requester_label.as_deref() else {
+                continue;
+            };
+            let identity = (request.requester_id.clone(), label.to_owned());
+            if !identities.contains_key(&identity) {
+                let key = db
+                    .collection::<ApiKey>(KEYS)
+                    .find_one(doc! {"user_id": &request.requester_id, "name": label})
+                    .await?;
+                let thread = if let Some(key) = key {
+                    let credential = db
+                        .collection::<AssistantAgentCredential>(CREDENTIALS)
+                        .find_one(doc! {"user_id": &request.requester_id, "api_key_id": &key.id})
+                        .await?;
+                    if let Some(credential) = credential {
+                        db.collection::<AssistantConversation>(CONVERSATIONS)
+                            .find_one(doc! {"_id": &credential.conversation_id, "user_id": &request.requester_id})
+                            .await?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                identities.insert(
+                    identity.clone(),
+                    thread.map(|t| (t.agent_id.unwrap_or_default(), t.guest_turn)),
+                );
+            }
+            let Some(Some((requester, guest))) = identities.get(&identity) else {
+                continue;
+            };
+            if *guest || agent.is_some_and(|target| target != requester) {
+                continue;
+            }
+            if super::assistant_acknowledgement_service::cached_full_access(
+                db,
+                modes,
+                &request.requester_id,
+                requester,
+            )
+            .await?
+            {
+                ids.push(request.id);
+            }
+        }
+        let ids: Vec<_> = ids.iter().map(String::as_str).collect();
+        expire_pending_ids(db, &ids, sweep_time, &marker).await?;
+    }
+    Ok(())
 }
 
 async fn requests_updated_by_expiry_sweep(
@@ -1405,6 +1633,9 @@ pub async fn list_requests(
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalRequest>, u64)> {
     let mut filter = build_requests_filter(user_id, admin_branches);
+    // Org group cards have an explicit participant ACL and are projected by
+    // the group transcript, not the organization-wide approvals inbox.
+    filter.insert("assistant_group", bson::Bson::Null);
     match statuses {
         [] => {}
         [single] => {
@@ -1450,6 +1681,13 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
         .ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
 }
 
+fn service_config_supports_grants(config: &ServiceApprovalConfig) -> bool {
+    config.approval_mode == ApprovalMode::Grant
+        || config.rules.iter().any(|rule| {
+            rule.effect == ApprovalEffect::RequireApproval && rule.mode == ApprovalMode::Grant
+        })
+}
+
 /// Build the Mongo filter for listing approval grants. Empty
 /// `admin_branches` preserves the legacy per-user shape. When
 /// non-empty, branches are emitted as `$or` alternatives. Each
@@ -1459,9 +1697,10 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
 /// also intersected with the mode set so a scoped admin never sees
 /// rows outside their `allowed_service_ids`.
 ///
-/// `grant_mode_by_owner` maps an owner `user_id` → its grant-mode
-/// service ids. An owner missing from the map has no services in
-/// grant mode and contributes no grants.
+/// `grant_mode_by_owner` maps an owner `user_id` → service ids with
+/// grant capability, whether from the top-level mode or a rule. An
+/// owner missing from the map has no grant-capable services and
+/// contributes no grants.
 fn build_grants_filter(
     user_id: &str,
     admin_branches: &[OrgFilterBranch],
@@ -1546,12 +1785,13 @@ fn build_grants_filter(
 
 /// List active approval grants for a user.
 ///
-/// Only returns grants for services currently in `Grant` mode.
-/// Grants for services in `PerRequest` mode (or with no config,
-/// which defaults to `PerRequest`) are excluded even if they
-/// haven't been revoked yet. This read-time filter acts as a
-/// safety net for any write-time race conditions or partial
-/// failures during mode switches (see #146).
+/// Only returns grants for services with current grant capability.
+/// Capability may come from top-level `Grant` mode (including legacy
+/// configs with a missing field) or a `require_approval` rule whose
+/// mode is `Grant`. Services with no config default to `PerRequest`
+/// and remain excluded. This read-time filter acts as a safety net
+/// for write-time races or partial failures during policy changes
+/// (see #146).
 ///
 /// `admin_branches` widens the listing to also include org-scoped
 /// grants owned by each supplied admin org, with per-branch scope
@@ -1581,18 +1821,18 @@ pub async fn list_grants(
     for id in &config_owner_ids {
         ids_bson.push(bson::Bson::String(id.clone()));
     }
+    // Load the owners' complete configs and resolve grant capability in Rust.
+    // Filtering on raw BSON `approval_mode` would miss both legacy documents
+    // where the field is absent and rule-level grant modes.
     let configs: Vec<ServiceApprovalConfig> = db
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .find(doc! {
-            "user_id": { "$in": ids_bson },
-            "approval_mode": "grant",
-        })
+        .find(doc! { "user_id": { "$in": ids_bson } })
         .await?
         .try_collect()
         .await?;
     let mut grant_mode_by_owner: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for c in configs {
+    for c in configs.into_iter().filter(service_config_supports_grants) {
         grant_mode_by_owner
             .entry(c.user_id)
             .or_default()
@@ -1741,15 +1981,7 @@ pub async fn set_service_approval_config(
 
         match config {
             Ok(Some(cfg)) => {
-                // When the persisted mode is per_request, clean up stale state:
-                // 1. Revoke active grants so they no longer authorize proxy calls (#146)
-                // 2. Cancel pending grant-mode requests so they can't be approved (#153)
-                // Both operations are idempotent, so retries after partial failure
-                // still clean up.
-                if cfg.approval_mode == ApprovalMode::PerRequest {
-                    revoke_grants_for_service(db, user_id, service_id).await?;
-                    cancel_pending_grant_requests(db, user_id, service_id).await?;
-                }
+                reconcile_grant_state_for_config(db, user_id, service_id, &cfg).await?;
                 return Ok(cfg);
             }
             Ok(None) => {
@@ -1761,10 +1993,7 @@ pub async fn set_service_approval_config(
                 // Concurrent upserts can race on the unique (user_id, service_id) index.
                 // Read-after-write resolves to the winning document.
                 if let Some(existing) = collection.find_one(filter.clone()).await? {
-                    if existing.approval_mode == ApprovalMode::PerRequest {
-                        revoke_grants_for_service(db, user_id, service_id).await?;
-                        cancel_pending_grant_requests(db, user_id, service_id).await?;
-                    }
+                    reconcile_grant_state_for_config(db, user_id, service_id, &existing).await?;
                     return Ok(existing);
                 }
                 continue;
@@ -1797,8 +2026,8 @@ pub async fn delete_service_approval_config(
     // of deleted_count. If a previous attempt deleted the config but failed on
     // cleanup, this retry still cleans up. Both operations are no-ops when
     // nothing matches.
-    revoke_grants_for_service(db, user_id, service_id).await?;
-    cancel_pending_grant_requests(db, user_id, service_id).await?;
+    revoke_grants_for_service(db, user_id, service_id, false).await?;
+    cancel_pending_grant_requests(db, user_id, service_id, false).await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound(
@@ -1907,9 +2136,37 @@ fn resolve_service_config_update(
     ))
 }
 
-/// Cancel all pending grant-mode approval requests for a (user, service) pair.
-/// Called when a service switches to `per_request` mode so stale grant requests
-/// are no longer actionable (see #153).
+/// Reconcile persisted grants and pending grant-mode requests after a policy
+/// update. Top-level grant mode retains service-wide and scoped state. With a
+/// rule-only grant capability, service-wide legacy state is invalid but scoped
+/// state remains eligible for the current evaluator to check operation by
+/// operation. `evaluate_and_check` consults a stored grant only after the live
+/// policy selects `Grant` for that operation, so a retained scope cannot bypass
+/// a newly selected `PerRequest` rule. The trade-off is stale scoped rows: when
+/// one grant rule remains, scopes created by removed or narrowed grant rules
+/// stay stored and visible until expiry or explicit revocation. Comparing two
+/// wildcard scope languages is not expressible through `grant_scope_covers`,
+/// which checks one concrete operation. When no grant capability remains, all
+/// grant state is invalid.
+async fn reconcile_grant_state_for_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    config: &ServiceApprovalConfig,
+) -> AppResult<()> {
+    if config.approval_mode == ApprovalMode::Grant {
+        return Ok(());
+    }
+
+    let unscoped_only = service_config_supports_grants(config);
+    revoke_grants_for_service(db, user_id, service_id, unscoped_only).await?;
+    cancel_pending_grant_requests(db, user_id, service_id, unscoped_only).await?;
+    Ok(())
+}
+
+/// Cancel pending grant-mode approval requests for a (user, service) pair.
+/// When `unscoped_only` is true, scoped requests remain eligible for live
+/// rule-level evaluation and only service-wide legacy requests are cancelled.
 ///
 /// Uses `$in: ["grant", null]` to also catch legacy requests that pre-date the
 /// `approval_mode` field -- those deserialize as `Grant` via
@@ -1918,39 +2175,48 @@ async fn cancel_pending_grant_requests(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    unscoped_only: bool,
 ) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
+    let mut filter = doc! {
+        "user_id": user_id,
+        "service_id": service_id,
+        "status": "pending",
+        "approval_mode": { "$in": ["grant", null] },
+    };
+    if unscoped_only {
+        // `{ field: null }` matches both explicit null and a missing field,
+        // which covers every service-wide legacy request representation.
+        filter.insert("grant_scope", bson::Bson::Null);
+    }
     db.collection::<ApprovalRequest>(REQUESTS)
         .update_many(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "status": "pending",
-                "approval_mode": { "$in": ["grant", null] },
-            },
+            filter,
             doc! { "$set": { "status": "expired", "decided_at": now } },
         )
         .await?;
     Ok(())
 }
 
-/// Revoke all active (non-revoked) grants for a (user, service) pair.
-/// Called after switching a service to `per_request` mode so stale grants
-/// no longer appear in the UI (see #146).
+/// Revoke active grants for a (user, service) pair. When `unscoped_only` is
+/// true, scoped grants remain eligible for live rule-level evaluation and only
+/// service-wide legacy grants are revoked.
 async fn revoke_grants_for_service(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    unscoped_only: bool,
 ) -> AppResult<()> {
+    let mut filter = doc! {
+        "user_id": user_id,
+        "service_id": service_id,
+        "revoked": false,
+    };
+    if unscoped_only {
+        filter.insert("scope", bson::Bson::Null);
+    }
     db.collection::<ApprovalGrant>(GRANTS)
-        .update_many(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "revoked": false,
-            },
-            doc! { "$set": { "revoked": true } },
-        )
+        .update_many(filter, doc! { "$set": { "revoked": true } })
         .await?;
     Ok(())
 }
@@ -1975,6 +2241,7 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            assistant_group: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
             service_id: "service-1".to_string(),
@@ -2554,12 +2821,345 @@ mod tests {
         assert_eq!(in_arr.len(), 0);
     }
 
+    #[test]
+    fn service_config_grant_capability_includes_rule_level_grant_mode() {
+        let mut config = ServiceApprovalConfig {
+            id: "cfg-1".to_string(),
+            user_id: "user-1".to_string(),
+            service_id: "svc-1".to_string(),
+            service_name: "Service".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        config.rules.push(ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        });
+
+        assert!(service_config_supports_grants(&config));
+    }
+
     // ================================================================
     // Integration tests (require running MongoDB)
     // ================================================================
 
     use crate::models::user::UserType;
     use crate::test_utils::{connect_test_database, test_user};
+
+    #[tokio::test]
+    async fn full_access_startup_retires_chat_only_approvals_with_guarded_expiry_lifecycle() {
+        use crate::models::{
+            assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+            assistant_settings::AccessMode,
+        };
+        use crate::services::{
+            assistant_acknowledgement_service as acks, assistant_settings_service as settings,
+        };
+        let f = crate::services::assistant_authority_tests::fixture("approval_startup_retirement")
+            .await;
+        let actor = crate::services::audit_service::AuditActor {
+            user_id: f.owner.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        crate::services::assistant_team_service::set_agent_policy(
+            &f.state.db,
+            &actor,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::AgentPolicy {
+                model: None,
+                access_mode_override: Some(Some(AccessMode::Nyxmode)),
+            },
+        )
+        .await
+        .unwrap();
+        settings::update(
+            &f.state.db,
+            &f.owner,
+            settings::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let nyxbot = f
+            .state
+            .db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": &f.nyxbot_thread})
+            .await
+            .unwrap()
+            .unwrap();
+        let full_key = crate::services::key_service::get_api_key(
+            &f.state.db,
+            &f.owner,
+            &nyxbot.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let auto_key =
+            crate::services::key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
+                .await
+                .unwrap();
+        let general_id = crate::services::assistant_authority_tests::ordinary_key(&f).await;
+        let general = crate::services::key_service::get_api_key(&f.state.db, &f.owner, &general_id)
+            .await
+            .unwrap();
+        let mut requests = Vec::new();
+        for (id, label, status) in [
+            ("full", full_key.name.as_str(), "pending"),
+            ("auto", auto_key.name.as_str(), "pending"),
+            ("general", general.name.as_str(), "pending"),
+            ("decided", full_key.name.as_str(), "approved"),
+        ] {
+            let mut request = make_request(id, status);
+            request.user_id = f.owner.clone();
+            request.requester_id = f.owner.clone();
+            request.requester_type = "user".into();
+            request.requester_label = Some(label.into());
+            request.expires_at = Utc::now() + Duration::minutes(10);
+            request.notification_channel = None;
+            requests.push(request);
+        }
+        f.state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .insert_many(requests)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::services::assistant_nyxagent::pending_approvals(
+                &f.state.db,
+                &f.owner,
+                &full_key.id
+            )
+            .await
+            .unwrap()
+            .len(),
+            1,
+            "reads do not retire pre-upgrade asks"
+        );
+        acks::retire_full_access_confirmations(&f.state.db, None, None)
+            .await
+            .unwrap();
+        let full = get_request(&f.state.db, "full").await.unwrap();
+        assert_eq!(full.status, "expired");
+        assert!(full.decided_at.is_some());
+        assert!(
+            full.decision_idempotency_key
+                .as_deref()
+                .unwrap()
+                .starts_with("expiry:full-access:")
+        );
+        acks::retire_full_access_confirmations(&f.state.db, None, None)
+            .await
+            .unwrap();
+        let again = get_request(&f.state.db, "full").await.unwrap();
+        assert_eq!(full.decided_at, again.decided_at);
+        assert_eq!(
+            full.decision_idempotency_key,
+            again.decision_idempotency_key
+        );
+        for id in ["auto", "general"] {
+            let kept = get_request(&f.state.db, id).await.unwrap();
+            assert_eq!(kept.status, "pending");
+            assert!(kept.decided_at.is_none());
+        }
+        // A decision won between the candidate read and the expiry write.
+        assert_eq!(
+            expire_pending_ids(
+                &f.state.db,
+                &["decided"],
+                bson::DateTime::now(),
+                "expiry:race"
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            get_request(&f.state.db, "decided").await.unwrap().status,
+            "approved"
+        );
+        crate::services::assistant_team_service::set_agent_policy(
+            &f.state.db,
+            &actor,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::AgentPolicy {
+                model: None,
+                access_mode_override: Some(None),
+            },
+        )
+        .await
+        .unwrap();
+        let auto = get_request(&f.state.db, "auto").await.unwrap();
+        assert_eq!(
+            auto.status, "expired",
+            "agent write retires approval-only asks"
+        );
+        assert!(auto.decided_at.is_some());
+        assert_ne!(
+            full.decision_idempotency_key, auto.decision_idempotency_key,
+            "each sweep has a unique marker"
+        );
+        assert_eq!(
+            get_request(&f.state.db, "general").await.unwrap().status,
+            "pending"
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_access_chat_bypass_evaluates_policy_and_grants_once() {
+        use crate::models::assistant_settings::AccessMode;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "approval_single_evaluation",
+        )
+        .await;
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let service = uuid::Uuid::new_v4().to_string();
+        insert_config(
+            &f.state.db,
+            &make_service_config(&f.owner, &service, true, ApprovalMode::Grant),
+        )
+        .await;
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let record = queries.clone();
+        let enabled = Arc::new(AtomicBool::new(true));
+        let monitor = enabled.clone();
+        let handler = EventHandler::callback(move |event| {
+            if monitor.load(Ordering::SeqCst)
+                && let CommandEvent::Started(event) = event
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                record.lock().unwrap().push(collection.to_owned());
+            }
+        });
+        let mut options = mongodb::options::ClientOptions::parse(
+            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        options.command_event_handler = Some(handler);
+        let db = mongodb::Client::with_options(options)
+            .unwrap()
+            .database(f.state.db.name());
+        let descriptor =
+            crate::services::operation_descriptor::build_http_descriptor("POST", "/things", None);
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        enabled.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        assert_eq!(receipt.unwrap().reason, "approval");
+        let queries = queries.lock().unwrap().clone();
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|q| q.as_str() == SERVICE_APPROVAL_CONFIGS)
+                .count(),
+            1
+        );
+        assert_eq!(queries.iter().filter(|q| q.as_str() == GRANTS).count(), 1);
+        crate::services::assistant_settings_service::update(
+            &db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Nyxmode),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
+        assert!(receipt.is_none());
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! {"service_id": &service},
+                doc! {"$set": {"default_effect": "deny"}},
+            )
+            .await
+            .unwrap();
+        crate::services::assistant_settings_service::update(
+            &db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                access_mode: Some(AccessMode::Autopilot),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let (outcome, receipt) = evaluate_for_chat(
+            &db,
+            &f.owner,
+            &f.owner,
+            &service,
+            &descriptor,
+            Some("user"),
+            &f.owner,
+            false,
+            false,
+            Some(&f.chat),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::Denied));
+        assert!(receipt.is_none());
+        f.state.db.drop().await.unwrap();
+    }
 
     /// Helper to insert an ApprovalRequest directly into the DB.
     async fn insert_request(db: &mongodb::Database, req: &ApprovalRequest) {
@@ -2667,6 +3267,7 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -3356,6 +3957,173 @@ mod tests {
         assert!(!still_valid);
     }
 
+    #[tokio::test]
+    async fn set_service_approval_config_reconciles_rule_scoped_and_service_wide_grants() {
+        let Some(db) = connect_test_database("appr_svc_set_cfg_rule_grants").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let scope = "v1:http:post:write:/v1/chat/**";
+
+        let mut rule_scoped = make_grant(
+            &user_id,
+            &service_id,
+            "api_key",
+            "rule-requester",
+            false,
+            30,
+        );
+        rule_scoped.scope = Some(scope.to_string());
+        let service_wide = make_grant(
+            &user_id,
+            &service_id,
+            "api_key",
+            "legacy-requester",
+            false,
+            30,
+        );
+        insert_grant(&db, &rule_scoped).await;
+        insert_grant(&db, &service_wide).await;
+
+        let grant_rule = ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        };
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(std::slice::from_ref(&grant_rule)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let grants = db.collection::<ApprovalGrant>(GRANTS);
+        let retained = grants
+            .find_one(doc! { "_id": &rule_scoped.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let revoked_legacy = grants
+            .find_one(doc! { "_id": &service_wide.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!retained.revoked, "rule-scoped grant should remain active");
+        assert!(
+            revoked_legacy.revoked,
+            "service-wide grant requires top-level grant mode"
+        );
+
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&[]),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let revoked_rule = grants
+            .find_one(doc! { "_id": &rule_scoped.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            revoked_rule.revoked,
+            "scoped grant should be revoked after grant capability is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_scoped_grant_cannot_bypass_current_per_request_rule() {
+        let Some(db) = connect_test_database("appr_svc_stale_scope_policy_gate").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let requester_id = "rule-requester";
+
+        let mut stale_grant = make_grant(&user_id, &service_id, "api_key", requester_id, false, 30);
+        stale_grant.scope = Some("v1:http:*:*:*".to_string());
+        insert_grant(&db, &stale_grant).await;
+
+        let rules = vec![
+            ApprovalRule {
+                methods: vec!["DELETE".to_string()],
+                resource_pattern: "/v1/admin/**".to_string(),
+                verbs: vec![],
+                effect: ApprovalEffect::RequireApproval,
+                mode: ApprovalMode::PerRequest,
+            },
+            ApprovalRule {
+                methods: vec!["POST".to_string()],
+                resource_pattern: "/v1/chat/**".to_string(),
+                verbs: vec![],
+                effect: ApprovalEffect::RequireApproval,
+                mode: ApprovalMode::Grant,
+            },
+        ];
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&rules),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let retained = db
+            .collection::<ApprovalGrant>(GRANTS)
+            .find_one(doc! { "_id": &stale_grant.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!retained.revoked, "conservative cleanup retains the scope");
+
+        let operation = crate::services::operation_descriptor::build_http_descriptor(
+            "DELETE",
+            "/v1/admin/users/42",
+            None,
+        );
+        let outcome = evaluate_and_check(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            &operation,
+            Some("api_key"),
+            requester_id,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let ApprovalOutcome::NeedsApproval(pending) = outcome else {
+            panic!("current per-request rule must not reuse the stale grant");
+        };
+        assert_eq!(pending.resolution.mode, ApprovalMode::PerRequest);
+    }
+
     // --- delete_service_approval_config ---
 
     #[tokio::test]
@@ -3689,6 +4457,59 @@ mod tests {
         let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].id, grant.id);
+    }
+
+    #[tokio::test]
+    async fn list_grants_includes_legacy_config_without_stored_approval_mode() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_legacy_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+        db.collection::<bson::Document>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "_id": &config.id },
+                doc! { "$unset": { "approval_mode": "" } },
+            )
+            .await
+            .unwrap();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(grants[0].id, grant.id);
+    }
+
+    #[tokio::test]
+    async fn list_grants_includes_rule_level_grant_mode_service() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_rule_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut config = make_service_config(&user_id, &service_id, true, ApprovalMode::PerRequest);
+        config.rules.push(ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        });
+        insert_config(&db, &config).await;
+
+        let mut grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        grant.scope = Some("v1:http:post:write:/v1/chat/**".to_string());
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
         assert_eq!(grants[0].id, grant.id);
     }
 

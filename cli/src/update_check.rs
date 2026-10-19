@@ -236,7 +236,9 @@ mod tests {
 
     #[test]
     fn ci_is_enabled_respects_env() {
-        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         unsafe { std::env::set_var("CI", "true") };
         assert!(ci_is_enabled());
         unsafe { std::env::set_var("CI", "false") };

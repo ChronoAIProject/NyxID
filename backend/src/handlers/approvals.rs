@@ -272,15 +272,15 @@ async fn resolve_scope_storage_service_ids(
     for id in allowed_user_service_ids {
         ids_bson.push(mongodb::bson::Bson::String(id.clone()));
     }
-    let rows: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(mongodb::bson::doc! {
-            "_id": { "$in": ids_bson },
-            "user_id": org_user_id,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let rows: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(mongodb::bson::doc! {
+                "_id": { "$in": ids_bson },
+                "user_id": org_user_id,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in rows {
@@ -401,15 +401,21 @@ async fn ensure_caller_can_decide(
     db: &mongodb::Database,
     request: &crate::models::approval_request::ApprovalRequest,
     auth_user_id: &str,
-) -> AppResult<()> {
+) -> AppResult<Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>> {
+    let group_access =
+        crate::services::org_group_service::authorize_approval(db, request, auth_user_id, None)
+            .await?;
     if request.user_id == auth_user_id {
-        return Ok(());
+        return Ok(group_access);
     }
 
     // Check whether the request owner is an org and the caller is one of
     // its admins. `resolve_owner_access` returns Forbidden for non-org
     // owners or non-member callers, which collapses both "ex-admin" and
     // "stranger" into the same denial path.
+    if group_access.is_some() {
+        return Ok(group_access);
+    }
     let access =
         crate::services::org_service::resolve_owner_access(db, auth_user_id, &request.user_id)
             .await?;
@@ -432,7 +438,7 @@ async fn ensure_caller_can_decide(
         ));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 // --- Query/Request types ---
@@ -663,7 +669,18 @@ pub async fn get_request_status(
     // - the legacy match, OR
     // - the actor has any access to the owning org (member or admin),
     //   which means the request was created on their behalf via cascade.
-    if request.user_id != owner_user_id {
+    if let Some(binding) = &request.assistant_group {
+        if binding.actor_user_id != auth_user.user_id.to_string() {
+            return Err(crate::services::org_group_service::missing());
+        }
+        crate::services::org_group_service::get(
+            &state.db,
+            &binding.actor_user_id,
+            &binding.group_id,
+            auth_user.org_agent_access.as_ref(),
+        )
+        .await?;
+    } else if request.user_id != owner_user_id {
         let access = crate::services::org_service::resolve_owner_access(
             &state.db,
             &owner_user_id,
@@ -693,6 +710,11 @@ pub async fn create_request(
     tele: TelemetryContext,
     Json(body): Json<CreateToolApprovalRequest>,
 ) -> AppResult<(axum::http::StatusCode, Json<CreateApprovalResponse>)> {
+    if auth_user.assistant_group_id.is_some() {
+        return Err(AppError::Forbidden(
+            "Use the assistant action cards for organization group tools".into(),
+        ));
+    }
     // Validate tool_name
     let tool_name = body.tool_name.trim();
     if tool_name.is_empty() || tool_name.len() > 256 {
@@ -800,7 +822,7 @@ pub async fn decide_request(
     // Verify the caller can act on this request -- direct owner, named
     // recipient, or current admin of the owning org.
     let request = approval_service::get_request(&state.db, &request_id).await?;
-    ensure_caller_can_decide(&state.db, &request, &user_id).await?;
+    let group_access = ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
         && duration_sec <= 0
@@ -810,7 +832,7 @@ pub async fn decide_request(
         ));
     }
 
-    let updated = approval_service::process_decision(
+    let updated = approval_service::process_decision_with_access(
         &state.db,
         &state.config,
         &state.http_client,
@@ -821,6 +843,7 @@ pub async fn decide_request(
         body.duration_sec,
         idempotency_key,
         "web",
+        group_access.as_ref(),
     )
     .await?;
 
@@ -1287,8 +1310,7 @@ async fn scope_user_service_ids_for_config(
     service_id: &str,
 ) -> AppResult<Vec<String>> {
     let mut ids = Vec::new();
-    if (db
-        .collection::<UserService>(USER_SERVICES)
+    if (crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(mongodb::bson::doc! {
             "_id": service_id,
             "user_id": owner_user_id,
@@ -1398,10 +1420,10 @@ async fn resolve_approval_target(
     owner_user_id: &str,
     service_id: &str,
 ) -> AppResult<ApprovalTarget> {
-    if let Some(user_service) = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc_ownership(owner_user_id, service_id))
-        .await?
+    if let Some(user_service) =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc_ownership(owner_user_id, service_id))
+            .await?
     {
         // Pick the display name by key space:
         //  - Catalog-backed: the policy is keyed by `catalog_service_id`
@@ -1412,24 +1434,25 @@ async fn resolve_approval_target(
         //  - Custom: the policy is keyed by the UserService id itself,
         //    so the endpoint label (or slug fallback) is both accurate
         //    and uniquely attached to that one service.
-        let (effective_service_id, display_name) =
-            if let Some(ref catalog_id) = user_service.catalog_service_id {
-                let catalog_name = db
-                    .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                    .find_one(mongodb::bson::doc! { "_id": catalog_id })
-                    .await?
-                    .map(|s| s.name)
-                    .unwrap_or_else(|| user_service.slug.clone());
-                (catalog_id.clone(), catalog_name)
-            } else {
-                let endpoint_label = db
-                    .collection::<UserEndpoint>(USER_ENDPOINTS)
+        let (effective_service_id, display_name) = if let Some(ref catalog_id) =
+            user_service.catalog_service_id
+        {
+            let catalog_name = db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(mongodb::bson::doc! { "_id": catalog_id })
+                .await?
+                .map(|s| s.name)
+                .unwrap_or_else(|| user_service.slug.clone());
+            (catalog_id.clone(), catalog_name)
+        } else {
+            let endpoint_label =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
                     .find_one(mongodb::bson::doc! { "_id": &user_service.endpoint_id })
                     .await?
                     .map(|ep| ep.label)
                     .unwrap_or_else(|| user_service.slug.clone());
-                (user_service.id.clone(), endpoint_label)
-            };
+            (user_service.id.clone(), endpoint_label)
+        };
         return Ok(ApprovalTarget {
             effective_service_id,
             display_name,
@@ -1479,8 +1502,7 @@ async fn find_matching_user_service_for_config(
     owner_user_id: &str,
     stored_service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    if let Some(us) = db
-        .collection::<UserService>(USER_SERVICES)
+    if let Some(us) = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc_ownership(owner_user_id, stored_service_id))
         .await?
         && access.allows_resource(&us.id)
@@ -1493,8 +1515,7 @@ async fn find_matching_user_service_for_config(
     // whose allowed_service_ids doesn't cover any sibling gets `None`,
     // keeping their metadata sealed.
     use futures::TryStreamExt;
-    let mut cursor = db
-        .collection::<UserService>(USER_SERVICES)
+    let mut cursor = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find(mongodb::bson::doc! {
             "user_id": owner_user_id,
             "catalog_service_id": stored_service_id,
@@ -1872,6 +1893,7 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

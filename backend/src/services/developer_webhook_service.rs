@@ -73,6 +73,34 @@ impl DeveloperWebhookDispatcher {
         event_type: &str,
         data: Value,
     ) -> Result<(), DeliveryFailure> {
+        self.deliver_for_app_inner(db, app_id, event_id, event_type, data, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn deliver_for_app_hardened(
+        &self,
+        db: &Database,
+        app_id: &str,
+        event_id: &str,
+        event_type: &str,
+        data: Value,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<(), DeliveryFailure> {
+        self.deliver_for_app_inner(db, app_id, event_id, event_type, data, Some(occurred_at))
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_for_app_inner(
+        &self,
+        db: &Database,
+        app_id: &str,
+        event_id: &str,
+        event_type: &str,
+        data: Value,
+        occurred_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DeliveryFailure> {
         if data
             .get("user_id")
             .and_then(serde_json::Value::as_str)
@@ -105,7 +133,11 @@ impl DeveloperWebhookDispatcher {
         }
         let admitted = match RateWindowStore::admit(
             db,
-            "developer_webhook",
+            if occurred_at.is_some() {
+                "developer_channel_webhook"
+            } else {
+                "developer_webhook"
+            },
             app_id,
             u64::from(APP_WEBHOOK_MAX_PER_MINUTE),
             std::time::Duration::from_secs(60),
@@ -189,7 +221,7 @@ impl DeveloperWebhookDispatcher {
         let envelope = ConnectionWebhookEnvelope {
             event_id: event_id.to_string(),
             event_type: event_type.to_string(),
-            occurred_at: Utc::now(),
+            occurred_at: occurred_at.unwrap_or_else(Utc::now),
             data,
         };
         let body = match serde_json::to_vec(&envelope) {
@@ -211,8 +243,21 @@ impl DeveloperWebhookDispatcher {
             });
         }
 
+        let hardened_client = if occurred_at.is_some() {
+            Some(
+                super::channel_media_service::media_client(url, None, None)
+                    .await
+                    .map_err(|_| DeliveryFailure {
+                        attempts: 0,
+                        reason: "destination_unavailable",
+                        last_status: None,
+                    })?,
+            )
+        } else {
+            None
+        };
         webhook_delivery_service::deliver_signed_body(
-            &self.http_client,
+            hardened_client.as_ref().unwrap_or(&self.http_client),
             url,
             secret.as_slice(),
             event_type,

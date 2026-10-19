@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::token::{generate_api_key, hash_token};
 use crate::errors::{AppError, AppResult};
@@ -13,7 +14,11 @@ use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_BINDINGS,
 };
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
+use crate::models::api_key_credential::{
+    ApiKeyCredential, COLLECTION_NAME as API_KEY_CREDENTIALS, CredentialRevokedReason,
+};
 use crate::redaction::RedactedLen;
+use crate::services::api_key_credential_service;
 use crate::services::{
     api_key_mutation_service as key_mutations,
     api_key_scope_service::{self, ScopeAuthorization},
@@ -35,6 +40,7 @@ pub struct CreatedApiKey {
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
@@ -79,13 +85,19 @@ pub enum ApiKeyRotationOutcome {
 #[derive(Clone)]
 struct RotationMaterial {
     key_prefix: String,
-    full_key: String,
+    full_key: Zeroizing<String>,
     key_hash: String,
     created_at: chrono::DateTime<Utc>,
 }
 
+impl fmt::Debug for RotationMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RotationMaterial { [REDACTED] }")
+    }
+}
+
 enum RotationTransactionOutcome {
-    Created(ApiKey),
+    Created(ApiKey, Vec<ApiKeyCredential>, bool),
     AlreadyCommitted(ApiKey),
 }
 
@@ -107,6 +119,7 @@ fn created_api_key_from_model(key: ApiKey, full_key: String) -> AppResult<Create
         allowed_service_ids: key.allowed_service_ids,
         allowed_node_ids: key.allowed_node_ids,
         allow_all_services: key.allow_all_services,
+        allow_auto_connected_services: key.allow_auto_connected_services,
         allow_all_nodes: key.allow_all_nodes,
         rate_limit_per_second: key.rate_limit_per_second,
         rate_limit_burst: key.rate_limit_burst,
@@ -131,6 +144,7 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
 
 /// Valid platform identifiers for API keys.
 const VALID_PLATFORMS: &[&str] = &[
+    "nyxid-assistant",
     "claude-code",
     "cursor",
     "codex",
@@ -189,8 +203,10 @@ fn generate_scoped_api_key() -> (String, String, String) {
     rand::thread_rng().fill_bytes(&mut bytes);
 
     let hex_encoded = hex::encode(bytes);
-    let full_key = format!("nyxid_ag_{hex_encoded}");
-    let prefix = format!("nyxid_ag_{}", &hex_encoded[..8]);
+    let full_key = format!("{}{hex_encoded}", crate::crypto::token::AGENT_KEY_PREFIX);
+    let prefix = crate::crypto::token::agent_key_display_prefix(&full_key)
+        .expect("generated Agent Key has a valid display prefix")
+        .to_string();
     let mut hasher = Sha256::new();
     hasher.update(full_key.as_bytes());
     let hash = hex::encode(hasher.finalize());
@@ -210,6 +226,7 @@ pub async fn create_api_key(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -227,6 +244,7 @@ pub async fn create_api_key(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -252,6 +270,7 @@ pub async fn create_api_key_with_scope_authorization(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -271,6 +290,7 @@ pub async fn create_api_key_with_scope_authorization(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -279,6 +299,7 @@ pub async fn create_api_key_with_scope_authorization(
         scope_plan_digest,
         ApiKeyPurpose::General,
         false,
+        None,
     )
     .await
 }
@@ -300,6 +321,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -319,6 +341,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -327,6 +350,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
         scope_plan_digest,
         ApiKeyPurpose::General,
         false,
+        None,
     )
     .await
 }
@@ -343,6 +367,7 @@ pub async fn create_api_key_with_security_class(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -364,6 +389,7 @@ pub async fn create_api_key_with_security_class(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -372,12 +398,119 @@ pub async fn create_api_key_with_security_class(
         scope_plan_digest,
         purpose,
         scheduled_write_enabled,
+        None,
     )
     .await
 }
 
+/// The Agent Key exchange uses the same creation validation inside its atomic
+/// approval transaction; no key or primary secret is committed independently.
+pub async fn create_login_api_key(
+    db: &mongodb::Database,
+    owner: &str,
+    actor: &str,
+    id: &str,
+    input: &super::auth_agent_key_login_service::NewKeyInput,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class_and_id(
+        db,
+        owner,
+        Some(actor),
+        Some(id),
+        &input.name,
+        &input.scopes,
+        expires_at,
+        None,
+        Some(&input.allowed_service_ids),
+        Some(&input.allowed_node_ids),
+        Some(input.allow_all_services),
+        Some(input.allow_auto_connected_services),
+        Some(input.allow_all_nodes),
+        input.rate_limit_per_second,
+        input.rate_limit_burst,
+        input.platform.as_deref(),
+        None,
+        input.scope_plan_digest.as_deref(),
+        ApiKeyPurpose::General,
+        false,
+        Some(session),
+    )
+    .await
+}
+
+/// Validate a future login key without creating a credential or parent row.
+pub async fn validate_login_api_key(
+    db: &mongodb::Database,
+    actor: &str,
+    input: &crate::models::login_grant::NewKeyInput,
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    if input.name.is_empty() || input.name.len() > 200 {
+        return Err(AppError::ValidationError(
+            "API key name must be between 1 and 200 characters".into(),
+        ));
+    }
+    validate_api_key_scopes(&input.scopes)?;
+    validate_platform(input.platform.as_deref())?;
+    let owner =
+        api_key_scope_service::resolve_scope_owner_id(db, actor, input.target_org_id.as_deref())
+            .await?;
+    let expiry = input
+        .expires_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(super::api_key_validation::parse_expires_at)
+        .transpose()?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_service_ids,
+        Some(input.allow_all_services),
+        "allow_all_services",
+        "allowed_service_ids",
+    )?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_node_ids,
+        Some(input.allow_all_nodes),
+        "allow_all_nodes",
+        "allowed_node_ids",
+    )?;
+    if !input.allow_all_services {
+        api_key_scope_service::validate_service_ids(
+            db,
+            &owner,
+            &input.allowed_service_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if !input.allow_all_nodes {
+        api_key_scope_service::validate_node_ids(
+            db,
+            &owner,
+            &input.allowed_node_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if let Some(digest) = &input.scope_plan_digest {
+        api_key_scope_service::verify_scope_plan_precondition(
+            db,
+            actor,
+            &owner,
+            &input.allowed_service_ids,
+            &input.allowed_node_ids,
+            input.allow_all_services,
+            input.allow_all_nodes,
+            digest,
+            input.allow_auto_connected_services,
+        )
+        .await?;
+    }
+    Ok(expiry)
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn create_api_key_with_security_class_and_id(
+pub(crate) async fn create_api_key_with_security_class_and_id(
     db: &mongodb::Database,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
@@ -389,6 +522,7 @@ async fn create_api_key_with_security_class_and_id(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -397,7 +531,9 @@ async fn create_api_key_with_security_class_and_id(
     scope_plan_digest: Option<&str>,
     purpose: ApiKeyPurpose,
     scheduled_write_enabled: bool,
+    session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<CreatedApiKey> {
+    require_ordinary_purpose(purpose)?;
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
@@ -412,7 +548,24 @@ async fn create_api_key_with_security_class_and_id(
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
 
-    if purpose == ApiKeyPurpose::ScheduledInvocation && (all_svcs || all_nodes || scopes != "proxy")
+    if purpose == ApiKeyPurpose::PermissionBound
+        && (all_svcs
+            || all_nodes
+            || allow_auto_connected_services.unwrap_or(false)
+            || scopes != "proxy"
+            || svc_ids.len() != 1
+            || !node_ids.is_empty()
+            || callback_url.is_some()
+            || scheduled_write_enabled)
+    {
+        return Err(AppError::ValidationError("Permission-bound keys require one connection, proxy scope, and no node or callback authority".into()));
+    }
+
+    if purpose == ApiKeyPurpose::ScheduledInvocation
+        && (all_svcs
+            || all_nodes
+            || allow_auto_connected_services.unwrap_or(false)
+            || scopes != "proxy")
     {
         return Err(AppError::DurableGrantMismatch(
             "scheduled_invocation keys require exact service/node scopes and scopes='proxy'"
@@ -435,6 +588,7 @@ async fn create_api_key_with_security_class_and_id(
             all_svcs,
             all_nodes,
             expected_digest,
+            allow_auto_connected_services.unwrap_or(false),
         )
         .await?;
     }
@@ -488,12 +642,18 @@ async fn create_api_key_with_security_class_and_id(
         is_active: true,
         created_at: now,
         rotation_predecessor_id: None,
+        machine_external_grants_present: false,
         state_version: 1,
         updated_at: Some(now),
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
+        allowed_platform_service_ids: Vec::new(),
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
+        allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
         allow_all_nodes: all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -510,7 +670,7 @@ async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, None).await?;
+    key_mutations::insert_one(db, &new_key, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -526,6 +686,7 @@ async fn create_api_key_with_security_class_and_id(
         allowed_service_ids: svc_ids,
         allowed_node_ids: node_ids,
         allow_all_services: all_svcs,
+        allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
         allow_all_nodes: all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -535,11 +696,89 @@ async fn create_api_key_with_security_class_and_id(
     })
 }
 
+/// Require at least one backing service in a restricted API key's effective
+/// allowlist. Call after owner/membership resolution to preserve its errors.
+pub fn ensure_api_key_service_scope(
+    scope: Option<&[String]>,
+    service_ids: &[String],
+) -> AppResult<()> {
+    if let Some(allowed) = scope
+        && !service_ids.iter().any(|id| allowed.contains(id))
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "API key does not have access to this service".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the current service grant once when loading a key's authority.
+/// Only restricted keys with the durable platform grant need a database read.
+/// This deliberately does not provision services on the authentication path.
+pub async fn effective_allowed_service_ids(
+    db: &mongodb::Database,
+    key: &ApiKey,
+) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
+    let access = super::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    effective_allowed_service_ids_with_access(db, key, access.as_deref()).await
+}
+
+pub async fn effective_allowed_service_ids_with_access(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
+    if let Some(ids) = super::org_agent_service::key_services(db, key, access).await? {
+        return Ok(ids);
+    }
+    let mut ids = key.allowed_service_ids.clone();
+    if !key.allowed_platform_service_ids.is_empty() {
+        ids.extend(key.allowed_platform_service_ids.iter().cloned());
+        ids.sort();
+        ids.dedup();
+    }
+    if key.allow_auto_connected_services && !key.allow_all_services {
+        ids.extend(active_auto_connected_service_ids(db, &key.user_id).await?);
+        ids.sort();
+        ids.dedup();
+    }
+    Ok(ids)
+}
+
+/// Owner-bound, active platform rows only. The compound index covers this query.
+pub async fn active_auto_connected_service_ids(
+    db: &mongodb::Database,
+    owner_id: &str,
+) -> AppResult<Vec<String>> {
+    use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME};
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find(doc! { "user_id": owner_id, "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }], "is_active": true })
+        .projection(doc! { "_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            row.get_str("_id")
+                .map(str::to_owned)
+                .map_err(|_| AppError::Internal("Invalid platform service id".into()))
+        })
+        .collect()
+}
+
 /// List all API keys for a user (without exposing the full key).
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -551,7 +790,7 @@ pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<V
 /// Get a single API key by ID, verifying ownership.
 pub async fn get_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<ApiKey> {
     db.collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))
 }
@@ -569,11 +808,26 @@ pub async fn delete_api_key_with_expected_state_version(
     key_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<()> {
-    let key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    delete_api_key_in_session(db, user_id, key_id, expected_state_version, None)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn delete_api_key_in_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+    mut session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
+    let collection = db.collection::<ApiKey>(API_KEYS);
+    let read = collection
+        .find_one(doc! {"_id": key_id, "user_id": user_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
+    let key = match session.as_deref_mut() {
+        Some(session) => read.session(session).await?,
+        None => read.await?,
+    }
+    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
         && key.state_version != expected
     {
@@ -585,16 +839,48 @@ pub async fn delete_api_key_with_expected_state_version(
         filter.insert("state_version", expected);
     }
 
-    let result =
-        key_mutations::update_one(db, filter, doc! { "$set": { "is_active": false } }, None)
-            .await?;
+    let result = key_mutations::update_one(
+        db,
+        filter,
+        doc! { "$set": { "is_active": false } },
+        session.as_deref_mut(),
+    )
+    .await?;
     if result.matched_count != 1 {
         return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
     }
 
+    super::assistant_agent_credential_service::invalidate_for_key(
+        db,
+        user_id,
+        key_id,
+        session.as_deref_mut(),
+    )
+    .await?;
+    let bindings = db.collection::<AgentServiceBinding>(AGENT_BINDINGS);
+    let cleanup = bindings.delete_many(doc! {"api_key_id": key_id, "user_id": user_id});
+    match session.as_deref_mut() {
+        Some(session) => cleanup.session(session).await?,
+        None => cleanup.await?,
+    };
+    let children = api_key_credential_service::revoke_children(
+        db,
+        key_id,
+        CredentialRevokedReason::ParentRevoked,
+        session.as_deref_mut(),
+    )
+    .await?;
+    if session.is_none() {
+        api_key_credential_service::audit_revocations(
+            db,
+            &children,
+            CredentialRevokedReason::ParentRevoked,
+        );
+    }
+
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
-    Ok(())
+    Ok(children)
 }
 
 fn stale_api_key_conflict() -> AppError {
@@ -629,14 +915,16 @@ async fn unmatched_api_key_write(
 #[allow(dead_code)]
 pub async fn rotate_api_key(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     key_id: &str,
 ) -> AppResult<CreatedApiKey> {
-    rotate_api_key_with_scope_authorization(db, user_id, None, key_id).await
+    rotate_api_key_with_scope_authorization(db, encryption_keys, user_id, None, key_id).await
 }
 
 pub async fn rotate_api_key_with_scope_authorization(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     key_id: &str,
@@ -644,6 +932,7 @@ pub async fn rotate_api_key_with_scope_authorization(
     let successor_id = Uuid::new_v4().to_string();
     match rotate_api_key_with_scope_authorization_and_id(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         key_id,
@@ -663,6 +952,7 @@ pub async fn rotate_api_key_with_scope_authorization(
 /// the one-time successor secret.
 pub async fn rotate_api_key_with_scope_authorization_and_id(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -670,6 +960,7 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
 ) -> AppResult<ApiKeyRotationOutcome> {
     rotate_api_key_with_scope_authorization_and_id_inner(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         predecessor_id,
@@ -683,6 +974,7 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
 #[cfg(test)]
 pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -691,6 +983,7 @@ pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collisio
 ) -> AppResult<ApiKeyRotationOutcome> {
     rotate_api_key_with_scope_authorization_and_id_inner(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         predecessor_id,
@@ -702,6 +995,7 @@ pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collisio
 
 async fn rotate_api_key_with_scope_authorization_and_id_inner(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -717,6 +1011,8 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         ));
     }
 
+    let audit_db = db.clone();
+    let encryption_keys = encryption_keys.clone();
     let db = db.clone();
     let user_id = user_id.to_string();
     let predecessor_id = predecessor_id.to_string();
@@ -743,7 +1039,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                 {
-                    if existing.user_id != user_id {
+                    if existing.user_id != user_id || matches!(existing.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
                         return Err(AppError::NotFound("API key not found".to_string()));
                     }
                     if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
@@ -768,6 +1064,12 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                if matches!(old_key.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
+                    return Err(AppError::NotFound("API key not found".into()));
+                }
+                if old_key.purpose == ApiKeyPurpose::PermissionBound {
+                    return Err(AppError::Forbidden("Reissue permission-bound keys through /permission-keys, then revoke the predecessor".into()));
+                }
                 if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
                     return Err(AppError::DurableGrantMismatch(
                         "scheduled_invocation keys must be reprovisioned from a fresh scope plan"
@@ -859,14 +1161,14 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             };
                             RotationMaterial {
                                 key_prefix,
-                                full_key,
+                                full_key: Zeroizing::new(full_key),
                                 key_hash,
                                 created_at: Utc::now(),
                             }
                         })
                         .clone()
                 };
-                let successor = ApiKey {
+                let mut successor = ApiKey {
                     id: successor_for_transaction.clone(),
                     user_id: old_key.user_id.clone(),
                     name: old_key.name.clone(),
@@ -878,12 +1180,20 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     is_active: true,
                     created_at: rotation_material.created_at,
                     rotation_predecessor_id: Some(old_key.id.clone()),
+                    machine_external_grants_present: false,
                     state_version: 1,
                     updated_at: Some(rotation_material.created_at),
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
+                    allowed_platform_service_ids: Vec::new(),
+                    assistant_group_id: None,
+                    assistant_agent_owner_id: None,
+                    // Ordinary keys keep their operation scopes; conversation
+                    // keys are overwritten from agent authority below.
+                    assistant_operation_scopes: old_key.assistant_operation_scopes.clone(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
+                    allow_auto_connected_services: old_key.allow_auto_connected_services,
                     allow_all_nodes: old_key.allow_all_nodes,
                     rate_limit_per_second: old_key.rate_limit_per_second,
                     rate_limit_burst: old_key.rate_limit_burst,
@@ -910,6 +1220,124 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     ));
                 }
                 key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                let assistant_managed =
+                    super::assistant_agent_credential_service::adopt_rotated_key(
+                        &db,
+                        &encryption_keys,
+                        &user_id,
+                        &old_key.id,
+                        &successor.id,
+                        &rotation_material.full_key,
+                        &mut *session,
+                    )
+                    .await?;
+                if assistant_managed {
+                    let credential = db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_agent_credential::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"api_key_id": &successor.id, "user_id": &user_id})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::Internal("Assistant credential unavailable".into())
+                        })?;
+                    let conversation_id = credential.get_str("conversation_id").map_err(|_| {
+                        AppError::Internal("Assistant credential unavailable".into())
+                    })?;
+                    let conversation = db
+                        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": conversation_id, "user_id": &user_id})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                    // The successor carries exactly its thread's agent authority:
+                    // Full for NyxBot, the durable grants for a specialist.
+                    let authority =
+                        super::assistant_agent_credential_service::authority_in_session(
+                            &db,
+                            &conversation,
+                            &mut *session,
+                        )
+                        .await?;
+                    let fields = authority.key_fields();
+                    successor.scopes = fields.get_str("scopes").unwrap_or("proxy").to_owned();
+                    successor.allow_all_services =
+                        fields.get_bool("allow_all_services").unwrap_or(false);
+                    successor.allow_all_nodes = true;
+                    successor.allow_auto_connected_services = fields
+                        .get_bool("allow_auto_connected_services")
+                        .unwrap_or(false);
+                    match &authority {
+                        super::assistant_agent_credential_service::KeyAuthority::Subagent(
+                            grants,
+                            scopes,
+                            owner,
+                        ) => {
+                            successor.assistant_agent_owner_id = Some(owner.clone());
+                            successor.assistant_operation_scopes = scopes.clone();
+                            successor.allowed_service_ids = grants.service_ids.clone();
+                            successor.allowed_platform_service_ids =
+                                grants.platform_service_ids.clone();
+                        }
+                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            successor.assistant_operation_scopes.clear();
+                            successor.allowed_service_ids.clear();
+                            successor.allowed_platform_service_ids.clear();
+                        }
+                    }
+                    successor.allowed_node_ids.clear();
+                    successor.assistant_group_id = conversation
+                        .group_request_id
+                        .as_ref()
+                        .and(conversation.group_id.clone());
+                    if successor.assistant_group_id.is_some() {
+                        // Group authentication binds the key to its hidden
+                        // thread. Move that binding with the encrypted successor,
+                        // rather than waiting for the next turn to refresh it.
+                        db.collection::<bson::Document>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &conversation.id, "user_id": &user_id,
+                            "credential_api_key_id": &old_key.id},
+                            doc! {"$set": {"credential_api_key_id": &successor.id}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    }
+                    let mut update = fields;
+                    update.insert(
+                        "assistant_group_id",
+                        bson::to_bson(&successor.assistant_group_id)
+                            .expect("group binding serialization"),
+                    );
+                    update.insert("allowed_node_ids", bson::Bson::Array(Vec::new()));
+                    if !update.contains_key("allowed_service_ids") {
+                        update.insert("allowed_service_ids", bson::Bson::Array(Vec::new()));
+                        update.insert(
+                            "allowed_platform_service_ids",
+                            bson::Bson::Array(Vec::new()),
+                        );
+                    }
+                    key_mutations::update_one(
+                        &db,
+                        doc! {"_id": &successor.id, "user_id": &user_id},
+                        doc! {"$set": update},
+                        Some(&mut *session),
+                    )
+                    .await?;
+                    successor.state_version += 1;
+                }
+                let children = api_key_credential_service::revoke_children(
+                    &db,
+                    &old_key.id,
+                    CredentialRevokedReason::ParentRotated,
+                    Some(&mut *session),
+                )
+                .await?;
 
                 if !old_bindings.is_empty() {
                     let now = rotation_material.created_at;
@@ -931,7 +1359,11 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .await?;
                 }
 
-                Ok(RotationTransactionOutcome::Created(successor))
+                Ok(RotationTransactionOutcome::Created(
+                    successor,
+                    children,
+                    assistant_managed,
+                ))
             }
             .await;
             key_mutations::transaction_result(operation)
@@ -943,15 +1375,25 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         RotationTransactionOutcome::AlreadyCommitted(key) => {
             Ok(ApiKeyRotationOutcome::AlreadyCommitted(key))
         }
-        RotationTransactionOutcome::Created(key) => {
-            let full_key = material
-                .lock()
-                .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
-                .as_ref()
-                .map(|material| material.full_key.clone())
-                .ok_or_else(|| {
-                    AppError::Internal("rotation committed without key material".to_string())
-                })?;
+        RotationTransactionOutcome::Created(key, children, assistant_managed) => {
+            api_key_credential_service::audit_revocations(
+                &audit_db,
+                &children,
+                CredentialRevokedReason::ParentRotated,
+            );
+            // Assistant secrets stay private even when rotated through a user route.
+            let full_key = if assistant_managed {
+                String::new()
+            } else {
+                material
+                    .lock()
+                    .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
+                    .as_ref()
+                    .map(|material| material.full_key.as_str().to_owned())
+                    .ok_or_else(|| {
+                        AppError::Internal("rotation committed without key material".to_string())
+                    })?
+            };
             tracing::info!(
                 old_key_id = %tracing_predecessor_id,
                 new_key_id = %key.id,
@@ -979,6 +1421,7 @@ pub async fn update_api_key_scope_with_scope_authorization(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<Option<u32>>,
     rate_limit_burst: Option<Option<u32>>,
@@ -997,6 +1440,7 @@ pub async fn update_api_key_scope_with_scope_authorization(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -1023,6 +1467,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<Option<u32>>,
     rate_limit_burst: Option<Option<u32>>,
@@ -1033,7 +1478,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
@@ -1042,8 +1487,30 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Err(stale_api_key_conflict());
     }
 
-    if existing.purpose == ApiKeyPurpose::ScheduledInvocation
+    if existing.purpose == ApiKeyPurpose::PermissionBound {
+        return Err(AppError::Forbidden("Permission-bound key authority is immutable; use /permission-keys to pause or reissue it".into()));
+    }
+    if existing
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != user_id)
         && (scopes.is_some()
+            || allowed_service_ids.is_some()
+            || allowed_node_ids.is_some()
+            || allow_all_services.is_some()
+            || allow_all_nodes.is_some()
+            || allow_auto_connected_services.is_some()
+            || platform.is_some()
+            || callback_url.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization thread authority is managed through the agent's grants".into(),
+        ));
+    }
+
+    if existing.purpose == ApiKeyPurpose::ScheduledInvocation
+        && (allow_auto_connected_services.is_some()
+            || scopes.is_some()
             || allowed_service_ids.is_some()
             || allowed_node_ids.is_some()
             || allow_all_services.is_some()
@@ -1069,6 +1536,8 @@ pub async fn update_api_key_scope_with_expected_state_version(
         validate_platform(platform)?;
     }
 
+    let effective_auto_svcs =
+        allow_auto_connected_services.unwrap_or(existing.allow_auto_connected_services);
     let effective_all_svcs = allow_all_services.unwrap_or(existing.allow_all_services);
     let effective_all_nodes = allow_all_nodes.unwrap_or(existing.allow_all_nodes);
 
@@ -1087,6 +1556,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
             effective_all_svcs,
             effective_all_nodes,
             expected_digest,
+            effective_auto_svcs,
         )
         .await?;
     }
@@ -1130,6 +1600,9 @@ pub async fn update_api_key_scope_with_expected_state_version(
     }
     if let Some(nids) = allowed_node_ids {
         update.insert("allowed_node_ids", nids);
+    }
+    if let Some(v) = allow_auto_connected_services {
+        update.insert("allow_auto_connected_services", v);
     }
     if let Some(v) = allow_all_services {
         update.insert("allow_all_services", v);
@@ -1183,7 +1656,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Ok(existing);
     }
 
-    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true };
+    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} };
     if let Some(expected) = expected_state_version {
         filter.insert("state_version", expected);
     }
@@ -1199,22 +1672,64 @@ pub async fn update_api_key_scope_with_expected_state_version(
         .ok_or_else(|| AppError::Internal("API key disappeared after update".to_string()))
 }
 
-/// Validate an API key from a request. Returns the user_id if valid.
+/// Public runtime keys never acquire ordinary owner, service or node authority.
+/// This boundary is independent of feature flags and of caller-supplied scopes.
+pub(crate) fn require_ordinary_purpose(purpose: ApiKeyPurpose) -> AppResult<()> {
+    if matches!(
+        purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) {
+        return Err(AppError::Forbidden(
+            "Public runtime keys cannot use ordinary execution".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a primary or child credential without widening the parent purpose.
 pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
-) -> AppResult<(String, ApiKey)> {
+) -> AppResult<(String, ApiKey, Option<String>)> {
     let key_hash = hash_token(raw_key);
 
-    let key = db
+    let primary = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "key_hash": &key_hash, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid API key".to_string()))?;
+        .await?;
+    let (key, credential_id) = if let Some(key) = primary {
+        (key, None)
+    } else {
+        let child = db
+            .collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .find_one(doc! {"secret_hash": &key_hash, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
+        if child.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+            return Err(AppError::Unauthorized(
+                "API key credential has expired".into(),
+            ));
+        }
+        let parent = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &child.api_key_id, "user_id": &child.user_id, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
+        (parent, Some(child.id))
+    };
 
+    if matches!(
+        key.purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) && credential_id.is_some()
+    {
+        return Err(AppError::Unauthorized(
+            "Public runtime keys cannot have child credentials".into(),
+        ));
+    }
     // Check expiration
     if let Some(expires_at) = key.expires_at
-        && expires_at < Utc::now()
+        && expires_at <= Utc::now()
     {
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
@@ -1230,7 +1745,15 @@ pub async fn validate_api_key(
     )
     .await?;
 
-    Ok((user_id, key))
+    if let Some(id) = credential_id.as_deref() {
+        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
+            )
+            .await?;
+    }
+    Ok((user_id, key, credential_id))
 }
 
 #[cfg(test)]
@@ -1248,6 +1771,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -1379,17 +1905,14 @@ mod tests {
         let (prefix, full_key, hash) = generate_scoped_api_key();
         assert!(
             prefix.starts_with("nyxid_ag_"),
-            "prefix should start with nyxid_ag_, got: {prefix}"
+            "prefix should start with nyxid_ag_"
         );
         assert!(
             full_key.starts_with("nyxid_ag_"),
-            "full_key should start with nyxid_ag_, got: {full_key}"
+            "full_key should start with nyxid_ag_"
         );
         assert_eq!(hash.len(), 64, "hash should be 64 hex chars");
-        assert!(
-            hex::decode(&hash).is_ok(),
-            "hash should be valid hex: {hash}"
-        );
+        assert!(hex::decode(&hash).is_ok(), "hash should be valid hex");
     }
 
     #[test]
@@ -1422,6 +1945,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let result = create_api_key(
             &db, &user_id, "", "read", None, None, None, None, None, None, None, None, None, None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1438,7 +1962,7 @@ mod tests {
         let long_name = "a".repeat(201);
         let result = create_api_key(
             &db, &user_id, &long_name, "read", None, None, None, None, None, None, None, None,
-            None, None,
+            None, None, None,
         )
         .await;
         assert!(result.is_err());
@@ -1457,6 +1981,7 @@ mod tests {
             &user_id,
             "test",
             "invalid_scope",
+            None,
             None,
             None,
             None,
@@ -1487,6 +2012,7 @@ mod tests {
             "read write",
             None,
             Some("test key"),
+            None,
             None,
             None,
             None,
@@ -1530,6 +2056,7 @@ mod tests {
             None,
             None,
             Some(true),
+            None,
             Some(true),
             None,
             None,
@@ -1586,6 +2113,7 @@ mod tests {
             Some(&service_ids),
             Some(&node_ids),
             Some(false),
+            None,
             Some(false),
             None,
             None,
@@ -1637,6 +2165,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -1684,6 +2213,7 @@ mod tests {
             None,
             Some(&node_ids),
             Some(true),
+            None,
             Some(false),
             None,
             None,
@@ -1727,6 +2257,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -1760,13 +2291,13 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         create_api_key(
             &db, &user_id, "key-1", "read", None, None, None, None, None, None, None, None, None,
-            None,
+            None, None,
         )
         .await
         .expect("create key-1");
         create_api_key(
             &db, &user_id, "key-2", "write", None, None, None, None, None, None, None, None, None,
-            None,
+            None, None,
         )
         .await
         .expect("create key-2");
@@ -1808,6 +2339,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -1830,6 +2362,7 @@ mod tests {
             &user_id,
             "to-delete",
             "read",
+            None,
             None,
             None,
             None,
@@ -1891,6 +2424,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(50),
             Some(100),
             Some("codex"),
@@ -1898,9 +2432,14 @@ mod tests {
         )
         .await
         .expect("create key");
-        let rotated = rotate_api_key(&db, &user_id, &original.id)
-            .await
-            .expect("should rotate");
+        let rotated = rotate_api_key(
+            &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
+            &user_id,
+            &original.id,
+        )
+        .await
+        .expect("should rotate");
         assert_ne!(rotated.id, original.id);
         assert_ne!(rotated.full_key, original.full_key);
         assert_eq!(rotated.name, "rotate-me");
@@ -1934,6 +2473,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(50),
             Some(100),
             Some("codex"),
@@ -1945,6 +2485,7 @@ mod tests {
 
         let rotated = match rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -1983,6 +2524,7 @@ mod tests {
 
         let replay = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2003,6 +2545,7 @@ mod tests {
 
         let owner_isolation = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &Uuid::new_v4().to_string(),
             None,
             &original.id,
@@ -2014,6 +2557,7 @@ mod tests {
 
         let conflict = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2028,6 +2572,7 @@ mod tests {
             .expect("deactivate committed successor");
         let historical_replay = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2065,12 +2610,14 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create owner key");
 
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &other_user_id,
             Some(&other_user_id),
             &original.id,
@@ -2112,6 +2659,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -2131,6 +2679,7 @@ mod tests {
 
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &org_id,
             Some(&actor_id),
             &original.id,
@@ -2172,6 +2721,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -2185,6 +2735,7 @@ mod tests {
         assert!(matches!(
             rotate_api_key_with_scope_authorization_and_id(
                 &db,
+                &Arc::new(crate::test_utils::test_encryption_keys()),
                 &org_id,
                 Some(&actor_id),
                 &original.id,
@@ -2204,6 +2755,7 @@ mod tests {
             .expect("revoke membership");
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &org_id,
             Some(&actor_id),
             &original.id,
@@ -2236,13 +2788,15 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
-        let (returned_uid, key) = validate_api_key(&db, &created.full_key)
+        let (returned_uid, key, credential_id) = validate_api_key(&db, &created.full_key)
             .await
             .expect("should validate");
         assert_eq!(returned_uid, user_id);
+        assert!(credential_id.is_none());
         assert_eq!(key.name, "validate-me");
         let touched = get_api_key(&db, &user_id, &created.id)
             .await
@@ -2285,6 +2839,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2302,7 +2857,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let created = create_api_key(
             &db, &user_id, "old-name", "read", None, None, None, None, None, None, None, None,
-            None, None,
+            None, None, None,
         )
         .await
         .expect("create key");
@@ -2312,6 +2867,7 @@ mod tests {
             None,
             &created.id,
             Some("new-name"),
+            None,
             None,
             None,
             None,
@@ -2357,6 +2913,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2365,6 +2922,7 @@ mod tests {
             &user_id,
             None,
             &created.id,
+            None,
             None,
             None,
             None,
@@ -2401,6 +2959,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(10),
             Some(20),
             None,
@@ -2414,6 +2973,7 @@ mod tests {
             &user_id,
             None,
             &created.id,
+            None,
             None,
             None,
             None,
@@ -2455,6 +3015,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2466,6 +3027,7 @@ mod tests {
             None,
             &created.id,
             Some("from-concurrent"),
+            None,
             None,
             None,
             None,
@@ -2490,6 +3052,7 @@ mod tests {
             None,
             &created.id,
             Some("from-stale"),
+            None,
             None,
             None,
             None,
@@ -2539,6 +3102,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2548,6 +3112,7 @@ mod tests {
             None,
             &created.id,
             Some("renamed"),
+            None,
             None,
             None,
             None,
@@ -2572,5 +3137,242 @@ mod tests {
             .expect("key still active");
         assert!(stored.is_active);
         assert_eq!(stored.state_version, 2);
+    }
+}
+
+#[cfg(test)]
+mod auto_connected_scope_tests {
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as SERVICES};
+    use crate::test_utils::{connect_transaction_test_database, test_user, test_user_service};
+
+    #[tokio::test]
+    async fn auto_connected_scope_is_live_owner_bound_and_persisted_across_rotation() {
+        let db = connect_transaction_test_database("auto_connected_key_scope").await;
+        let owner = Uuid::new_v4().to_string();
+        let other = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let manual_id = Uuid::new_v4().to_string();
+        let platform_id = Uuid::new_v4().to_string();
+        let mut platform = test_user_service(&platform_id, &owner, "platform", "ep", None, None);
+        platform.source = Some(AUTO_PROVISION_SOURCE.into());
+        let mut inactive = platform.clone();
+        inactive.id = Uuid::new_v4().to_string();
+        inactive.is_active = false;
+        let mut foreign = platform.clone();
+        foreign.id = Uuid::new_v4().to_string();
+        foreign.user_id = other;
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_many([
+                test_user_service(&manual_id, &owner, "manual", "ep-manual", None, None),
+                platform.clone(),
+                inactive,
+                foreign,
+            ])
+            .await
+            .unwrap();
+        let created = create_api_key(
+            &db,
+            &owner,
+            "platform agent",
+            "proxy",
+            None,
+            None,
+            Some(std::slice::from_ref(&manual_id)),
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(created.allow_auto_connected_services);
+        let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
+        let mut expected = vec![manual_id.clone(), platform_id.clone()];
+        expected.sort();
+        assert_eq!(
+            effective_allowed_service_ids(&db, &key).await.unwrap(),
+            expected
+        );
+        assert_eq!(key.allowed_service_ids, vec![manual_id.clone()]);
+
+        // Reconciliation changes the row identity; the durable grant follows it.
+        db.collection::<bson::Document>(SERVICES)
+            .delete_one(doc! { "_id": &platform_id })
+            .await
+            .unwrap();
+        platform.id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_one(&platform)
+            .await
+            .unwrap();
+        let effective = effective_allowed_service_ids(&db, &key).await.unwrap();
+        assert!(effective.contains(&platform.id));
+        assert!(!effective.contains(&platform_id));
+        assert_eq!(effective.len(), 2);
+
+        let updated = update_api_key_scope_with_scope_authorization(
+            &db,
+            &owner,
+            None,
+            &key.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!updated.allow_auto_connected_services);
+        assert_eq!(
+            effective_allowed_service_ids(&db, &updated).await.unwrap(),
+            vec![manual_id]
+        );
+        let updated = update_api_key_scope_with_scope_authorization(
+            &db,
+            &owner,
+            None,
+            &key.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Storing both flags is valid and the unrestricted branch performs no expansion.
+        assert!(updated.allow_auto_connected_services && updated.allow_all_services);
+        assert_eq!(
+            effective_allowed_service_ids(&db, &updated).await.unwrap(),
+            updated.allowed_service_ids
+        );
+        let rotated = rotate_api_key(
+            &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
+            &owner,
+            &key.id,
+        )
+        .await
+        .unwrap();
+        assert!(rotated.allow_auto_connected_services);
+        let (_, stored, _) = validate_api_key(&db, &rotated.full_key).await.unwrap();
+        assert!(stored.allow_auto_connected_services);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_connected_scope_org_key_rejects_personal_service_ids() {
+        let db = connect_transaction_test_database("auto_connected_org_scope").await;
+        let actor = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &actor,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut service = test_user_service(&id, &actor, "personal-platform", "ep", None, None);
+        service.source = Some(AUTO_PROVISION_SOURCE.into());
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        // Also exercise the actor-aware path used by org management handlers.
+        let error = api_key_scope_service::validate_service_ids(
+            &db,
+            &org,
+            std::slice::from_ref(&id),
+            ScopeAuthorization::for_actor(Some(&actor)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::ValidationError(_)));
+        let error = create_api_key(
+            &db,
+            &org,
+            "org",
+            "proxy",
+            None,
+            None,
+            Some(&[id]),
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(error, AppError::ValidationError(_)));
+        let created = create_api_key(
+            &db,
+            &org,
+            "org",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
+        assert!(
+            effective_allowed_service_ids(&db, &key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        db.drop().await.unwrap();
     }
 }

@@ -1,3 +1,6 @@
+pub mod access_denial;
+pub mod skill_draft;
+pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -60,6 +63,27 @@ pub struct ErrorResponse {
     pub details: Option<serde_json::Value>,
 }
 
+/// Safe metadata for attempted, authorized pool members. No endpoint or credential identity.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PoolAttemptSummary {
+    pub attempt: u32,
+    pub priority: u32,
+    pub reason: String,
+    pub upstream_status: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolAttemptTransportKind {
+    Connect,
+    Timeout,
+    AfterDispatch,
+    NodeUnsent,
+    NodeTimeout,
+    NodeAfterDispatch,
+}
+
+// Retired error codes 11800 and 11801 are reserved; never reuse them.
+
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
 #[derive(Debug, thiserror::Error)]
@@ -67,14 +91,13 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    /// Known unusable stored credential, distinct from malformed requests or
+    /// infrastructure failures. Keep the established public bad-request contract.
+    #[error("Bad request: {0}")]
+    CredentialUnavailable(String),
+
     #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
     RequestBodyTooLarge { max_bytes: usize, context: String },
-
-    #[error("Platform operation vendor is unavailable")]
-    PlatformOperationUnavailable,
-
-    #[error("{0}")]
-    PlatformVendorProvisioningInvalid(String),
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
@@ -82,11 +105,45 @@ pub enum AppError {
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
+    /// Same forbidden / 1002 response with additive, fixed recovery metadata.
+    #[error("Forbidden: {message}")]
+    ForbiddenWithGuidance {
+        message: String,
+        guidance: Box<access_denial::AccessDenial>,
+    },
+
+    #[error("Access is not granted and no request was created")]
+    AssistantMissingAccess(Box<serde_json::Value>),
+
     #[error("Not found: {0}")]
     NotFound(String),
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("A turn is already active in this conversation")]
+    AssistantTurnActive,
+    #[error("The voice request queue is full")]
+    VoiceQueueFull,
+    #[error("Voice provider adapters are not enabled")]
+    VoiceProviderUnavailable,
+    #[error("Tool operation is not published")]
+    ToolOperationNotPublished,
+    /// Adds safe startup context while preserving the underlying numeric code/status.
+    #[error("Voice startup failed")]
+    VoiceStartFailed(Box<voice_start::Failure>),
+
+    #[error(
+        "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
+    )]
+    AssistantTurnRequired,
+
+    /// A NyxBot model selection names a model NyxAgent does not offer.
+    #[error("The selected model is not available. Choose another model in the model selector.")]
+    AssistantModelUnavailable,
+
+    #[error("Attachment expired per retention policy. Upload it again to continue.")]
+    AssistantAttachmentExpired,
 
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
@@ -94,14 +151,24 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
+    #[error("Service concurrency limit reached; retry after an in-flight request completes")]
+    ServiceConcurrencyLimited,
+
     #[error("Internal server error: {0}")]
     Internal(String),
+
+    #[error("Pool attempt transport failed ({0:?})")]
+    PoolAttemptTransport(PoolAttemptTransportKind),
 
     #[error("Database error: {0}")]
     DatabaseError(#[from] mongodb::error::Error),
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    /// Authored skill diagnostics retain the existing validation_error / 1008 contract.
+    #[error(transparent)]
+    SkillDraftValidation(Box<skill_draft::SkillDraftValidation>),
 
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
@@ -218,6 +285,81 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
+    // 12400–12422: machine access, controller privacy and saved-login filling.
+    #[error("Machine capability is disabled; the owner must enable it on the node")]
+    MachineCapabilityDisabled,
+
+    #[error("This caller may not use the machine")]
+    MachineNotAllowed,
+
+    #[error("Path is outside the configured machine roots")]
+    MachinePathOutsideRoots,
+
+    #[error("Machine job not found in this conversation")]
+    MachineJobNotFound,
+
+    #[error("Machine confirmation is pending; wait for the owner")]
+    MachineConfirmationPending,
+
+    #[error("The owner declined the machine operation")]
+    MachineConfirmationDeclined,
+
+    #[error("Computer use is unavailable; check the cua driver and permissions")]
+    MachineComputerUnavailable,
+
+    #[error("Machine output or transfer limit exceeded; request a smaller page")]
+    MachineLimitExceeded,
+
+    #[error("The owner controls this machine; wait for hand-back")]
+    MachineOwnerInControl,
+
+    #[error(
+        "Saved-login typing requires the owner to allow this single-user machine in Assistant → Machines settings or use an isolated machine"
+    )]
+    MachineNotIsolated,
+
+    #[error("Saved login not found or not usable")]
+    MachineLoginNotFound,
+
+    #[error("The focused browser origin is not approved for this login")]
+    MachineLoginOriginMismatch,
+
+    #[error("Focus a suitable input field for this login value")]
+    MachineLoginWrongField,
+
+    #[error(
+        "Managed browser filling is unavailable; install the protected browser policies during setup"
+    )]
+    MachineBrowserUnavailable,
+
+    #[error(
+        "Computer driver is restarting; retry after a short delay and observe before repeating an action"
+    )]
+    MachineDriverRestarting,
+    #[error("Enable Accessibility and Screen Recording for this node")]
+    MachineComputerPermissionMissing,
+    #[error("This computer tool is not supported; choose an advertised tool or browser action")]
+    MachineComputerToolUnsupported,
+    #[error("The machine display is unavailable; start its desktop session")]
+    MachineDisplayUnavailable,
+    #[error("The owner stopped this turn; wait for a new turn")]
+    MachineTurnStopped,
+    #[error("Machine authority v2 is required; update the machine before configuring capabilities")]
+    MachineAuthorityUnsupported,
+    #[error(
+        "Machine permission was revoked or is not granted; see the capability guidance for this chat"
+    )]
+    MachinePermissionRevoked,
+    #[error(
+        "Machine authority lease expired or revision changed; start a freshly authorized operation"
+    )]
+    MachineAuthorityStale,
+
+    #[error(
+        "This machine has too many active operations; retry when an operation finishes. Running work continues."
+    )]
+    MachineAuthorityBusy,
+
     #[error("Node not found: {0}")]
     NodeNotFound(String),
 
@@ -232,6 +374,14 @@ pub enum AppError {
 
     #[error("Node credential missing: {0}")]
     NodeCredentialMissing(String),
+
+    #[error("Target-selected HTTP requests require a node advertising HTTP signature v2")]
+    NodeHttpSignatureUnsupported,
+
+    #[error(
+        "workspace_destinations_not_activated (12300): Google Docs, Sheets, and Slides routing is not activated for this service. Startup reconciliation did not complete for this catalog row; check the server log for 'Google editor destinations were not activated' and the service's policy, destination map, and provider requirement."
+    )]
+    WorkspaceDestinationsNotActivated,
 
     #[error("WebSocket proxy downstream error: {0}")]
     WsProxyDownstream(String),
@@ -360,6 +510,38 @@ pub enum AppError {
     #[error("Auth device user code invalid")]
     AuthDeviceUserCodeInvalid,
 
+    #[error("Agent Key login request not found")]
+    AgentKeyLoginNotFound,
+    #[error("Agent Key login request expired")]
+    AgentKeyLoginExpired,
+    #[error("Agent Key authorization pending")]
+    AgentKeyLoginPending,
+    #[error("Slow down Agent Key login polling")]
+    AgentKeyLoginSlowDown,
+    #[error("Agent Key login denied")]
+    AgentKeyLoginDenied,
+    #[error("Agent Key credential already delivered")]
+    AgentKeyLoginAlreadyDelivered,
+    #[error("Too many Agent Key login attempts")]
+    AgentKeyLoginRateLimited,
+    #[error("Invalid Agent Key login user code")]
+    AgentKeyLoginUserCodeInvalid,
+    #[error("This key is not eligible for Agent Key login")]
+    AgentKeyLoginKeyIneligible,
+    #[error("Agent Key login credential not found")]
+    AgentKeyCredentialNotFound,
+
+    #[error("Login code is invalid")]
+    LoginCodeInvalid,
+    #[error("Login code expired")]
+    LoginCodeExpired,
+    #[error("Login code was cancelled")]
+    LoginCodeCancelled,
+    #[error("Login code was already redeemed")]
+    LoginCodeRedeemed,
+    #[error("Too many login code attempts")]
+    LoginCodeRateLimited,
+
     #[error("Connect link not found")]
     ConnectLinkNotFound,
 
@@ -423,11 +605,34 @@ pub enum AppError {
     #[error("Device channel conversations do not support replies")]
     DeviceChannelReplyNotAllowed,
 
+    #[error("Conversation is not reachable: {0}")]
+    ChannelConversationNotReachable(String),
+    #[error("Channel media is not supported")]
+    ChannelMediaUnsupported,
+    #[error("Channel media exceeds the configured size limit")]
+    ChannelMediaTooLarge,
+    #[error("Channel media fetch failed: {0}")]
+    ChannelMediaFetchFailed(String),
+    #[error("Channel attachment not found")]
+    ChannelAttachmentNotFound,
+
+    #[error("Platform does not support initiated messages")]
+    ChannelPlatformSendUnsupported,
+
+    #[error("Conversation has no concrete platform chat address")]
+    ChannelConversationNotAddressable,
+
+    #[error("Agent-initiated messages are not enabled for this conversation")]
+    ChannelAgentInitiateNotAllowed,
+
     #[error("Organization accounts cannot authenticate directly")]
     OrgCannotAuthenticate,
 
     #[error("Organization membership query timed out")]
     OrgQueryTimeout,
+
+    #[error("Usage query timed out; select a shorter window or narrower filters and retry")]
+    AdminUsageQueryTimeout,
 
     #[error("Organization not found: {0}")]
     OrgNotFound(String),
@@ -512,6 +717,13 @@ pub enum AppError {
     #[error("Oracle login snapshot not found: {0}")]
     OracleLoginSnapshotNotFound(String),
 
+    #[error("Installation credential expired; enroll with a fresh credential")]
+    OracleWorkerCredentialRenewalRequired,
+    #[error(
+        "Oracle pool deletion requires settling active tasks or worker commands, or retrying DELETE to continue bounded command expiry"
+    )]
+    OraclePoolActiveWork,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -524,6 +736,21 @@ pub enum AppError {
     #[error("Service pool has no viable member: {0}")]
     ServicePoolNoViableMember(String),
 
+    #[error("No service pool attempt completed successfully")]
+    ServicePoolAttemptsExhausted { attempts: Vec<PoolAttemptSummary> },
+
+    #[error("Pool accounting is temporarily unavailable")]
+    ServicePoolInfrastructureUnavailable,
+
+    #[error("Pool upstream returned an unsupported content encoding")]
+    ServicePoolUpstreamEncodingUnsupported,
+
+    #[error("All eligible pool members are cooling down")]
+    ServicePoolCoolingDown,
+
+    #[error("Pool request deadline exceeded")]
+    ServicePoolDeadlineExceeded { attempts: Vec<PoolAttemptSummary> },
+
     #[error("Insufficient billing credits")]
     InsufficientCredits,
 
@@ -532,6 +759,11 @@ pub enum AppError {
 
     #[error("Billing provider unavailable: {0}")]
     BillingProviderUnavailable(String),
+
+    #[error(
+        "Managed execution {0} is pending usage verification; inspect its status and do not retry automatically"
+    )]
+    ManagedExecutionPending(String),
 
     #[error("Plan entitlement required: {0}")]
     PlanEntitlementRequired(String),
@@ -544,18 +776,41 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Generic policy refusals, with or without additive recovery guidance.
+    /// Specialized 403 errors retain their own control-flow semantics.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(
+            self,
+            Self::Forbidden(_)
+                | Self::ForbiddenWithGuidance { .. }
+                | Self::AssistantMissingAccess(_)
+        )
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::VoiceStartFailed(failure) => failure.source.status_code(),
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::ValidationError(_)
+            | Self::SkillDraftValidation(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
-            Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_)
+            | Self::ForbiddenWithGuidance { .. }
+            | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
+            Self::AssistantTurnRequired => StatusCode::CONFLICT,
+            Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
+            Self::AssistantAttachmentExpired => StatusCode::GONE,
+            Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -591,11 +846,37 @@ impl AppError {
             Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
                 StatusCode::BAD_REQUEST
             }
+            Self::MachineCapabilityDisabled => StatusCode::FORBIDDEN,
+            Self::MachineNotAllowed => StatusCode::FORBIDDEN,
+            Self::MachinePathOutsideRoots => StatusCode::FORBIDDEN,
+            Self::MachineJobNotFound => StatusCode::NOT_FOUND,
+            Self::MachineConfirmationPending => StatusCode::CONFLICT,
+            Self::MachineConfirmationDeclined => StatusCode::FORBIDDEN,
+            Self::MachineComputerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineLimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::MachineOwnerInControl => StatusCode::CONFLICT,
+            Self::MachineNotIsolated => StatusCode::FORBIDDEN,
+            Self::MachineLoginNotFound => StatusCode::NOT_FOUND,
+            Self::MachineLoginOriginMismatch => StatusCode::FORBIDDEN,
+            Self::MachineLoginWrongField => StatusCode::BAD_REQUEST,
+            Self::MachineBrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineDriverRestarting | Self::MachineDisplayUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
+            Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
+            Self::MachineTurnStopped => StatusCode::CONFLICT,
+            Self::MachineAuthorityUnsupported => StatusCode::CONFLICT,
+            Self::MachinePermissionRevoked => StatusCode::FORBIDDEN,
+            Self::MachineAuthorityStale => StatusCode::CONFLICT,
+            Self::MachineAuthorityBusy => StatusCode::TOO_MANY_REQUESTS,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
+            Self::NodeHttpSignatureUnsupported => StatusCode::BAD_GATEWAY,
+            Self::WorkspaceDestinationsNotActivated => StatusCode::SERVICE_UNAVAILABLE,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
             Self::ClientDisconnected => client_closed_request(),
             Self::PendingCredentialDecryptFailed(_) => StatusCode::BAD_REQUEST,
@@ -618,7 +899,8 @@ impl AppError {
             Self::DurableGrantContractDrift
             | Self::DurableOperationDuplicate
             | Self::DurableOperationConflict
-            | Self::DurableOperationOutcomeUncertain => StatusCode::CONFLICT,
+            | Self::DurableOperationOutcomeUncertain
+            | Self::ManagedExecutionPending(_) => StatusCode::CONFLICT,
             Self::DurableGrantQuotaExhausted => StatusCode::TOO_MANY_REQUESTS,
             Self::DeviceCodeNotFound => StatusCode::BAD_REQUEST,
             Self::DeviceCodeExpired => StatusCode::GONE,
@@ -637,6 +919,20 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => StatusCode::GONE,
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginNotFound => StatusCode::NOT_FOUND,
+            Self::LoginCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::LoginCodeExpired | Self::LoginCodeRedeemed => StatusCode::GONE,
+            Self::LoginCodeCancelled => StatusCode::FORBIDDEN,
+            Self::LoginCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AgentKeyLoginExpired => StatusCode::GONE,
+            Self::AgentKeyLoginPending => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginSlowDown => StatusCode::TOO_MANY_REQUESTS,
+            Self::AgentKeyLoginDenied => StatusCode::FORBIDDEN,
+            Self::AgentKeyLoginAlreadyDelivered => StatusCode::GONE,
+            Self::AgentKeyLoginRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AgentKeyLoginUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginKeyIneligible => StatusCode::BAD_REQUEST,
+            Self::AgentKeyCredentialNotFound => StatusCode::NOT_FOUND,
             Self::ConnectLinkNotFound => StatusCode::NOT_FOUND,
             Self::ConnectLinkExpired => StatusCode::GONE,
             Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
@@ -658,8 +954,16 @@ impl AppError {
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
+            Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
+            Self::ChannelPlatformSendUnsupported => StatusCode::NOT_IMPLEMENTED,
+            Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
+            Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
-            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgQueryTimeout | Self::AdminUsageQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
             Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
             Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
@@ -688,34 +992,56 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
+            Self::OraclePoolActiveWork => StatusCode::CONFLICT,
+            Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::ServicePoolDeadlineExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            Self::ServicePoolUpstreamEncodingUnsupported => StatusCode::BAD_GATEWAY,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
-            Self::ServicePoolNoViableMember(_) => StatusCode::BAD_GATEWAY,
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::InsufficientCredits
             | Self::BillingNotConfigured(_)
             | Self::BillingProviderUnavailable(_)
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
-            Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
-            Self::BadRequest(_) => 1000,
+            Self::VoiceStartFailed(failure) => failure.source.error_code(),
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
-            Self::PlatformOperationUnavailable => 11800,
-            Self::PlatformVendorProvisioningInvalid(_) => 11801,
             Self::Unauthorized(_) => 1001,
-            Self::Forbidden(_) => 1002,
+            Self::Forbidden(_)
+            | Self::ForbiddenWithGuidance { .. }
+            | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
+            Self::AssistantTurnActive => 12100,
+            Self::VoiceQueueFull => 12500,
+            Self::VoiceProviderUnavailable => 12501,
+            Self::ToolOperationNotPublished => 12700,
+            Self::ManagedExecutionPending(_) => 12800,
+            // 12101 is already the public upload-retention code.
+            Self::AssistantTurnRequired => 12102,
+            Self::AssistantModelUnavailable => 12103,
+            Self::AssistantAttachmentExpired => 12101,
+            Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited => 1005,
-            Self::Internal(_) => 1006,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
-            Self::ValidationError(_) => 1008,
+            Self::ValidationError(_) | Self::SkillDraftValidation(_) => 1008,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -752,6 +1078,29 @@ impl AppError {
             Self::ApprovalFailed { .. } => 7001,
             Self::ExternalTokenInvalid(_) => 6004,
             Self::ExternalProviderNotConfigured(_) => 6005,
+            Self::MachineCapabilityDisabled => 12400,
+            Self::MachineNotAllowed => 12401,
+            Self::MachinePathOutsideRoots => 12402,
+            Self::MachineJobNotFound => 12403,
+            Self::MachineConfirmationPending => 12404,
+            Self::MachineConfirmationDeclined => 12405,
+            Self::MachineComputerUnavailable => 12406,
+            Self::MachineLimitExceeded => 12407,
+            Self::MachineOwnerInControl => 12408,
+            Self::MachineNotIsolated => 12409,
+            Self::MachineLoginNotFound => 12410,
+            Self::MachineLoginOriginMismatch => 12411,
+            Self::MachineLoginWrongField => 12412,
+            Self::MachineBrowserUnavailable => 12413,
+            Self::MachineDriverRestarting => 12414,
+            Self::MachineComputerPermissionMissing => 12415,
+            Self::MachineComputerToolUnsupported => 12416,
+            Self::MachineDisplayUnavailable => 12417,
+            Self::MachineTurnStopped => 12418,
+            Self::MachineAuthorityUnsupported => 12419,
+            Self::MachinePermissionRevoked => 12420,
+            Self::MachineAuthorityStale => 12421,
+            Self::MachineAuthorityBusy => 12422,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -759,6 +1108,8 @@ impl AppError {
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
             Self::ClientDisconnected => 8012,
+            Self::NodeHttpSignatureUnsupported => 8013,
+            Self::WorkspaceDestinationsNotActivated => 12300,
             Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
             Self::PendingCredentialVersionUnsupported(_) => {
                 PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE
@@ -802,6 +1153,21 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => 11205,
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
+            Self::AgentKeyLoginNotFound => 11900,
+            Self::LoginCodeInvalid => 12000,
+            Self::LoginCodeExpired => 12001,
+            Self::LoginCodeCancelled => 12002,
+            Self::LoginCodeRedeemed => 12003,
+            Self::LoginCodeRateLimited => 12004,
+            Self::AgentKeyLoginExpired => 11901,
+            Self::AgentKeyLoginPending => 11902,
+            Self::AgentKeyLoginSlowDown => 11903,
+            Self::AgentKeyLoginDenied => 11904,
+            Self::AgentKeyLoginAlreadyDelivered => 11905,
+            Self::AgentKeyLoginRateLimited => 11906,
+            Self::AgentKeyLoginUserCodeInvalid => 11907,
+            Self::AgentKeyLoginKeyIneligible => 11908,
+            Self::AgentKeyCredentialNotFound => 11909,
             Self::ConnectLinkNotFound => 11300,
             Self::ConnectLinkExpired => 11301,
             Self::ConnectLinkAlreadyCompleted => 11302,
@@ -823,8 +1189,17 @@ impl AppError {
             Self::ChannelPlatformError(_) => 10005,
             Self::ChannelPlatformEditUnsupported => 10007,
             Self::DeviceChannelReplyNotAllowed => 10006,
+            Self::ChannelConversationNotReachable(_) => 10011,
+            Self::ChannelMediaUnsupported => 10012,
+            Self::ChannelMediaTooLarge => 10013,
+            Self::ChannelMediaFetchFailed(_) => 10014,
+            Self::ChannelAttachmentNotFound => 10015,
+            Self::ChannelPlatformSendUnsupported => 10010,
+            Self::ChannelConversationNotAddressable => 10009,
+            Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
+            Self::AdminUsageQueryTimeout => 12200,
             Self::OrgNotFound(_) => 8101,
             Self::OrgSlugTaken(_) => 8107,
             Self::OrgMembershipRequired => 8102,
@@ -853,10 +1228,16 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => 11013,
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
+            Self::OracleWorkerCredentialRenewalRequired => 11016,
+            Self::OraclePoolActiveWork => 11017,
+            Self::ServicePoolUpstreamEncodingUnsupported => 11407,
+            Self::ServicePoolInfrastructureUnavailable => 11404,
+            Self::ServicePoolCoolingDown => 11405,
+            Self::ServicePoolDeadlineExceeded { .. } => 11406,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
-            Self::ServicePoolNoViableMember(_) => 11403,
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => 11403,
             Self::InsufficientCredits => 11300,
             Self::BillingNotConfigured(_) => 11301,
             Self::BillingProviderUnavailable(_) => 11302,
@@ -895,26 +1276,36 @@ impl AppError {
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
             | Self::ServiceAccountInactive => StatusCode::UNAUTHORIZED,
-            Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             _ => StatusCode::BAD_REQUEST,
         }
     }
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
-            Self::BadRequest(_) => "bad_request",
+            Self::VoiceStartFailed(failure) => failure.source.error_key(),
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
-            Self::PlatformOperationUnavailable => "platform_operation_unavailable",
-            Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
             Self::Unauthorized(_) => "unauthorized",
-            Self::Forbidden(_) => "forbidden",
+            Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
+            Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::AssistantTurnActive => "turn_active",
+            Self::VoiceQueueFull => "voice_queue_full",
+            Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::ToolOperationNotPublished => "tool_operation_not_published",
+            Self::AssistantTurnRequired => "assistant_turn_required",
+            Self::AssistantModelUnavailable => "model_unavailable",
+            Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
+            Self::ServiceConcurrencyLimited => "service_concurrency_limited",
             Self::RateLimited => "rate_limited",
-            Self::Internal(_) => "internal_error",
+            Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
-            Self::ValidationError(_) => "validation_error",
+            Self::ValidationError(_) | Self::SkillDraftValidation(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -953,11 +1344,36 @@ impl AppError {
             Self::ApprovalFailed { .. } => "approval_failed",
             Self::ExternalTokenInvalid(_) => "external_token_invalid",
             Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
+            Self::MachineCapabilityDisabled => "machine_capability_disabled",
+            Self::MachineNotAllowed => "machine_not_allowed",
+            Self::MachinePathOutsideRoots => "machine_path_outside_roots",
+            Self::MachineJobNotFound => "machine_job_not_found",
+            Self::MachineConfirmationPending => "machine_confirmation_pending",
+            Self::MachineConfirmationDeclined => "machine_confirmation_declined",
+            Self::MachineComputerUnavailable => "machine_computer_unavailable",
+            Self::MachineLimitExceeded => "machine_limit_exceeded",
+            Self::MachineOwnerInControl => "owner_in_control",
+            Self::MachineNotIsolated => "machine_not_isolated",
+            Self::MachineLoginNotFound => "machine_login_not_found",
+            Self::MachineLoginOriginMismatch => "machine_login_origin_mismatch",
+            Self::MachineLoginWrongField => "machine_login_wrong_field",
+            Self::MachineBrowserUnavailable => "machine_browser_unavailable",
+            Self::MachineDriverRestarting => "driver_restarting",
+            Self::MachineComputerPermissionMissing => "computer_permission_missing",
+            Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
+            Self::MachineDisplayUnavailable => "display_unavailable",
+            Self::MachineTurnStopped => "machine_turn_stopped",
+            Self::MachineAuthorityUnsupported => "machine_authority_unsupported",
+            Self::MachinePermissionRevoked => "machine_permission_revoked",
+            Self::MachineAuthorityStale => "machine_authority_stale",
+            Self::MachineAuthorityBusy => "machine_authority_busy",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
+            Self::NodeHttpSignatureUnsupported => "node_http_signature_unsupported",
+            Self::WorkspaceDestinationsNotActivated => "workspace_destinations_not_activated",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
             Self::ClientDisconnected => "client_disconnected",
             Self::PendingCredentialDecryptFailed(_) => "pending_credential_decrypt_failed",
@@ -1003,6 +1419,21 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => "auth_device_already_delivered",
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
+            Self::AgentKeyLoginNotFound => "agent_key_login_not_found",
+            Self::LoginCodeInvalid => "login_code_invalid",
+            Self::LoginCodeExpired => "login_code_expired",
+            Self::LoginCodeCancelled => "login_code_cancelled",
+            Self::LoginCodeRedeemed => "login_code_redeemed",
+            Self::LoginCodeRateLimited => "login_code_rate_limited",
+            Self::AgentKeyLoginExpired => "agent_key_login_expired",
+            Self::AgentKeyLoginPending => "agent_key_login_pending",
+            Self::AgentKeyLoginSlowDown => "agent_key_login_slow_down",
+            Self::AgentKeyLoginDenied => "agent_key_login_denied",
+            Self::AgentKeyLoginAlreadyDelivered => "agent_key_login_already_delivered",
+            Self::AgentKeyLoginRateLimited => "agent_key_login_rate_limited",
+            Self::AgentKeyLoginUserCodeInvalid => "agent_key_login_user_code_invalid",
+            Self::AgentKeyLoginKeyIneligible => "agent_key_login_key_ineligible",
+            Self::AgentKeyCredentialNotFound => "agent_key_credential_not_found",
             Self::ConnectLinkNotFound => "connect_link_not_found",
             Self::ConnectLinkExpired => "connect_link_expired",
             Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",
@@ -1024,8 +1455,17 @@ impl AppError {
             Self::ChannelPlatformError(_) => "channel_platform_error",
             Self::ChannelPlatformEditUnsupported => "edit_unsupported",
             Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
+            Self::ChannelConversationNotReachable(_) => "channel_conversation_not_reachable",
+            Self::ChannelMediaUnsupported => "channel_media_unsupported",
+            Self::ChannelMediaTooLarge => "channel_media_too_large",
+            Self::ChannelMediaFetchFailed(_) => "channel_media_fetch_failed",
+            Self::ChannelAttachmentNotFound => "channel_attachment_not_found",
+            Self::ChannelPlatformSendUnsupported => "channel_platform_send_unsupported",
+            Self::ChannelConversationNotAddressable => "channel_conversation_not_addressable",
+            Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
+            Self::AdminUsageQueryTimeout => "admin_usage_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
             Self::OrgSlugTaken(_) => "org_slug_taken",
             Self::OrgMembershipRequired => "org_membership_required",
@@ -1054,13 +1494,26 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OraclePoolActiveWork => "oracle_pool_active_work",
+            Self::OracleWorkerCredentialRenewalRequired => {
+                "oracle_worker_credential_renewal_required"
+            }
+            Self::ServicePoolUpstreamEncodingUnsupported => {
+                "service_pool_upstream_encoding_unsupported"
+            }
+            Self::ServicePoolInfrastructureUnavailable => "service_pool_infrastructure_unavailable",
+            Self::ServicePoolCoolingDown => "service_pool_cooling_down",
+            Self::ServicePoolDeadlineExceeded { .. } => "service_pool_deadline_exceeded",
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
-            Self::ServicePoolNoViableMember(_) => "service_pool_no_viable_member",
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => {
+                "service_pool_no_viable_member"
+            }
             Self::InsufficientCredits => "insufficient_credits",
             Self::BillingNotConfigured(_) => "billing_not_configured",
             Self::BillingProviderUnavailable(_) => "billing_provider_unavailable",
+            Self::ManagedExecutionPending(_) => "managed_execution_pending",
             Self::PlanEntitlementRequired(_) => "plan_entitlement_required",
             Self::AnonymousIncompatibleBilling(_) => "anonymous_incompatible_billing",
             Self::WalletSuspended => "wallet_suspended",
@@ -1068,18 +1521,12 @@ impl AppError {
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let status = self.status_code();
-
-        // Log server errors at error level; client errors at warn level
-        match &self {
-            AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
-            AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
-            _ => tracing::warn!(error = %self, "Client error"),
+impl AppError {
+    /// The same client-safe payload for JSON responses and streaming errors.
+    pub fn response_body(&self) -> ErrorResponse {
+        if let Self::VoiceStartFailed(failure) = self {
+            return failure.response();
         }
-
-        // Extract MFA session token before consuming self in the message match
         let mfa_session_token = match &self {
             AppError::MfaRequired { session_token } => Some(session_token.clone()),
             _ => None,
@@ -1098,6 +1545,21 @@ impl IntoResponse for AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::SkillDraftValidation(diagnostic) => {
+                Some(serde_json::to_value(diagnostic).expect("fixed skill draft diagnostic"))
+            }
+            AppError::ForbiddenWithGuidance { guidance, .. } => {
+                Some(serde_json::to_value(guidance).expect("fixed access denial metadata"))
+            }
+            AppError::AssistantMissingAccess(value) => Some(value.as_ref().clone()),
+            AppError::Unauthorized(_) | AppError::AuthenticationFailed(_) => {
+                Some(serde_json::json!({"reason":"authentication_failed"}))
+            }
+            AppError::TokenExpired => Some(serde_json::json!({"reason":"credential_expired"})),
+            AppError::ServicePoolAttemptsExhausted { attempts }
+            | AppError::ServicePoolDeadlineExceeded { attempts } => {
+                Some(serde_json::json!({ "attempts": attempts }))
+            }
             AppError::GrantCascadeConfirmationRequired(payload) => Some(
                 serde_json::to_value(payload.as_ref())
                     .expect("grant cascade payload must be serializable"),
@@ -1105,15 +1567,16 @@ impl IntoResponse for AppError {
             _ => None,
         };
 
-        let body = ErrorResponse {
+        ErrorResponse {
             error: self.error_key().to_string(),
             error_code: self.error_code(),
             message: match &self {
                 // Never leak internal details to clients
-                AppError::Internal(_) | AppError::DatabaseError(_) => {
-                    "An internal error occurred".to_string()
-                }
+                AppError::Internal(_)
+                | AppError::PoolAttemptTransport(_)
+                | AppError::DatabaseError(_) => "An internal error occurred".to_string(),
                 AppError::MfaRequired { .. } => "MFA verification required".to_string(),
+                AppError::AssistantTurnRequired => "This assistant key is only valid while its conversation has a live turn; start or resume the conversation".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
@@ -1128,6 +1591,11 @@ impl IntoResponse for AppError {
                 } => {
                     format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
                 }
+                AppError::SkillDraftValidation(diagnostic)
+                    if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
+                {
+                    format!("Skill draft failed validation ({}); details unavailable.", diagnostic.rule)
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
@@ -1135,20 +1603,125 @@ impl IntoResponse for AppError {
             request_id: approval_request_id,
             approve_url,
             details,
-        };
+        }
+    }
+}
 
-        (status, axum::Json(body)).into_response()
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        // Log server errors at error level; client errors at warn level.
+        match &self {
+            // Already logged once with bounded structured fields by the startup boundary.
+            AppError::VoiceStartFailed(_) => {}
+            AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
+            AppError::PoolAttemptTransport(kind) => {
+                tracing::error!(?kind, "Pool attempt transport failure")
+            }
+            AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
+            _ => tracing::warn!(error = %self, "Client error"),
+        }
+        let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        response
     }
 }
 
 /// Convenience type alias for handler return types.
 pub type AppResult<T> = Result<T, AppError>;
 
+impl From<crate::models::credits::CreditsError> for AppError {
+    fn from(error: crate::models::credits::CreditsError) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[test]
+    fn assistant_missing_access_is_forbidden_class_with_contextual_details() {
+        let value = serde_json::json!({"error": "missing_access", "scope": "service",
+            "target": "GitHub", "request_created": false, "grants_path": "/assistant?agent=a"});
+        let error = AppError::AssistantMissingAccess(Box::new(value.clone()));
+        assert!(error.is_forbidden());
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(error.error_code(), 1002);
+        assert_eq!(error.error_key(), "missing_access");
+        assert!(!error.to_string().contains("NyxBot"));
+        assert!(!error.to_string().contains("GitHub"));
+        let body = error.response_body();
+        assert_eq!(body.error, "missing_access");
+        assert_eq!(body.error_code, 1002);
+        assert_eq!(body.details, Some(value));
+    }
+
+    #[test]
+    fn generic_forbidden_classification_includes_guidance_only() {
+        for error in [
+            AppError::Forbidden("Denied".into()),
+            AppError::unsupported_credential("Denied", access_denial::CredentialType::ApiKey),
+            AppError::insufficient_scope("Denied"),
+        ] {
+            assert!(error.is_forbidden());
+            assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+            assert_eq!(error.error_code(), 1002);
+            assert_eq!(error.error_key(), "forbidden");
+            assert_eq!(error.to_string(), "Forbidden: Denied");
+        }
+        for error in [
+            AppError::Unauthorized("Invalid".into()),
+            AppError::NotFound("Missing".into()),
+            AppError::ApiKeyScopeForbidden("Specialized".into()),
+        ] {
+            assert!(!error.is_forbidden());
+        }
+    }
+
+    #[test]
+    fn only_empty_ornn_verdict_reports_unavailable_details() {
+        let local = AppError::SkillDraftValidation(Box::new(
+            skill_draft::SkillDraftValidation::size("package", "bytes", 10, 11),
+        ));
+        assert_eq!(
+            local.response_body().message,
+            "Skill draft failed validation (too_large)"
+        );
+        for rule in [
+            "credential_shape",
+            "required",
+            "unsafe_path",
+            "scope_required",
+        ] {
+            let local: AppError = skill_draft::SkillDraftValidation::at(rule, "draft")
+                .on_line(3)
+                .into();
+            let response = local.response_body();
+            assert_eq!(response.message, local.to_string());
+            assert_eq!(response.details.unwrap()["line"], 3);
+        }
+        let detailed: AppError =
+            skill_draft::SkillDraftValidation::ornn_rejected(["no-readme-md"]).into();
+        assert_eq!(detailed.response_body().message, detailed.to_string());
+        let local: AppError =
+            skill_draft::SkillDraftValidation::at("ornn_validation_failed", "draft")
+                .on_line(2)
+                .into();
+        assert_eq!(local.response_body().message, local.to_string());
+        let ornn = skill_draft::SkillDraftValidation::ornn_rejected([]);
+        let ornn = AppError::SkillDraftValidation(Box::new(ornn));
+        assert_eq!(
+            ornn.response_body().message,
+            "Skill draft failed validation (ornn_format_rejected); details unavailable."
+        );
+    }
 
     #[tokio::test]
     async fn request_body_too_large_has_structured_413_contract() {
@@ -1164,6 +1737,23 @@ mod tests {
         assert_eq!(payload["error"], "request_body_too_large");
         assert_eq!(payload["error_code"], 11700);
         assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
+
+    #[tokio::test]
+    async fn credential_unavailable_preserves_bad_request_wire_contract() {
+        let error = AppError::CredentialUnavailable("API key is failed".into());
+        assert_eq!(error.oauth_error_code(), "invalid_request");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let previous =
+            serde_json::to_value(AppError::BadRequest("API key is failed".into()).response_body())
+                .unwrap();
+        assert_eq!(payload, previous);
+        assert_eq!(payload["error_code"], 1000);
+        assert_eq!(payload["error"], "bad_request");
+        assert_eq!(payload["message"], "Bad request: API key is failed");
     }
 
     #[test]
@@ -1445,8 +2035,44 @@ mod tests {
     }
 
     #[test]
+    fn managed_execution_pending_is_a_conflict_with_a_stable_status_reference() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let error = AppError::ManagedExecutionPending(id.clone());
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12800);
+        assert_eq!(error.error_key(), "managed_execution_pending");
+        assert!(error.response_body().message.contains(&id));
+        assert!(error.response_body().message.contains("do not retry"));
+    }
+
+    #[test]
+    fn assistant_model_unavailable_contract() {
+        let error = AppError::AssistantModelUnavailable;
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.error_code(), 12103);
+        assert_eq!(error.error_key(), "model_unavailable");
+        assert!(error.response_body().message.contains("model selector"));
+    }
+
+    #[test]
+    fn assistant_turn_required_contract() {
+        let error = AppError::AssistantTurnRequired;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12102);
+        assert_eq!(error.error_key(), "assistant_turn_required");
+        assert!(error.response_body().message.len() < 2_000);
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::ManagedExecutionPending("".into()).error_code(),
+            AppError::AssistantTurnActive.error_code(),
+            AppError::AssistantTurnRequired.error_code(),
+            AppError::AssistantModelUnavailable.error_code(),
+            AppError::AdminUsageQueryTimeout.error_code(),
+            AppError::WorkspaceDestinationsNotActivated.error_code(),
+            AppError::NodeHttpSignatureUnsupported.error_code(),
             AppError::BadRequest("".into()).error_code(),
             AppError::RequestBodyTooLarge {
                 max_bytes: 0,
@@ -1574,6 +2200,7 @@ mod tests {
             AppError::OracleWorkerCommandNotFound("".into()).error_code(),
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
+            AppError::OracleWorkerCredentialRenewalRequired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
@@ -1600,6 +2227,13 @@ mod tests {
             "unauthorized"
         );
         assert_eq!(AppError::Forbidden("".into()).error_key(), "forbidden");
+        assert_eq!(
+            AppError::AssistantMissingAccess(Box::new(
+                serde_json::json!({"error": "missing_access"})
+            ))
+            .error_key(),
+            "missing_access"
+        );
         assert_eq!(AppError::NotFound("".into()).error_key(), "not_found");
         assert_eq!(AppError::Conflict("".into()).error_key(), "conflict");
         assert_eq!(AppError::RateLimited.error_key(), "rate_limited");
@@ -2273,10 +2907,58 @@ mod tests {
                 1015,
             ),
             (
+                AppError::ChannelMediaUnsupported,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "channel_media_unsupported",
+                10012,
+            ),
+            (
+                AppError::ChannelMediaTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "channel_media_too_large",
+                10013,
+            ),
+            (
+                AppError::ChannelMediaFetchFailed("provider unavailable".into()),
+                StatusCode::BAD_GATEWAY,
+                "channel_media_fetch_failed",
+                10014,
+            ),
+            (
+                AppError::ChannelAttachmentNotFound,
+                StatusCode::NOT_FOUND,
+                "channel_attachment_not_found",
+                10015,
+            ),
+            (
                 AppError::ChannelPlatformEditUnsupported,
                 StatusCode::NOT_IMPLEMENTED,
                 "edit_unsupported",
                 10007,
+            ),
+            (
+                AppError::ChannelAgentInitiateNotAllowed,
+                StatusCode::FORBIDDEN,
+                "channel_agent_initiate_not_allowed",
+                10008,
+            ),
+            (
+                AppError::ChannelConversationNotAddressable,
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_addressable",
+                10009,
+            ),
+            (
+                AppError::ChannelPlatformSendUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "channel_platform_send_unsupported",
+                10010,
+            ),
+            (
+                AppError::ChannelConversationNotReachable("target refused delivery".to_string()),
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_reachable",
+                10011,
             ),
             (
                 AppError::DeviceChannelReplyNotAllowed,

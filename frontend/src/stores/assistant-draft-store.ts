@@ -95,6 +95,8 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
     {
       name: STORAGE_KEY,
       version: 1,
+      // Payloads written while the retired Ask/Full draft preference existed
+      // still carry `nyxAgentAccessMode`; it is ignored and dropped on the next write.
       partialize: ({ ownerUserId, drafts }) => ({ ownerUserId, drafts }),
     },
   ),

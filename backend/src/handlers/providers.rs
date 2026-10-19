@@ -1,15 +1,16 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::url_validation::validate_base_url;
+use crate::services::url_validation::{MAX_URL_LEN, validate_advisory_http_url, validate_base_url};
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
+use super::catalog_authority::{self, CatalogAuthority};
 use super::services_helpers::require_admin;
 
 // --- Request / Response types ---
@@ -30,6 +31,7 @@ pub struct CreateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     // Device code flow fields
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
@@ -43,6 +45,9 @@ pub struct CreateProviderRequest {
     pub documentation_url: Option<String>,
     // Auth method
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<std::collections::HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     // Generic OAuth edge case fields
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: Option<String>,
@@ -81,6 +86,7 @@ pub struct UpdateProviderRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -91,6 +97,9 @@ pub struct UpdateProviderRequest {
     pub documentation_url: Option<String>,
     pub credential_mode: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<std::collections::HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -101,6 +110,8 @@ pub struct UpdateProviderRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RevocationConfigRequest {
+    #[serde(default = "crate::models::provider_config::default_request_encoding")]
+    pub request_encoding: String,
     pub style: String,
     pub url: String,
     pub auth: String,
@@ -111,6 +122,7 @@ pub struct RevocationConfigRequest {
 impl From<RevocationConfigRequest> for crate::models::provider_config::RevocationConfig {
     fn from(value: RevocationConfigRequest) -> Self {
         Self {
+            request_encoding: value.request_encoding,
             style: value.style,
             url: value.url,
             auth: value.auth,
@@ -165,8 +177,14 @@ pub struct ProviderResponse {
     pub provider_type: String,
     pub revocation: Option<RevocationConfigResponse>,
     pub has_oauth_config: bool,
+    pub authorization_url: Option<String>,
+    pub token_url: Option<String>,
+    pub revocation_url: Option<String>,
+    pub has_client_id: bool,
+    pub has_client_secret: bool,
     pub default_scopes: Option<Vec<String>>,
     pub supports_pkce: bool,
+    pub authorization_nonce_required: bool,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -178,6 +196,9 @@ pub struct ProviderResponse {
     pub is_active: bool,
     pub credential_mode: String,
     pub token_endpoint_auth_method: String,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: std::collections::HashMap<String, String>,
+    pub supports_oauth_scopes: bool,
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: String,
     pub client_id_param_name: Option<String>,
@@ -188,6 +209,7 @@ pub struct ProviderResponse {
 
 #[derive(Debug, Serialize)]
 pub struct RevocationConfigResponse {
+    pub request_encoding: String,
     pub style: String,
     pub url: String,
     pub auth: String,
@@ -215,14 +237,21 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         description: p.description,
         provider_type: p.provider_type,
         revocation: revocation.map(|revocation| RevocationConfigResponse {
+            request_encoding: revocation.request_encoding,
             style: revocation.style,
             url: revocation.url,
             auth: revocation.auth,
             revokes_grant: revocation.revokes_grant,
         }),
         has_oauth_config,
+        authorization_url: p.authorization_url,
+        token_url: p.token_url,
+        revocation_url: p.revocation_url,
+        has_client_id: p.client_id_encrypted.is_some(),
+        has_client_secret: p.client_secret_encrypted.is_some(),
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
+        authorization_nonce_required: p.authorization_nonce_required,
         device_code_url: p.device_code_url,
         device_token_url: p.device_token_url,
         device_verification_url: p.device_verification_url,
@@ -234,6 +263,15 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         is_active: p.is_active,
         credential_mode: p.credential_mode,
         token_endpoint_auth_method: p.token_endpoint_auth_method,
+        token_request_encoding: p.token_request_encoding,
+        oauth_request_headers: p
+            .oauth_request_headers
+            .into_iter()
+            .filter(|(name, value)| {
+                crate::models::provider_config::is_public_oauth_header(name, value)
+            })
+            .collect(),
+        supports_oauth_scopes: p.supports_oauth_scopes,
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
         client_id_param_name: p.client_id_param_name,
@@ -280,11 +318,27 @@ fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig)
 // --- Handlers ---
 
 /// GET /api/v1/providers
+#[derive(Default, Deserialize)]
+pub struct ListProvidersQuery {
+    pub include_inactive: Option<bool>,
+}
+
 pub async fn list_providers(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
+    Query(query): Query<ListProvidersQuery>,
 ) -> AppResult<Json<ProviderListResponse>> {
-    let providers = provider_service::list_providers(&state.db).await?;
+    let providers = if query.include_inactive == Some(true) {
+        let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+        let filter = if authority == CatalogAuthority::Admin {
+            mongodb::bson::doc! {}
+        } else {
+            mongodb::bson::doc! {"$or": [{"is_active": true}, {"created_by": auth_user.user_id.to_string()}]}
+        };
+        provider_service::list_providers_filtered(&state.db, filter).await?
+    } else {
+        provider_service::list_providers(&state.db).await?
+    };
 
     let items: Vec<ProviderResponse> = providers.into_iter().map(provider_to_response).collect();
 
@@ -297,7 +351,10 @@ pub async fn create_provider(
     auth_user: AuthUser,
     Json(body): Json<CreateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    if authority == CatalogAuthority::CatalogManager {
+        catalog_authority::check_provider_create(&body)?;
+    }
 
     if body.name.is_empty() || body.slug.is_empty() {
         return Err(AppError::ValidationError(
@@ -326,6 +383,7 @@ pub async fn create_provider(
         body.revocation_url
             .as_ref()
             .map(|url| crate::models::provider_config::RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
                 auth: "inherit".to_string(),
@@ -367,6 +425,11 @@ pub async fn create_provider(
         )));
     }
 
+    provider_service::validate_oauth_request_options(
+        body.token_request_encoding.as_deref(),
+        body.oauth_request_headers.as_ref(),
+    )?;
+
     if let Some(ref format) = body.device_code_format
         && !["rfc8628", "openai"].contains(&format.as_str())
     {
@@ -374,6 +437,12 @@ pub async fn create_provider(
             "device_code_format must be 'rfc8628' or 'openai'".to_string(),
         ));
     }
+
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -547,6 +616,10 @@ pub async fn create_provider(
         body.device_code_format.as_deref(),
         body.client_id_param_name.as_deref(),
         revocation,
+        body.token_request_encoding,
+        body.oauth_request_headers.unwrap_or_default(),
+        body.supports_oauth_scopes.unwrap_or(true),
+        body.authorization_nonce_required.unwrap_or(false),
     )
     .await?;
 
@@ -557,6 +630,7 @@ pub async fn create_provider(
         Some(serde_json::json!({
             "provider_id": &provider.id,
             "slug": &provider.slug,
+            "authority": authority.as_str(),
         })),
     );
 
@@ -573,6 +647,25 @@ pub async fn get_provider(
     Ok(Json(provider_to_response(provider)))
 }
 
+/// Links shown to users must be absolute http(s) URLs without credentials,
+/// whichever client wrote them. An empty value clears the field.
+fn validate_display_urls(
+    icon_url: Option<&str>,
+    documentation_url: Option<&str>,
+    api_key_url: Option<&str>,
+) -> AppResult<()> {
+    for (field, value) in [
+        ("icon_url", icon_url),
+        ("documentation_url", documentation_url),
+        ("api_key_url", api_key_url),
+    ] {
+        if let Some(url) = value.map(str::trim).filter(|url| !url.is_empty()) {
+            validate_advisory_http_url(url, field, MAX_URL_LEN)?;
+        }
+    }
+    Ok(())
+}
+
 /// PUT /api/v1/providers/{provider_id}
 pub async fn update_provider(
     State(state): State<AppState>,
@@ -580,7 +673,20 @@ pub async fn update_provider(
     Path(provider_id): Path<String>,
     Json(body): Json<UpdateProviderRequest>,
 ) -> AppResult<Json<ProviderResponse>> {
-    require_admin(&state, &auth_user).await?;
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    // A Catalog Manager's write applies only to the version it was checked against.
+    let mut checked_version = None;
+    if authority == CatalogAuthority::CatalogManager {
+        let provider = provider_service::get_provider(&state.db, &provider_id).await?;
+        catalog_authority::check_provider_update(
+            &state,
+            &auth_user.user_id.to_string(),
+            &provider,
+            &body,
+        )
+        .await?;
+        checked_version = Some(provider.updated_at);
+    }
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
@@ -594,18 +700,31 @@ pub async fn update_provider(
     {
         provider_service::validate_revocation_url(url).await?;
     }
-    if let Some(ref url) = body.device_code_url {
+    if let Some(ref url) = body.device_code_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.device_token_url {
+    if let Some(ref url) = body.device_token_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.device_verification_url {
+    if let Some(ref url) = body.device_verification_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.hosted_callback_url {
+    if let Some(ref url) = body.hosted_callback_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
+    validate_display_urls(
+        body.icon_url.as_deref(),
+        body.documentation_url.as_deref(),
+        body.api_key_url.as_deref(),
+    )?;
 
     let updates = provider_service::ProviderUpdateInput {
         name: body.name,
@@ -619,6 +738,7 @@ pub async fn update_provider(
         client_id: body.client_id,
         client_secret: body.client_secret,
         supports_pkce: body.supports_pkce,
+        authorization_nonce_required: body.authorization_nonce_required,
         device_code_url: body.device_code_url,
         device_token_url: body.device_token_url,
         device_verification_url: body.device_verification_url,
@@ -629,16 +749,38 @@ pub async fn update_provider(
         documentation_url: body.documentation_url,
         credential_mode: body.credential_mode,
         token_endpoint_auth_method: body.token_endpoint_auth_method,
+        token_request_encoding: body.token_request_encoding,
+        oauth_request_headers: body.oauth_request_headers,
+        supports_oauth_scopes: body.supports_oauth_scopes,
         extra_auth_params: body.extra_auth_params,
         device_code_format: body.device_code_format,
         client_id_param_name: body.client_id_param_name,
         clear_client_credentials: body.clear_client_credentials,
     };
     let cleared_credentials = updates.clear_client_credentials == Some(true);
+    let set_client_credentials = updates.client_id.is_some() || updates.client_secret.is_some();
 
-    let updated =
-        provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
-            .await?;
+    let updated = match checked_version {
+        Some(version) => {
+            provider_service::update_provider_if_unchanged(
+                &state.db,
+                &state.encryption_keys,
+                &provider_id,
+                updates,
+                Some(version),
+            )
+            .await?
+        }
+        None => {
+            provider_service::update_provider(
+                &state.db,
+                &state.encryption_keys,
+                &provider_id,
+                updates,
+            )
+            .await?
+        }
+    };
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -647,6 +789,8 @@ pub async fn update_provider(
         Some(serde_json::json!({
             "provider_id": &provider_id,
             "cleared_client_credentials": cleared_credentials,
+            "set_client_credentials": set_client_credentials,
+            "authority": authority.as_str(),
         })),
     );
 
@@ -673,6 +817,109 @@ pub async fn delete_provider(
     Ok(Json(DeleteProviderResponse {
         message: "Provider deactivated and user tokens revoked".to_string(),
     }))
+}
+
+/// Admin inventory includes both canonical links and legacy requirements.
+pub async fn list_linked_services(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<super::services::ServiceListResponse>> {
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let caller_id = auth_user.user_id.to_string();
+    let services =
+        crate::services::provider_link_service::list_linked(&state.db, &provider_id).await?;
+    // Catalog Managers see public rows and their own, without the Admin-only
+    // credential inspection.
+    let (services, inspection_keys): (Vec<_>, _) = match authority {
+        CatalogAuthority::Admin => (services, Some(state.encryption_keys.as_ref())),
+        CatalogAuthority::CatalogManager | CatalogAuthority::ToolsManager => (
+            services
+                .into_iter()
+                .filter(|service| {
+                    service.visibility != "private" || service.created_by == caller_id
+                })
+                .collect(),
+            None,
+        ),
+    };
+    let eligible =
+        crate::services::tools_manager_service::eligible_manager_tool_ids(&state.db, &services)
+            .await?;
+    let mut responses = Vec::with_capacity(services.len());
+    for service in services {
+        let can_manage = eligible.contains(&service.id);
+        responses.push(
+            super::services_helpers::service_to_response_with_known_eligibility(
+                inspection_keys,
+                service,
+                None,
+                can_manage,
+            )
+            .await,
+        );
+    }
+    Ok(Json(super::services::ServiceListResponse {
+        services: responses,
+    }))
+}
+
+pub async fn link_service(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((provider_id, service_id)): Path<(String, String)>,
+) -> AppResult<Json<super::services::ServiceResponse>> {
+    let authority = catalog_authority::require_catalog_writer(&state, &auth_user).await?;
+    let target = super::services_helpers::fetch_service(&state, &service_id).await?;
+    if target.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        return Err(AppError::Forbidden(
+            "Tools must remain provider-less".into(),
+        ));
+    }
+    if authority == CatalogAuthority::CatalogManager {
+        let caller_id = auth_user.user_id.to_string();
+        catalog_authority::check_owned_provider(&state, &caller_id, &provider_id).await?;
+        let service = super::services_helpers::fetch_service(&state, &service_id).await?;
+        if service.created_by != caller_id {
+            return Err(AppError::Forbidden(
+                "A Catalog Manager can only link services they created; ask an Admin".to_string(),
+            ));
+        }
+    }
+    let mutation_authority = crate::services::catalog_mutation_service::Authority {
+        actor: audit_service::AuditActor::from_auth_user(&auth_user),
+        first_party_human: true,
+        admin_required: authority == CatalogAuthority::Admin,
+        catalog_base_url: state.config.base_url.clone(),
+    };
+    Box::pin(crate::services::provider_link_service::link_with_authority(
+        &state.db,
+        &provider_id,
+        &service_id,
+        None,
+        Some((&target, &mutation_authority)),
+    ))
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "service_provider_linked",
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "provider_id": &provider_id,
+            "authority": authority.as_str(),
+        })),
+    );
+    let service = super::services_helpers::fetch_service(&state, &service_id).await?;
+    Ok(Json(
+        super::services_helpers::service_to_response_with_eligibility(
+            &state.db,
+            Some(&state.encryption_keys),
+            service,
+            None,
+        )
+        .await?,
+    ))
 }
 
 #[cfg(test)]
@@ -708,14 +955,116 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_headers_stored_before_validation_never_reach_non_admins() {
+        use crate::models::provider_config::COLLECTION_NAME;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+        use mongodb::bson::{self, doc};
+        let db = connect_test_database("oauth_header_privacy")
+            .await
+            .expect("MongoDB required");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        assert!(!user.is_admin);
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let provider = make_provider("oauth2");
+        let mut stored = bson::to_document(&provider).unwrap();
+        stored.insert(
+            "oauth_request_headers",
+            doc! {
+                "X-API-Key": "private-header-sentinel",
+                "Notion-Version": "2022-06-28",
+                "Anthropic-Version": "private-version-sentinel",
+            },
+        );
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_one(stored)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let response = super::list_providers(
+            axum::extract::State(state.clone()),
+            test_auth_user(&user_id),
+            axum::extract::Query(super::ListProvidersQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.providers.len(), 1);
+        let json = serde_json::to_string(&response.0).unwrap();
+        assert!(!json.contains("private-header-sentinel"));
+        assert!(!json.contains("private-version-sentinel"));
+        assert_eq!(response.0.providers[0].oauth_request_headers.len(), 1);
+        assert_eq!(
+            response.0.providers[0].oauth_request_headers["Notion-Version"],
+            "2022-06-28"
+        );
+        super::provider_service::seed_default_providers(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let cleaned = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &provider.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleaned.get_document("oauth_request_headers").unwrap(),
+            &doc! { "Notion-Version": "2022-06-28" }
+        );
+    }
+
+    #[test]
+    fn oauth_header_model_rejects_unsafe_writes_and_redacts_debug() {
+        let mut provider = make_provider("oauth2");
+        for (name, value) in [
+            ("X-API-Key", "private-sentinel"),
+            ("Notion-Version", "private-sentinel"),
+        ] {
+            provider.oauth_request_headers =
+                std::collections::HashMap::from([(name.into(), value.into())]);
+            assert!(mongodb::bson::to_document(&provider).is_err());
+            assert!(!format!("{provider:?}").contains(value));
+            assert!(
+                provider_to_response(provider.clone())
+                    .oauth_request_headers
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn edit_response_includes_saved_endpoints_and_credential_presence_only() {
+        let response = serde_json::to_value(provider_to_response(make_provider("oauth2"))).unwrap();
+        assert_eq!(
+            response["authorization_url"],
+            "https://auth.example.com/authorize"
+        );
+        assert_eq!(response["token_url"], "https://auth.example.com/token");
+        assert_eq!(response["has_client_id"], true);
+        assert_eq!(response["has_client_secret"], true);
+        for secret in [
+            "client_id",
+            "client_secret",
+            "client_id_encrypted",
+            "client_secret_encrypted",
+        ] {
+            assert!(response.get(secret).is_none());
         }
     }
 
@@ -813,6 +1162,7 @@ mod tests {
             .flatten()
             .expect("structured revocation should be present");
         assert_eq!(configured.style, "github");
+        assert_eq!(configured.request_encoding, "form");
         assert!(configured.revokes_grant);
     }
 
@@ -820,6 +1170,7 @@ mod tests {
     fn provider_response_exposes_dedicated_revocation_shape() {
         let mut provider = make_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "inherit".to_string(),
@@ -831,6 +1182,7 @@ mod tests {
         assert_eq!(
             response.get("revocation"),
             Some(&serde_json::json!({
+                "request_encoding": "form",
                 "style": "github",
                 "url": "https://api.github.com/applications",
                 "auth": "inherit",
@@ -849,6 +1201,7 @@ mod tests {
         assert_eq!(
             response.get("revocation"),
             Some(&serde_json::json!({
+                "request_encoding": "form",
                 "style": "rfc7009",
                 "url": "https://example.com/revoke",
                 "auth": "inherit",

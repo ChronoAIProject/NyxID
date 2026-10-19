@@ -1,3 +1,4 @@
+import { PlatformServiceScope } from "@/components/shared/platform-service-scope"
 /**
  * Access Scope card — Services + Nodes multi-select, porting
  * `.wizard-access-card` from `cli/src/wizard/assets/wizard.html:170-220`
@@ -23,18 +24,24 @@ import { useNodes } from "@/hooks/use-nodes"
 
 export interface AccessScopeState {
   readonly allowAllServices: boolean
+  readonly allowAutoConnectedServices?: boolean
   readonly allowAllNodes: boolean
   readonly selectedServiceIds: ReadonlySet<string>
   readonly selectedNodeIds: ReadonlySet<string>
 }
 
 export interface AccessScopeCardProps {
+  readonly ownerId?: string
   readonly value: AccessScopeState
   readonly onChange: (next: AccessScopeState) => void
 }
 
-export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
-  const services = useKeys()
+export function AccessScopeCard({
+  value,
+  onChange,
+  ownerId,
+}: AccessScopeCardProps) {
+  const services = useKeys({ includeTools: true });
   const nodes = useNodes()
 
   function toggleService(id: string) {
@@ -57,7 +64,7 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
       className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-[13px] font-semibold">
+        <h3 id="access-scope-title" className="text-13 font-semibold">
           Access Scope
         </h3>
         <p className="text-xs text-muted-foreground">
@@ -75,17 +82,47 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
         listLabel="Select allowed services:"
         loading={services.isLoading}
         items={
-          services.data?.map((s) => ({
-            id: s.id,
-            primary: s.label,
-            secondary: s.slug,
-            iconSlug: s.catalog_service_slug,
-          })) ?? []
+          services.data
+            ?.filter(
+              (s) =>
+                s.is_active &&
+                !s.auto_connected &&
+                (!ownerId ||
+                  (s.credential_source?.type === "org" &&
+                    s.credential_source.org_id === ownerId)) &&
+                (s.credential_source?.type !== "org" ||
+                  s.credential_source.allowed),
+            )
+            .map((s) => ({
+              id: s.id,
+              primary: s.label,
+              secondary: s.slug,
+              iconSlug: s.catalog_service_slug,
+            })) ?? []
         }
         selectedIds={value.selectedServiceIds}
         onToggle={toggleService}
       />
 
+      {!value.allowAllServices && (
+        <PlatformServiceScope
+          services={(services.data ?? []).filter(
+            (service) =>
+              service.is_active &&
+              (!ownerId
+                ? service.credential_source?.type !== "org"
+                : service.credential_source?.type === "org" &&
+                  service.credential_source.org_id === ownerId),
+          )}
+          selectedIds={[...value.selectedServiceIds]}
+          allowAll={value.allowAutoConnectedServices}
+          onAllowAllChange={(allowAutoConnectedServices) =>
+            onChange({ ...value, allowAutoConnectedServices })
+          }
+          onToggle={toggleService}
+          orgOwned={!!ownerId}
+        />
+      )}
       <AccessGroup
         label="Nodes"
         icon={<ServersIcon />}
@@ -96,11 +133,13 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
         listLabel="Select allowed nodes:"
         loading={nodes.isLoading}
         items={
-          nodes.data?.map((n) => ({
-            id: n.id,
-            primary: n.name,
-            secondary: n.status,
-          })) ?? []
+          nodes.data
+            ?.filter((n) => !ownerId || n.owner.id === ownerId)
+            .map((n) => ({
+              id: n.id,
+              primary: n.name,
+              secondary: n.status,
+            })) ?? []
         }
         selectedIds={value.selectedNodeIds}
         onToggle={toggleNode}
@@ -141,11 +180,11 @@ function AccessGroup({
 }: AccessGroupProps) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-[12px] font-medium">
+      <div className="flex items-center gap-1.5 text-12 font-medium">
         <span className="text-muted-foreground">{icon}</span>
         <span>{label}</span>
       </div>
-      <Label className="flex cursor-pointer items-center gap-2 text-[12px]">
+      <Label className="flex cursor-pointer items-center gap-2 text-12">
         <Checkbox
           checked={allowAll}
           onCheckedChange={(checked) => {
@@ -169,7 +208,7 @@ function AccessGroup({
               {items.map((item) => (
                 <Label
                   key={item.id}
-                  className="flex cursor-pointer items-center gap-2 text-[12px]"
+                  className="flex cursor-pointer items-center gap-2 text-12"
                 >
                   <Checkbox
                     checked={selectedIds.has(item.id)}

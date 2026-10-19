@@ -1,3 +1,4 @@
+use axum::response::{IntoResponse, Response};
 use axum::{
     Json,
     body::Body,
@@ -21,7 +22,7 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-use super::ssh_tunnel::authorize_ssh_access_for_operation;
+use super::ssh_tunnel::authorize_ssh_access_for_connection;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -131,7 +132,7 @@ pub async fn ssh_exec(
     Path(service_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     request: Request<Body>,
-) -> AppResult<Json<SshExecResponse>> {
+) -> AppResult<Response> {
     require_json_content_type(request.headers())?;
     let headers = request.headers().clone();
     let body_bytes =
@@ -140,6 +141,22 @@ pub async fn ssh_exec(
     let body: SshExecRequest = serde_json::from_slice(&body_bytes)
         .map_err(|error| AppError::BadRequest(format!("Invalid SSH exec request: {error}")))?;
 
+    let connection = if auth_user.assistant_chat.is_some() {
+        Some(
+            crate::services::assistant_native_execution::ssh_connection(
+                &state,
+                &auth_user.proxy_resolution_user_id(),
+                &service_id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let service_id = connection
+        .as_ref()
+        .and_then(|row| row.catalog_service_id.clone())
+        .unwrap_or(service_id);
     let billing_egress_permit =
         crate::services::billing::route_inventory::enforce_billing_egress_classification(
             Some(billing_route_policy),
@@ -151,291 +168,442 @@ pub async fn ssh_exec(
         operation_descriptor::SshOperationKind::Exec,
         Some(&body.command),
     );
-    let auth_context =
-        authorize_ssh_access_for_operation(&state, &auth_user, &service_id, &operation).await?;
-
-    let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    let service_slug = auth_context.service_slug.clone();
-    let user_id = auth_user.user_id.to_string();
-    if auth_context.mode == SshAuthMode::ProxyOnly {
-        return Err(AppError::SshAuthModeUnsupportedForOperation(
-            "ssh exec is not supported for proxy-only SSH services".to_string(),
-        ));
-    }
-    if auth_context.mode == SshAuthMode::Cert && !ssh_svc.certificate_auth_enabled {
-        return Err(AppError::SshAuthModeUnsupportedForOperation(
-            "ssh exec requires certificate auth for cert-mode SSH services".to_string(),
-        ));
-    }
-
-    // -- Validate principal --
-    let principal = body.principal.trim().to_string();
-    ssh_service::validate_principal(&principal)?;
-    if !ssh_svc.allowed_principals.iter().any(|p| p == &principal) {
-        return Err(AppError::Forbidden(
-            "Requested SSH principal is not allowed for this service".to_string(),
-        ));
-    }
-
-    // -- Validate timeout --
-    let timeout_secs = body.timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
-
-    // -- Validate command --
-    let command = body.command.trim().to_string();
-    if command.is_empty() {
-        return Err(AppError::ValidationError(
-            "command must not be empty".to_string(),
-        ));
-    }
-    if command.len() > 8192 {
-        return Err(AppError::ValidationError(
-            "command must not exceed 8192 characters".to_string(),
-        ));
-    }
-    check_dangerous_command(&command)?;
-
-    // -- Session limiting --
-    let session_guard = state.ssh_session_manager.try_acquire(&user_id).await?;
-
-    let ip_address = Some(addr.ip().to_string());
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    // -- Require a node agent --
-    // SSH commands are executed on the node agent, not the NyxID server.
-    let node_route = node_routing_service::resolve_node_route(
-        &state.db,
-        &user_id,
-        &service_id,
-        &state.node_ws_manager,
-    )
-    .await
-    .ok()
-    .flatten();
-
-    let node_route = node_route.ok_or_else(|| {
-        AppError::BadRequest(
-            "No node agent is bound to this SSH service. \
-             Deploy a NyxID node agent and bind it to this service to execute commands."
-                .to_string(),
-        )
-    })?;
-    let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
-    let billing_owner = state
-        .billing
-        .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &auth_context.owner_user_id)
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "ssh.exec")
         .await?;
-    let node_intent = if node_route.fallback_node_ids.is_empty() {
-        crate::services::billing::NodeIntent::Node
-    } else {
-        crate::services::billing::NodeIntent::NodeWithFallback
-    };
-    let billing_ctx = crate::services::billing::BillingRouteContext::new(
-        crate::services::billing::BillingIngress::SshExec,
-        uuid::Uuid::new_v4().to_string(),
-        billing_owner.owner_id,
-        user_id.clone(),
-        auth_user.api_key_id.clone(),
-        None,
-        Some(service_id.clone()),
-        Some(service_slug.clone()),
-        node_intent,
-        "ssh".to_string(),
-        CredentialClass::NodeManaged,
-        BillingMetric::Bytes,
-        None,
-        false,
-    );
-    let metered = state.billing.open(&billing_ctx).await?;
-    let request_len = command.len() as i64;
+    let auth_context = authorize_ssh_access_for_connection(
+        &state,
+        &auth_user,
+        &service_id,
+        &operation,
+        connection.as_ref(),
+    )
+    .await?;
 
-    // -- Generate ephemeral SSH credentials for cert mode only (key + cert as strings, no files) --
-    let ephemeral = if auth_context.mode == SshAuthMode::Cert {
-        Some(
-            super::ssh_web_terminal::generate_ephemeral_credentials(
-                &state,
+    let concurrency = crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        auth_context.concurrency_policy.as_ref(),
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let work = Box::pin(async {
+        let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+        let service_slug = auth_context.service_slug.clone();
+        let user_id = auth_user.user_id.to_string();
+        if auth_context.mode == SshAuthMode::ProxyOnly {
+            return Err(AppError::SshAuthModeUnsupportedForOperation(
+                "ssh exec is not supported for proxy-only SSH services".to_string(),
+            ));
+        }
+        if auth_context.mode == SshAuthMode::Cert && !ssh_svc.certificate_auth_enabled {
+            return Err(AppError::SshAuthModeUnsupportedForOperation(
+                "ssh exec requires certificate auth for cert-mode SSH services".to_string(),
+            ));
+        }
+
+        // -- Validate principal --
+        let principal = body.principal.trim().to_string();
+        ssh_service::validate_principal(&principal)?;
+        if !ssh_svc.allowed_principals.iter().any(|p| p == &principal) {
+            return Err(AppError::Forbidden(
+                "Requested SSH principal is not allowed for this service".to_string(),
+            ));
+        }
+
+        // -- Validate timeout --
+        let timeout_secs = body.timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
+
+        // -- Validate command --
+        let command = body.command.trim().to_string();
+        if command.is_empty() {
+            return Err(AppError::ValidationError(
+                "command must not be empty".to_string(),
+            ));
+        }
+        if command.len() > 8192 {
+            return Err(AppError::ValidationError(
+                "command must not exceed 8192 characters".to_string(),
+            ));
+        }
+        check_dangerous_command(&command)?;
+
+        let decision = if let Some(connection) = connection.as_ref() {
+            crate::services::assistant_native_execution::ssh_gate(&state, auth_user.assistant_chat.as_deref(), connection,
                 &ssh_svc,
-                &service_id,
-                &user_id,
-                &principal,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+                &serde_json::json!({"command":command,"principal":principal,"timeout_secs":timeout_secs,
+                    "acknowledgement_id":headers.get(crate::services::assistant_service_execution::ACK_HEADER).and_then(|v| v.to_str().ok())})).await?
+        } else {
+            crate::services::assistant_service_execution::Decision {
+                admission: None,
+                automatic: None,
+                refusal: None,
+            }
+        };
+        if let Some(refusal) = decision.refusal.as_ref() {
+            return Ok((axum::http::StatusCode::CONFLICT, Json(refusal)).into_response());
+        }
 
-    // -- Execute via node agent with failover --
-    let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
-        .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
-        .collect();
+        // -- Session limiting --
+        let session_guard = state.ssh_session_manager.try_acquire(&user_id).await?;
 
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let mut last_error = None;
-    let mut last_error_message = None;
+        let ip_address = Some(addr.ip().to_string());
+        let user_agent = headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
 
-    for node_id in &all_node_ids {
-        let signing_secret = if state.config.node_hmac_signing_enabled {
-            match node_service::get_node_signing_secret(
+        // -- Require a node agent --
+        // SSH commands are executed on the node agent, not the NyxID server.
+        let node_route = if let Some(connection) = connection.as_ref() {
+            crate::services::assistant_native_execution::ssh_route(&state, connection).await?
+        } else {
+            let node_route = node_routing_service::resolve_node_route(
                 &state.db,
-                state.encryption_keys.as_ref(),
-                node_id,
+                &user_id,
+                &service_id,
+                &state.node_ws_manager,
             )
             .await
-            {
-                Ok(secret) => Some(secret),
-                Err(error) => {
-                    tracing::warn!(
-                        service_id = %service_id,
-                        node_id = %node_id,
-                        error = %error,
-                        "SSH exec node signing secret resolution failed"
-                    );
-                    last_error_message = Some(format!("Signing secret error: {error}"));
-                    continue;
-                }
-            }
+            .ok()
+            .flatten();
+
+            node_route.ok_or_else(|| {
+                AppError::BadRequest(
+                    "No node agent is bound to this SSH service. \
+             Deploy a NyxID node agent and bind it to this service to execute commands."
+                        .to_string(),
+                )
+            })?
+        };
+        let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+        let credential_class = CredentialClass::NodeManaged;
+        let billing_owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_execution(
+                &billing_resolution_user_id,
+                &auth_context.owner_user_id,
+                credential_class,
+            )
+            .await?;
+        let node_intent = if node_route.fallback_node_ids.is_empty() {
+            crate::services::billing::NodeIntent::Node
+        } else {
+            crate::services::billing::NodeIntent::NodeWithFallback
+        };
+        let billing_ctx = crate::services::billing::BillingRouteContext::new(
+            crate::services::billing::BillingIngress::SshExec,
+            uuid::Uuid::new_v4().to_string(),
+            billing_owner.owner_id,
+            user_id.clone(),
+            auth_user.api_key_id.clone(),
+            None,
+            Some(service_id.clone()),
+            Some(service_slug.clone()),
+            node_intent,
+            "ssh".to_string(),
+            credential_class,
+            BillingMetric::Bytes,
+            None,
+            false,
+        );
+        let metered = state.billing.open(&billing_ctx).await?;
+        let request_len = command.len() as i64;
+
+        // -- Generate ephemeral SSH credentials for cert mode only (key + cert as strings, no files) --
+        let ephemeral = if auth_context.mode == SshAuthMode::Cert {
+            Some(
+                super::ssh_web_terminal::generate_ephemeral_credentials(
+                    &state,
+                    &ssh_svc,
+                    &service_id,
+                    &user_id,
+                    &principal,
+                )
+                .await?,
+            )
         } else {
             None
         };
 
-        state.billing.mark_forwarded(&metered).await?;
-        let exec_result = session_guard
-            .run_until_lost(async {
-                match auth_context.mode {
-                    SshAuthMode::Cert => {
-                        let ephemeral = ephemeral.as_ref().ok_or_else(|| {
-                            AppError::Internal("Missing generated SSH certificate".to_string())
-                        })?;
+        // -- Execute via node agent with failover --
+        let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+            .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
+            .collect();
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let mut last_error = None;
+        let mut last_error_message = None;
+
+        for node_id in &all_node_ids {
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                if !node_routing_service::is_node_id_dispatchable(
+                    &state.db,
+                    node_id,
+                    &state.node_ws_manager,
+                )
+                .await?
+                {
+                    continue;
+                }
+                match crate::services::assistant_native_execution::verify_ssh_node(
+                    &state,
+                    chat,
+                    &connection
+                        .as_ref()
+                        .ok_or(AppError::AssistantTurnRequired)?
+                        .id,
+                    node_id,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(AppError::ApiKeyScopeForbidden(_)) => continue,
+                    Err(error) => {
                         state
-                            .node_dispatch
-                            .exec_ssh_command(
-                                node_id,
-                                crate::services::node_ws_manager::NodeSshExecRequest {
-                                    request_id: request_id.clone(),
-                                    host: ssh_svc.host.clone(),
-                                    port: ssh_svc.port,
-                                    principal: principal.clone(),
-                                    private_key_pem: ephemeral.private_key_pem.clone(),
-                                    certificate_openssh: ephemeral.certificate_openssh.clone(),
-                                    command: command.clone(),
-                                    timeout_secs,
-                                },
-                                signing_secret.as_ref().map(|s| s.as_slice()),
-                                billing_egress_permit,
-                            )
-                            .await
-                    }
-                    SshAuthMode::NodeKey => {
-                        state
-                            .node_dispatch
-                            .exec_ssh_node_key_command(
-                                node_id,
-                                crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {
-                                    request_id: request_id.clone(),
-                                    service_slug: auth_context.service_slug.clone(),
-                                    principal: principal.clone(),
-                                    command: command.clone(),
-                                    timeout_secs,
-                                    target_host: Some(ssh_svc.host.clone()),
-                                    target_port: Some(ssh_svc.port),
-                                    host_key_sha256: None,
-                                },
-                                signing_secret.as_ref().map(|s| s.as_slice()),
-                                billing_egress_permit,
-                            )
-                            .await
-                    }
-                    SshAuthMode::ProxyOnly => {
-                        unreachable!("proxy-only returned before node dispatch")
+                            .billing
+                            .reject_before_send(&metered, "assistant_authority_changed", false)
+                            .await?;
+                        return Err(error);
                     }
                 }
-            })
-            .await;
-
-        match exec_result {
-            Ok(result) => {
-                state
-                    .billing
-                    .settle(
-                        &metered,
-                        PlatformUsage::single_request(
-                            request_len + result.stdout.len() as i64 + result.stderr.len() as i64,
-                        ),
-                        None,
-                        None,
-                    )
-                    .await?;
-                if auth_context.mode == SshAuthMode::NodeKey {
-                    record_node_ssh_metric_success(
-                        state.db.clone(),
-                        (*node_id).to_string(),
-                        result.duration_ms,
-                    );
-                }
-
-                // Keep session guard alive until command completes.
-                let _ = &session_guard;
-                drop(session_guard);
-
-                let response = SshExecResponse {
-                    exit_code: result.exit_code,
-                    stdout: truncate_output(result.stdout.as_bytes()),
-                    stderr: truncate_output(result.stderr.as_bytes()),
-                    duration_ms: result.duration_ms,
-                    timed_out: result.timed_out,
-                };
-
-                // -- Audit log --
-                audit_service::log_async(
-                    state.db.clone(),
-                    Some(user_id.clone()),
-                    "ssh_exec_command".to_string(),
-                    Some(serde_json::json!({
-                        "service_id": service_id,
-                        "principal": principal,
-                        "command": redact_command_for_audit(&command),
-                        "exit_code": response.exit_code,
-                        "duration_ms": response.duration_ms,
-                        "timed_out": response.timed_out,
-                        "routed_via": "node",
-                        "node_id": node_id,
-                    })),
-                    ip_address,
-                    user_agent,
-                    None,
-                    None,
-                );
-
-                // Telemetry: ssh.tunnel_opened with mode="exec". Exec is a
-                // one-shot command invocation -- no corresponding
-                // `ssh.tunnel_closed` event fires for this path.
-                emit_event(
-                    state.telemetry.as_deref(),
-                    &user_id,
-                    auth_user.api_key_id.as_deref(),
-                    &tele,
-                    TelemetryEvent::SshTunnelOpened {
-                        service_slug,
-                        mode: "exec".to_string(),
-                    },
-                );
-
-                return Ok(Json(response));
             }
-            Err(error @ AppError::RateLimited) => return Err(error),
-            Err(error) => {
-                if auth_context.mode == SshAuthMode::NodeKey {
-                    let error_message = error.to_string();
-                    record_node_ssh_metric_error(
+            let signing_secret = if state.config.node_hmac_signing_enabled {
+                match node_service::get_node_signing_secret(
+                    &state.db,
+                    state.encryption_keys.as_ref(),
+                    node_id,
+                )
+                .await
+                {
+                    Ok(secret) => Some(secret),
+                    Err(error) => {
+                        tracing::warn!(
+                            service_id = %service_id,
+                            node_id = %node_id,
+                            error = %error,
+                            "SSH exec node signing secret resolution failed"
+                        );
+                        last_error_message = Some(format!("Signing secret error: {error}"));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            state.billing.mark_forwarded(&metered).await?;
+            if let (Some(admission), Some(connection)) =
+                (decision.admission.as_ref(), connection.as_ref())
+            {
+                let validation = async {
+                    admission
+                        .revalidate(&state.db, &connection.id, None)
+                        .await?;
+                    crate::services::assistant_native_execution::verify_ssh_node(
+                        &state,
+                        auth_user
+                            .assistant_chat
+                            .as_deref()
+                            .ok_or(AppError::AssistantTurnRequired)?,
+                        &connection.id,
+                        node_id,
+                    )
+                    .await
+                }
+                .await;
+                if let Err(error) = validation {
+                    state
+                        .billing
+                        .reject_before_send(&metered, "assistant_authority_changed", false)
+                        .await?;
+                    return Err(error);
+                }
+            }
+            let exec_result = session_guard
+                .run_until_lost(async {
+                    match auth_context.mode {
+                        SshAuthMode::Cert => {
+                            let ephemeral = ephemeral.as_ref().ok_or_else(|| {
+                                AppError::Internal("Missing generated SSH certificate".to_string())
+                            })?;
+                            state
+                                .node_dispatch
+                                .exec_ssh_command(
+                                    node_id,
+                                    crate::services::node_ws_manager::NodeSshExecRequest {
+                                        request_id: request_id.clone(),
+                                        host: ssh_svc.host.clone(),
+                                        port: ssh_svc.port,
+                                        principal: principal.clone(),
+                                        private_key_pem: ephemeral.private_key_pem.clone(),
+                                        certificate_openssh: ephemeral.certificate_openssh.clone(),
+                                        command: command.clone(),
+                                        timeout_secs,
+                                    },
+                                    signing_secret.as_ref().map(|s| s.as_slice()),
+                                    billing_egress_permit,
+                                )
+                                .await
+                        }
+                        SshAuthMode::NodeKey => {
+                            state
+                                .node_dispatch
+                                .exec_ssh_node_key_command(
+                                    node_id,
+                                    crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {
+                                        request_id: request_id.clone(),
+                                        service_slug: auth_context.service_slug.clone(),
+                                        principal: principal.clone(),
+                                        command: command.clone(),
+                                        timeout_secs,
+                                        target_host: Some(ssh_svc.host.clone()),
+                                        target_port: Some(ssh_svc.port),
+                                        host_key_sha256: None,
+                                    },
+                                    signing_secret.as_ref().map(|s| s.as_slice()),
+                                    billing_egress_permit,
+                                )
+                                .await
+                        }
+                        SshAuthMode::ProxyOnly => {
+                            unreachable!("proxy-only returned before node dispatch")
+                        }
+                    }
+                })
+                .await;
+
+            match exec_result {
+                Ok(result) => {
+                    state
+                        .billing
+                        .settle(
+                            &metered,
+                            PlatformUsage::single_request(
+                                request_len
+                                    + result.stdout.len() as i64
+                                    + result.stderr.len() as i64,
+                            ),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    if auth_context.mode == SshAuthMode::NodeKey {
+                        record_node_ssh_metric_success(
+                            state.db.clone(),
+                            (*node_id).to_string(),
+                            result.duration_ms,
+                        );
+                    }
+
+                    // Keep session guard alive until command completes.
+                    let _ = &session_guard;
+                    drop(session_guard);
+
+                    let response = SshExecResponse {
+                        exit_code: result.exit_code,
+                        stdout: truncate_output(result.stdout.as_bytes()),
+                        stderr: truncate_output(result.stderr.as_bytes()),
+                        duration_ms: result.duration_ms,
+                        timed_out: result.timed_out,
+                    };
+
+                    // -- Audit log --
+                    audit_service::log_async(
                         state.db.clone(),
-                        (*node_id).to_string(),
-                        error_message.clone(),
+                        Some(user_id.clone()),
+                        "ssh_exec_command".to_string(),
+                        Some(serde_json::json!({
+                            "service_id": service_id,
+                            "principal": principal,
+                            "command": redact_command_for_audit(&command),
+                            "exit_code": response.exit_code,
+                            "duration_ms": response.duration_ms,
+                            "timed_out": response.timed_out,
+                            "routed_via": "node",
+                            "node_id": node_id,
+                        })),
+                        ip_address,
+                        user_agent,
+                        None,
+                        None,
                     );
-                    if let AppError::SshHostKeyMismatch(message) = &error {
+
+                    // Telemetry: ssh.tunnel_opened with mode="exec". Exec is a
+                    // one-shot command invocation -- no corresponding
+                    // `ssh.tunnel_closed` event fires for this path.
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &user_id,
+                        auth_user.api_key_id.as_deref(),
+                        &tele,
+                        TelemetryEvent::SshTunnelOpened {
+                            service_slug: service_slug.clone(),
+                            mode: "exec".to_string(),
+                        },
+                    );
+
+                    if response.exit_code == 0 && !response.timed_out {
+                        crate::services::approval_service::record_chat_approval(
+                            &state.db,
+                            auth_user.assistant_chat.as_deref(),
+                            auth_context.approval_bypass,
+                            &service_id,
+                            &service_slug,
+                            &operation,
+                        )
+                        .await;
+                    }
+                    if response.exit_code == 0
+                        && !response.timed_out
+                        && auth_context.approval_bypass.is_none()
+                        && let (Some(admission), Some(chat)) = (
+                            decision.admission.as_ref(),
+                            auth_user.assistant_chat.as_deref(),
+                        )
+                    {
+                        admission.receipt(&state.db, chat, decision.automatic).await;
+                    }
+                    return Ok(Json(response).into_response());
+                }
+                Err(error @ AppError::RateLimited) => return Err(error),
+                Err(error) => {
+                    if auth_user.assistant_chat.is_some() {
+                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
+                        return Err(error);
+                    }
+                    if auth_context.mode == SshAuthMode::NodeKey {
+                        let error_message = error.to_string();
+                        record_node_ssh_metric_error(
+                            state.db.clone(),
+                            (*node_id).to_string(),
+                            error_message.clone(),
+                        );
+                        if let AppError::SshHostKeyMismatch(message) = &error {
+                            audit_service::log_async(
+                                state.db.clone(),
+                                Some(user_id.clone()),
+                                "ssh_host_key_mismatch".to_string(),
+                                Some(serde_json::json!({
+                                    "service_id": service_id,
+                                    "principal": principal,
+                                    "error": message,
+                                    "routed_via": "node",
+                                    "node_id": node_id,
+                                })),
+                                ip_address.clone(),
+                                user_agent.clone(),
+                                None,
+                                None,
+                            );
+                        }
+                        last_error_message = Some(error_message);
+                    } else {
+                        last_error_message = Some(error.to_string());
+                    }
+                    if let AppError::SshHostKeyMismatch(message) = &error
+                        && auth_context.mode == SshAuthMode::Cert
+                    {
                         audit_service::log_async(
                             state.db.clone(),
                             Some(user_id.clone()),
@@ -452,55 +620,39 @@ pub async fn ssh_exec(
                             None,
                             None,
                         );
+                        return Err(error);
                     }
-                    last_error_message = Some(error_message);
-                } else {
-                    last_error_message = Some(error.to_string());
-                }
-                if let AppError::SshHostKeyMismatch(message) = &error
-                    && auth_context.mode == SshAuthMode::Cert
-                {
-                    audit_service::log_async(
-                        state.db.clone(),
-                        Some(user_id.clone()),
-                        "ssh_host_key_mismatch".to_string(),
-                        Some(serde_json::json!({
-                            "service_id": service_id,
-                            "principal": principal,
-                            "error": message,
-                            "routed_via": "node",
-                            "node_id": node_id,
-                        })),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        None,
-                        None,
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        error = %error,
+                        "SSH exec via node failed, trying next"
                     );
-                    return Err(error);
+                    last_error = Some(error);
                 }
-                tracing::warn!(
-                    service_id = %service_id,
-                    node_id = %node_id,
-                    error = %error,
-                    "SSH exec via node failed, trying next"
-                );
-                last_error = Some(error);
             }
         }
+
+        // Keep session guard alive until we return.
+        let _ = &session_guard;
+        drop(session_guard);
+
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+
+        Err(AppError::Internal(format!(
+            "SSH exec failed on all nodes: {}",
+            last_error_message.unwrap_or_else(|| "no nodes available".to_string()),
+        )))
+    });
+    match concurrency {
+        Some(lease) => {
+            let response = lease.run(work).await?;
+            Ok(lease.hold_response(response.into_response()))
+        }
+        None => work.await.map(IntoResponse::into_response),
     }
-
-    // Keep session guard alive until we return.
-    let _ = &session_guard;
-    drop(session_guard);
-
-    if let Some(error) = last_error {
-        return Err(error);
-    }
-
-    Err(AppError::Internal(format!(
-        "SSH exec failed on all nodes: {}",
-        last_error_message.unwrap_or_else(|| "no nodes available".to_string()),
-    )))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
@@ -26,17 +26,436 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 // `credential_mode: "both"` (platform OAuth app with BYO override, see
 // docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md), and this startup migration would
 // otherwise revert an ops-provisioned "both" back to "user" on every restart.
+// `twitter` and `linkedin` are also excluded: their seeds stay BYO-only, but an
+// ops-provisioned shared app ("both" or "admin") must survive this migration
+// on restart.
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "facebook",
     "discord",
     "spotify",
-    "linkedin",
     "slack",
     "microsoft",
     "tiktok",
     "twitch",
     "reddit",
     "lark",
+];
+
+const TWITTER_DEFAULT_SCOPES: &[&str] = &[
+    "tweet.read",
+    "tweet.write",
+    "media.write",
+    "users.read",
+    "offline.access",
+    "dm.read",
+    "dm.write",
+    "media.write",
+];
+
+/// OAuth providers with fixed authorization and token endpoints. These
+/// definitions intentionally stop at the OAuth contract; provider-specific API
+/// operation overlays can be added without changing the connection flow. Providers that need a tenant, data-center,
+/// merchant, bot, or user-entered host are kept out of this registry until
+/// NyxID can collect and bind those values safely.
+struct ManagedOAuthProviderSeed {
+    slug: &'static str,
+    name: &'static str,
+    description: &'static str,
+    authorization_url: &'static str,
+    token_url: &'static str,
+    documentation_url: &'static str,
+    supports_pkce: bool,
+    token_endpoint_auth_method: &'static str,
+    token_request_encoding: Option<&'static str>,
+    default_scopes: Option<&'static [&'static str]>,
+    extra_auth_params: Option<&'static [(&'static str, &'static str)]>,
+    client_id_param_name: Option<&'static str>,
+}
+
+const MANAGED_OAUTH_PROVIDER_SEEDS: &[ManagedOAuthProviderSeed] = &[
+    ManagedOAuthProviderSeed {
+        slug: "stripe",
+        name: "Stripe",
+        description: "Stripe account access through Stripe Apps OAuth",
+        authorization_url: "https://marketplace.stripe.com/oauth/v2/authorize",
+        token_url: "https://api.stripe.com/v1/oauth/token",
+        documentation_url: "https://docs.stripe.com/stripe-apps/api-authentication/oauth",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "airtable",
+        name: "Airtable",
+        description: "Airtable account access via OAuth 2.0",
+        authorization_url: "https://airtable.com/oauth2/v1/authorize",
+        token_url: "https://airtable.com/oauth2/v1/token",
+        documentation_url: "https://airtable.com/developers/web/api/oauth-reference",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["schema.bases:read", "data.records:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "asana",
+        name: "Asana",
+        description: "Asana account access via OAuth 2.0",
+        authorization_url: "https://app.asana.com/-/oauth_authorize",
+        token_url: "https://app.asana.com/-/oauth_token",
+        documentation_url: "https://developers.asana.com/docs/oauth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["workspaces:read", "projects:read", "tasks:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "attio",
+        name: "Attio",
+        description: "Attio account access via OAuth 2.0",
+        authorization_url: "https://app.attio.com/authorize",
+        token_url: "https://app.attio.com/oauth/token",
+        documentation_url: "https://docs.attio.com/docs/authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "bitbucket",
+        name: "Bitbucket",
+        description: "Bitbucket account access via OAuth 2.0",
+        authorization_url: "https://bitbucket.org/site/oauth2/authorize",
+        token_url: "https://bitbucket.org/site/oauth2/access_token",
+        documentation_url: "https://developer.atlassian.com/cloud/bitbucket/oauth-2/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["account"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "box",
+        name: "Box",
+        description: "Box account access via OAuth 2.0",
+        authorization_url: "https://account.box.com/api/oauth2/authorize",
+        token_url: "https://api.box.com/oauth2/token",
+        documentation_url: "https://developer.box.com/guides/authentication/oauth2/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "calendly",
+        name: "Calendly",
+        description: "Calendly account access via OAuth 2.0",
+        authorization_url: "https://auth.calendly.com/oauth/authorize",
+        token_url: "https://auth.calendly.com/oauth/token",
+        documentation_url: "https://developer.calendly.com/creating-an-oauth-app",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "capsule-crm",
+        name: "Capsule CRM",
+        description: "Capsule CRM account access via OAuth 2.0",
+        authorization_url: "https://api.capsulecrm.com/oauth/authorise",
+        token_url: "https://api.capsulecrm.com/oauth/token",
+        documentation_url: "https://developer.capsulecrm.com/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "clickup",
+        name: "ClickUp",
+        description: "ClickUp account access via OAuth 2.0",
+        authorization_url: "https://app.clickup.com/api/v2/oauth/authorize",
+        token_url: "https://api.clickup.com/api/v2/oauth/token",
+        documentation_url: "https://developer.clickup.com/docs/authentication",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "crowdin",
+        name: "Crowdin",
+        description: "Crowdin account access via OAuth 2.0",
+        authorization_url: "https://accounts.crowdin.com/oauth/authorize",
+        token_url: "https://accounts.crowdin.com/oauth/token",
+        documentation_url: "https://support.crowdin.com/developer/authorizing-oauth-apps/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "dialpad",
+        name: "Dialpad",
+        description: "Dialpad account access via OAuth 2.0",
+        authorization_url: "https://dialpad.com/oauth2/authorize",
+        token_url: "https://dialpad.com/oauth2/token",
+        documentation_url: "https://developers.dialpad.com/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "dropbox",
+        name: "Dropbox",
+        description: "Dropbox account access via OAuth 2.0",
+        authorization_url: "https://www.dropbox.com/oauth2/authorize",
+        token_url: "https://api.dropboxapi.com/oauth2/token",
+        documentation_url: "https://developers.dropbox.com/oauth-guide",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: Some(&[("token_access_type", "offline")]),
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "eventbrite",
+        name: "Eventbrite",
+        description: "Eventbrite account access via OAuth 2.0",
+        authorization_url: "https://www.eventbrite.com/oauth/authorize",
+        token_url: "https://www.eventbrite.com/oauth/token",
+        documentation_url: "https://www.eventbrite.com/platform/api",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "figma",
+        name: "Figma",
+        description: "Figma account access via OAuth 2.0",
+        authorization_url: "https://www.figma.com/oauth",
+        token_url: "https://api.figma.com/v1/oauth/token",
+        documentation_url: "https://www.figma.com/developers/api#oauth2",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["file_content:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "gitlab",
+        name: "GitLab",
+        description: "GitLab account access via OAuth 2.0",
+        authorization_url: "https://gitlab.com/oauth/authorize",
+        token_url: "https://gitlab.com/oauth/token",
+        documentation_url: "https://docs.gitlab.com/api/oauth2/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read_user"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "hubspot",
+        name: "HubSpot",
+        description: "HubSpot account access via OAuth 2.0",
+        authorization_url: "https://app.hubspot.com/oauth/authorize",
+        token_url: "https://api.hubapi.com/oauth/v1/token",
+        documentation_url: "https://developers.hubspot.com/docs/api/oauth-quickstart",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["oauth"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "intercom",
+        name: "Intercom",
+        description: "Intercom account access via OAuth 2.0",
+        authorization_url: "https://app.intercom.com/oauth",
+        token_url: "https://api.intercom.io/auth/eagle/token",
+        documentation_url: "https://developers.intercom.com/docs/build-an-integration/learn-more/authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "jira",
+        name: "Jira Cloud",
+        description: "Jira Cloud account access via OAuth 2.0",
+        authorization_url: "https://auth.atlassian.com/authorize",
+        token_url: "https://auth.atlassian.com/oauth/token",
+        documentation_url: "https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("json"),
+        default_scopes: Some(&[
+            "read:me",
+            "read:jira-user",
+            "read:jira-work",
+            "offline_access",
+        ]),
+        extra_auth_params: Some(&[("audience", "api.atlassian.com"), ("prompt", "consent")]),
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "linear",
+        name: "Linear",
+        description: "Linear account access via OAuth 2.0",
+        authorization_url: "https://linear.app/oauth/authorize",
+        token_url: "https://api.linear.app/oauth/token",
+        documentation_url: "https://linear.app/developers/oauth-2-0-authentication",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "miro",
+        name: "Miro",
+        description: "Miro account access via OAuth 2.0",
+        authorization_url: "https://miro.com/oauth/authorize",
+        token_url: "https://api.miro.com/v1/oauth/token",
+        documentation_url: "https://developers.miro.com/docs/oauth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["boards:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "pagerduty",
+        name: "PagerDuty",
+        description: "PagerDuty account access via OAuth 2.0",
+        authorization_url: "https://identity.pagerduty.com/oauth/authorize",
+        token_url: "https://identity.pagerduty.com/oauth/token",
+        documentation_url: "https://developer.pagerduty.com/docs/ZG9jOjExMDI5NTU5-oauth-2",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "productboard",
+        name: "Productboard",
+        description: "Productboard account access via OAuth 2.0",
+        authorization_url: "https://app.productboard.com/oauth2/authorize",
+        token_url: "https://app.productboard.com/oauth2/token",
+        documentation_url: "https://developer.productboard.com/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "sentry",
+        name: "Sentry",
+        description: "Sentry account access via OAuth 2.0",
+        authorization_url: "https://sentry.io/oauth/authorize/",
+        token_url: "https://sentry.io/oauth/token/",
+        documentation_url: "https://docs.sentry.io/api/auth/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["org:read", "project:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "shippo",
+        name: "Shippo",
+        description: "Shippo account access via OAuth 2.0",
+        authorization_url: "https://goshippo.com/oauth/authorize",
+        token_url: "https://goshippo.com/oauth/access_token",
+        documentation_url: "https://docs.goshippo.com/",
+        supports_pkce: false,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "square",
+        name: "Square",
+        description: "Square account access via OAuth 2.0",
+        authorization_url: "https://connect.squareup.com/oauth2/authorize",
+        token_url: "https://connect.squareup.com/oauth2/token",
+        documentation_url: "https://developer.squareup.com/docs/oauth-api/how-oauth-works",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("json"),
+        default_scopes: None,
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "todoist",
+        name: "Todoist",
+        description: "Todoist account access via OAuth 2.0",
+        authorization_url: "https://app.todoist.com/oauth/authorize",
+        token_url: "https://api.todoist.com/oauth/access_token",
+        documentation_url: "https://developer.todoist.com/api/v1/#tag/Authorization/OAuth",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_post",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["data:read"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
+    ManagedOAuthProviderSeed {
+        slug: "zoom",
+        name: "Zoom",
+        description: "Zoom account access via OAuth 2.0",
+        authorization_url: "https://zoom.us/oauth/authorize",
+        token_url: "https://zoom.us/oauth/token",
+        documentation_url: "https://developers.zoom.us/docs/integrations/oauth/",
+        supports_pkce: true,
+        token_endpoint_auth_method: "client_secret_basic",
+        token_request_encoding: Some("form"),
+        default_scopes: Some(&["user:read:user"]),
+        extra_auth_params: None,
+        client_id_param_name: None,
+    },
 ];
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -47,6 +466,7 @@ pub async fn seed_default_providers(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
+    remove_unsafe_oauth_headers(db).await?;
     let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let now = Utc::now();
 
@@ -55,6 +475,109 @@ pub async fn seed_default_providers(
     // Helper: check if a provider with this slug already exists
     macro_rules! slug_exists {
         ($slug:expr) => {{ collection.find_one(doc! { "slug": $slug }).await?.is_some() }};
+    }
+
+    // IFTTT Webhooks (per-user raw key)
+    if !slug_exists!("ifttt") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "ifttt".to_string(),
+            name: "IFTTT Webhooks".to_string(),
+            description: Some("Run preconfigured IFTTT Webhooks Applets".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "IFTTT Pro or Pro+ is required. In Webhooks settings, open Documentation and copy only the raw Webhooks key, not the full URL. Create and enable an Applet using Receive a web request or Receive a web request with a JSON payload. Event names contain only letters, numbers, and underscores.".to_string(),
+            ),
+            api_key_url: Some("https://ifttt.com/maker_webhooks".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://ifttt.com/explore/what-are-webhooks".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "ifttt", "Seeded default provider: IFTTT Webhooks");
+        seeded_count += 1;
+    }
+
+    if !slug_exists!("ifttt-mcp") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "ifttt-mcp".into(),
+            name: "IFTTT".into(),
+            description: Some(
+                "Connect IFTTT to discover services, create Applets, and use its AI tools".into(),
+            ),
+            provider_type: "oauth2".into(),
+            authorization_url: Some(super::ifttt_oauth_service::AUTHORIZE_URL.into()),
+            token_url: Some(super::ifttt_oauth_service::TOKEN_URL.into()),
+            revocation_url: Some("https://ifttt.com/oauth/revoke".into()),
+            revocation: Some(RevocationConfig {
+                request_encoding: "form".into(),
+                style: "rfc7009".into(),
+                url: "https://ifttt.com/oauth/revoke".into(),
+                auth: "inherit".into(),
+                revokes_grant: false,
+            }),
+            default_scopes: Some(vec!["mcp".into()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://ifttt.com/mcp".into()),
+            is_active: true,
+            credential_mode: "admin".into(),
+            token_endpoint_auth_method: "client_secret_post".into(),
+            token_request_encoding: Some("form".into()),
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: Some(HashMap::from([(
+                "resource".into(),
+                nyxid_service_adapters::ifttt_mcp::BASE_URL.into(),
+            )])),
+            device_code_format: "rfc8628".into(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".into(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        seeded_count += 1;
     }
 
     // 1. OpenAI (API Key)
@@ -86,15 +609,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openai", "Seeded default provider: OpenAI");
         seeded_count += 1;
@@ -186,15 +714,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "openai".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "openai-codex",
@@ -203,7 +736,53 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 3. Anthropic (API Key)
+    // 3. xAI (API Key)
+    if !slug_exists!("xai") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "xai".to_string(),
+            name: "xAI".to_string(),
+            description: Some("xAI Grok API access".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some("Get your API key from https://console.x.ai".to_string()),
+            api_key_url: Some("https://console.x.ai".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.x.ai".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "xai", "Seeded default provider: xAI");
+        seeded_count += 1;
+    }
+
+    // 4. Anthropic (API Key)
     if !slug_exists!("anthropic") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -232,21 +811,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "anthropic", "Seeded default provider: Anthropic");
         seeded_count += 1;
     }
 
-    // 4. Google AI Studio (API Key)
+    // 5. Google AI Studio (API Key)
     if !slug_exists!("google-ai") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -275,15 +859,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-ai",
@@ -292,7 +881,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 5. Mistral AI (API Key)
+    // 6. Mistral AI (API Key)
     if !slug_exists!("mistral") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -321,21 +910,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "mistral", "Seeded default provider: Mistral AI");
         seeded_count += 1;
     }
 
-    // 6. Cohere (API Key)
+    // 7. Cohere (API Key)
     if !slug_exists!("cohere") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -364,21 +958,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "cohere", "Seeded default provider: Cohere");
         seeded_count += 1;
     }
 
-    // 7. DeepSeek (API Key)
+    // 8. DeepSeek (API Key)
     if !slug_exists!("deepseek") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -407,15 +1006,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "deepseek", "Seeded default provider: DeepSeek");
         seeded_count += 1;
@@ -454,17 +1058,230 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "firecrawl", "Seeded default provider: Firecrawl");
+        seeded_count += 1;
+    }
+
+    // Supabase Data API (per-project URL + API key)
+    if !slug_exists!("supabase") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "supabase".to_string(),
+            name: "Supabase".to_string(),
+            description: Some(
+                "Connect a Supabase project's PostgREST Data API as a personal database for AI agents."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Provide the project URL (`https://<project-ref>.supabase.co`) or full Data API \
+                 URL ending in `/rest/v1`, plus a Supabase API key. Prefer a new \
+                 `sb_secret_...` key for server-side \
+                 agent access, but note that secret keys use the `service_role` Postgres role \
+                 and bypass Row Level Security."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://supabase.com/dashboard/project/_/settings/api-keys".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some("https://supabase.com/docs/guides/api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: true,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "supabase", "Seeded default provider: Supabase");
+        seeded_count += 1;
+    }
+
+    for (slug, name, description, authorization_url, token_url, documentation_url) in [
+        (
+            "cloudflare",
+            "Cloudflare",
+            "Manage Cloudflare accounts, zones, DNS, and Workers through OAuth. API permissions and account access are selected in Cloudflare.",
+            "https://dash.cloudflare.com/oauth2/auth",
+            "https://dash.cloudflare.com/oauth2/token",
+            "https://developers.cloudflare.com/fundamentals/oauth/",
+        ),
+        (
+            "supabase-management",
+            "Supabase Management",
+            "Manage Supabase organizations and projects through OAuth. Project database access uses the separate Supabase Data API connector.",
+            "https://api.supabase.com/v1/oauth/authorize",
+            "https://api.supabase.com/v1/oauth/token",
+            "https://supabase.com/docs/guides/integrations/build-a-supabase-integration",
+        ),
+        (
+            "railway",
+            "Railway",
+            "Manage selected Railway workspaces and projects through OAuth and the GraphQL API. Viewer permissions are requested by default.",
+            "https://backboard.railway.com/oauth/auth",
+            "https://backboard.railway.com/oauth/token",
+            "https://docs.railway.com/integrations/oauth",
+        ),
+    ] {
+        if slug_exists!(slug) {
+            continue;
+        }
+        let revocation_url =
+            (slug == "cloudflare").then(|| "https://dash.cloudflare.com/oauth2/revoke".to_string());
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(authorization_url.to_string()),
+            token_url: Some(token_url.to_string()),
+            revocation: revocation_url.as_ref().map(|url| RevocationConfig {
+                request_encoding: "form".to_string(),
+                style: "rfc7009".to_string(),
+                url: url.clone(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
+            revocation_url,
+            default_scopes: match slug {
+                "cloudflare" => Some(vec!["openid".to_string(), "offline_access".to_string()]),
+                "railway" => Some(
+                    [
+                        "openid",
+                        "email",
+                        "profile",
+                        "offline_access",
+                        "project:viewer",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
+                // Supabase configures permissions on the registered app; its
+                // authorize `scope` parameter is deprecated.
+                _ => None,
+            },
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(documentation_url.to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: Some("form".to_string()),
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: slug != "supabase-management",
+            extra_auth_params: (slug == "railway")
+                .then(|| HashMap::from([("prompt".to_string(), "consent".to_string())])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: i32::from(slug == "cloudflare"),
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug, "Seeded cloud OAuth provider");
+        seeded_count += 1;
+    }
+
+    // Telnyx (API Key)
+    if !slug_exists!("telnyx") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telnyx".to_string(),
+            name: "Telnyx".to_string(),
+            description: Some(
+                "Telnyx API access for AI inference, assistants, speech, voice calls, and messaging."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a Telnyx API key in Mission Control and paste the raw key. NyxID adds the Bearer prefix automatically."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://portal.telnyx.com/#/app/api-keys".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://developers.telnyx.com".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "telnyx", "Seeded default provider: Telnyx");
         seeded_count += 1;
     }
 
@@ -503,17 +1320,74 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "elevenlabs", "Seeded default provider: ElevenLabs");
+        seeded_count += 1;
+    }
+
+    // Aurinko account bearer tokens; managed OAuth requires documented PKCE support.
+    if !slug_exists!("aurinko") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "aurinko".to_string(),
+            name: "Aurinko".to_string(),
+            description: Some(
+                "Aurinko unified email API for a user-connected mailbox."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Paste an Aurinko account access token (not an application API key or signing secret). Authorize Mail.Read for reading, Mail.Send for sending, and Mail.Drafts for drafts. NyxID sends Authorization: Bearer. Channel bots are configured separately."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://app.aurinko.io/".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.aurinko.io/unified-apis/email-api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "aurinko", "Seeded default provider: Aurinko");
         seeded_count += 1;
     }
 
@@ -550,21 +1424,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twilio", "Seeded default provider: Twilio");
         seeded_count += 1;
     }
 
-    // 8. Twitter / X (OAuth 2.0 with PKCE)
+    // 9. Twitter / X (OAuth 2.0 with PKCE)
     if !slug_exists!("twitter") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -576,6 +1455,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://api.x.com/2/oauth2/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -587,13 +1467,12 @@ pub async fn seed_default_providers(
             // attach images/video to posts via `POST /2/media/upload`; without it that
             // endpoint returns 403 and there is currently no scope input in the CLI pair
             // wizard to add it after the fact.
-            default_scopes: Some(vec![
-                "tweet.read".to_string(),
-                "tweet.write".to_string(),
-                "media.write".to_string(),
-                "users.read".to_string(),
-                "offline.access".to_string(),
-            ]),
+            default_scopes: Some(
+                TWITTER_DEFAULT_SCOPES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            ),
             client_id_encrypted: None,
             client_secret_encrypted: None,
             supports_pkce: true,
@@ -608,35 +1487,37 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
         seeded_count += 1;
     }
 
-    // Migration: set credential_mode and token_endpoint_auth_method on existing Twitter providers.
+    // Migration: backfill Twitter token authentication without changing the admin-selected mode.
     // The $ne filter means this is a no-op after migration completes.
     if let Some(existing_twitter) = collection
-        .find_one(doc! { "slug": "twitter", "$or": [
-            { "credential_mode": { "$ne": "user" } },
-            { "token_endpoint_auth_method": { "$ne": "client_secret_basic" } },
-        ]})
+        .find_one(doc! { "slug": "twitter",
+            "token_endpoint_auth_method": { "$ne": "client_secret_basic" },
+        })
         .await?
     {
         collection
             .update_one(
                 doc! { "_id": &existing_twitter.id },
                 doc! { "$set": {
-                    "credential_mode": "user",
                     "token_endpoint_auth_method": "client_secret_basic",
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
                 }},
@@ -644,7 +1525,7 @@ pub async fn seed_default_providers(
             .await?;
         tracing::info!(
             slug = "twitter",
-            "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+            "Migrated existing Twitter provider token_endpoint_auth_method to client_secret_basic"
         );
     }
 
@@ -670,6 +1551,28 @@ pub async fn seed_default_providers(
         );
     }
 
+    // DM operations require dm.read/dm.write (X returns 403 without them).
+    // Add missing defaults without overwriting admin scopes or duplicating entries.
+    let twitter_dm_migration = collection
+        .update_one(
+            doc! { "slug": "twitter", "$or": [
+                { "default_scopes": { "$ne": "dm.read" } },
+                { "default_scopes": { "$ne": "dm.write" } },
+                { "default_scopes": { "$ne": "media.write" } },
+            ] },
+            doc! {
+                "$addToSet": { "default_scopes": { "$each": ["dm.read", "dm.write", "media.write"] } },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    if twitter_dm_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "twitter",
+            "Migrated Twitter default_scopes to include DM scopes"
+        );
+    }
+
     let social_user_mode_migration = collection
         .update_many(
             doc! {
@@ -689,7 +1592,25 @@ pub async fn seed_default_providers(
         );
     }
 
-    // 9. Google (OAuth2)
+    // LinkedIn was seeded with PKCE on, which makes every token exchange
+    // fail with `invalid_client` (see the LinkedIn seed below).
+    let linkedin_pkce_migration = collection
+        .update_one(
+            doc! { "slug": "linkedin", "supports_pkce": true },
+            doc! { "$set": {
+                "supports_pkce": false,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if linkedin_pkce_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "linkedin",
+            "Migrated LinkedIn provider to supports_pkce=false"
+        );
+    }
+
+    // 10. Google (OAuth2)
     if !slug_exists!("google") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -701,10 +1622,11 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
-                revokes_grant: false,
+                revokes_grant: true,
             }),
             default_scopes: Some(vec![
                 "openid".to_string(),
@@ -730,25 +1652,29 @@ pub async fn seed_default_providers(
             // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
             credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: Some(HashMap::from([
                 ("access_type".to_string(), "offline".to_string()),
                 ("prompt".to_string(), "consent".to_string()),
             ])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "google", "Seeded default provider: Google");
         seeded_count += 1;
     }
 
-    // 10. GitHub (OAuth2)
+    // 11. GitHub (OAuth2)
     if !slug_exists!("github") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -760,6 +1686,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
                 auth: "inherit".to_string(),
@@ -783,16 +1710,20 @@ pub async fn seed_default_providers(
             // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
             credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github", "Seeded default provider: GitHub");
         seeded_count += 1;
@@ -838,21 +1769,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github-pat", "Seeded default provider: GitHub PAT");
         seeded_count += 1;
     }
 
-    // 11. Facebook (OAuth2)
+    // 12. Facebook (OAuth2)
     if !slug_exists!("facebook") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -864,6 +1800,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "facebook_deauth".to_string(),
                 url: "https://graph.facebook.com/v21.0/me/permissions".to_string(),
                 auth: "inherit".to_string(),
@@ -886,22 +1823,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "facebook", "Seeded default provider: Facebook");
         seeded_count += 1;
     }
 
-    // 12. Discord (OAuth2)
+    // 13. Discord (OAuth2)
     if !slug_exists!("discord") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -913,6 +1854,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://discord.com/api/oauth2/token".to_string()),
             revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://discord.com/api/oauth2/token/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -935,22 +1877,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "discord", "Seeded default provider: Discord");
         seeded_count += 1;
     }
 
-    // 13. Spotify (OAuth2)
+    // 14. Spotify (OAuth2)
     if !slug_exists!("spotify") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -982,21 +1928,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "spotify", "Seeded default provider: Spotify");
         seeded_count += 1;
     }
 
-    // 14. LinkedIn (OAuth2)
+    // 15. LinkedIn (OAuth2)
     if !slug_exists!("linkedin") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1010,6 +1961,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
             revocation_url: Some("https://www.linkedin.com/oauth/v2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.linkedin.com/oauth/v2/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -1022,7 +1974,10 @@ pub async fn seed_default_providers(
             ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
-            supports_pkce: true,
+            // LinkedIn's confidential web flow rejects a token request that
+            // carries `code_verifier` with `invalid_client`; PKCE exists only
+            // on its separate native flow.
+            supports_pkce: false,
             device_code_url: None,
             device_token_url: None,
             device_verification_url: None,
@@ -1036,22 +1991,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "linkedin", "Seeded default provider: LinkedIn");
         seeded_count += 1;
     }
 
-    // 15. Slack (OAuth2)
+    // 16. Slack (OAuth2)
     if !slug_exists!("slack") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1063,6 +2022,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
             revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "self_bearer".to_string(),
                 url: "https://slack.com/api/auth.revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -1086,22 +2046,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack", "Seeded default provider: Slack");
         seeded_count += 1;
     }
 
-    // 16. Microsoft (OAuth2)
+    // 17. Microsoft (OAuth2)
     if !slug_exists!("microsoft") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1122,6 +2086,7 @@ pub async fn seed_default_providers(
                 "email".to_string(),
                 "profile".to_string(),
                 "offline_access".to_string(),
+                "User.Read".to_string(),
             ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1139,21 +2104,43 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "microsoft", "Seeded default provider: Microsoft");
         seeded_count += 1;
     }
 
-    // 17. TikTok (OAuth2)
+    // The Microsoft Graph `/me` probe and profile tool require User.Read.
+    // Add it to the original system seed without overwriting an operator's
+    // customized scope list.
+    collection
+        .update_one(
+            doc! {
+                "slug": "microsoft",
+                "created_by": "system",
+                "default_scopes": { "$type": "array", "$nin": ["User.Read"] },
+            },
+            doc! {
+                "$addToSet": { "default_scopes": "User.Read" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(now) },
+            },
+        )
+        .await?;
+
+    // 18. TikTok (OAuth2)
     if !slug_exists!("tiktok") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1165,6 +2152,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
             revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://open.tiktokapis.com/v2/oauth/revoke/".to_string(),
                 auth: "inherit".to_string(),
@@ -1187,22 +2175,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("client_key".to_string()),
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "tiktok", "Seeded default provider: TikTok");
         seeded_count += 1;
     }
 
-    // 18. Twitch (OAuth2)
+    // 19. Twitch (OAuth2)
     if !slug_exists!("twitch") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1214,6 +2206,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
             revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://id.twitch.tv/oauth2/revoke".to_string(),
                 auth: "client_id".to_string(),
@@ -1234,22 +2227,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitch", "Seeded default provider: Twitch");
         seeded_count += 1;
     }
 
-    // 19. Reddit (OAuth2)
+    // 20. Reddit (OAuth2)
     if !slug_exists!("reddit") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1261,6 +2258,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
             revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.reddit.com/api/v1/revoke_token".to_string(),
                 auth: "inherit".to_string(),
@@ -1281,19 +2279,23 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: Some(HashMap::from([(
                 "duration".to_string(),
                 "permanent".to_string(),
             )])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "reddit", "Seeded default provider: Reddit");
         seeded_count += 1;
@@ -1339,7 +2341,7 @@ pub async fn seed_default_providers(
         );
     }
 
-    // 20. Lark / Larksuite (OAuth2)
+    // 21. Lark / Larksuite (OAuth2)
     if !slug_exists!("lark") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1376,15 +2378,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "lark", "Seeded default provider: Lark");
         seeded_count += 1;
@@ -1425,21 +2432,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "feishu", "Seeded default provider: Feishu");
         seeded_count += 1;
     }
 
-    // 21. Telegram Login Widget (telegram_widget)
+    // 22. Telegram Login Widget (telegram_widget)
     if !slug_exists!("telegram") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1469,21 +2481,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "telegram", "Seeded default provider: Telegram Login");
         seeded_count += 1;
     }
 
-    // 22. Telegram Bot API (API Key)
+    // 23. Telegram Bot API (API Key)
     if !slug_exists!("telegram-bot") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1515,15 +2532,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "telegram-bot",
@@ -1572,15 +2594,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "lark-bot", "Seeded default provider: Lark Bot API");
         seeded_count += 1;
@@ -1626,15 +2653,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "feishu-bot",
@@ -1682,15 +2714,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "discord-bot",
@@ -1739,21 +2776,77 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack-bot", "Seeded default provider: Slack Bot API");
         seeded_count += 1;
     }
 
-    // 23. OpenClaw (API Key + self-hosted gateway URL)
+    // WhatsApp Business Platform (direct Meta Cloud API).
+    if !slug_exists!("whatsapp-business") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "whatsapp-business".to_string(),
+            name: "WhatsApp Business Platform".to_string(),
+            description: Some("WhatsApp Business Platform credentials for the direct Meta Cloud API. NyxID injects the System User token as Authorization: Bearer. The WhatsApp Business App and Twilio API are not supported.".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some("In Meta Business Settings, create a System User token with whatsapp_business_messaging and whatsapp_business_management permissions and assign your WhatsApp Business Account. Use the Phone Number ID in Cloud API paths.".to_string()),
+            api_key_url: Some("https://developers.facebook.com/apps".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.facebook.com/documentation/business-messaging/whatsapp/overview".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "whatsapp-business",
+            "Seeded default provider: WhatsApp Business Platform"
+        );
+        seeded_count += 1;
+    }
+
+    // 24. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1787,21 +2880,26 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: true,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openclaw", "Seeded default provider: OpenClaw");
         seeded_count += 1;
     }
 
-    // 24. OpenRouter (API Key)
+    // 25. OpenRouter (API Key)
     if !slug_exists!("openrouter") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1834,19 +2932,184 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openrouter", "Seeded default provider: OpenRouter");
         seeded_count += 1;
     }
+
+    // 26. Notion (OAuth2)
+    for (slug, name, host) in [
+        ("posthog", "PostHog (US)", "https://us.posthog.com"),
+        ("posthog-eu", "PostHog (EU)", "https://eu.posthog.com"),
+    ] {
+        if slug_exists!(slug) {
+            continue;
+        }
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            description: Some("PostHog analytics API access via OAuth 2.0.".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(format!("{host}/oauth/authorize/")),
+            token_url: Some(format!("{host}/oauth/token/")),
+            revocation_url: Some(format!("{host}/oauth/revoke/")),
+            revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
+                style: "rfc7009".to_string(),
+                url: format!("{host}/oauth/revoke/"),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
+            default_scopes: Some(
+                crate::services::scope_catalog::POSTHOG_DEFAULT_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect(),
+            ),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://posthog.com/docs/api/oauth".to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: Some("form".to_string()),
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug, "Seeded default PostHog provider");
+        seeded_count += 1;
+    }
+
+    // Capabilities and page access are chosen in Notion, not via scopes.
+    // OAuth uses JSON + Basic auth and rotates refresh tokens. Notion does
+    // not document expires_in; persist it only when actually returned.
+    if !slug_exists!("notion") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "notion".to_string(),
+            name: "Notion".to_string(),
+            description: Some(
+                "Notion workspace access via OAuth 2.0. The pages and databases \
+                 an integration can reach are selected by the user during \
+                 authorization."
+                    .to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://api.notion.com/v1/oauth/authorize".to_string()),
+            token_url: Some("https://api.notion.com/v1/oauth/token".to_string()),
+            revocation_url: Some("https://api.notion.com/v1/oauth/revoke".to_string()),
+            revocation: Some(RevocationConfig {
+                request_encoding: "json".to_string(),
+                style: "rfc7009".to_string(),
+                url: "https://api.notion.com/v1/oauth/revoke".to_string(),
+                // "inherit" resolves to HTTP Basic here because
+                // `token_endpoint_auth_method` is `client_secret_basic`,
+                // which is what Notion's revoke endpoint expects.
+                auth: "inherit".to_string(),
+                // Revoking one Notion token does not touch other bot
+                // installations of the same integration, so no cascade
+                // confirmation is warranted.
+                revokes_grant: false,
+            }),
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://developers.notion.com/docs/authorization".to_string()),
+            is_active: true,
+            // "both": BYO wins when present, otherwise the ops-provisioned
+            // platform OAuth app (one-click connect). Deliberately NOT added
+            // to SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS, so an ops
+            // update to this row survives restarts.
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: Some("json".to_string()),
+            oauth_request_headers: HashMap::from([(
+                "Notion-Version".to_string(),
+                "2022-06-28".to_string(),
+            )]),
+            supports_oauth_scopes: false,
+            extra_auth_params: Some(HashMap::from([("owner".to_string(), "user".to_string())])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "notion", "Seeded default provider: Notion");
+        seeded_count += 1;
+    }
+
+    // Repair rows from the initial Notion seed, without replacing operator settings.
+    for (field, value) in [
+        (
+            "token_request_encoding",
+            bson::Bson::String("json".to_string()),
+        ),
+        (
+            "oauth_request_headers",
+            bson::Bson::Document(doc! { "Notion-Version": "2022-06-28" }),
+        ),
+        ("supports_oauth_scopes", bson::Bson::Boolean(false)),
+    ] {
+        collection
+            .update_many(
+                doc! { "slug": "notion", "created_by": "system", field: { "$exists": false } },
+                doc! { "$set": { field: value } },
+            )
+            .await?;
+    }
+    collection.update_many(
+        doc! { "slug": "notion", "created_by": "system", "revocation.url": "https://api.notion.com/v1/oauth/revoke",
+            "revocation.request_encoding": { "$exists": false } },
+        doc! { "$set": { "revocation.request_encoding": "json" } },
+    ).await?;
 
     // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
     // injection (non-delegated). Google Cloud uses the standard OAuth2
@@ -1899,15 +3162,20 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "aws-billing", "Seeded default provider: AWS Billing");
         seeded_count += 1;
@@ -1936,6 +3204,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
@@ -1958,6 +3227,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             // Google only returns a refresh_token when the auth request carries
             // access_type=offline + prompt=consent. Without these the user gets
             // a 1-hour access token and broker calls start failing the moment
@@ -1968,13 +3240,14 @@ pub async fn seed_default_providers(
             ])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-cloud",
@@ -2005,7 +3278,81 @@ pub async fn seed_default_providers(
         );
     }
 
+    // Managed OAuth connectors with fixed provider endpoints. Keep
+    // these in a data-driven registry so adding a connector cannot silently
+    // diverge from the standard provider defaults. Client credentials remain
+    // operator-configured; `both` permits a BYO app when a deployment has not
+    // provisioned a NyxID platform app yet.
+    for seed in MANAGED_OAUTH_PROVIDER_SEEDS {
+        if slug_exists!(seed.slug) {
+            continue;
+        }
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: seed.slug.to_string(),
+            name: seed.name.to_string(),
+            description: Some(seed.description.to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(seed.authorization_url.to_string()),
+            token_url: Some(seed.token_url.to_string()),
+            revocation_url: None,
+            revocation: None,
+            default_scopes: seed
+                .default_scopes
+                .map(|scopes| scopes.iter().map(|scope| (*scope).to_string()).collect()),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: seed.supports_pkce,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(seed.documentation_url.to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: seed.token_endpoint_auth_method.to_string(),
+            token_request_encoding: seed.token_request_encoding.map(str::to_string),
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: seed.slug != "stripe",
+            extra_auth_params: seed.extra_auth_params.map(|params| {
+                params
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect()
+            }),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: seed.client_id_param_name.map(str::to_string),
+            authorization_nonce_required: false,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = seed.slug, "Seeded managed OAuth provider");
+        seeded_count += 1;
+    }
+
     backfill_provider_revocation(&collection).await?;
+
+    for adapter in super::channel_adapters::registered_adapters(&std::sync::Arc::new(
+        super::provider_token_exchange_service::TokenExchangeCache::new(),
+    )) {
+        if let super::channel_platform::CredentialResolution::OAuthConnection {
+            provider_slug,
+            required_scopes,
+        } = adapter.credential_resolution()
+        {
+            collection.update_one(doc! { "slug": provider_slug }, vec![doc! { "$set": {
+                "default_scopes": { "$setUnion": [{ "$ifNull": ["$default_scopes", []] }, required_scopes] },
+            } }]).await?;
+        }
+    }
 
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
@@ -2088,7 +3435,7 @@ const REVOCATION_SEED_UPGRADES: &[RevocationSeedUpgrade] = &[
         style: "rfc7009",
         url: "https://oauth2.googleapis.com/revoke",
         auth: "none",
-        revokes_grant: false,
+        revokes_grant: true,
         revocation_url: Some("https://oauth2.googleapis.com/revoke"),
     },
     RevocationSeedUpgrade {
@@ -2143,6 +3490,10 @@ fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
 }
 
 pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    #[cfg(test)]
+    if crate::test_utils::is_registered_loopback_revocation_url(url) {
+        return Ok(());
+    }
     validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
@@ -2151,6 +3502,7 @@ pub async fn validate_revocation_config(
     provider_type: &str,
     revocation: &RevocationConfig,
 ) -> AppResult<()> {
+    validate_oauth_request_options(Some(&revocation.request_encoding), None)?;
     if matches!(provider_type, "api_key" | "telegram_widget") {
         return Err(AppError::ValidationError(
             "revocation is only supported for oauth2 and device_code providers".to_string(),
@@ -2173,8 +3525,67 @@ pub async fn validate_revocation_config(
     validate_revocation_url(&revocation.url).await
 }
 
-fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
+async fn remove_unsafe_oauth_headers(db: &mongodb::Database) -> AppResult<()> {
+    let collection = db.collection::<bson::Document>(COLLECTION_NAME);
+    let mut rows = collection
+        .find(doc! { "oauth_request_headers": { "$type": "object" } })
+        .await?;
+    while let Some(row) = rows.try_next().await? {
+        let headers = row
+            .get_document("oauth_request_headers")
+            .map_err(|_| AppError::Internal("Invalid OAuth header document".into()))?;
+        let sanitized: bson::Document = headers
+            .iter()
+            .filter(|(name, value)| {
+                value.as_str().is_some_and(|value| {
+                    crate::models::provider_config::is_public_oauth_header(name, value)
+                })
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        if &sanitized != headers {
+            collection.update_one(
+                doc! { "_id": row.get("_id").cloned().unwrap_or_default(), "oauth_request_headers": headers.clone() },
+                doc! { "$set": { "oauth_request_headers": sanitized } },
+            ).await?;
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_oauth_request_options(
+    encoding: Option<&str>,
+    headers: Option<&HashMap<String, String>>,
+) -> AppResult<()> {
+    if encoding.is_some_and(|value| !["form", "json"].contains(&value)) {
+        return Err(AppError::ValidationError(
+            "OAuth request encoding must be one of: form, json".to_string(),
+        ));
+    }
+    if let Some(headers) = headers {
+        if headers.len() > 20 {
+            return Err(AppError::ValidationError(
+                "Too many OAuth request headers (maximum 20)".to_string(),
+            ));
+        }
+        for (name, value) in headers {
+            if !crate::models::provider_config::is_public_oauth_header(name, value) {
+                return Err(AppError::ValidationError(
+                    "OAuth headers only support Notion-Version and Anthropic-Version with YYYY-MM-DD dates".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_seeded_provider_options(provider: &ProviderConfig) -> AppResult<()> {
+    validate_oauth_request_options(
+        provider.token_request_encoding.as_deref(),
+        Some(&provider.oauth_request_headers),
+    )?;
     if let Some(revocation) = provider.revocation.as_ref() {
+        validate_oauth_request_options(Some(&revocation.request_encoding), None)?;
         validate_revocation_url_shape(&revocation.url)?;
     }
     Ok(())
@@ -2249,6 +3660,21 @@ async fn backfill_provider_revocation(
         }
     }
 
+    // Google's revoke endpoint invalidates the account's project-wide grant.
+    // Upgrade the old official seed so deleting one product uses cascade confirmation.
+    collection
+        .update_many(
+            doc! {
+                "slug": "google", "created_by": "system",
+                "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                "token_url": "https://oauth2.googleapis.com/token",
+                "revocation.url": "https://oauth2.googleapis.com/revoke",
+                "revocation.style": "rfc7009",
+                "revocation.revokes_grant": false,
+            },
+            doc! { "$set": { "revocation.revokes_grant": true, "updated_at": &now } },
+        )
+        .await?;
     Ok(())
 }
 
@@ -2321,6 +3747,51 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
+        "api-ifttt-mcp" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
+        "api-ifttt" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: false,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
+        "api-google-workspace"
+        | "api-google-calendar"
+        | "api-google-drive"
+        | "api-google-gmail"
+        | "api-google-docs"
+        | "api-google-sheets"
+        | "api-google-slides" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: matches!(
+                    slug,
+                    "api-google-workspace" | "api-google-drive"
+                ),
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         // OpenClaw Gateway speaks native WebSocket to its CLI/TUI
         // clients. The HTTP proxy path is supported but not all
         // downstream instances expose OpenAI-compatible HTTP endpoints,
@@ -2362,7 +3833,19 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
-        "api-twilio" => Some((
+        "api-telnyx" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: true,
+                supports_streaming: true,
+            },
+            true,
+        )),
+        "api-twilio" | "api-aurinko" | "api-supabase" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -2374,9 +3857,42 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             false,
         )),
+        // Notion accepts multipart file uploads on api.notion.com.
+        "api-notion" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: true,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         _ => None,
     }
 }
+
+/// Required Notion API headers. `Notion-Version` is mandatory on every
+/// request (Notion returns 400 without it), and `content-type` covers the
+/// JSON-bodied endpoints. Both are `overridable: true` so a caller pinning
+/// a different API version -- or an SDK that already sets these -- wins;
+/// the defaults only apply when the caller omits them.
+const NOTION_DEFAULT_HEADERS: &[SeededHeader] = &[
+    SeededHeader {
+        name: "Notion-Version",
+        value: "2022-06-28",
+        overridable: true,
+        sensitive: false,
+    },
+    SeededHeader {
+        name: "content-type",
+        value: "application/json",
+        overridable: true,
+        sensitive: false,
+    },
+];
 
 /// Required Anthropic API headers. `anthropic-version` is mandatory on every
 /// request (rejected with 400 if missing); `content-type` is required for
@@ -2423,7 +3939,106 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
     },
 ];
 
+macro_rules! managed_oauth_service_seed {
+    ($provider:literal, $slug:literal, $name:literal, $base_url:literal, $homepage:literal) => {
+        DefaultServiceSeed {
+            provider_slug: $provider,
+            service_slug: concat!("api-", $slug),
+            service_name: $name,
+            base_url: $base_url,
+            injection_method: "bearer",
+            injection_key: "Authorization",
+            service_auth_method: None,
+            service_auth_key_name: None,
+            description: Some(concat!($name, " account access through NyxID OAuth 2.0.")),
+            default_request_headers: None,
+            service_category: "connection",
+            requires_user_credential: true,
+            homepage_url: Some($homepage),
+            auth_notes: Some(
+                "Connect with the provider's OAuth consent screen. Configure a NyxID-owned OAuth app (or use a BYO app) with the callback URL shown by NyxID.",
+            ),
+            known_limitations: Some(
+                "This initial connector seeds the OAuth connection and generic proxy base URL. Provider-specific operation overlays and least-privilege scope menus are added separately after endpoint verification.",
+            ),
+        }
+    };
+}
+
+/// LinkedIn's Rest.li endpoints (including `/v2/ugcPosts`, used by the
+/// hosted `create_post` tool) require `X-Restli-Protocol-Version: 2.0.0`.
+/// Overridable so a caller pinning its own protocol version still wins.
+const LINKEDIN_DEFAULT_HEADERS: &[SeededHeader] = &[SeededHeader {
+    name: "X-Restli-Protocol-Version",
+    value: "2.0.0",
+    overridable: true,
+    sensitive: false,
+}];
+
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
+        provider_slug: "ifttt-mcp",
+        service_slug: "api-ifttt-mcp",
+        service_name: "IFTTT",
+        base_url: nyxid_service_adapters::ifttt_mcp::BASE_URL,
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some(nyxid_service_adapters::ifttt_mcp::AUTH_METHOD),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Connect your IFTTT account to discover available tools, create Applets, and use connected services. Discover tools first, then call a tool using its returned name and input schema.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://ifttt.com/mcp"),
+        auth_notes: Some(
+            "Sign in to IFTTT in your browser. NyxID registers its OAuth client on first connection and stores your tokens encrypted. IFTTT manages the accounts used by your Applets.",
+        ),
+        known_limitations: Some(
+            "Available tools and actions depend on your IFTTT account and plan. Tool calls may create or enable persistent automations; review their effects before calling. Later autonomous Applet runs execute in IFTTT, outside NyxID approval and audit. No automatic retries or completion guarantee. Server routing only; Webhooks connections remain separate.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "ifttt",
+        service_slug: "api-ifttt",
+        service_name: "IFTTT Webhooks",
+        base_url: nyxid_service_adapters::ifttt::BASE_URL,
+        injection_method: "ifttt_webhook",
+        injection_key: "",
+        service_auth_method: Some("ifttt_webhook"),
+        service_auth_key_name: Some("key"),
+        description: Some(
+            "Run preconfigured IFTTT Webhooks Applets with value1/value2/value3 or a JSON payload. POST /trigger/EVENT or /trigger/EVENT/json; EVENT uses letters, numbers, and underscores. A receipt confirms event acceptance, not Applet completion.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://ifttt.com/maker_webhooks"),
+        auth_notes: Some(
+            "Requires IFTTT Pro or Pro+. Enter only the raw Webhooks key from Documentation, never a full URL. The key can trigger all matching Applets in its IFTTT account. NyxID appends it at egress. Use the returned connection slug, including any suffix.",
+        ),
+        known_limitations: Some(
+            "Only preconfigured Webhooks Applets; no Applet creation, listing, history, or completion polling. POST only; JSON bodies only, no query parameters or WebSocket. Fixed maker.ifttt.com destination. No identity/access-token/delegation forwarding. No automatic verification, retry, redirect following, or idempotency guarantee. Check IFTTT Activity after an uncertain result. Node routing requires a node version supporting ifttt_webhook.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "xai",
+        service_slug: "llm-xai",
+        service_name: "xAI API",
+        base_url: "https://api.x.ai/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
+        default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
+    },
     DefaultServiceSeed {
         provider_slug: "openai",
         service_slug: "llm-openai",
@@ -2566,7 +4181,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
             "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
         ),
         known_limitations: Some(
-            "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+            "The NyxID-hosted OpenAPI overlay covers agent submit/status, scrape, search and site mapping for typed tool discovery. Rendering and cache controls are advisory in the tool schema; Firecrawl's response does not certify a cache hit or live render. Other Firecrawl operations remain available through the generic proxy.",
         ),
     },
     DefaultServiceSeed {
@@ -2593,6 +4208,52 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
     },
     DefaultServiceSeed {
+        provider_slug: "telnyx",
+        service_slug: "api-telnyx",
+        service_name: "Telnyx",
+        base_url: "https://api.telnyx.com/v2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Telnyx AI inference, assistants, speech, voice calls, and messaging. NyxID injects a bearer API key and relays streamed model responses and speech audio.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://telnyx.com"),
+        auth_notes: Some(
+            "Paste the raw API key from Telnyx Mission Control; NyxID adds `Authorization: Bearer`. OpenAI-compatible clients use the service proxy URL with `/ai/openai` appended as their base URL.",
+        ),
+        known_limitations: Some(
+            "The hosted overlay covers core AI, speech, calling, and messaging REST operations. Inbound webhooks and call media streams require a separate application receiver. Calls require a Telnyx voice connection and an authorized caller ID; messaging requires a configured sender and applicable registration.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "aurinko",
+        service_slug: "api-aurinko",
+        service_name: "Aurinko Email",
+        base_url: "https://api.aurinko.io",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Read, search, and reply to email, inspect threads and attachments, and manage drafts in your connected Aurinko mailbox.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.aurinko.io"),
+        auth_notes: Some(
+            "Use a mailbox account access token, not an application credential. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts. Channel bot credentials are managed separately.",
+        ),
+        known_limitations: Some(
+            "Managed OAuth onboarding is unavailable until Aurinko documents PKCE support. Account-token onboarding is supported. Send IDs are best effort; processingStatus Incomplete can follow successful submission. Never blindly retry uncertain sends. Provider mailbox setup and consent remain required.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "twilio",
         service_slug: "api-twilio",
         service_name: "Twilio",
@@ -2613,6 +4274,106 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "Twilio Media Streams are inbound WebSocket connections initiated by Twilio to a public application server and are outside this outbound credential proxy. The hosted overlay intentionally focuses on core Calls, Messages, and Recordings REST operations.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "supabase",
+        service_slug: "api-supabase",
+        service_name: "Supabase Data API",
+        // Placeholder: every connection must provide its own project URL.
+        base_url: "https://project-ref.supabase.co/rest/v1",
+        injection_method: "header",
+        injection_key: "apikey",
+        service_auth_method: Some("header"),
+        service_auth_key_name: Some("apikey"),
+        description: Some(
+            "Supabase PostgREST Data API connector for using a project database from AI agents. \
+             Supply the project URL (`https://<project-ref>.supabase.co`) or full `/rest/v1` \
+             Data API URL, and NyxID injects the encrypted Supabase key through the `apikey` header.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "The credential is sent as the Supabase `apikey` header. Do not enter a \
+             `postgresql://` connection string. New `sb_secret_...` and `sb_publishable_...` \
+             keys are not bearer JWTs and must not be configured as Authorization Bearer tokens.",
+        ),
+        known_limitations: Some(
+            "This connector targets the PostgREST Data API only; it does not proxy PostgreSQL \
+             connection strings, Storage, Edge Functions, or Realtime. Secret keys and legacy \
+             `service_role` keys bypass Row Level Security. Supabase schemas are project-specific, \
+             so NyxID exposes the generic proxy tool unless the user supplies a separate OpenAPI spec.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "cloudflare",
+        service_slug: "api-cloudflare",
+        service_name: "Cloudflare",
+        base_url: "https://api.cloudflare.com/client/v4",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Cloudflare account, zone, DNS, and Workers management through an OAuth connection.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.cloudflare.com"),
+        auth_notes: Some(
+            "Register a confidential Cloudflare OAuth client using client_secret_basic. Configure API permissions on that client; users select accounts and optional permissions during consent. NyxID uses PKCE and requests offline_access for refresh tokens.",
+        ),
+        known_limitations: Some(
+            "Private OAuth clients are restricted to members of the client's Cloudflare account. A managed client serving other accounts must be public and verify its publisher domain. Account administrators may block new public OAuth authorizations. The hosted overlay covers account, zone, and DNS reads; other APIs remain available through the generic proxy.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "supabase-management",
+        service_slug: "api-supabase-management",
+        service_name: "Supabase Management",
+        base_url: "https://api.supabase.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Supabase organization and project management through OAuth, including infrastructure configuration and provisioning.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "Create an OAuth app in Supabase organization settings. Permissions are configured on the app, so NyxID omits the deprecated scope parameter. Token exchange and refresh use form encoding, HTTP Basic authentication, and PKCE.",
+        ),
+        known_limitations: Some(
+            "Management OAuth tokens are not project Data API keys or end-user Supabase Auth JWTs. Use api-supabase with a project URL and API key for table access. Changing app permissions requires users to reauthorize. Revoke the app in Supabase when remote access must be removed; no revocation endpoint is seeded.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "railway",
+        service_slug: "api-railway",
+        service_name: "Railway",
+        base_url: "https://backboard.railway.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Railway GraphQL API access to selected projects and workspaces through OAuth. Viewer access is the default; request member scopes to manage resources.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://railway.com"),
+        auth_notes: Some(
+            "Register a Web OAuth app in Railway workspace settings > Developer. NyxID uses HTTP Basic authentication and PKCE. openid is required; offline_access plus prompt=consent obtains rotating refresh tokens. API requests are JSON POSTs to /graphql/v2.",
+        ),
+        known_limitations: Some(
+            "Users choose which projects or workspaces to share; token access is capped by their actual role. Access tokens expire after one hour. Arbitrary GraphQL requests may contain mutations and are marked as requiring approval in the hosted overlay. Revoke remote access in Railway Account Settings > Apps; no revocation endpoint is seeded.",
         ),
     },
     DefaultServiceSeed {
@@ -2650,6 +4411,165 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         known_limitations: None,
     },
     DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-workspace",
+        service_name: "Google Workspace",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://workspace.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access by default. You can choose narrower permissions; only operations covered by the granted scopes will work.",
+        ),
+        known_limitations: Some(
+            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-calendar",
+        service_name: "Google Calendar",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read, create, edit, and delete calendars and events; check availability.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://calendar.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Calendar access, including creating secondary calendars.",
+        ),
+        known_limitations: Some(
+            "API access is limited to the published Calendar operations. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-drive",
+        service_name: "Google Drive",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read, upload, create, edit, export, and delete Google Drive files and folders; create, read, and edit Docs, Sheets, and Slides.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://drive.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive access to existing and newly created files, subject to the account's file permissions.",
+        ),
+        known_limitations: Some(
+            "Drive includes Docs, Sheets, and Slides through the published HTTP operations. Full Drive scope covers existing files subject to file permissions; drive.file is limited to app-authorized files and drive.readonly does not grant write access. Calendar, Gmail, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-gmail",
+        service_name: "Gmail",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some("Read and search Gmail messages, and send messages and replies."),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://mail.google.com"),
+        auth_notes: Some(
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. You can choose read-only or send-only access; only operations covered by the granted scopes will work.",
+        ),
+        known_limitations: Some(
+            "Only published message list, read, and send operations are available. No deletion, trash, mailbox changes, or draft management. Replies require threadId and matching Subject, In-Reply-To, and References MIME headers. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-docs",
+        service_name: "Google Docs",
+        base_url: "https://docs.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Docs, including text, formatting, tables, and lists.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://docs.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Docs API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on docs.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-sheets",
+        service_name: "Google Sheets",
+        base_url: "https://sheets.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create and edit spreadsheets; read, write, append, and clear cell values using A1 ranges.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://sheets.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Sheets API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on sheets.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-slides",
+        service_name: "Google Slides",
+        base_url: "https://slides.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Slides presentations, pages, shapes, text, and formatting.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://slides.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Slides API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on slides.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "github",
         service_slug: "api-github",
         service_name: "GitHub OAuth",
@@ -2665,6 +4585,84 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "posthog",
+        service_slug: "api-posthog",
+        service_name: "PostHog (US)",
+        base_url: "https://us.posthog.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Access PostHog projects, insights, dashboards, feature flags, and analytics queries.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://posthog.com"),
+        auth_notes: Some(
+            "Connect with a registered PostHog OAuth client in the matching cloud region. Default scopes are read-only; additional permissions require reauthorization.",
+        ),
+        known_limitations: Some(
+            "Use the region where your PostHog account lives. Access is limited to the projects and scopes granted during consent. This connector accesses the private API, not event ingestion.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "posthog-eu",
+        service_slug: "api-posthog-eu",
+        service_name: "PostHog (EU)",
+        base_url: "https://eu.posthog.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Access PostHog projects, insights, dashboards, feature flags, and analytics queries.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://posthog.com"),
+        auth_notes: Some(
+            "Connect with a registered PostHog OAuth client in the matching cloud region. Default scopes are read-only; additional permissions require reauthorization.",
+        ),
+        known_limitations: Some(
+            "Use the region where your PostHog account lives. Access is limited to the projects and scopes granted during consent. This connector accesses the private API, not event ingestion.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "notion",
+        service_slug: "api-notion",
+        service_name: "Notion",
+        base_url: "https://api.notion.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Notion pages, databases, blocks, comments, and users. Search, read, \
+             create, and update workspace content the connected user shared with \
+             the integration.",
+        ),
+        default_request_headers: Some(NOTION_DEFAULT_HEADERS),
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.notion.so"),
+        auth_notes: Some(
+            "Connect a Notion workspace using the NyxID managed app or your own \
+             public integration. Notion has no OAuth scopes: the integration's \
+             capabilities are fixed in Notion's developer settings, and the user \
+             picks which pages and databases to share during authorization.",
+        ),
+        known_limitations: Some(
+            "Only content the user explicitly shared with the integration is \
+             reachable; newly created pages must be shared separately. Notion \
+             enforces roughly three requests per second per integration. File \
+             uploads require multipart/form-data with a boundary. OAuth refresh \
+             tokens rotate; no access-token lifetime is assumed.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "github-pat",
@@ -2702,6 +4700,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "linkedin",
+        service_slug: "api-linkedin",
+        service_name: "LinkedIn",
+        base_url: "https://api.linkedin.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "LinkedIn profile and publishing tools for AI agents. Read the connected member profile and create posts with explicit approval.",
+        ),
+        default_request_headers: Some(LINKEDIN_DEFAULT_HEADERS),
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.linkedin.com"),
+        auth_notes: Some(
+            "Connect a LinkedIn account using your LinkedIn developer app. The profile tool uses OpenID Connect scopes; publishing also requires the w_member_social permission.",
+        ),
+        known_limitations: Some(
+            "LinkedIn may require app review and product approval before publishing permissions are granted. Only the hosted profile and post operations are typed; other LinkedIn APIs remain available through the generic proxy.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "discord",
@@ -2762,19 +4783,25 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "microsoft",
         service_slug: "api-microsoft",
-        service_name: "Microsoft Graph API",
+        service_name: "Microsoft 365",
         base_url: "https://graph.microsoft.com/v1.0",
         injection_method: "bearer",
         injection_key: "Authorization",
         service_auth_method: None,
         service_auth_key_name: None,
-        description: None,
+        description: Some(
+            "Microsoft 365 mail, calendar, profile, and OneDrive tools for AI agents through Microsoft Graph.",
+        ),
         default_request_headers: None,
-        service_category: "internal",
-        requires_user_credential: false,
-        homepage_url: None,
-        auth_notes: None,
-        known_limitations: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.microsoft.com/microsoft-365"),
+        auth_notes: Some(
+            "Connect a Microsoft account using your Microsoft Entra application. Choose the Microsoft Graph permissions needed for the tools you intend to use, such as User.Read, Mail.Read, Mail.Send, Files.ReadWrite, or Calendars.ReadWrite.",
+        ),
+        known_limitations: Some(
+            "Microsoft Graph permissions are tenant- and administrator-consent dependent. Only the published mail, calendar, profile, and file operations are typed; other Graph APIs remain available through the generic proxy.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "tiktok",
@@ -2988,6 +5015,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         known_limitations: None,
     },
     DefaultServiceSeed {
+        provider_slug: "whatsapp-business",
+        service_slug: "api-whatsapp-business",
+        service_name: "WhatsApp Business Platform (Meta Cloud API)",
+        base_url: "https://graph.facebook.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Direct Meta Cloud API with a System User bearer token. Use a versioned Graph path and the Phone Number ID for messaging; the channel-bot adapter pins its own Graph version.",
+        ),
+        default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        homepage_url: Some("https://business.whatsapp.com/products/business-platform"),
+        auth_notes: Some(
+            "System User token with whatsapp_business_messaging and whatsapp_business_management, assigned to the WhatsApp Business Account.",
+        ),
+        known_limitations: Some(
+            "WhatsApp Business App has no API. Twilio-hosted WhatsApp is a separate API. Free-form replies require an open 24-hour customer service window; otherwise use approved templates.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "openclaw",
         service_slug: "llm-openclaw",
         service_name: "OpenClaw Gateway",
@@ -3086,6 +5136,211 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         auth_notes: None,
         known_limitations: None,
     },
+    DefaultServiceSeed {
+        provider_slug: "stripe",
+        service_slug: "api-stripe",
+        service_name: "Stripe",
+        base_url: "https://api.stripe.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read Stripe customers, invoices, payments, and subscriptions through a connected Stripe account.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://stripe.com"),
+        auth_notes: Some(
+            "Configure the Stripe App client ID and developer secret API key as the OAuth client secret. Permissions are defined in the Stripe App manifest, not OAuth scopes.",
+        ),
+        known_limitations: Some(
+            "Public OAuth install links require a published Stripe App. Use the matching test/live developer key and install URL. Disconnect removes local credentials; uninstall the app in Stripe to revoke upstream access.",
+        ),
+    },
+    managed_oauth_service_seed!(
+        "airtable",
+        "airtable",
+        "Airtable",
+        "https://api.airtable.com/v0",
+        "https://airtable.com"
+    ),
+    managed_oauth_service_seed!(
+        "asana",
+        "asana",
+        "Asana",
+        "https://app.asana.com/api/1.0",
+        "https://asana.com"
+    ),
+    managed_oauth_service_seed!(
+        "attio",
+        "attio",
+        "Attio",
+        "https://api.attio.com/v2",
+        "https://attio.com"
+    ),
+    managed_oauth_service_seed!(
+        "bitbucket",
+        "bitbucket",
+        "Bitbucket",
+        "https://api.bitbucket.org/2.0",
+        "https://bitbucket.org"
+    ),
+    managed_oauth_service_seed!(
+        "box",
+        "box",
+        "Box",
+        "https://api.box.com/2.0",
+        "https://www.box.com"
+    ),
+    managed_oauth_service_seed!(
+        "calendly",
+        "calendly",
+        "Calendly",
+        "https://api.calendly.com",
+        "https://calendly.com"
+    ),
+    managed_oauth_service_seed!(
+        "capsule-crm",
+        "capsule-crm",
+        "Capsule CRM",
+        "https://api.capsulecrm.com/api/v2",
+        "https://capsulecrm.com"
+    ),
+    managed_oauth_service_seed!(
+        "clickup",
+        "clickup",
+        "ClickUp",
+        "https://api.clickup.com/api/v2",
+        "https://clickup.com"
+    ),
+    managed_oauth_service_seed!(
+        "crowdin",
+        "crowdin",
+        "Crowdin",
+        "https://api.crowdin.com/api/v2",
+        "https://crowdin.com"
+    ),
+    managed_oauth_service_seed!(
+        "dialpad",
+        "dialpad",
+        "Dialpad",
+        "https://dialpad.com/api/v2",
+        "https://dialpad.com"
+    ),
+    managed_oauth_service_seed!(
+        "dropbox",
+        "dropbox",
+        "Dropbox",
+        "https://api.dropboxapi.com/2",
+        "https://www.dropbox.com"
+    ),
+    managed_oauth_service_seed!(
+        "eventbrite",
+        "eventbrite",
+        "Eventbrite",
+        "https://www.eventbriteapi.com/v3",
+        "https://www.eventbrite.com"
+    ),
+    managed_oauth_service_seed!(
+        "figma",
+        "figma",
+        "Figma",
+        "https://api.figma.com/v1",
+        "https://www.figma.com"
+    ),
+    managed_oauth_service_seed!(
+        "gitlab",
+        "gitlab",
+        "GitLab",
+        "https://gitlab.com/api/v4",
+        "https://gitlab.com"
+    ),
+    managed_oauth_service_seed!(
+        "hubspot",
+        "hubspot",
+        "HubSpot",
+        "https://api.hubapi.com",
+        "https://www.hubspot.com"
+    ),
+    managed_oauth_service_seed!(
+        "intercom",
+        "intercom",
+        "Intercom",
+        "https://api.intercom.io",
+        "https://www.intercom.com"
+    ),
+    managed_oauth_service_seed!(
+        "jira",
+        "jira",
+        "Jira Cloud",
+        "https://api.atlassian.com",
+        "https://www.atlassian.com/software/jira"
+    ),
+    managed_oauth_service_seed!(
+        "linear",
+        "linear",
+        "Linear",
+        "https://api.linear.app",
+        "https://linear.app"
+    ),
+    managed_oauth_service_seed!(
+        "miro",
+        "miro",
+        "Miro",
+        "https://api.miro.com/v2",
+        "https://miro.com"
+    ),
+    managed_oauth_service_seed!(
+        "pagerduty",
+        "pagerduty",
+        "PagerDuty",
+        "https://api.pagerduty.com",
+        "https://www.pagerduty.com"
+    ),
+    managed_oauth_service_seed!(
+        "productboard",
+        "productboard",
+        "Productboard",
+        "https://api.productboard.com",
+        "https://www.productboard.com"
+    ),
+    managed_oauth_service_seed!(
+        "sentry",
+        "sentry",
+        "Sentry",
+        "https://sentry.io/api/0",
+        "https://sentry.io"
+    ),
+    managed_oauth_service_seed!(
+        "shippo",
+        "shippo",
+        "Shippo",
+        "https://api.goshippo.com",
+        "https://goshippo.com"
+    ),
+    managed_oauth_service_seed!(
+        "square",
+        "square",
+        "Square",
+        "https://connect.squareup.com/v2",
+        "https://squareup.com"
+    ),
+    managed_oauth_service_seed!(
+        "todoist",
+        "todoist",
+        "Todoist",
+        "https://api.todoist.com/api/v1",
+        "https://todoist.com"
+    ),
+    managed_oauth_service_seed!(
+        "zoom",
+        "zoom",
+        "Zoom",
+        "https://api.zoom.us/v2",
+        "https://zoom.us"
+    ),
 ];
 
 /// Apply per-slug capability / streaming overrides to pre-existing seeded
@@ -3611,6 +5866,299 @@ async fn reconcile_firecrawl_seed_metadata(
     Ok(())
 }
 
+/// Upgrade the original Workspace preset without broadening an admin's policy
+/// or replacing customized metadata. Existing Google tokens still require user
+/// consent before the newly published Gmail operations can succeed.
+async fn reconcile_google_workspace_seed(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    use super::google_workspace::GoogleProduct;
+    use crate::models::downstream_service::ProxyOperationPolicy;
+
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let Some(service) = services
+        .find_one(doc! { "slug": "api-google-workspace", "created_by": "system" })
+        .await?
+    else {
+        return Ok(());
+    };
+    let seed = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == "api-google-workspace")
+        .expect("Workspace seed");
+    for (field, old, new) in [
+        (
+            "description",
+            "Google Drive files and folders, calendars, events, and availability.",
+            Some(
+                "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+            ),
+        ),
+        (
+            "auth_notes",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars.",
+            seed.auth_notes,
+        ),
+        (
+            "known_limitations",
+            "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            Some(
+                "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            ),
+        ),
+    ] {
+        services
+            .update_one(
+                doc! { "_id": &service.id, field: old },
+                doc! { "$set": { field: new, "updated_at": bson::DateTime::from_chrono(now) } },
+            )
+            .await?;
+    }
+
+    let old_policy: ProxyOperationPolicy = serde_json::from_str(include_str!(
+        "../../specs/fixtures/google-workspace-pre-gmail-legacy-policy.json"
+    ))
+    .map_err(|error| AppError::Internal(format!("Invalid historical Workspace policy: {error}")))?;
+    let old_policy = bson::to_bson(&old_policy)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
+    let legacy_workspace = GoogleProduct::Workspace.legacy_operation_policy()?;
+    let new_policy = bson::to_bson(&legacy_workspace)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
+    services.update_one(
+        doc! { "_id": &service.id, "proxy_operation_policy": old_policy },
+        doc! { "$set": { "proxy_operation_policy": new_policy, "updated_at": bson::DateTime::from_chrono(now) } },
+    ).await?;
+
+    Ok(())
+}
+
+async fn reconcile_google_mail_send_seed(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    for (slug, old_notes) in [
+        (
+            "api-google-workspace",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read access. Select gmail.send to send or reply to email.",
+        ),
+        (
+            "api-google-gmail",
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly by default; select gmail.send to send messages and replies. Existing connections need renewed consent for added scopes.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! { "slug": slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google mail seed");
+        services.update_one(
+            doc! { "_id": &service.id, "auth_notes": old_notes },
+            doc! { "$set": { "auth_notes": seed.auth_notes, "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+        services.update_one(
+            doc! { "_id": &service.id, "description": "Read and search Gmail messages; optionally send messages and replies." },
+            doc! { "$set": { "description": seed.description, "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+    }
+    Ok(())
+}
+
+async fn reconcile_google_optional_mail_scopes_seed(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    for (slug, old_notes) in [
+        (
+            "api-google-workspace",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
+        ),
+        (
+            "api-google-gmail",
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. Gmail sending permission is required; existing connections need renewed consent.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! { "slug": slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google mail seed");
+        services.update_one(
+            doc! { "_id": &service.id, "auth_notes": old_notes },
+            doc! { "$set": { "auth_notes": seed.auth_notes, "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+    }
+    Ok(())
+}
+
+async fn reconcile_google_optional_scope_requirements(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+    for seed in DEFAULT_SERVICE_SEEDS {
+        let Some(product) = super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+        else {
+            continue;
+        };
+        let Some(service) = services
+            .find_one(doc! { "slug": seed.service_slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let default_scopes = product.default_scopes();
+        services.update_one(
+            doc! { "_id": &service.id, "required_permissions": { "$in": &default_scopes } },
+            doc! { "$pull": { "required_permissions": { "$in": &default_scopes } }, "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+        requirements.update_many(
+            doc! { "service_id": &service.id, "provider_config_id": &service.provider_config_id,
+                "scopes": { "$in": &default_scopes } },
+            doc! { "$pull": { "scopes": { "$in": &default_scopes } }, "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+    }
+    Ok(())
+}
+
+/// Compare-and-set only the exact known Workspace and Drive policies and absent maps.
+/// An operator's policy or destination map is never overwritten by startup.
+async fn reconcile_workspace_destinations(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    use super::google_workspace::GoogleProduct;
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    for (slug, product, old_description, old_limitations) in [
+        (
+            "api-google-workspace",
+            GoogleProduct::Workspace,
+            "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+            "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+        ),
+        (
+            "api-google-drive",
+            GoogleProduct::Drive,
+            "Read, upload, create, edit, export, and delete Google Drive files and folders.",
+            "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! {"slug": slug, "created_by": "system"})
+            .await?
+        else {
+            continue;
+        };
+        match super::destination_routing::effective_catalog_auth(db, &service).await {
+            Ok(auth) if auth == "bearer" => {}
+            Err(error @ (AppError::DatabaseError(_) | AppError::Internal(_))) => return Err(error),
+            _ => {
+                tracing::warn!(slug, service_id = %service.id, reason = "provider_requirement",
+                    "Google editor destinations were not activated: effective bearer provider requirement is unavailable");
+                continue;
+            }
+        }
+        let new_policy = product.operation_policy()?;
+        let old_policy = product.legacy_operation_policy()?;
+        let targets = super::destination_routing::normalize_targets(
+            slug,
+            "bearer",
+            "http",
+            super::destination_routing::workspace_targets(),
+            Some(&new_policy),
+        )?;
+        let activation = services.update_one(
+        doc! { "slug": slug, "created_by": "system", "auth_method": "none", "service_type": "http",
+            "proxy_operation_policy": bson::to_bson(&old_policy).map_err(|error| AppError::Internal(error.to_string()))?,
+            "$or": [{"destination_targets": {"$exists": false}}, {"destination_targets": {} }],
+        },
+        doc! { "$set": {
+            "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?,
+            "proxy_operation_policy": bson::to_bson(&new_policy).map_err(|error| AppError::Internal(error.to_string()))?,
+            "updated_at": bson::DateTime::from_chrono(now),
+        } },
+    ).await?;
+        if activation.matched_count == 0 {
+            let live = services.find_one(doc! {"_id": &service.id}).await?;
+            if let Some(row) = live.as_ref()
+                && !row.destination_targets.is_empty()
+                && row.destination_targets != targets
+            {
+                let target_ids: Vec<_> = row.destination_targets.keys().take(16).collect();
+                tracing::info!(slug, service_id = %service.id, ?target_ids,
+                    "Google editor custom destination map retained");
+            }
+            if live
+                .as_ref()
+                .is_none_or(|row| row.destination_targets.is_empty())
+            {
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.slug != slug => "slug",
+                    Some(row) if row.created_by != "system" => "created_by",
+                    Some(row) if row.auth_method != "none" => "auth_method",
+                    Some(row) if row.service_type != "http" => "service_type",
+                    Some(row) if row.proxy_operation_policy.as_ref() != Some(&old_policy) => {
+                        "proxy_operation_policy"
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::warn!(slug, service_id = %service.id, failed_precondition,
+                "Google editor destinations were not activated: compare-and-set precondition failed");
+            }
+        }
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google product seed");
+        // Metadata follows persisted activation and uses its own known-default CAS
+        // so an administrator's descriptions are preserved independently.
+        for (field, old, new) in [
+            ("description", Some(old_description), seed.description),
+            (
+                "known_limitations",
+                Some(old_limitations),
+                seed.known_limitations,
+            ),
+        ] {
+            let metadata = services.update_one(doc! {"_id": &service.id, "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?, field: old},doc! {"$set":{field:new,"updated_at":bson::DateTime::from_chrono(now)}}).await?;
+            if metadata.matched_count == 0 {
+                let live = services.find_one(doc! {"_id": &service.id}).await?;
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.destination_targets != targets => "destination_targets",
+                    Some(row) if field == "description" && row.description.as_deref() != old => {
+                        field
+                    }
+                    Some(row)
+                        if field == "known_limitations"
+                            && row.known_limitations.as_deref() != old =>
+                    {
+                        field
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::debug!(slug, service_id = %service.id, metadata_field = field, failed_precondition,
+                "Google editor metadata compare-and-set skipped");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
@@ -3659,6 +6207,7 @@ pub async fn seed_default_services(
     const SERVICE_NAME_RENAMES: &[(&str, &str, &str)] = &[
         // (slug, old default name, new default name)
         ("api-github", "GitHub API", "GitHub OAuth"),
+        ("api-microsoft", "Microsoft Graph API", "Microsoft 365"),
     ];
     for (slug, old_name, new_name) in SERVICE_NAME_RENAMES {
         let renamed = service_col
@@ -3673,6 +6222,32 @@ pub async fn seed_default_services(
         if renamed.modified_count > 0 {
             tracing::info!(slug, new_name, "Renamed seeded OAuth service display name");
         }
+    }
+
+    // Microsoft Graph was originally seeded as an internal implementation
+    // service. Promote that system-owned row to a user-connectable AI
+    // service on existing installations. Customized rows are left alone.
+    let microsoft_promoted = service_col
+        .update_one(
+            doc! {
+                "slug": "api-microsoft",
+                "created_by": "system",
+                "service_category": "internal",
+            },
+            doc! {
+                "$set": {
+                    "service_category": "connection",
+                    "requires_user_credential": true,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+    if microsoft_promoted.modified_count > 0 {
+        tracing::info!(
+            slug = "api-microsoft",
+            "Promoted Microsoft Graph to AI connection service"
+        );
     }
 
     // Backfill capability + streaming flags for seeded services whose
@@ -3721,6 +6296,11 @@ pub async fn seed_default_services(
     // users on a generic app page with no actionable permission selected.
     ensure_seeded_required_permissions(&service_col, now).await?;
 
+    // Existing installations receive the same additive catalog metadata.
+    service_col.update_many(
+        doc! { "slug": { "$in": ["api-github", "api-github-pat"] }, "git_http": { "$exists": false } },
+        doc! { "$set": { "git_http": { "origin": "https://github.com", "username": "x-access-token" } } },
+    ).await?;
     for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
         let provider = match provider_col
@@ -3731,10 +6311,14 @@ pub async fn seed_default_services(
             None => continue, // Provider not seeded yet, skip
         };
 
-        // Check if a downstream service already exists for this provider
-        let existing = service_col
-            .find_one(doc! { "provider_config_id": &provider.id })
-            .await?;
+        // Google product entries share one provider. Preserve the historical
+        // one-service-per-provider check for all other seeds.
+        let existing_filter = if seed.provider_slug == "google" {
+            doc! { "slug": seed.service_slug }
+        } else {
+            doc! { "provider_config_id": &provider.id }
+        };
+        let existing = service_col.find_one(existing_filter).await?;
 
         if existing.is_some() {
             continue; // Already seeded
@@ -3794,6 +6378,22 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: if super::google_workspace::GoogleProduct::from_slug(
+                seed.service_slug,
+            )
+            .is_some_and(|product| product.has_editor_destinations())
+            {
+                super::destination_routing::workspace_targets()
+            } else {
+                Default::default()
+            },
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
@@ -3804,7 +6404,9 @@ pub async fn seed_default_services(
             auth_method: service_auth_method,
             auth_key_name: service_auth_key_name,
             credential_encrypted: empty_credential,
+            platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url,
             asyncapi_spec_url: None,
             streaming_supported,
@@ -3814,6 +6416,10 @@ pub async fn seed_default_services(
             requires_user_credential: seed.requires_user_credential,
             is_active: true,
             created_by: "system".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -3828,6 +6434,15 @@ pub async fn seed_default_services(
             issues_url: None,
             capabilities,
             billing: None,
+            inference: None,
+            git_http: matches!(seed.service_slug, "api-github" | "api-github-pat").then(|| {
+                crate::models::downstream_service::GitHttp {
+                    origin: "https://github.com".into(),
+                    username: "x-access-token".into(),
+                }
+            }),
+            concurrency_policy: None,
+            inference_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),
             required_permissions: seed_required_permissions(seed.service_slug).map(|permissions| {
@@ -3844,7 +6459,11 @@ pub async fn seed_default_services(
             developer_app_ids: None,
             token_exchange_config,
             anonymous_endpoints: Vec::new(),
-            proxy_operation_policy: None,
+            proxy_operation_policy: super::google_workspace::GoogleProduct::from_slug(
+                seed.service_slug,
+            )
+            .map(|product| product.operation_policy())
+            .transpose()?,
             created_at: now,
             updated_at: now,
         };
@@ -3894,6 +6513,31 @@ pub async fn seed_default_services(
     }
 
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
+    reconcile_google_workspace_seed(db, now).await?;
+    reconcile_google_mail_send_seed(db, now).await?;
+    reconcile_google_optional_mail_scopes_seed(db, now).await?;
+    reconcile_google_optional_scope_requirements(db, now).await?;
+    reconcile_workspace_destinations(db, now).await?;
+
+    // Replace only the incorrect metadata shipped by the initial Notion seed.
+    let old_notion_limitations = "Only content the user explicitly shared with the integration is \
+        reachable; newly created pages must be shared separately. Notion \
+        enforces roughly three requests per second per integration. File \
+        uploads go to a signed URL returned by Notion, not through the \
+        proxy. Access tokens do not expire and are not refreshed.";
+    if let Some(seed) = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == "api-notion")
+    {
+        service_col.update_one(
+            doc! { "slug": "api-notion", "created_by": "system", "known_limitations": old_notion_limitations },
+            doc! { "$set": {
+                "known_limitations": seed.known_limitations,
+                "capabilities.supports_proxy_binary_upload": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        ).await?;
+    }
 
     // Migration: update name + description on existing seeded services
     // whose description still matches a known auto-generated or previously
@@ -4032,22 +6676,24 @@ pub async fn seed_default_services(
             );
         }
 
-        let user_res = db
-            .collection::<mongodb::bson::Document>(USER_SERVICES)
-            .update_many(
-                doc! {
-                    "catalog_service_id": { "$in": &telegram_service_ids },
-                    "auth_method": { "$ne": "path" },
-                },
-                doc! {
-                    "$set": {
-                        "auth_method": "path",
-                        "auth_key_name": "bot",
-                        "updated_at": bson::DateTime::from_chrono(now),
-                    }
-                },
-            )
-            .await?;
+        let user_res = crate::services::service_history::collection::<mongodb::bson::Document>(
+            db,
+            USER_SERVICES,
+        )
+        .update_many(
+            doc! {
+                "catalog_service_id": { "$in": &telegram_service_ids },
+                "auth_method": { "$ne": "path" },
+            },
+            doc! {
+                "$set": {
+                    "auth_method": "path",
+                    "auth_key_name": "bot",
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
         if user_res.modified_count > 0 {
             tracing::info!(
                 modified = user_res.modified_count,
@@ -4209,7 +6855,8 @@ async fn cleanup_legacy_gcp_sa_data(
         .collect();
 
     // Cascade-delete user-owned rows tied to the removed catalog slugs.
-    let user_service_col = db.collection::<UserService>(USER_SERVICES);
+    let user_service_col =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES);
     let user_services: Vec<UserService> = user_service_col
         .find(doc! { "slug": { "$in": REMOVED_SERVICE_SLUGS } })
         .await?
@@ -4350,16 +6997,16 @@ async fn delete_unreferenced(
     if candidate_ids.is_empty() {
         return Ok(0);
     }
-    let still_referenced: std::collections::HashSet<String> = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .distinct(
-            referencing_field,
-            doc! { referencing_field: { "$in": candidate_ids } },
-        )
-        .await?
-        .into_iter()
-        .filter_map(|b| b.as_str().map(str::to_string))
-        .collect();
+    let still_referenced: std::collections::HashSet<String> =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .distinct(
+                referencing_field,
+                doc! { referencing_field: { "$in": candidate_ids } },
+            )
+            .await?
+            .into_iter()
+            .filter_map(|b| b.as_str().map(str::to_string))
+            .collect();
     let orphaned: Vec<&String> = candidate_ids
         .iter()
         .filter(|id| !still_referenced.contains(*id))
@@ -4367,11 +7014,12 @@ async fn delete_unreferenced(
     if orphaned.is_empty() {
         return Ok(0);
     }
-    Ok(db
-        .collection::<mongodb::bson::Document>(collection)
-        .delete_many(doc! { "_id": { "$in": &orphaned } })
-        .await?
-        .deleted_count)
+    Ok(
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, collection)
+            .delete_many(doc! { "_id": { "$in": &orphaned } })
+            .await?
+            .deleted_count,
+    )
 }
 
 /// Input for OAuth2 provider configuration fields.
@@ -4414,6 +7062,9 @@ pub struct TelegramWidgetProviderInput {
 /// Fields that can be updated on a provider config.
 #[derive(Default)]
 pub struct ProviderUpdateInput {
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub is_active: Option<bool>,
@@ -4425,6 +7076,7 @@ pub struct ProviderUpdateInput {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: Option<bool>,
+    pub authorization_nonce_required: Option<bool>,
     pub device_code_url: Option<String>,
     pub device_token_url: Option<String>,
     pub device_verification_url: Option<String>,
@@ -4444,6 +7096,41 @@ pub struct ProviderUpdateInput {
     /// are rejected. Incident-response path for a compromised connector
     /// secret (docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md B5).
     pub clear_client_credentials: Option<bool>,
+}
+
+/// Only fence values whose concurrent change could invalidate nonce validation.
+/// Disabled URL edits may race with each other; explicit disabling needs no guard.
+fn authorization_nonce_update_guard(
+    existing: &ProviderConfig,
+    updates: &ProviderUpdateInput,
+) -> Option<bson::Document> {
+    if existing.provider_type != "oauth2"
+        || updates.authorization_nonce_required == Some(false)
+        || (updates.authorization_nonce_required.is_none()
+            && updates.authorization_url.is_none()
+            && updates.client_id_param_name.is_none())
+    {
+        return None;
+    }
+    let mut guard = doc! {
+        "authorization_nonce_required": if existing.authorization_nonce_required {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! { "$ne": true })
+        },
+    };
+    if updates
+        .authorization_nonce_required
+        .unwrap_or(existing.authorization_nonce_required)
+    {
+        // Compare actual fields as well as updated_at: BSON clocks have ms precision.
+        guard.insert("authorization_url", existing.authorization_url.as_deref());
+        guard.insert(
+            "client_id_param_name",
+            existing.client_id_param_name.as_deref(),
+        );
+    }
+    Some(guard)
 }
 
 /// Create a new provider configuration. Admin only.
@@ -4489,6 +7176,10 @@ pub async fn create_provider(
         device_code_format,
         client_id_param_name,
         None,
+        None,
+        HashMap::new(),
+        true,
+        false,
     )
     .await
 }
@@ -4514,7 +7205,30 @@ pub async fn create_provider_with_revocation(
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
     revocation: Option<RevocationConfig>,
+    token_request_encoding: Option<String>,
+    oauth_request_headers: HashMap<String, String>,
+    supports_oauth_scopes: bool,
+    authorization_nonce_required: bool,
 ) -> AppResult<ProviderConfig> {
+    if authorization_nonce_required && provider_type != "oauth2" {
+        return Err(AppError::ValidationError(
+            "authorization_nonce_required is only supported for hosted oauth2 providers"
+                .to_string(),
+        ));
+    }
+    if provider_type == "oauth2" {
+        super::oauth_flow::validate_authorization_nonce_config(
+            authorization_nonce_required,
+            oauth_config
+                .as_ref()
+                .map(|config| config.authorization_url.as_str()),
+            client_id_param_name,
+        )?;
+    }
+    validate_oauth_request_options(
+        token_request_encoding.as_deref(),
+        Some(&oauth_request_headers),
+    )?;
     let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
@@ -4542,6 +7256,7 @@ pub async fn create_provider_with_revocation(
     let revocation = match (revocation, oauth_config.as_ref()) {
         (Some(revocation), _) => Some(revocation),
         (None, Some(oauth)) => oauth.revocation_url.as_ref().map(|url| RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: url.clone(),
             auth: "inherit".to_string(),
@@ -4671,9 +7386,13 @@ pub async fn create_provider_with_revocation(
         is_active: true,
         credential_mode: credential_mode.to_string(),
         token_endpoint_auth_method: token_endpoint_auth_method.to_string(),
+        token_request_encoding,
+        oauth_request_headers,
+        supports_oauth_scopes,
         extra_auth_params,
         device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
         client_id_param_name: normalized_client_id_param_name,
+        authorization_nonce_required,
         requires_gateway_url: false,
         created_by: created_by.to_string(),
         revocation_seed_version: i32::from(has_admin_revocation),
@@ -4692,9 +7411,16 @@ pub async fn create_provider_with_revocation(
 
 /// List all active providers (visible to all authenticated users).
 pub async fn list_providers(db: &mongodb::Database) -> AppResult<Vec<ProviderConfig>> {
+    list_providers_filtered(db, doc! {"is_active": true}).await
+}
+
+pub async fn list_providers_filtered(
+    db: &mongodb::Database,
+    filter: bson::Document,
+) -> AppResult<Vec<ProviderConfig>> {
     let providers: Vec<ProviderConfig> = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find(doc! { "is_active": true })
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()
@@ -4730,8 +7456,28 @@ pub async fn update_provider(
     provider_id: &str,
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
+    update_provider_if_unchanged(db, encryption_keys, provider_id, updates, None).await
+}
+
+/// `update_provider` that applies only while the provider's `updated_at`
+/// still equals `observed_updated_at`, so a write authorized against one
+/// version of the provider (for example its OAuth client being absent)
+/// cannot land on a version changed in between. A mismatch is a Conflict.
+pub async fn update_provider_if_unchanged(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    provider_id: &str,
+    updates: ProviderUpdateInput,
+    observed_updated_at: Option<DateTime<Utc>>,
+) -> AppResult<ProviderConfig> {
     // Verify exists
     let existing = get_provider(db, provider_id).await?;
+    if observed_updated_at.is_some_and(|observed| observed != existing.updated_at) {
+        return Err(AppError::Conflict(
+            "The provider changed while this update was being checked; reload and try again"
+                .to_string(),
+        ));
+    }
     if existing.provider_type == "telegram_widget"
         && let Some(ref mode) = updates.credential_mode
         && mode != "admin"
@@ -4748,14 +7494,42 @@ pub async fn update_provider(
             "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
         ));
     }
+    if updates.authorization_nonce_required == Some(true) && existing.provider_type != "oauth2" {
+        return Err(AppError::ValidationError(
+            "authorization_nonce_required is only supported for hosted oauth2 providers"
+                .to_string(),
+        ));
+    }
+    if existing.provider_type == "oauth2" {
+        super::oauth_flow::validate_authorization_nonce_config(
+            updates
+                .authorization_nonce_required
+                .unwrap_or(existing.authorization_nonce_required),
+            updates
+                .authorization_url
+                .as_deref()
+                .or(existing.authorization_url.as_deref()),
+            updates
+                .client_id_param_name
+                .as_deref()
+                .or(existing.client_id_param_name.as_deref()),
+        )?;
+    }
     let revocation_update = match updates.revocation.clone() {
         Some(explicit) => Some(explicit),
         None => updates.revocation_url.as_ref().map(|url| {
             Some(RevocationConfig {
-                style: "rfc7009".to_string(),
                 url: url.clone(),
-                auth: "inherit".to_string(),
-                revokes_grant: false,
+                ..existing
+                    .revocation
+                    .clone()
+                    .unwrap_or_else(|| RevocationConfig {
+                        request_encoding: "form".to_string(),
+                        style: "rfc7009".to_string(),
+                        url: url.clone(),
+                        auth: "inherit".to_string(),
+                        revokes_grant: false,
+                    })
             })
         }),
     };
@@ -4819,7 +7593,11 @@ pub async fn update_provider(
         set_doc.insert("name", name.as_str());
     }
     if let Some(ref desc) = updates.description {
-        set_doc.insert("description", desc.as_str());
+        if desc.trim().is_empty() {
+            unset_doc.insert("description", "");
+        } else {
+            set_doc.insert("description", desc.trim());
+        }
     }
     if let Some(active) = updates.is_active {
         set_doc.insert("is_active", active);
@@ -4882,32 +7660,67 @@ pub async fn update_provider(
             },
         );
     }
+    if let Some(required) = updates.authorization_nonce_required {
+        set_doc.insert("authorization_nonce_required", required);
+    }
     if let Some(pkce) = updates.supports_pkce {
         set_doc.insert("supports_pkce", pkce);
     }
     if let Some(ref url) = updates.device_code_url {
-        set_doc.insert("device_code_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_code_url", "");
+        } else {
+            set_doc.insert("device_code_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_token_url {
-        set_doc.insert("device_token_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_token_url", "");
+        } else {
+            set_doc.insert("device_token_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_verification_url {
-        set_doc.insert("device_verification_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_verification_url", "");
+        } else {
+            set_doc.insert("device_verification_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.hosted_callback_url {
-        set_doc.insert("hosted_callback_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("hosted_callback_url", "");
+        } else {
+            set_doc.insert("hosted_callback_url", url.as_str());
+        }
     }
     if let Some(ref instr) = updates.api_key_instructions {
-        set_doc.insert("api_key_instructions", instr.as_str());
+        if instr.trim().is_empty() {
+            unset_doc.insert("api_key_instructions", "");
+        } else {
+            set_doc.insert("api_key_instructions", instr.trim());
+        }
     }
     if let Some(ref url) = updates.api_key_url {
-        set_doc.insert("api_key_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("api_key_url", "");
+        } else {
+            set_doc.insert("api_key_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.icon_url {
-        set_doc.insert("icon_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("icon_url", "");
+        } else {
+            set_doc.insert("icon_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.documentation_url {
-        set_doc.insert("documentation_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("documentation_url", "");
+        } else {
+            set_doc.insert("documentation_url", url.trim());
+        }
     }
     if let Some(ref mode) = updates.credential_mode {
         let valid_modes = ["admin", "user", "both"];
@@ -4929,6 +7742,25 @@ pub async fn update_provider(
             )));
         }
         set_doc.insert("token_endpoint_auth_method", method.as_str());
+    }
+    validate_oauth_request_options(
+        updates.token_request_encoding.as_deref(),
+        updates.oauth_request_headers.as_ref(),
+    )?;
+    if let Some(ref encoding) = updates.token_request_encoding {
+        set_doc.insert("token_request_encoding", encoding);
+    }
+    if let Some(ref headers) = updates.oauth_request_headers {
+        set_doc.insert(
+            "oauth_request_headers",
+            headers
+                .iter()
+                .map(|(key, value)| (key.clone(), bson::Bson::String(value.clone())))
+                .collect::<bson::Document>(),
+        );
+    }
+    if let Some(supported) = updates.supports_oauth_scopes {
+        set_doc.insert("supports_oauth_scopes", supported);
     }
 
     if let Some(ref params) = updates.extra_auth_params {
@@ -4952,7 +7784,11 @@ pub async fn update_provider(
         } else {
             name.clone()
         };
-        set_doc.insert("client_id_param_name", value);
+        if value.trim().is_empty() {
+            unset_doc.insert("client_id_param_name", "");
+        } else {
+            set_doc.insert("client_id_param_name", value.trim());
+        }
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -4965,21 +7801,61 @@ pub async fn update_provider(
     if !unset_doc.is_empty() {
         update_doc.insert("$unset", unset_doc);
     }
+    let mut filter = doc! { "_id": provider_id };
+    if let Some(observed) = observed_updated_at {
+        filter.insert("updated_at", bson::DateTime::from_chrono(observed));
+    }
+
+    let nonce_guard = authorization_nonce_update_guard(&existing, &updates);
+    let nonce_config_update = nonce_guard.is_some();
+    if let Some(guard) = nonce_guard {
+        filter.extend(guard);
+    }
 
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(doc! { "_id": provider_id }, update_doc)
+        .find_one_and_update(filter, update_doc)
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
                 .build(),
         )
-        .await?
-        .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
+        .await?;
+    let Some(updated) = updated else {
+        return Err(provider_update_miss_error(
+            db,
+            provider_id,
+            observed_updated_at.is_some(),
+            nonce_config_update,
+        )
+        .await?);
+    };
 
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 
     Ok(updated)
+}
+
+async fn provider_update_miss_error(
+    db: &mongodb::Database,
+    provider_id: &str,
+    version_fenced: bool,
+    nonce_config_update: bool,
+) -> AppResult<AppError> {
+    if !version_fenced
+        && (!nonce_config_update
+            || db
+                .collection::<ProviderConfig>(COLLECTION_NAME)
+                .find_one(doc! { "_id": provider_id })
+                .await?
+                .is_none())
+    {
+        return Ok(AppError::NotFound("Provider not found".to_string()));
+    }
+    Ok(AppError::Conflict(
+        "The provider changed while this update was being checked; reload and try again"
+            .to_string(),
+    ))
 }
 
 pub(crate) fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
@@ -5076,7 +7952,8 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, MANAGED_OAUTH_PROVIDER_SEEDS,
+        NOTION_DEFAULT_HEADERS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
         normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
         seed_capability_override,
     };
@@ -5279,6 +8156,393 @@ mod tests {
     }
 
     #[test]
+    fn notion_seed_carries_required_version_header() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|s| s.service_slug == "api-notion")
+            .expect("api-notion seed should exist");
+
+        assert_eq!(seed.provider_slug, "notion");
+        assert_eq!(seed.base_url, "https://api.notion.com");
+        assert_eq!(seed.injection_method, "bearer");
+        assert_eq!(seed.injection_key, "Authorization");
+        // Delegated provider-managed auth: the ServiceProviderRequirement
+        // drives injection, so the service itself must not carry a static
+        // auth method.
+        assert!(seed.service_auth_method.is_none());
+        assert!(seed.requires_user_credential);
+        assert_eq!(seed.service_category, "connection");
+
+        let headers = seed
+            .default_request_headers
+            .expect("api-notion must carry seeded default headers");
+        let names: Vec<&str> = headers.iter().map(|h| h.name).collect();
+        assert!(
+            names.contains(&"Notion-Version"),
+            "Notion-Version must be seeded (Notion rejects requests without it); got {names:?}"
+        );
+
+        let version = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("notion-version"))
+            .expect("Notion-Version present");
+        assert_eq!(version.value, "2022-06-28");
+        assert!(
+            version.overridable,
+            "Notion-Version must be overridable so a caller pinning another API version wins"
+        );
+        assert!(!version.sensitive, "an API version header is not a secret");
+        assert_eq!(NOTION_DEFAULT_HEADERS.len(), 2);
+    }
+
+    #[test]
+    fn seed_capability_override_notion_has_correct_flags() {
+        let (caps, streaming) =
+            super::seed_capability_override("api-notion").expect("api-notion has an override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(
+            !caps.supports_websocket,
+            "Notion exposes no WebSocket surface"
+        );
+        assert!(
+            !caps.supports_streaming,
+            "Notion responses are not streamed"
+        );
+        assert!(
+            caps.supports_proxy_binary_upload,
+            "Notion accepts multipart uploads through api.notion.com"
+        );
+        assert!(!streaming);
+    }
+
+    #[test]
+    fn posthog_catalog_regions_and_managed_scopes_match() {
+        for (provider_slug, service_slug, host) in [
+            ("posthog", "api-posthog", "https://us.posthog.com"),
+            ("posthog-eu", "api-posthog-eu", "https://eu.posthog.com"),
+        ] {
+            let seed = DEFAULT_SERVICE_SEEDS
+                .iter()
+                .find(|seed| seed.service_slug == service_slug)
+                .unwrap();
+            assert_eq!(seed.provider_slug, provider_slug);
+            assert_eq!(seed.base_url, host);
+            assert_eq!(seed.injection_method, "bearer");
+            assert_eq!(seed.service_category, "connection");
+            assert!(seed.requires_user_credential);
+            let allowed =
+                crate::services::scope_catalog::platform_scope_allowlist(provider_slug).unwrap();
+            let menu = crate::services::scope_catalog::for_provider(provider_slug).unwrap();
+            for scope in crate::services::scope_catalog::POSTHOG_DEFAULT_SCOPES {
+                assert!(allowed.contains(scope));
+                assert!(
+                    menu.iter()
+                        .any(|entry| entry.scope == *scope && !entry.sensitive)
+                );
+            }
+            assert!(!allowed.contains(&"feature_flag:write"));
+        }
+    }
+
+    #[tokio::test]
+    async fn posthog_oauth_seeds_preserve_operator_configuration() {
+        let db = seed_default_catalog("posthog_oauth_seeds")
+            .await
+            .expect("PostHog seed test requires MongoDB");
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        for (slug, host) in [
+            ("posthog", "https://us.posthog.com"),
+            ("posthog-eu", "https://eu.posthog.com"),
+        ] {
+            let provider = providers
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                provider.authorization_url.as_deref(),
+                Some(format!("{host}/oauth/authorize/").as_str())
+            );
+            assert_eq!(
+                provider.token_url.as_deref(),
+                Some(format!("{host}/oauth/token/").as_str())
+            );
+            assert_eq!(provider.token_endpoint_auth_method, "client_secret_post");
+            assert_eq!(provider.token_request_encoding.as_deref(), Some("form"));
+            assert!(provider.supports_pkce);
+            assert_eq!(provider.credential_mode, "both");
+            assert_eq!(
+                provider.revocation.as_ref().unwrap().url,
+                format!("{host}/oauth/revoke/")
+            );
+            providers
+                .update_one(
+                    doc! { "_id": &provider.id },
+                    doc! { "$set": {
+                        "credential_mode": "admin", "default_scopes": ["project:read"]
+                    }},
+                )
+                .await
+                .unwrap();
+        }
+        super::seed_default_providers(&db, &test_encryption_keys())
+            .await
+            .unwrap();
+        for slug in ["posthog", "posthog-eu"] {
+            let provider = providers
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.credential_mode, "admin");
+            assert_eq!(provider.default_scopes.unwrap(), vec!["project:read"]);
+            assert_eq!(
+                providers
+                    .count_documents(doc! { "slug": slug })
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_default_providers_seeds_notion_for_managed_oauth() {
+        let db = seed_default_catalog("prov_seed_notion")
+            .await
+            .expect("Notion seed test requires MongoDB");
+        let provider = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .find_one(doc! { "slug": "notion" })
+            .await
+            .expect("query notion provider")
+            .expect("notion provider seeded");
+
+        assert_eq!(provider.provider_type, "oauth2");
+        assert!(provider.is_active);
+        // Managed one-click by default once ops provisions a client; BYO
+        // still wins when a user supplies their own integration.
+        assert_eq!(provider.credential_mode, "both");
+        // Notion authenticates the token endpoint with HTTP Basic.
+        assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+        assert_eq!(provider.token_request_encoding.as_deref(), Some("json"));
+        assert_eq!(
+            provider.oauth_request_headers["Notion-Version"],
+            "2022-06-28"
+        );
+        assert!(!provider.supports_oauth_scopes);
+        assert_eq!(
+            provider.revocation.as_ref().unwrap().request_encoding,
+            "json"
+        );
+        // Notion's OAuth implementation has no PKCE support.
+        assert!(!provider.supports_pkce);
+        // Notion has no scope parameter at all -- capabilities are fixed on
+        // the integration and page access is chosen in Notion's own picker.
+        assert!(
+            provider.default_scopes.is_none(),
+            "Notion takes no scope parameter; sending one is a protocol error"
+        );
+        // `owner=user` is mandatory on the authorize request.
+        assert_eq!(
+            provider
+                .extra_auth_params
+                .as_ref()
+                .and_then(|params| params.get("owner"))
+                .map(String::as_str),
+            Some("user")
+        );
+        // Fresh installs must not be reverted to BYO-only on restart.
+        assert!(
+            !super::SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS.contains(&"notion"),
+            "notion must stay out of the user-mode reversion migration so ops updates stick"
+        );
+        // No platform scope allowlist is required precisely because there is
+        // no scope parameter to gate (spec D5).
+        assert!(crate::services::scope_catalog::platform_scope_allowlist("notion").is_none());
+    }
+
+    #[tokio::test]
+    async fn notion_seed_repairs_initial_rows_and_preserves_admin_oauth_settings() {
+        let db = seed_default_catalog("notion_seed_upgrade")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        providers.update_one(doc! { "slug": "notion" }, doc! { "$unset": {
+            "token_request_encoding": "", "oauth_request_headers": "", "supports_oauth_scopes": "", "revocation.request_encoding": ""
+        } }).await.unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let repaired = providers
+            .find_one(doc! { "slug": "notion" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.token_request_encoding.as_deref(), Some("json"));
+        assert_eq!(
+            repaired.oauth_request_headers["Notion-Version"],
+            "2022-06-28"
+        );
+        assert!(!repaired.supports_oauth_scopes);
+        assert_eq!(
+            repaired.revocation.as_ref().unwrap().request_encoding,
+            "json"
+        );
+        let headers = std::collections::HashMap::from([(
+            "Notion-Version".to_string(),
+            "2026-03-11".to_string(),
+        )]);
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &repaired.id,
+            super::ProviderUpdateInput {
+                token_request_encoding: Some("form".into()),
+                oauth_request_headers: Some(headers.clone()),
+                supports_oauth_scopes: Some(true),
+                credential_mode: Some("admin".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.token_request_encoding.as_deref(), Some("form"));
+        for _ in 0..2 {
+            super::seed_default_providers(&db, &enc).await.unwrap();
+        }
+        let preserved = providers
+            .find_one(doc! { "_id": &repaired.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.token_request_encoding.as_deref(), Some("form"));
+        assert_eq!(preserved.oauth_request_headers, headers);
+        assert!(preserved.supports_oauth_scopes);
+        assert_eq!(preserved.credential_mode, "admin");
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &repaired.id,
+            super::ProviderUpdateInput {
+                token_request_encoding: Some("xml".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn oauth_request_options_reject_invalid_encoding_and_unsafe_headers() {
+        for encoding in ["form", "json"] {
+            assert!(super::validate_oauth_request_options(Some(encoding), None).is_ok());
+        }
+        for encoding in ["", "JSON", "xml"] {
+            assert!(super::validate_oauth_request_options(Some(encoding), None).is_err());
+        }
+        for (name, value) in [
+            ("Authorization", "Basic forbidden"),
+            ("Content-Type", "text/plain"),
+            ("Host", "elsewhere.example"),
+            ("Bad Header", "value"),
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+            ("Notion-Version", "2022-02-30"),
+            ("Notion-Version", "2022-06-28\r\nInjected: value"),
+        ] {
+            let headers = std::collections::HashMap::from([(name.to_string(), value.to_string())]);
+            assert!(super::validate_oauth_request_options(None, Some(&headers)).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_header_updates_reject_secrets_without_changing_stored_metadata() {
+        let db = seed_default_catalog("oauth_headers_update")
+            .await
+            .expect("MongoDB required");
+        let provider = super::get_provider_by_slug(&db, "notion").await.unwrap();
+        for (name, value) in [
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+        ] {
+            let error = super::update_provider(
+                &db,
+                &test_encryption_keys(),
+                &provider.id,
+                super::ProviderUpdateInput {
+                    oauth_request_headers: Some(std::collections::HashMap::from([(
+                        name.into(),
+                        value.into(),
+                    )])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, crate::errors::AppError::ValidationError(_)));
+            assert_eq!(
+                super::get_provider(&db, &provider.id)
+                    .await
+                    .unwrap()
+                    .oauth_request_headers,
+                provider.oauth_request_headers
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_revocation_url_update_preserves_options_and_allows_explicit_encoding() {
+        let db = seed_default_catalog("revocation_url_options")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let provider = super::get_provider_by_slug(&db, "notion").await.unwrap();
+        let mut config = provider.revocation.unwrap();
+        config.auth = "basic".into();
+        config.revokes_grant = true;
+        super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(config.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        config.url = "https://api.notion.com/v1/oauth/revoke?updated=1".into();
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation_url: Some(config.url.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.revocation.as_ref(), Some(&config));
+        assert_eq!(updated.revocation_url, Some(config.url.clone()));
+        config.request_encoding = "form".into();
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(config.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.revocation, Some(config));
+    }
+
+    #[test]
     fn openrouter_seed_carries_attribution_headers() {
         let seed = DEFAULT_SERVICE_SEEDS
             .iter()
@@ -5455,9 +8719,13 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -6469,6 +9737,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stripe_seed_uses_stripe_apps_oauth_and_curated_read_operations() {
+        let provider = MANAGED_OAUTH_PROVIDER_SEEDS
+            .iter()
+            .find(|seed| seed.slug == "stripe")
+            .unwrap();
+        assert_eq!(
+            provider.authorization_url,
+            "https://marketplace.stripe.com/oauth/v2/authorize"
+        );
+        assert_eq!(provider.token_url, "https://api.stripe.com/v1/oauth/token");
+        assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+        assert_eq!(provider.default_scopes, None);
+        assert!(!provider.supports_pkce);
+        let service = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-stripe")
+            .unwrap();
+        assert_eq!(service.base_url, "https://api.stripe.com");
+        assert!(service.requires_user_credential);
+        let spec = crate::services::catalog_spec_registry::spec_for_slug("api-stripe").unwrap();
+        let paths = spec["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 8);
+        for item in paths.values() {
+            assert_eq!(item.as_object().unwrap().len(), 1);
+            assert_eq!(item["get"]["x-aevatar-tool"]["readOnly"], true);
+        }
+        assert_eq!(
+            crate::services::scope_catalog::platform_scope_allowlist("stripe"),
+            None
+        );
+    }
+
+    #[test]
+    fn managed_oauth_registry_is_static_and_excludes_google_super() {
+        let mut slugs = std::collections::HashSet::new();
+        for seed in MANAGED_OAUTH_PROVIDER_SEEDS {
+            assert!(seed.authorization_url.starts_with("https://"));
+            assert!(seed.token_url.starts_with("https://"));
+            assert!(
+                slugs.insert(seed.slug),
+                "duplicate managed OAuth provider slug: {}",
+                seed.slug
+            );
+            assert_ne!(seed.slug, "googlesuper");
+        }
+        assert!(slugs.len() >= 20);
+    }
+
+    #[test]
+    fn managed_oauth_services_have_matching_provider_seeds() {
+        for seed in DEFAULT_SERVICE_SEEDS {
+            if !seed.service_slug.starts_with("api-") {
+                continue;
+            }
+            let Some(provider) = MANAGED_OAUTH_PROVIDER_SEEDS
+                .iter()
+                .find(|provider| provider.slug == seed.provider_slug)
+            else {
+                continue;
+            };
+            assert_eq!(
+                seed.service_slug,
+                format!("api-{}", provider.slug),
+                "managed OAuth service slug must be derived from its provider"
+            );
+            assert!(seed.requires_user_credential);
+        }
+    }
+
     // ── update_provider integration tests ──────────────────────────
 
     #[tokio::test]
@@ -6518,6 +9856,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6528,6 +9867,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6591,6 +9933,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6601,6 +9944,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6635,6 +9981,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6645,6 +9992,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6711,6 +10061,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6721,6 +10072,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("invalid_mode".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6779,6 +10133,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6789,6 +10144,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6832,6 +10190,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6842,6 +10201,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6900,6 +10262,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6910,6 +10273,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: Some("bearer_magic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -6968,6 +10334,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -6978,6 +10345,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: Some("magic".to_string()),
                 client_id_param_name: None,
@@ -7045,6 +10415,7 @@ mod tests {
                 client_id: Some("my-client-id".to_string()),
                 client_secret: Some("my-secret".to_string()),
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -7055,6 +10426,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7128,6 +10502,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: Some(true),
+                authorization_nonce_required: None,
                 device_code_url: Some("https://new.example.com/device".to_string()),
                 device_token_url: Some("https://new.example.com/devtoken".to_string()),
                 device_verification_url: Some("https://new.example.com/verify".to_string()),
@@ -7138,6 +10513,9 @@ mod tests {
                 documentation_url: Some("https://new.example.com/docs".to_string()),
                 credential_mode: Some("both".to_string()),
                 token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: Some(std::collections::HashMap::from([(
                     "prompt".to_string(),
                     "consent".to_string(),
@@ -7201,6 +10579,341 @@ mod tests {
         assert!(updated.extra_auth_params.is_some());
     }
 
+    #[tokio::test]
+    async fn authorization_nonce_provider_crud_preserves_omissions_and_validates_effective_config()
+    {
+        let db = connect_test_database("auth_nonce_crud")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let provider = create_oauth_provider_with_revocation(&db, None, None).await;
+        assert!(!provider.authorization_nonce_required);
+        let update =
+            |required, url: Option<&str>, param: Option<&str>| super::ProviderUpdateInput {
+                authorization_nonce_required: required,
+                authorization_url: url.map(str::to_string),
+                client_id_param_name: param.map(str::to_string),
+                ..Default::default()
+            };
+        for (url, param) in [
+            (Some("https://example.com/auth?nonce=static"), None),
+            (Some("https://example.com/auth?%6eonce="), None),
+            (Some("https://example.com/auth#fragment"), None),
+            (None, Some(" nonce ")),
+        ] {
+            assert!(matches!(
+                super::update_provider(&db, &enc, &provider.id, update(Some(true), url, param))
+                    .await,
+                Err(AppError::ValidationError(_))
+            ));
+            assert!(
+                !super::get_provider(&db, &provider.id)
+                    .await
+                    .unwrap()
+                    .authorization_nonce_required
+            );
+        }
+        super::update_provider(&db, &enc, &provider.id, update(Some(true), None, None))
+            .await
+            .unwrap();
+        let renamed = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                name: Some("Older client changed name".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(renamed.authorization_nonce_required);
+        for changes in [
+            update(None, Some("https://example.com/auth?nonce=static"), None),
+            update(None, Some("https://example.com/auth?%6eonce="), None),
+            update(None, Some("https://example.com/auth#fragment"), None),
+            update(None, None, Some(" nonce ")),
+        ] {
+            assert!(matches!(
+                super::update_provider(&db, &enc, &provider.id, changes).await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        let cleared =
+            super::update_provider(&db, &enc, &provider.id, update(None, None, Some("  ")))
+                .await
+                .unwrap();
+        assert_eq!(cleared.client_id_param_name, None);
+        let disabled = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            update(
+                Some(false),
+                Some("https://example.com/auth?nonce=legacy#legacy"),
+                Some(" nonce "),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!disabled.authorization_nonce_required);
+        assert_eq!(disabled.client_id_param_name.as_deref(), Some("nonce"));
+        assert!(
+            super::update_provider(&db, &enc, &provider.id, update(Some(true), None, None))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_create_rejects_conflicts_before_persistence_and_non_oauth2() {
+        let db = connect_test_database("auth_nonce_create")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for (provider_type, required, endpoint, param, valid) in [
+            ("oauth2", true, "https://example.com/auth", None, true),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth?nonce=x",
+                None,
+                false,
+            ),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth?%6eonce=x",
+                None,
+                false,
+            ),
+            ("oauth2", true, "https://example.com/auth#x", None, false),
+            (
+                "oauth2",
+                true,
+                "https://example.com/auth",
+                Some(" nonce "),
+                false,
+            ),
+            (
+                "oauth2",
+                false,
+                "https://example.com/auth?nonce=x#x",
+                Some("nonce"),
+                true,
+            ),
+            ("api_key", true, "https://example.com/auth", None, false),
+            ("api_key", false, "https://example.com/auth", None, true),
+            ("device_code", true, "https://example.com/auth", None, false),
+            (
+                "telegram_widget",
+                true,
+                "https://example.com/auth",
+                None,
+                false,
+            ),
+        ] {
+            let slug = Uuid::new_v4().to_string();
+            let created = super::create_provider_with_revocation(
+                &db,
+                &enc,
+                "Nonce test",
+                &slug,
+                provider_type,
+                if provider_type == "oauth2" {
+                    "user"
+                } else {
+                    "admin"
+                },
+                "client_secret_post",
+                (provider_type == "oauth2").then(|| super::OAuthProviderInput {
+                    authorization_url: endpoint.into(),
+                    token_url: "https://example.com/token".into(),
+                    revocation_url: None,
+                    default_scopes: Some(vec!["hubstaff:read".into()]),
+                    client_id: None,
+                    client_secret: None,
+                    supports_pkce: true,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "admin",
+                None,
+                None,
+                param,
+                None,
+                None,
+                Default::default(),
+                true,
+                required,
+            )
+            .await;
+            assert_eq!(
+                created.is_ok(),
+                valid,
+                "{provider_type} {required} {endpoint} {param:?}"
+            );
+            assert_eq!(
+                db.collection::<ProviderConfig>(COLLECTION_NAME)
+                    .count_documents(doc! {"slug":&slug})
+                    .await
+                    .unwrap(),
+                u64::from(valid)
+            );
+            if let Ok(provider) = created {
+                assert_eq!(provider.authorization_nonce_required, required);
+                if provider_type == "api_key" {
+                    assert!(matches!(
+                        super::update_provider(
+                            &db,
+                            &enc,
+                            &provider.id,
+                            super::ProviderUpdateInput {
+                                authorization_nonce_required: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await,
+                        Err(AppError::ValidationError(_))
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_update_guards_detect_concurrent_enable_and_config_edits() {
+        let db = connect_test_database("auth_nonce_guards")
+            .await
+            .expect("MongoDB required");
+        let provider = create_oauth_provider_with_revocation(&db, None, None).await;
+        let url_edit = super::ProviderUpdateInput {
+            authorization_url: Some("https://example.com/new".into()),
+            ..Default::default()
+        };
+        let enable = super::ProviderUpdateInput {
+            authorization_nonce_required: Some(true),
+            ..Default::default()
+        };
+        let mut disabled_guard =
+            super::authorization_nonce_update_guard(&provider, &url_edit).unwrap();
+        assert_eq!(
+            disabled_guard,
+            doc! {"authorization_nonce_required":{"$ne":true}}
+        );
+        let mut enabled_guard =
+            super::authorization_nonce_update_guard(&provider, &enable).unwrap();
+        assert!(enabled_guard.contains_key("authorization_url"));
+        assert!(enabled_guard.contains_key("client_id_param_name"));
+        assert!(
+            super::authorization_nonce_update_guard(
+                &provider,
+                &super::ProviderUpdateInput::default()
+            )
+            .is_none()
+        );
+        assert!(
+            super::authorization_nonce_update_guard(
+                &provider,
+                &super::ProviderUpdateInput {
+                    authorization_nonce_required: Some(false),
+                    authorization_url: Some("https://example.com/auth?nonce=legacy".into()),
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
+        disabled_guard.insert("_id", &provider.id);
+        enabled_guard.insert("_id", &provider.id);
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        // Keep updated_at identical: actual field comparisons must detect drift.
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"authorization_url":"https://example.com/concurrent?nonce=static"}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                enabled_guard,
+                doc! {"$set":{"authorization_nonce_required":true}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        // Ordinary disabled edits retain their previous concurrency behavior.
+        assert_eq!(
+            rows.update_one(
+                disabled_guard.clone(),
+                doc! {"$set":{"authorization_url":"https://example.com/other"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            1
+        );
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"authorization_nonce_required":true}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                disabled_guard,
+                doc! {"$set":{"authorization_url":"https://example.com/auth?nonce=static"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        let enabled = super::get_provider(&db, &provider.id).await.unwrap();
+        let mut edit_guard = super::authorization_nonce_update_guard(&enabled, &url_edit).unwrap();
+        edit_guard.insert("_id", &provider.id);
+        rows.update_one(
+            doc! {"_id":&provider.id},
+            doc! {"$set":{"client_id_param_name":"app_id"}},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.update_one(
+                edit_guard,
+                doc! {"$set":{"authorization_url":"https://example.com/new"}}
+            )
+            .await
+            .unwrap()
+            .matched_count,
+            0
+        );
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, false, true)
+                .await
+                .unwrap(),
+            AppError::Conflict(_)
+        ));
+        rows.delete_one(doc! {"_id":&provider.id}).await.unwrap();
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, false, true)
+                .await
+                .unwrap(),
+            AppError::NotFound(_)
+        ));
+        assert!(matches!(
+            super::provider_update_miss_error(&db, &provider.id, true, true)
+                .await
+                .unwrap(),
+            AppError::Conflict(_)
+        ));
+    }
+
     async fn create_oauth_provider_with_revocation(
         db: &mongodb::Database,
         legacy_revocation_url: Option<&str>,
@@ -7236,6 +10949,10 @@ mod tests {
             None,
             None,
             revocation,
+            None,
+            Default::default(),
+            true,
+            false,
         )
         .await
         .expect("provider should be created")
@@ -7252,6 +10969,7 @@ mod tests {
             &db,
             None,
             Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://example.com/revoke-rfc7009".to_string(),
                 auth: "post".to_string(),
@@ -7270,6 +10988,7 @@ mod tests {
             &db,
             Some("https://example.com/deprecated-alias"),
             Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
                 auth: "inherit".to_string(),
@@ -7306,6 +11025,7 @@ mod tests {
             make_test_provider(&format!("revocation-update-{}", Uuid::new_v4()), "oauth2");
         provider.revocation_url = Some("https://example.com/original".to_string());
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/original".to_string(),
             auth: "inherit".to_string(),
@@ -7337,6 +11057,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    request_encoding: "form".to_string(),
                     style: "github".to_string(),
                     url: "https://api.github.com/applications".to_string(),
                     auth: "basic".to_string(),
@@ -7357,6 +11078,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    request_encoding: "form".to_string(),
                     style: "rfc7009".to_string(),
                     url: "https://example.com/new-rfc7009".to_string(),
                     auth: "none".to_string(),
@@ -7409,6 +11131,7 @@ mod tests {
     #[tokio::test]
     async fn validate_revocation_config_rejects_invalid_admin_input() {
         let valid = RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/revoke".to_string(),
             auth: "inherit".to_string(),
@@ -7434,6 +11157,7 @@ mod tests {
             ("rfc7009", "inherit", "https://127.0.0.1/revoke"),
         ] {
             let config = RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: style.to_string(),
                 url: url.to_string(),
                 auth: auth.to_string(),
@@ -7450,14 +11174,36 @@ mod tests {
     fn trusted_seed_revocation_validation_does_not_require_dns() {
         let mut provider = make_test_provider("offline-revocation-seed", "oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://does-not-resolve.invalid/revoke".to_string(),
             auth: "none".to_string(),
             revokes_grant: false,
         });
 
-        super::validate_seeded_provider_revocation(&provider)
+        super::validate_seeded_provider_options(&provider)
             .expect("trusted seed validation must be independent of DNS");
+    }
+
+    #[test]
+    fn trusted_seed_validation_rejects_invalid_request_options() {
+        let mut provider = make_test_provider("invalid-seed-options", "oauth2");
+        provider.token_request_encoding = Some("xml".into());
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
+        provider.token_request_encoding = Some("json".into());
+        provider
+            .oauth_request_headers
+            .insert("X-API-Key".into(), "credential-sentinel".into());
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
+        provider.oauth_request_headers.clear();
+        provider.revocation = Some(RevocationConfig {
+            request_encoding: "xml".into(),
+            style: "rfc7009".into(),
+            url: "https://does-not-resolve.invalid/revoke".into(),
+            auth: "inherit".into(),
+            revokes_grant: false,
+        });
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
     }
 
     // ── create_provider with device_code config ────────────────────
@@ -7703,6 +11449,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_oauth_seeding_preserves_operator_settings_and_data_api() {
+        let db = seed_default_catalog("cloud_oauth_seeding")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+        let client_id = enc.encrypt(b"configured-cloud-client").await.unwrap();
+        let client_secret = enc.encrypt(b"configured-cloud-secret").await.unwrap();
+        let mut identities = Vec::new();
+        for (slug, service_slug) in [
+            ("cloudflare", "api-cloudflare"),
+            ("supabase-management", "api-supabase-management"),
+            ("railway", "api-railway"),
+        ] {
+            let mut provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+            let service = services
+                .find_one(doc! { "slug": service_slug })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(provider.credential_mode, "both");
+            assert!(provider.supports_pkce);
+            assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+            assert_eq!(
+                service.provider_config_id.as_deref(),
+                Some(provider.id.as_str())
+            );
+            assert_eq!(service.service_category, "connection");
+            assert!(service.requires_user_credential);
+            let requirement = requirements
+                .find_one(doc! { "service_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(requirement.provider_config_id, provider.id);
+            assert_eq!(requirement.injection_method, "bearer");
+            assert_eq!(requirement.injection_key.as_deref(), Some("Authorization"));
+            assert!(crate::services::catalog_spec_registry::spec_for_slug(service_slug).is_some());
+            identities.push((slug, provider.id.clone(), service_slug, service.id));
+            provider.credential_mode = "admin".into();
+            provider.client_id_encrypted = Some(client_id.clone());
+            provider.client_secret_encrypted = Some(client_secret.clone());
+            providers
+                .replace_one(doc! { "_id": &provider.id }, provider)
+                .await
+                .unwrap();
+        }
+        let provider_count = providers.count_documents(doc! {}).await.unwrap();
+        let service_count = services.count_documents(doc! {}).await.unwrap();
+        for _ in 0..2 {
+            super::seed_default_providers(&db, &enc).await.unwrap();
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for (slug, provider_id, service_slug, service_id) in &identities {
+                let provider = super::get_provider_by_slug(&db, slug).await.unwrap();
+                assert_eq!(&provider.id, provider_id);
+                assert_eq!(provider.credential_mode, "admin");
+                assert_eq!(provider.client_id_encrypted.as_ref(), Some(&client_id));
+                assert_eq!(
+                    provider.client_secret_encrypted.as_ref(),
+                    Some(&client_secret)
+                );
+                let service = services
+                    .find_one(doc! { "slug": *service_slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&service.id, service_id);
+                assert_eq!(
+                    requirements
+                        .count_documents(doc! { "service_id": service_id })
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+        assert_eq!(
+            providers.count_documents(doc! {}).await.unwrap(),
+            provider_count
+        );
+        assert_eq!(
+            services.count_documents(doc! {}).await.unwrap(),
+            service_count
+        );
+        let data_provider = super::get_provider_by_slug(&db, "supabase").await.unwrap();
+        assert_eq!(data_provider.provider_type, "api_key");
+        assert!(data_provider.requires_gateway_url);
+        let data_service = services
+            .find_one(doc! { "slug": "api-supabase" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(data_service.auth_method, "header");
+        assert_eq!(data_service.auth_key_name, "apikey");
+    }
+
+    #[tokio::test]
     async fn seed_default_providers_creates_known_slugs() {
         let Some(db) = connect_test_database("prov_svc_seed_slugs").await else {
             eprintln!("skipping: no MongoDB");
@@ -7719,6 +11564,10 @@ mod tests {
             "mistral",
             "cohere",
             "deepseek",
+            "supabase",
+            "supabase-management",
+            "cloudflare",
+            "railway",
             "elevenlabs",
             "twilio",
             "twitter",
@@ -7746,7 +11595,7 @@ mod tests {
         let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
         let expected = [
             ("twitter", "rfc7009", "inherit", false),
-            ("google", "rfc7009", "none", false),
+            ("google", "rfc7009", "none", true),
             ("github", "github", "inherit", true),
             ("facebook", "facebook_deauth", "inherit", true),
             ("discord", "rfc7009", "inherit", false),
@@ -7983,11 +11832,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_does_not_revert_ops_patched_both() {
-        let Some(db) = connect_test_database("prov_svc_ops_patch").await else {
-            eprintln!("skipping: no MongoDB");
+    async fn seed_turns_off_linkedin_pkce_and_adds_restli_header() {
+        let Some(db) = seed_default_catalog("prov_svc_linkedin_pkce").await else {
             return;
         };
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+
+        // Existing installs carry the old PKCE-on seed value.
+        providers
+            .update_one(
+                doc! { "slug": "linkedin" },
+                doc! { "$set": { "supports_pkce": true } },
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        let linkedin = providers
+            .find_one(doc! { "slug": "linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!linkedin.supports_pkce);
+
+        let service = services
+            .find_one(doc! { "slug": "api-linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        let headers = service.default_request_headers.unwrap_or_default();
+        assert!(headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("x-restli-protocol-version") && h.value == "2.0.0"
+        }));
+    }
+
+    #[tokio::test]
+    async fn seed_does_not_revert_ops_patched_both() {
+        let db = connect_test_database("prov_svc_ops_patch")
+            .await
+            .expect("MongoDB required");
         let enc = test_encryption_keys();
         let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
         super::seed_default_providers(&db, &enc).await.unwrap();
@@ -7996,14 +11881,14 @@ mod tests {
         // "user"; ops then PATCHes them to "both" to enable the platform app.
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "user" } },
             )
             .await
             .unwrap();
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "both" } },
             )
             .await
@@ -8011,7 +11896,7 @@ mod tests {
 
         // Restart: the social_user_mode_migration must leave them alone...
         super::seed_default_providers(&db, &enc).await.unwrap();
-        for slug in ["google", "github"] {
+        for slug in ["google", "github", "linkedin", "twitter"] {
             let p = collection
                 .find_one(doc! { "slug": slug })
                 .await
@@ -8042,6 +11927,83 @@ mod tests {
             discord.credential_mode, "user",
             "listed social slugs must still be migrated back to user"
         );
+    }
+
+    #[test]
+    fn twitter_default_scopes_are_allowed_on_platform_app() {
+        let allowed = crate::services::scope_catalog::platform_scope_allowlist("twitter")
+            .expect("Twitter shared app must have an allowlist");
+        for scope in super::TWITTER_DEFAULT_SCOPES {
+            assert!(
+                allowed.contains(scope),
+                "default scope {scope} must be allowlisted"
+            );
+        }
+        assert!(!super::SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS.contains(&"twitter"));
+    }
+
+    #[tokio::test]
+    async fn twitter_backfills_preserve_admin_mode_and_existing_scopes() {
+        let db = connect_test_database("twitter_backfills")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let fresh = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.credential_mode, "user");
+        collection
+            .update_one(
+                doc! { "slug": "twitter" },
+                doc! { "$set": {
+                    "credential_mode": "admin",
+                    "token_endpoint_auth_method": "client_secret_post",
+                    "default_scopes": ["tweet.read", "dm.read", "custom.scope"],
+                }},
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let migrated = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated.credential_mode, "admin");
+        assert_eq!(migrated.token_endpoint_auth_method, "client_secret_basic");
+        let scopes = migrated.default_scopes.as_ref().unwrap();
+        // Adapter backfills also merge required scopes via $setUnion, whose
+        // ordering is unspecified. Check preservation and additions as a set.
+        let scope_set: std::collections::BTreeSet<_> = scopes.iter().collect();
+        assert_eq!(scope_set.len(), scopes.len(), "scopes must remain unique");
+        for scope in [
+            "tweet.read",
+            "dm.read",
+            "custom.scope",
+            "media.write",
+            "dm.write",
+        ] {
+            assert!(scopes.iter().any(|s| s == scope), "missing scope {scope}");
+        }
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let again = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        let again_scopes = again.default_scopes.as_ref().unwrap();
+        assert_eq!(again_scopes.len(), scopes.len());
+        assert_eq!(
+            again_scopes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            scope_set
+        );
+        assert_eq!(again.updated_at, migrated.updated_at);
     }
 
     // ── platform-credential hygiene (spec B5) ──────────────────────
@@ -8261,6 +12223,578 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_destination_activation_logs_custom_policy_without_mutating_it() {
+        use tracing::instrument::WithSubscriber;
+
+        let db = crate::test_utils::connect_test_database("workspace_activation_warning")
+            .await
+            .unwrap();
+        let encryption = test_encryption_keys();
+        super::seed_default_providers(&db, &encryption)
+            .await
+            .unwrap();
+        super::seed_default_services(&db, &encryption)
+            .await
+            .unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        for slug in ["api-google-workspace", "api-google-drive"] {
+            let mut service = services
+                .find_one(doc! {"slug": slug})
+                .await
+                .unwrap()
+                .unwrap();
+            service.proxy_operation_policy = Some(
+                super::super::google_workspace::GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .legacy_operation_policy()
+                    .unwrap(),
+            );
+            service.proxy_operation_policy.as_mut().unwrap().rules.pop();
+            services.update_one(doc! {"_id": &service.id}, doc! {"$set": {
+            "proxy_operation_policy": bson::to_bson(&service.proxy_operation_policy).unwrap(),
+        }, "$unset": {"destination_targets": ""}}).await.unwrap();
+            let before = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+
+            let capture = tempfile::NamedTempFile::new().unwrap();
+            let writer = capture.reopen().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            super::reconcile_workspace_destinations(&db, chrono::Utc::now())
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+
+            let after = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after, before);
+            let logs = std::fs::read_to_string(capture.path()).unwrap();
+            let warnings: Vec<_> = logs
+                .lines()
+                .filter(|line| {
+                    line.contains("WARN")
+                        && line.contains("Google editor destinations were not activated")
+                        && line.contains(&service.id)
+                })
+                .collect();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("failed_precondition=\"proxy_operation_policy\""));
+            assert!(warnings[0].contains(&service.id));
+            assert!(!warnings[0].contains("path_template"));
+            for field in ["description", "known_limitations"] {
+                assert!(logs.lines().any(|line| {
+                    line.contains("DEBUG")
+                        && line.contains("Google editor metadata compare-and-set skipped")
+                        && line.contains(field)
+                        && line.contains("failed_precondition=\"destination_targets\"")
+                }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_workspace_gmail_upgrade_preserves_customizations() {
+        use crate::models::downstream_service::ProxyOperationPolicy;
+        use crate::services::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+
+        let db = connect_test_database("workspace_gmail_upgrade")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+        let service = services
+            .find_one(doc! { "slug": "api-google-workspace" })
+            .await
+            .unwrap()
+            .unwrap();
+        // Pin this historical migration to Drive + Calendar -> + Gmail.
+        // Workspace's current union also contains the later editor operations.
+        // Reconstruct the later migration's concatenation from source operations,
+        // independently of the production policy fixture under test. The original
+        // seed's map composition below must produce the same order.
+        let mut old_rules = Vec::new();
+        for source in [
+            include_str!("../../specs/fixtures/google-drive-before-auto-activation.json"),
+            include_str!("../../specs/catalog/google-calendar.openapi.json"),
+        ] {
+            let spec: serde_json::Value = serde_json::from_str(source).unwrap();
+            for (path, item) in spec["paths"].as_object().unwrap() {
+                for method in ["get", "post", "put", "patch", "delete"] {
+                    if item.get(method).is_some() {
+                        old_rules.push(crate::models::downstream_service::ProxyOperationRule {
+                            method: method.to_uppercase(),
+                            path_template: path.clone(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+        let old_policy = ProxyOperationPolicy { rules: old_rules };
+        let old_scopes = vec!["openid", "email", "profile", DRIVE, CALENDAR];
+        for shape in [
+            "original_seed",
+            "migration_pin",
+            "sorted_custom",
+            "reordered",
+            "subset",
+        ] {
+            let customized = matches!(shape, "sorted_custom" | "reordered" | "subset");
+            let mut policy = old_policy.clone();
+            if shape == "original_seed" {
+                // bson enables serde_json/preserve_order in the production graph.
+                // The old seed composed Drive then Calendar into this map.
+                let mut paths = serde_json::Map::new();
+                for source in [
+                    include_str!("../../specs/fixtures/google-drive-before-auto-activation.json"),
+                    include_str!("../../specs/catalog/google-calendar.openapi.json"),
+                ] {
+                    let spec: serde_json::Value = serde_json::from_str(source).unwrap();
+                    paths.extend(spec["paths"].as_object().unwrap().clone());
+                }
+                let mut rules = Vec::new();
+                for (path, item) in paths {
+                    for method in ["get", "post", "put", "patch", "delete"] {
+                        if item.get(method).is_some() {
+                            rules.push(crate::models::downstream_service::ProxyOperationRule {
+                                method: method.to_uppercase(),
+                                path_template: path.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                policy = ProxyOperationPolicy { rules };
+                assert_eq!(
+                    policy, old_policy,
+                    "audited historical orders coincide under preserve_order"
+                );
+            } else if shape == "sorted_custom" {
+                policy
+                    .rules
+                    .sort_by(|a, b| a.path_template.cmp(&b.path_template));
+            } else if shape == "reordered" {
+                policy.rules.reverse();
+            } else if shape == "subset" {
+                policy.rules.pop();
+            }
+            let description = if customized {
+                "Custom Workspace"
+            } else {
+                "Google Drive files and folders, calendars, events, and availability."
+            };
+            let notes = if customized {
+                "Custom auth notes"
+            } else {
+                "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars."
+            };
+            let limitations = if customized {
+                "Custom limits"
+            } else {
+                "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together."
+            };
+            let scopes = if customized {
+                vec!["openid", CALENDAR]
+            } else {
+                old_scopes.clone()
+            };
+            services.update_one(doc! { "_id": &service.id }, doc! { "$set": {
+                "proxy_operation_policy": bson::to_bson(&policy).unwrap(),
+                "description": description, "auth_notes": notes, "known_limitations": limitations,
+                "destination_targets": {},
+            }}).await.unwrap();
+            requirements
+                .update_one(
+                    doc! { "service_id": &service.id },
+                    doc! { "$set": { "scopes": &scopes }},
+                )
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                super::seed_default_services(&db, &enc).await.unwrap();
+                let updated = services
+                    .find_one(doc! { "_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let req = requirements
+                    .find_one(doc! { "service_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected_policy = if customized {
+                    policy.clone()
+                } else {
+                    GoogleProduct::Workspace.operation_policy().unwrap()
+                };
+                assert_eq!(updated.proxy_operation_policy, Some(expected_policy));
+                if customized {
+                    assert!(updated.destination_targets.is_empty());
+                    assert_eq!(updated.description.as_deref(), Some(description));
+                    assert_eq!(updated.auth_notes.as_deref(), Some(notes));
+                    assert_eq!(updated.known_limitations.as_deref(), Some(limitations));
+                    assert_eq!(req.scopes, Some(vec![]));
+                } else {
+                    assert_eq!(
+                        updated.destination_targets,
+                        crate::services::destination_routing::workspace_targets()
+                    );
+                    assert!(updated.description.unwrap().contains("Slides"));
+                    assert!(updated.auth_notes.unwrap().contains("narrower permissions"));
+                    assert!(
+                        updated
+                            .known_limitations
+                            .unwrap()
+                            .contains("Gmail deletion")
+                    );
+                    assert_eq!(req.scopes, Some(vec![]));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_mail_seed_preserves_custom_requirements_once() {
+        use crate::services::google_workspace::GMAIL_READONLY;
+        let db = connect_test_database("google_mail_send_seed")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(super::REQUIREMENTS);
+        for slug in ["api-google-workspace", "api-google-gmail"] {
+            let service = services
+                .find_one(doc! {"slug": slug})
+                .await
+                .unwrap()
+                .unwrap();
+            services
+                .update_one(
+                    doc! {"_id": &service.id},
+                    doc! {"$set": {
+                        "auth_notes": "Custom Google setup notes",
+                        "required_permissions": ["custom.permission", GMAIL_READONLY],
+                    }},
+                )
+                .await
+                .unwrap();
+            requirements
+                .update_one(
+                    doc! {"service_id": &service.id},
+                    doc! {"$set": {
+                        "scopes": ["openid", "custom.scope", GMAIL_READONLY],
+                    }},
+                )
+                .await
+                .unwrap();
+        }
+        for _ in 0..2 {
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for slug in ["api-google-workspace", "api-google-gmail"] {
+                let service = services
+                    .find_one(doc! {"slug": slug})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    service.auth_notes.as_deref(),
+                    Some("Custom Google setup notes")
+                );
+                assert_eq!(
+                    service.required_permissions,
+                    Some(vec!["custom.permission".to_string()])
+                );
+                let req = requirements
+                    .find_one(doc! {"service_id": &service.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(req.scopes, Some(vec!["custom.scope".to_string()]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_mail_optional_policy_clears_only_old_seeded_requirements() {
+        use crate::services::google_workspace::{CALENDAR, DRIVE, GMAIL_READONLY, GMAIL_SEND};
+        let db = connect_test_database("google_mail_optional_seed")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        for (slug, old_notes, old_permissions) in [
+            (
+                "api-google-workspace",
+                "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
+                vec![DRIVE, CALENDAR, GMAIL_READONLY, GMAIL_SEND],
+            ),
+            (
+                "api-google-gmail",
+                "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. Gmail sending permission is required; existing connections need renewed consent.",
+                vec![GMAIL_READONLY, GMAIL_SEND],
+            ),
+        ] {
+            let service = services
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            services.update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "auth_notes": old_notes, "required_permissions": old_permissions } },
+            ).await.unwrap();
+            for _ in 0..2 {
+                super::seed_default_services(&db, &enc).await.unwrap();
+                let updated = services
+                    .find_one(doc! { "_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(updated.auth_notes.unwrap().contains("You can choose"));
+                assert_eq!(updated.required_permissions, Some(vec![]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_seed_migrates_required_scopes_for_every_product() {
+        use crate::services::google_workspace::GoogleProduct;
+        let db = connect_test_database("google_optional_scope_requirements")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        for slug in [
+            "api-google-workspace",
+            "api-google-calendar",
+            "api-google-drive",
+            "api-google-gmail",
+            "api-google-docs",
+            "api-google-sheets",
+            "api-google-slides",
+        ] {
+            let service = services
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            let mut scopes = GoogleProduct::from_slug(slug).unwrap().default_scopes();
+            scopes.push("custom.scope".to_string());
+            services
+                .update_one(
+                    doc! { "_id": &service.id },
+                    doc! { "$set": { "required_permissions": &scopes } },
+                )
+                .await
+                .unwrap();
+            requirements
+                .update_one(
+                    doc! { "service_id": &service.id },
+                    doc! { "$set": { "scopes": &scopes } },
+                )
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..2 {
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for slug in [
+                "api-google-workspace",
+                "api-google-calendar",
+                "api-google-drive",
+                "api-google-gmail",
+                "api-google-docs",
+                "api-google-sheets",
+                "api-google-slides",
+            ] {
+                let service = services
+                    .find_one(doc! { "slug": slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    service.required_permissions,
+                    Some(vec!["custom.scope".to_string()])
+                );
+                let requirement = requirements
+                    .find_one(doc! { "service_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(requirement.scopes, Some(vec!["custom.scope".to_string()]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_products_share_existing_client_and_survive_reseeding() {
+        use crate::services::google_workspace::GoogleProduct;
+        use futures::TryStreamExt;
+        let db = connect_test_database("google_product_seed")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let provider = providers
+            .find_one(doc! { "slug": "google" })
+            .await
+            .unwrap()
+            .unwrap();
+        let client_id = enc.encrypt(b"shared-google-client").await.unwrap();
+        let secret = enc.encrypt(b"shared-google-secret").await.unwrap();
+        providers.update_one(doc! { "_id": &provider.id }, doc! { "$set": {
+            "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: client_id.clone() },
+            "client_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: secret.clone() },
+            "revocation.revokes_grant": false,
+        }}).await.unwrap();
+        // Start with the pre-existing generic Google catalog row.
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.slug = "api-google".into();
+        legacy.provider_config_id = Some(provider.id.clone());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "provider_config_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .sparse(true)
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+
+        let mut previous_rows: Option<Vec<bson::Document>> = None;
+        for _ in 0..2 {
+            crate::db::ensure_indexes(&db).await.unwrap();
+            super::seed_default_providers(&db, &enc).await.unwrap();
+            super::seed_default_services(&db, &enc).await.unwrap();
+            let rows: Vec<bson::Document> = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find(doc! { "provider_config_id": &provider.id })
+                .sort(doc! { "_id": 1 })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if let Some(previous) = &previous_rows {
+                assert_eq!(
+                    &rows, previous,
+                    "reseeding must preserve every Google row and UUID"
+                );
+            }
+            previous_rows = Some(rows);
+            let entries = crate::services::catalog_service::list_catalog(&db, &enc, "reader")
+                .await
+                .unwrap();
+            for slug in [
+                "api-google-workspace",
+                "api-google-calendar",
+                "api-google-drive",
+                "api-google-gmail",
+                "api-google-docs",
+                "api-google-sheets",
+                "api-google-slides",
+            ] {
+                let product = GoogleProduct::from_slug(slug).unwrap();
+                let entry = entries.iter().find(|entry| entry.slug == slug).unwrap();
+                assert_eq!(
+                    entry.provider_config_id.as_deref(),
+                    Some(provider.id.as_str())
+                );
+                assert_eq!(
+                    entry.oauth_client_id.as_deref(),
+                    Some("shared-google-client")
+                );
+                assert!(entry.has_platform_oauth_credentials);
+                assert_eq!(entry.revokes_grant, Some(true));
+                assert_eq!(entry.default_scopes, Some(product.default_scopes()));
+                let required: Vec<_> = entry
+                    .scope_catalog
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|scope| scope.required)
+                    .map(|scope| scope.scope.as_str())
+                    .collect();
+                assert!(required.is_empty());
+                assert_eq!(
+                    entry.platform_scope_allowlist,
+                    Some(product.allowed_scopes())
+                );
+                assert!(
+                    entry
+                        .scope_catalog
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .all(|entry| product.allowed_scopes().contains(&entry.scope))
+                );
+                let svc = db
+                    .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                    .find_one(doc! { "slug": slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(svc.proxy_operation_policy.is_some());
+                let req = db
+                    .collection::<ServiceProviderRequirement>(REQUIREMENTS)
+                    .find_one(doc! { "service_id": &svc.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(req.scopes, None);
+                assert!(svc.required_permissions.is_none());
+            }
+        }
+        let stored = providers
+            .find_one(doc! { "_id": &provider.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.client_id_encrypted, Some(client_id));
+        assert_eq!(stored.client_secret_encrypted, Some(secret));
+        assert_eq!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .count_documents(doc! { "provider_config_id": &provider.id })
+                .await
+                .unwrap(),
+            8
+        );
+    }
+
+    #[tokio::test]
     async fn seed_default_services_creates_known_slugs() {
         let Some(db) = connect_test_database("prov_svc_svc_slugs").await else {
             eprintln!("skipping: no MongoDB");
@@ -8458,6 +12992,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -8468,6 +13003,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: Some(params.clone()),
                 device_code_format: None,
                 client_id_param_name: None,
@@ -8538,6 +13076,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -8548,6 +13087,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -8575,6 +13117,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -8585,6 +13128,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("both".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -8647,6 +13193,7 @@ mod tests {
                     client_id: None,
                     client_secret: None,
                     supports_pkce: None,
+                    authorization_nonce_required: None,
                     device_code_url: None,
                     device_token_url: None,
                     device_verification_url: None,
@@ -8657,6 +13204,9 @@ mod tests {
                     documentation_url: None,
                     credential_mode: None,
                     token_endpoint_auth_method: None,
+                    token_request_encoding: None,
+                    oauth_request_headers: None,
+                    supports_oauth_scopes: None,
                     extra_auth_params: None,
                     device_code_format: Some(format.to_string()),
                     client_id_param_name: None,
@@ -8827,6 +13377,7 @@ mod tests {
                 client_id: None,
                 client_secret: None,
                 supports_pkce: None,
+                authorization_nonce_required: None,
                 device_code_url: None,
                 device_token_url: None,
                 device_verification_url: None,
@@ -8837,6 +13388,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -8853,6 +13407,7 @@ mod tests {
     #[test]
     fn direct_auth_seeds_have_service_auth_method() {
         let direct_auth_slugs = [
+            "api-supabase",
             "api-elevenlabs",
             "api-twilio",
             "api-github-pat",
@@ -8873,5 +13428,105 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn admin_form_optional_provider_text_clears_are_absent() {
+        let db = connect_test_database("admin_form_provider_clear")
+            .await
+            .expect("Mongo required");
+        let enc = test_encryption_keys();
+        let provider = super::create_provider(
+            &db,
+            &enc,
+            "Clear",
+            "clear-test",
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fields = [
+            "description",
+            "api_key_instructions",
+            "api_key_url",
+            "icon_url",
+            "documentation_url",
+            "client_id_param_name",
+        ];
+        let mut set = bson::Document::new();
+        for field in fields {
+            set.insert(field, "saved");
+        }
+        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .update_one(doc! {"_id": &provider.id}, doc! {"$set": set})
+            .await
+            .unwrap();
+        let saved = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                description: Some(" ".into()),
+                api_key_instructions: Some("".into()),
+                api_key_url: Some("".into()),
+                icon_url: Some("".into()),
+                documentation_url: Some("".into()),
+                client_id_param_name: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(saved.description.is_none());
+        assert!(saved.icon_url.is_none());
+        let raw = db
+            .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .find_one(doc! {"_id": &provider.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in fields {
+            assert!(!raw.contains_key(field), "{field} must be absent");
+        }
+    }
+
+    #[test]
+    fn supabase_seed_uses_project_url_and_direct_apikey_header() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-supabase")
+            .expect("api-supabase seed should exist");
+
+        assert_eq!(seed.provider_slug, "supabase");
+        assert_eq!(seed.base_url, "https://project-ref.supabase.co/rest/v1");
+        assert_eq!(seed.service_auth_method, Some("header"));
+        assert_eq!(seed.service_auth_key_name, Some("apikey"));
+        assert_eq!(seed.service_category, "connection");
+        assert!(seed.requires_user_credential);
+        assert!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug).is_none()
+        );
+
+        let (caps, streaming) = seed_capability_override("api-supabase")
+            .expect("api-supabase should have a capability override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_direct_downstream_auth);
+        assert!(!caps.supports_websocket);
+        assert!(!caps.supports_streaming);
+        assert!(!streaming);
     }
 }

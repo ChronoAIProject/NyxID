@@ -1,8 +1,11 @@
+import { MachineGrantCard } from "@/components/shared/machine-grant-card";
+import { useSearch } from "@tanstack/react-router";
+import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { useState } from "react";
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { useApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
-import { maskApiKey } from "@/lib/utils";
+import { isPastTimestamp, maskApiKey } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,16 +19,24 @@ import { PlatformCard } from "@/components/dashboard/api-key-detail/platform-car
 import { CallbackUrlCard } from "@/components/dashboard/api-key-detail/callback-url-card";
 import { RateLimitCard } from "@/components/dashboard/api-key-detail/rate-limit-card";
 import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-card";
+import { OperationScopeCard } from "@/components/dashboard/api-key-detail/operation-scope-card";
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
 import { VerifyKeyCard } from "@/components/dashboard/api-key-detail/verify-key-card";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
+  const { grant_service } = useSearch({ strict: false }) as {
+    grant_service?: string;
+  };
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const { data: apiKey, isLoading, error, refetch } = useApiKey(keyId);
   useBreadcrumbLabel(apiKey?.name);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const canWrite = apiKey != null &&
+    (apiKey.credential_source?.type !== "org" ||
+      apiKey.credential_source.role === "admin");
 
   if (isLoading) {
     return (
@@ -66,6 +77,7 @@ export function ApiKeyDetailPage() {
           apiKey.description ?? `API key ${maskApiKey(apiKey.key_prefix)}`
         }
         actions={
+          canWrite &&
           <div className="flex gap-2">
             <Button
               variant="outline"
@@ -87,6 +99,18 @@ export function ApiKeyDetailPage() {
         }
       />
 
+      {apiKey.assistant_conversation_id ? (
+        <p className="text-12 text-muted-foreground">
+          Used by assistant chat · {" "}
+          <Link
+            to="/assistant"
+            search={{ c: apiKey.assistant_conversation_id }}
+            className="text-primary-text hover:underline"
+          >
+            Open chat
+          </Link>
+        </p>
+      ) : null}
       <div className="grid gap-4 md:grid-cols-2">
         <DetailsCard
           name={apiKey.name}
@@ -102,6 +126,21 @@ export function ApiKeyDetailPage() {
 
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
         <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
+
+        <ServiceScopeCard
+          initialCatalogServiceId={grant_service}
+          canWrite={canWrite}
+          keyId={apiKey.id}
+          allowAllServices={apiKey.allow_all_services}
+          allowAutoConnectedServices={apiKey.allow_auto_connected_services}
+          allowedServiceIds={apiKey.allowed_service_ids}
+          allowedServices={apiKey.allowed_services}
+          apiKeySource={apiKey.credential_source}
+        />
+
+        {apiKey.assistant_conversation_id ? null : (
+          <OperationScopeCard keyId={apiKey.id} canWrite={canWrite} />
+        )}
 
         <NodeScopeCard
           keyId={apiKey.id}
@@ -119,21 +158,30 @@ export function ApiKeyDetailPage() {
 
         <BindingsCard
           keyId={apiKey.id}
-          allowAllServices={apiKey.allow_all_services}
           apiKeySource={apiKey.credential_source}
         />
         <VerifyKeyCard apiKey={apiKey} />
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 
+      <MachineGrantCard
+        source={{ kind: "api_key", id: apiKey.id }}
+        canWrite={canWrite}
+        eligible={apiKey.credential_source?.type !== "org" && apiKey.is_active && !apiKey.assistant_conversation_id && apiKey.purpose === "general" && !isPastTimestamp(apiKey.expires_at) && apiKey.scopes.split(/\s+/).some((scope) => ["proxy", "proxy:*"].includes(scope))}
+        stateVersion={apiKey.state_version}
+        allowedNodeIds={apiKey.allow_all_nodes ? undefined : apiKey.allowed_node_ids}
+        allowedServiceIds={apiKey.allow_all_services ? undefined : [...apiKey.allowed_service_ids, ...(apiKey.allow_auto_connected_services ? apiKey.allowed_services.filter((service) => service.auto_connected).map((service) => service.id) : [])]}
+      />
+      <LoginCredentialsSection keyId={apiKey.id} canWrite={canWrite} />
+
       <RotateKeyDialog
-        open={rotateOpen}
+        open={canWrite && rotateOpen}
         onOpenChange={setRotateOpen}
         keyId={apiKey.id}
       />
 
       <DeleteKeyDialog
-        open={deleteOpen}
+        open={canWrite && deleteOpen}
         onOpenChange={setDeleteOpen}
         keyId={apiKey.id}
         keyName={apiKey.name}

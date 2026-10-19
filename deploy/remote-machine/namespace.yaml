@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nyxid-machine
+  labels:
+    # The protected root supervisor needs CHOWN/SETUID/SETGID/KILL to drop
+    # commands to agent and stop them. The fixed admission policy narrows the
+    # baseline profile; command descendants are non-root with no_new_privs.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    nyxid.dev/managed: "true"

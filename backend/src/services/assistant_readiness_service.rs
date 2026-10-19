@@ -396,8 +396,7 @@ async fn unified_service_evidence(
         });
     };
 
-    let key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! {
             "_id": api_key_id,
             "user_id": &selected.effective_owner_id,

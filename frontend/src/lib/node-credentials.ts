@@ -21,6 +21,7 @@ export function buildNodeCredentialCommand(
 
   const base = `nyxid node credentials add --service ${serviceSlug}`;
   if (!service) return `${base} --header Authorization`;
+  if (service.auth_method === "ifttt_webhook") return `nyxid node credentials setup --service ${serviceSlug}`;
 
   if (service.auth_method === "query" || service.auth_type === "query") {
     return `${base} --query-param ${service.auth_key_name}`;
@@ -43,6 +44,9 @@ export function getNodeCredentialPromptHint(
   const authKind = getServiceAuthKind(service);
   if (authKind === "bearer" || authKind === "oauth2") {
     return "When prompted, enter only the raw token. nyxid node adds the Bearer prefix.";
+  }
+  if (service?.auth_method === "ifttt_webhook") {
+    return "Enter only the raw Webhooks key from IFTTT Documentation, not the full URL. Events use letters, numbers, and underscores.";
   }
   if (authKind === "basic") {
     return "When prompted, enter username:password. nyxid node encodes it as Basic auth.";

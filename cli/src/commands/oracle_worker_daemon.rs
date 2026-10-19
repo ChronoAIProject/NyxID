@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -62,12 +63,19 @@ pub fn save_config(config: &OracleWorkerConfig, profile: Option<&str>) -> Result
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
-    fs::write(&path, toml::to_string_pretty(config)?)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        pending
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    pending.write_all(toml::to_string_pretty(config)?.as_bytes())?;
+    pending.as_file().sync_all()?;
+    pending.persist(&path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(path)
 }
 

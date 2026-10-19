@@ -208,6 +208,12 @@ fn store_decrypted_credential(
     secret: &str,
 ) -> Result<()> {
     match entry.injection_method.as_str() {
+        "ifttt-webhook" | "ifttt_webhook" => config.add_ifttt_credential_via(
+            &entry.service_slug,
+            secret,
+            entry.target_url.as_deref(),
+            backend,
+        ),
         "header" => config.add_header_credential_via(
             &entry.service_slug,
             &entry.field_name,
@@ -333,6 +339,49 @@ mod tests {
                 assert_eq!(value.as_str(), "Bearer sk-rci");
             }
             _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn ifttt_remote_ciphertext_preserves_dedicated_mode_and_rejects_bad_destination() {
+        for target in [
+            None,
+            Some("https://maker.ifttt.com"),
+            Some("https://other.invalid"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let backend = file_backend(dir.path());
+            let mut cfg = config();
+            let mut meta = metadata("key");
+            meta.service_slug = "api-ifttt".into();
+            meta.injection_method = "ifttt-webhook".into();
+            meta.target_url = target.map(str::to_string);
+            let pubkey = pubkey_from(prepare_pubkey(&mut cfg, &backend, &meta).unwrap());
+            let key = "ifttt_remote_test-NOT_REAL";
+            let message = ciphertext_for(&meta, &pubkey, key);
+            let result =
+                decrypt_and_store_ciphertext(&mut cfg, &config_path, &backend, None, &message);
+            assert!(!format!("{result:?}").contains(key));
+            let store = CredentialStore::from_config_with_backend(&cfg, &backend).unwrap();
+            if target == Some("https://other.invalid") {
+                assert!(store.get("api-ifttt").is_none());
+                assert!(matches!(
+                    result,
+                    RemoteCredentialCryptoOutbound::DecryptResult {
+                        error_code: Some(_),
+                        ..
+                    }
+                ));
+            } else {
+                assert_eq!(store.get("api-ifttt").unwrap().ifttt_key(), Some(key));
+                assert!(store.get("api-ifttt").unwrap().header().is_none());
+                assert_eq!(
+                    cfg.credentials["api-ifttt"].injection_method,
+                    "ifttt_webhook"
+                );
+                assert!(!std::fs::read_to_string(&config_path).unwrap().contains(key));
+            }
         }
     }
 

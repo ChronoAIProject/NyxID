@@ -579,6 +579,68 @@ describe("AiKeyConfirm — custom-service back reset", () => {
   });
 });
 
+describe("AiKeyConfirm — Supabase catalog service", () => {
+  const supabaseEntry = {
+    slug: "api-supabase",
+    name: "Supabase Data API",
+    description: "Supabase PostgREST connector",
+    base_url: "https://project-ref.supabase.co/rest/v1",
+    auth_method: "header",
+    auth_key_name: "apikey",
+    provider_type: "api_key",
+    provider_config_id: "provider-supabase",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: true,
+    api_key_url: "https://supabase.com/dashboard/project/_/settings/api-keys",
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockGet.mockResolvedValue(supabaseEntry);
+    mockPost.mockResolvedValue({
+      id: "svc-supabase",
+      slug: "api-supabase",
+      label: "Supabase Data API",
+    });
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("collects the project URL and Supabase API key", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "api-supabase" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    const endpoint = await screen.findByLabelText("Supabase Project URL");
+    expect(endpoint).toHaveAttribute(
+      "placeholder",
+      "https://project-ref.supabase.co",
+    );
+    const credential = screen.getByLabelText("Supabase API key");
+    expect(credential).toHaveAttribute(
+      "placeholder",
+      "sb_secret_... or sb_publishable_...",
+    );
+
+    await user.type(endpoint, "https://demo.supabase.co");
+    await user.type(credential, "sb_secret_test");
+    await user.click(screen.getByRole("button", { name: "Create Service" }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith("/keys", {
+        service_slug: "api-supabase",
+        label: "Supabase Data API",
+        credential: "sb_secret_test",
+        endpoint_url: "https://demo.supabase.co",
+      });
+    });
+  });
+});
+
 describe("AiKeyConfirm — catalog services routed via node", () => {
   const catalogEntry = {
     slug: "llm-openai",
@@ -779,6 +841,17 @@ describe("AiKeyConfirm — upstream scope picker (issue #917)", () => {
     expect([...props.scopeOverride].sort()).toEqual(
       ["media.write", "tweet.read", "users.read"].sort(),
     );
+  });
+
+  it("omits scope controls and overrides when onboarding a scopeless OAuth provider", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ ...oauthEntry, name: "Notion", supports_oauth_scopes: false });
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />, { wrapper: createWrapper() });
+    const connect = await screen.findByRole("button", { name: /Continue with provider sign-in/i });
+    expect(screen.queryByRole("button", { name: /Read posts|Upload media/i })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/scope/i)).not.toBeInTheDocument();
+    await user.click(connect);
+    await waitFor(() => expect(mockOAuthFlow).toHaveBeenCalledWith(expect.objectContaining({ scopeOverride: undefined })));
   });
 
   it("adds a custom scope via the Add field and forwards it to OAuth", async () => {
@@ -1036,6 +1109,45 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     baseProps.onSuccess = vi.fn();
   });
 
+  it("keeps a read-only CLI scope override without adding send", async () => {
+    const user = userEvent.setup();
+    const read = "https://www.googleapis.com/auth/gmail.readonly";
+    const send = "https://www.googleapis.com/auth/gmail.send";
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1")
+        return { ...existingKey, granted_scopes: [read] };
+      if (path === "/catalog/api-twitter")
+        return {
+          ...twitterEntry,
+          default_scopes: [read, send],
+          scope_catalog: [
+            {
+              scope: send,
+              label: "Gmail (send)",
+              description: "Send email.",
+              required: false,
+            },
+          ],
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "svc-1", scope_override: [read] }}
+      />,
+      { wrapper: createWrapper() },
+    );
+    const reauth = await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    expect(screen.getByRole("button", { name: /Gmail \(send\)/ })).toBeEnabled();
+    await user.click(reauth);
+    expect(mockOAuthFlow).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeOverride: [read] }),
+    );
+  });
+
   it("seeds the picker from --set scope_override and hands it to OAuthFlow", async () => {
     const user = userEvent.setup();
     render(
@@ -1072,6 +1184,19 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     );
   });
 
+  it("blocks scope management for scopeless providers even with a CLI scope override", async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1") return existingKey;
+      if (path === "/catalog/api-twitter") return { ...twitterEntry, name: "Notion", supports_oauth_scopes: false };
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(<AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "svc-1", scope_override: ["media.write"] }} />, { wrapper: createWrapper() });
+    await screen.findByText(/doesn't support managing scopes here/i);
+    expect(screen.queryByRole("button", { name: /Re-authorize|Upload media|Read posts/i })).not.toBeInTheDocument();
+    expect(mockOAuthFlow).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   it("without --set, seeds from the connection's current grant", async () => {
     render(
       <AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "svc-1" }} />,
@@ -1088,5 +1213,17 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     expect(
       screen.getByRole("button", { name: /Upload media/i }),
     ).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+describe("CLI wizard platform-key selection", () => {
+  it("defaults to a server-held key and posts no credential", async () => {
+    mockGet.mockResolvedValue({ slug: "llm-xai", name: "xAI", base_url: "https://api.x.ai/v1", auth_method: "bearer", service_type: "http", requires_credential: true, platform_key: { available: true, pricing: null } });
+    mockPost.mockResolvedValue({ id: "platform-key", slug: "llm-xai", label: "xAI" });
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-xai" }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("radio", { name: /Use NyxID's key/ })).toBeChecked();
+    expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Connect/ }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
   });
 });

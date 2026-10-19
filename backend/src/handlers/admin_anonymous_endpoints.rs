@@ -9,9 +9,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{
-    AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-};
+use crate::models::downstream_service::{AnonymousEndpointRule, DownstreamService};
 use crate::mw::auth::AuthUser;
 use crate::services::{anonymous_endpoint_service, audit_service};
 
@@ -73,7 +71,7 @@ pub async fn list_anonymous_endpoints(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<AnonymousEndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
     Ok(Json(AnonymousEndpointListResponse {
         endpoints: service
             .anonymous_endpoints
@@ -90,7 +88,14 @@ pub async fn create_anonymous_endpoint(
     Json(body): Json<CreateAnonymousEndpointRequest>,
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let rule =
         anonymous_endpoint_service::build_rule(anonymous_endpoint_service::AnonymousRuleInput {
@@ -102,7 +107,7 @@ pub async fn create_anonymous_endpoint(
     let mut rules = service.anonymous_endpoints.clone();
     rules.push(rule.clone());
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -128,7 +133,14 @@ pub async fn update_anonymous_endpoint(
     Json(body): Json<UpdateAnonymousEndpointRequest>,
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let index = rules
@@ -146,7 +158,7 @@ pub async fn update_anonymous_endpoint(
     )?;
     rules[index] = updated.clone();
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -171,7 +183,14 @@ pub async fn delete_anonymous_endpoint(
     Path((service_id, rule_id)): Path<(String, String)>,
 ) -> AppResult<Json<AnonymousEndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
+    super::catalog_authority::deny_catalog_manager(
+        &state,
+        &auth_user,
+        &service,
+        "anonymous endpoints",
+    )
+    .await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let before = rules.len();
@@ -182,7 +201,7 @@ pub async fn delete_anonymous_endpoint(
         ));
     }
     anonymous_endpoint_service::validate_rules_for_service(&service, &rules)?;
-    persist_rules(&state, &service_id, &rules).await?;
+    persist_rules(&state, &auth_user, &service, &rules).await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -201,28 +220,30 @@ pub async fn delete_anonymous_endpoint(
 
 async fn persist_rules(
     state: &AppState,
-    service_id: &str,
+    auth: &AuthUser,
+    service: &DownstreamService,
     rules: &[AnonymousEndpointRule],
 ) -> AppResult<()> {
-    let rules_bson = bson::to_bson(rules)
-        .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": service_id },
-            doc! { "$set": {
-                "anonymous_endpoints": rules_bson,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
-        )
-        .await?;
+    let authority = crate::services::catalog_mutation_service::Authority {
+        actor: audit_service::AuditActor::from_auth_user(auth),
+        first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),
+        admin_required: service.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            || service.owner_user_id.is_some()
+            || (service.catalog_manager_created && service.visibility != "private"),
+        catalog_base_url: state.config.base_url.clone(),
+    };
+    let rules_bson = bson::to_bson(rules).map_err(|e| AppError::Internal(e.to_string()))?;
+    crate::services::catalog_mutation_service::commit_update(&state.db,service,&authority,
+        &doc! {"anonymous_endpoints":rules_bson,"updated_at":bson::DateTime::from_chrono(Utc::now())},
+        &doc! {"_id":&service.id},state.audit_chain_hmac_key.as_ref().as_ref()).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::services::role_service;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
@@ -233,6 +254,14 @@ mod tests {
     /// (identity_propagation_mode != "none" or token forwarding/delegation on).
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: Uuid::new_v4().to_string(),
             name: "Catalog".to_string(),
             slug: format!("svc-{}", Uuid::new_v4().simple()),
@@ -252,7 +281,9 @@ mod tests {
                 String::new()
             },
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -262,6 +293,10 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: created_by.to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: if identity_propagating {
                 "headers"
             } else {
@@ -280,6 +315,10 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            git_http: None,
+            concurrency_policy: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -573,6 +612,69 @@ mod tests {
 
         let persisted = load_service(&db, &service_id).await;
         assert_eq!(persisted.anonymous_endpoints.len(), 1);
+    }
+
+    /// On a row a Catalog Manager created, anonymous rules are Admin-only:
+    /// refused while the creator holds the role and after it is revoked.
+    #[tokio::test]
+    async fn catalog_manager_rows_keep_anonymous_rules_admin_only() {
+        let Some(db) = connect_test_database("anon_catalog_manager_row").await else {
+            return;
+        };
+        let owner_id = insert_user(&db).await;
+        let mut service = catalog_service(&owner_id, /* identity_propagating */ false);
+        service.catalog_manager_created = true;
+        insert_service(&db, &service).await;
+        let state = test_app_state(db.clone());
+        let rule = || {
+            Json(CreateAnonymousEndpointRequest {
+                enabled: true,
+                method: "GET".to_string(),
+                path_pattern: "/public/**".to_string(),
+                daily_quota: 100,
+            })
+        };
+
+        let without_role = create_anonymous_endpoint(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            Path(service.id.clone()),
+            rule(),
+        )
+        .await
+        .expect_err("a creator without the role cannot write rules on the row");
+        assert!(matches!(without_role, AppError::Forbidden(_)));
+
+        let role = db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CATALOG_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .expect("catalog manager role is seeded");
+        let role_ids = role_service::get_platform_role_ids(&db).await.unwrap();
+        role_service::assign_role_to_user(&db, &owner_id, &role_ids.operator)
+            .await
+            .unwrap();
+        role_service::assign_role_to_user(&db, &owner_id, &role.id)
+            .await
+            .unwrap();
+        let as_manager = create_anonymous_endpoint(
+            State(state),
+            test_auth_user(&owner_id),
+            Path(service.id.clone()),
+            rule(),
+        )
+        .await
+        .expect_err("a Catalog Manager cannot add anonymous rules");
+        assert!(
+            matches!(as_manager, AppError::Forbidden(ref message) if message.contains("anonymous"))
+        );
+        assert!(
+            load_service(&db, &service.id)
+                .await
+                .anonymous_endpoints
+                .is_empty()
+        );
     }
 
     /// Deleting an existing rule succeeds and removes it; deleting a missing

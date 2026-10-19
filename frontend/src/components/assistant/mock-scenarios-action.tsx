@@ -85,15 +85,15 @@ export function MockScenariosAction() {
         <section className="space-y-3 p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-[13px] font-semibold text-foreground">
+              <h2 className="text-13 font-semibold text-foreground">
                 Mock scenarios
               </h2>
               {engineState === "loading" ? (
-                <p role="status" className="mt-0.5 text-[11px] text-warning">
+                <p role="status" className="mt-0.5 text-11 text-warning">
                   Loading...
                 </p>
               ) : engineState === "error" ? (
-                <p role="alert" className="mt-0.5 text-[11px] text-destructive">
+                <p role="alert" className="mt-0.5 text-11 text-destructive">
                   Scenario engine failed to load.
                 </p>
               ) : null}
@@ -105,11 +105,11 @@ export function MockScenariosAction() {
               aria-label="Enable mock scenarios"
             />
           </div>
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-11 leading-4 text-muted-foreground">
             Shapes matching assistant HTTP fixtures. Session-only; other
             messages use the default fixture stream.
           </p>
-          <div className="flex gap-2 text-[11px] leading-4 text-warning">
+          <div className="flex gap-2 text-11 leading-4 text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
             <p>
               Action cards open real connection journeys and can create real
@@ -124,7 +124,7 @@ export function MockScenariosAction() {
         >
           <h3
             id="mock-scenario-list-heading"
-            className="mb-1 text-[10px] font-semibold uppercase text-text-tertiary"
+            className="mb-1 text-10 font-semibold uppercase text-text-tertiary"
           >
             Scenarios
           </h3>
@@ -142,13 +142,13 @@ export function MockScenariosAction() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <p className="truncate text-[12px] font-medium text-foreground">
+                      <p className="truncate text-12 font-medium text-foreground">
                         {scenarioName(entry.id)}
                       </p>
                       {matched && lastActivity ? (
                         <span
                           data-testid={`scenario-activity-${entry.id}`}
-                          className="flex shrink-0 items-center gap-1 text-[10px] text-success"
+                          className="flex shrink-0 items-center gap-1 text-10 text-success"
                         >
                           <Check className="h-3 w-3" />
                           Matched {activityAge(lastActivity.at)}
@@ -157,7 +157,7 @@ export function MockScenariosAction() {
                     </div>
                     <p
                       title={expression}
-                      className="truncate font-mono text-[10px] text-text-tertiary"
+                      className="truncate font-mono text-10 text-text-tertiary"
                     >
                       {expression}
                     </p>
@@ -176,7 +176,7 @@ export function MockScenariosAction() {
           {lastActivity && !lastActivity.matched ? (
             <p
               data-testid="unmatched-scenario-activity"
-              className="border-t border-border/50 pt-2 text-[10px] text-text-tertiary"
+              className="border-t border-border/50 pt-2 text-10 text-text-tertiary"
             >
               No scenario matched - {activityAge(lastActivity.at)}; message
               passed through.
@@ -191,7 +191,7 @@ export function MockScenariosAction() {
           <div className="flex items-center justify-between gap-3">
             <h3
               id="mock-scenario-world-heading"
-              className="text-[10px] font-semibold uppercase text-text-tertiary"
+              className="text-10 font-semibold uppercase text-text-tertiary"
             >
               Connected (mock)
             </h3>
@@ -201,14 +201,14 @@ export function MockScenariosAction() {
               size="sm"
               onClick={resetWorld}
               disabled={world.connected.length === 0}
-              className="h-6 px-1.5 text-[10px]"
+              className="h-6 px-1.5 text-10"
             >
               <RotateCcw />
               Reset world
             </Button>
           </div>
           {world.connected.length === 0 ? (
-            <p className="mt-2 text-[11px] leading-4 text-text-tertiary">
+            <p className="mt-2 text-11 leading-4 text-text-tertiary">
               Nothing connected - <code className="font-mono">need</code> flows
               will run their connect step.
             </p>
@@ -217,7 +217,7 @@ export function MockScenariosAction() {
               {world.connected.map((serviceSlug) => (
                 <span
                   key={serviceSlug}
-                  className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-[10px] text-success"
+                  className="inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-success/30 bg-success/10 pl-2 pr-1 text-10 text-success"
                 >
                   <span className="truncate font-mono">{serviceSlug}</span>
                   <button
@@ -234,7 +234,7 @@ export function MockScenariosAction() {
           )}
         </section>
 
-        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-[10px] leading-4 text-text-tertiary">
+        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-10 leading-4 text-text-tertiary">
           <p>
             Edit flows in{" "}
             <code className="font-mono">

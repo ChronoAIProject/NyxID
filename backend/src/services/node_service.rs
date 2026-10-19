@@ -277,6 +277,9 @@ pub async fn register_node(
     let signing_secret_hash = hash_token(&raw_signing_secret);
 
     let node = Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         // Registration-token ids are reserved as the future node identity.
         // This gives callers one stable, secret-free resource reference for
         // both the pending registration and the registered node.
@@ -354,6 +357,9 @@ pub async fn create_for_device(
     let signing_secret_hash = hash_token(raw_signing_secret.as_str());
 
     let node = Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         id: node_id.clone(),
         user_id: input.user_id.to_string(),
         name: device_node_name(input.label, &node_id),
@@ -427,6 +433,17 @@ pub async fn get_node_signing_secret(
             "Node {node_id} not found during request signing"
         )));
     };
+
+    signing_secret_from_node(encryption_keys, &node).await
+}
+
+/// Machine tools already batch-load their live nodes. Reusing that snapshot
+/// avoids a second database read solely to decrypt the signing key.
+pub(crate) async fn signing_secret_from_node(
+    encryption_keys: &EncryptionKeys,
+    node: &Node,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let node_id = &node.id;
 
     let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
         return Err(AppError::NodeOffline(format!(
@@ -602,6 +619,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
     max_nodes_per_user: u32,
     expected_state_version: Option<i64>,
 ) -> AppResult<TransferNodeResult> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "transfer").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, actor_user_id, &node).await?;
 
@@ -624,10 +642,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
     let previous_owner_user_id = node.user_id;
     let node_name = node.name;
     let new_owner_user_id = new_owner_user_id.to_string();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
             let operation: AppResult<TransferNodeResult> = async {
                 let current_filter = doc! {
                     "_id": &node_id,
@@ -681,8 +696,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     )
                     .session(&mut *session)
                     .await?;
-                let service_result = db
-                    .collection::<UserService>(USER_SERVICES)
+                let service_result = crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
                     .update_many(
                         doc! {
                             "node_id": &node_id,
@@ -777,6 +791,7 @@ pub async fn delete_node_with_expected_state_version(
     node_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<()> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, user_id, &node).await?;
 
@@ -784,84 +799,81 @@ pub async fn delete_node_with_expected_state_version(
     let node_id = node_id.to_string();
     let tracing_node_id = node_id.clone();
     let owner_user_id = node.user_id;
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation: AppResult<()> = async {
-                let now = bson::DateTime::from_chrono(Utc::now());
-                let mut node_filter = doc! {
-                    "_id": &node_id,
-                    "user_id": &owner_user_id,
-                    "is_active": true,
-                };
-                if let Some(expected) = expected_state_version {
-                    node_filter.insert(
-                        "$or",
-                        vec![
-                            doc! { "state_version": expected },
-                            doc! { "state_version": { "$exists": false } },
-                        ],
-                    );
-                }
-                let state_version_fallback = expected_state_version.unwrap_or(0);
-                let result = db
-                    .collection::<Node>(NODES)
-                    .update_one(
-                        node_filter,
-                        vec![doc! {
-                            "$set": {
-                                "is_active": false,
-                                "status": NodeStatus::Offline.as_str(),
-                                "updated_at": &now,
-                                "state_version": {
-                                    "$add": [
-                                        { "$ifNull": ["$state_version", state_version_fallback] },
-                                        1_i64,
-                                    ]
-                                },
-                            }
-                        }],
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if result.matched_count == 0 {
-                    if expected_state_version.is_some() {
-                        return Err(AppError::Conflict(
-                            "the node changed since this action was prepared".to_string(),
-                        ));
-                    }
-                    return Err(AppError::NodeNotFound("Node not found".to_string()));
-                }
-
-                db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-                    .update_many(
-                        doc! { "node_id": &node_id, "is_active": true },
-                        doc! { "$set": { "is_active": false, "updated_at": &now } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
-                    .delete_many(doc! { "node_id": &node_id })
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<UserService>(USER_SERVICES)
-                    .update_many(
-                        doc! { "node_id": &node_id, "is_active": true },
-                        doc! {
-                            "$unset": { "node_id": "" },
-                            "$set": { "updated_at": &now },
-                        },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                Ok(())
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        let operation: AppResult<()> = async {
+            let now = bson::DateTime::from_chrono(Utc::now());
+            let mut node_filter = doc! {
+                "_id": &node_id,
+                "user_id": &owner_user_id,
+                "is_active": true,
+            };
+            if let Some(expected) = expected_state_version {
+                node_filter.insert(
+                    "$or",
+                    vec![
+                        doc! { "state_version": expected },
+                        doc! { "state_version": { "$exists": false } },
+                    ],
+                );
             }
-            .await;
-            crate::services::api_key_mutation_service::transaction_result(operation)
-        })
-        .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+            let state_version_fallback = expected_state_version.unwrap_or(0);
+            let result = db
+                .collection::<Node>(NODES)
+                .update_one(
+                    node_filter,
+                    vec![doc! {
+                        "$set": {
+                            "is_active": false,
+                            "status": NodeStatus::Offline.as_str(),
+                            "updated_at": &now,
+                            "state_version": {
+                                "$add": [
+                                    { "$ifNull": ["$state_version", state_version_fallback] },
+                                    1_i64,
+                                ]
+                            },
+                        }
+                    }],
+                )
+                .session(&mut *session)
+                .await?;
+            if result.matched_count == 0 {
+                if expected_state_version.is_some() {
+                    return Err(AppError::Conflict(
+                        "the node changed since this action was prepared".to_string(),
+                    ));
+                }
+                return Err(AppError::NodeNotFound("Node not found".to_string()));
+            }
+
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .update_many(
+                    doc! { "node_id": &node_id, "is_active": true },
+                    doc! { "$set": { "is_active": false, "updated_at": &now } },
+                )
+                .session(&mut *session)
+                .await?;
+            db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+                .delete_many(doc! { "node_id": &node_id })
+                .session(&mut *session)
+                .await?;
+            crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
+                .update_many(
+                    doc! { "node_id": &node_id, "is_active": true },
+                    doc! {
+                        "$unset": { "node_id": "" },
+                        "$set": { "updated_at": &now },
+                    },
+                )
+                .session(&mut *session)
+                .await?;
+            Ok(())
+        }
+        .await;
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
 
     tracing::info!(node_id = %tracing_node_id, "Node deleted");
     Ok(())
@@ -1036,6 +1048,7 @@ pub async fn rotate_auth_token(
     user_id: &str,
     node_id: &str,
 ) -> AppResult<(String, String)> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "rotate").await?;
     let _node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
 
     let raw_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
@@ -1072,6 +1085,58 @@ pub async fn rotate_auth_token(
 
     tracing::info!(node_id = %node_id, "Node auth token and signing secret rotated");
     Ok((raw_token, raw_signing_secret))
+}
+
+/// Prepared using the same Node credential format as ordinary registration.
+/// Only managed bootstrap may activate it, in its lifecycle-fenced transaction.
+pub(crate) struct ManagedNodeCredentialMaterial {
+    pub auth_token: Zeroizing<String>,
+    pub signing_secret: Zeroizing<String>,
+    pub signing_secret_encrypted: Vec<u8>,
+}
+
+pub(crate) async fn prepare_managed_credentials(
+    encryption_keys: &EncryptionKeys,
+) -> AppResult<ManagedNodeCredentialMaterial> {
+    let auth_token = Zeroizing::new(format!(
+        "nyx_nauth_{}",
+        hex::encode(rand::random::<[u8; 32]>())
+    ));
+    let signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
+    let signing_secret_encrypted = encryption_keys.encrypt(signing_secret.as_bytes()).await?;
+    Ok(ManagedNodeCredentialMaterial {
+        auth_token,
+        signing_secret,
+        signing_secret_encrypted,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn activate_managed_credentials(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    node_id: &str,
+    owner_id: &str,
+    auth_hash: &str,
+    signing_hash: &str,
+    signing_secret_encrypted: &[u8],
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let updated = db.collection::<Node>(NODES).update_one(
+        doc! {"_id": node_id, "user_id": owner_id, "metadata.provisioning_source": "remote_machine"},
+        doc! {"$set": {
+            "auth_token_hash": auth_hash, "signing_secret_hash": signing_hash,
+            "signing_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: signing_secret_encrypted.to_vec() },
+            "is_active": true, "status": NodeStatus::Offline.as_str(),
+            "connection_owner": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now),
+        }, "$inc": {"access_revision": 1_i64, "state_version": 1_i64}},
+    ).session(session).await?;
+    if updated.modified_count != 1 {
+        return Err(AppError::Conflict(
+            "managed_node_identity_unavailable".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Update a binding's priority.
@@ -1145,6 +1210,7 @@ pub async fn list_all_nodes(
 
 /// Admin: soft-delete a node without ownership check.
 pub async fn admin_delete_node(db: &mongodb::Database, node_id: &str) -> AppResult<()> {
+    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db
@@ -1261,15 +1327,15 @@ async fn has_active_user_service_for_node(
     service_id: &str,
     node_id: &str,
 ) -> AppResult<bool> {
-    let count = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! {
-            "user_id": user_id,
-            "catalog_service_id": service_id,
-            "node_id": node_id,
-            "is_active": true,
-        })
-        .await?;
+    let count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .count_documents(doc! {
+                "user_id": user_id,
+                "catalog_service_id": service_id,
+                "node_id": node_id,
+                "is_active": true,
+            })
+            .await?;
 
     Ok(count > 0)
 }
@@ -1807,6 +1873,9 @@ mod tests {
     fn make_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),

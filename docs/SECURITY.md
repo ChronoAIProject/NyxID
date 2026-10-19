@@ -492,6 +492,8 @@ OAuth clients cannot configure or exchange for `account:read`, and delegation re
 
 The separate `mcp:catalog:read` capability is intentionally not an account-read, proxy, approval, management, or secret-delivery grant. Its delegated JWT uses `sub` for the owner, `act.sub` for the source/acting OAuth client, and `client_id` for the receiving OAuth client. Catalog authority claims are explicit (`allow_all_services`/`allowed_service_ids`, `allow_all_nodes`/`allowed_node_ids`, and `resources`); missing or contradictory claims fail closed. Refresh preserves both client identities and rechecks both clients and both consent records.
 
+Channel media downloads (`GET /api/v1/channel-relay/messages/{message_id}/attachments/{index}`) are explicitly denied by `delegated_read_denied_path`, even though other native channel-relay routes retain their own authorization. `GET /api/v1/channel-platforms` exposes metadata only and is allowed for delegated `account:read`; it is not a denied route.
+
 New management `GET` routes default to readable for `account:read`. Route authors must add any new secret-delivery, execution, streaming, WebSocket-upgrade, or authentication/provisioning protocol route to `delegated_read_denied_path` in `mw/auth.rs` before mounting it.
 
 ### MCP Injection Security

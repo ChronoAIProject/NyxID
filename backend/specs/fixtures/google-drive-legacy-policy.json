@@ -1,0 +1,40 @@
+{
+  "rules": [
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files"
+    },
+    {
+      "method": "POST",
+      "path_template": "/drive/v3/files"
+    },
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "POST",
+      "path_template": "/drive/v3/files/{fileId}/copy"
+    },
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files/{fileId}/export"
+    },
+    {
+      "method": "POST",
+      "path_template": "/upload/drive/v3/files"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/upload/drive/v3/files/{fileId}"
+    }
+  ]
+}

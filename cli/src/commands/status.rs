@@ -2,39 +2,54 @@ use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiError};
+use crate::auth::agent_key::{Identity, format_identity};
 use crate::cli::OutputFormat;
+use crate::commands::api_key::service_scope_display;
 
 pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
-    let user: Value = api.get_value("/users/me").await?;
-    let services_resp: Value = api.get_value("/keys").await?;
-    let api_keys_resp: Value = api.get_value("/api-keys").await?;
-    let nodes_resp: Value = api.get_value("/nodes").await?;
+    let identity: Option<Identity> = if api.is_agent_key_auth() {
+        Some(api.get("/auth/agent-key/self").await?)
+    } else {
+        None
+    };
+    if let (Some(identity), OutputFormat::Table) = (&identity, output) {
+        eprintln!("{}\n", format_identity(identity));
+    }
+    let user = section(api, "/users/me").await?;
+    let services_resp = section(api, "/keys").await?;
+    let api_keys_resp = section(api, "/api-keys").await?;
+    let nodes_resp = section(api, "/nodes").await?;
 
     // Unwrap from response wrappers: { "keys": [...] } or { "nodes": [...] }
     let services = services_resp
         .get("keys")
         .cloned()
-        .unwrap_or(Value::Array(vec![]));
+        .unwrap_or_else(|| empty_section(&services_resp));
     let api_keys = api_keys_resp
         .get("keys")
         .cloned()
-        .unwrap_or(Value::Array(vec![]));
+        .unwrap_or_else(|| empty_section(&api_keys_resp));
     let nodes = nodes_resp.get("nodes").cloned().unwrap_or(
         nodes_resp
             .as_array()
             .map(|a| Value::Array(a.clone()))
-            .unwrap_or(Value::Array(vec![])),
+            .unwrap_or_else(|| empty_section(&nodes_resp)),
     );
 
     match output {
         OutputFormat::Json => {
-            let combined = serde_json::json!({
+            let mut combined = serde_json::json!({
                 "user": user,
                 "services": services,
                 "api_keys": api_keys,
                 "nodes": nodes,
             });
+            if let Some(identity) = identity {
+                let mut auth = serde_json::to_value(identity)?;
+                auth["kind"] = Value::String("agent_key".into());
+                combined["auth"] = auth;
+            }
             println!("{}", serde_json::to_string_pretty(&combined)?);
         }
         OutputFormat::Table => {
@@ -45,11 +60,37 @@ pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
     Ok(())
 }
 
+async fn section(api: &mut ApiClient, path: &str) -> Result<Value> {
+    match api.get_value(path).await {
+        Err(error)
+            if api.is_agent_key_auth()
+                && error
+                    .downcast_ref::<ApiError>()
+                    .is_some_and(|error| error.status() == 403) =>
+        {
+            Ok(Value::Null)
+        }
+        result => result,
+    }
+}
+
+fn empty_section(response: &Value) -> Value {
+    if response.is_null() {
+        Value::Null
+    } else {
+        Value::Array(vec![])
+    }
+}
+
 fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &Value, base: &str) {
     let email = user["email"].as_str().unwrap_or("-");
     let role = user["role"].as_str().unwrap_or("-");
 
-    eprintln!("Account: {email} ({role})");
+    if user.is_null() {
+        eprintln!("Account: unavailable with this key's scope");
+    } else {
+        eprintln!("Account: {email} ({role})");
+    }
     eprintln!("Server:  {base}");
     eprintln!();
 
@@ -58,7 +99,9 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
     let svc_count = svc_list.map_or(0, |v| v.len());
     eprintln!("AI Services ({svc_count})");
 
-    if svc_count > 0 {
+    if services.is_null() {
+        eprintln!("  unavailable with this key's scope");
+    } else if svc_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
         table.set_header(["ID", "Slug", "Endpoint", "Status"]);
@@ -87,7 +130,9 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
     let key_count = key_list.map_or(0, |v| v.len());
     eprintln!("API Keys ({key_count})");
 
-    if key_count > 0 {
+    if api_keys.is_null() {
+        eprintln!("  unavailable with this key's scope");
+    } else if key_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
         table.set_header(["ID", "Name", "Scopes", "Services", "Nodes"]);
@@ -96,19 +141,7 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
             let id = key["id"].as_str().or(key["_id"].as_str()).unwrap_or("-");
             let name = key["name"].as_str().unwrap_or("-");
             let scopes = key["scopes"].as_str().unwrap_or("-");
-            let services = if key["allow_all_services"].as_bool().unwrap_or(true) {
-                "all".to_string()
-            } else {
-                key["allowed_services"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s["slug"].as_str().or(s["label"].as_str()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_else(|| "-".to_string())
-            };
+            let services = service_scope_display(key);
             let nodes_scope = if key["allow_all_nodes"].as_bool().unwrap_or(true) {
                 "all".to_string()
             } else {
@@ -135,7 +168,9 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
     let node_count = node_list.map_or(0, |v| v.len());
     eprintln!("Nodes ({node_count})");
 
-    if node_count > 0 {
+    if nodes.is_null() {
+        eprintln!("  unavailable with this key's scope");
+    } else if node_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
         table.set_header(["ID", "Name", "Status", "Last Seen"]);

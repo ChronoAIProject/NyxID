@@ -1,3 +1,5 @@
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
 // Supports all three provider shapes mirroring
@@ -19,6 +21,7 @@ import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
@@ -48,6 +51,9 @@ interface CredentialFieldSpec {
 }
 
 interface CatalogEntryShape {
+  readonly billing?: { readonly platform_billable?: boolean; readonly resale_billable?: boolean };
+  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly name: string;
   readonly description?: string;
@@ -86,6 +92,7 @@ interface CatalogEntryShape {
   readonly device_code_format?: string | null;
   /** Provider default scopes — pre-selected in the scope picker (NyxID#917). */
   readonly default_scopes?: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
   /** Curated selectable scope menu for this provider (NyxID#917). */
   readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
   /** Per-provider scope-removal capability (NyxID#917). `unsupported` →
@@ -271,8 +278,8 @@ export function AiKeyConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">{title}</h2>
-        <p className="text-[12px] text-muted-foreground">{subtitle}</p>
+        <h2 className="font-serif text-28 font-normal">{title}</h2>
+        <p className="text-12 text-muted-foreground">{subtitle}</p>
       </div>
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
@@ -400,11 +407,17 @@ function ManageScopesPanel({
       : null;
   const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
-  const selectedScopes = override ?? seedScopes;
+  const selectedScopes = includeRequiredScopes(
+    override ?? seedScopes,
+    entry?.scope_catalog ?? [],
+  );
   const scopeOverride =
-    override !== null
-      ? override
-      : (cliSet ?? (granted.length > 0 ? granted : undefined));
+    override !== null ||
+    cliSet !== null ||
+    granted.length > 0 ||
+    entry?.scope_catalog?.some((scope) => scope.required)
+      ? selectedScopes
+      : undefined;
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
@@ -429,11 +442,11 @@ function ManageScopesPanel({
   const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
   // Scoped management only applies to OAuth providers. (The only device-code
   // provider, openai-codex, has fixed scopes — nothing to manage.)
-  if (!isOAuth || !entry.provider_config_id) {
+  if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
         </p>
@@ -469,8 +482,8 @@ function ManageScopesPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
-        <p className="text-[12px] text-muted-foreground">
+        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+        <p className="text-12 text-muted-foreground">
           Adjust what {key.label} can do, then re-authorize at the provider.
           Your CLI is waiting for you to finish here.
         </p>
@@ -525,7 +538,7 @@ function OwnerPicker({
           <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
         </div>
       </div>
-      <p className="mt-1 text-[11px] text-muted-foreground">
+      <p className="mt-1 text-11 text-muted-foreground">
         Org-owned services are shared with every admin of that organization
         and can be proxied by its members.
       </p>
@@ -548,12 +561,15 @@ type CustomAuthMethod =
   | "basic"
   | "body"
   | "bot_bearer"
+  | "ifttt_webhook"
   | "none";
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
 function defaultAuthKeyName(method: CustomAuthMethod): string {
   switch (method) {
+    case "ifttt_webhook":
+      return "";
     case "header":
       return "X-API-Key";
     case "query":
@@ -578,6 +594,7 @@ function coerceAuthMethod(raw: string | undefined): CustomAuthMethod {
     case "path":
     case "basic":
     case "body":
+    case "ifttt_webhook":
     case "bot_bearer":
     case "none":
       return raw;
@@ -786,7 +803,7 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none"
+            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
             aria-required="true"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
@@ -794,6 +811,7 @@ function CustomServiceForm({
             <option value="header">header (custom header)</option>
             <option value="query">query (?key=…)</option>
             <option value="path">path (path-prefix injection)</option>
+            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
             <option value="basic">basic (Authorization: Basic …)</option>
             <option value="body">body (JSON-body field injection)</option>
             <option value="none">none (no auth injection)</option>
@@ -858,10 +876,10 @@ function CustomServiceForm({
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-[11px] text-muted-foreground">
+            <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-[11px] text-muted-foreground mt-1">
+            <p className="text-11 text-muted-foreground mt-1">
               Credential will be encrypted and pushed to this node over
               the existing WebSocket channel. NyxID never logs it.
             </p>
@@ -916,7 +934,9 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
-  const shape = classifyFlow(entry);
+  const [platformChoice, setPlatformChoice] = useState(true);
+  const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
+  const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -929,8 +949,12 @@ function CatalogConfirmForm({
   // Seeded with the provider's defaults (all pre-selected) so an unedited
   // submit requests exactly today's scopes; the picker lets the user drop a
   // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     entry.default_scopes ?? [],
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    entry.scope_catalog ?? [],
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -949,6 +973,7 @@ function CatalogConfirmForm({
         service_slug: entry.slug,
         label,
       };
+      if (usePlatformKey) { body.use_platform_key = true; }
       if (shape === "token-exchange" && !viaNode) {
         // Multi-field credential: validate required-ness and JSON-
         // encode. Mirror wizard.js submit path at wizard.js:723-734.
@@ -970,7 +995,7 @@ function CatalogConfirmForm({
       // `no-auth` / `oauth` / `device-code` skip credential entirely;
       // OAuth / device-code placeholder creation lives in the sub-
       // flow components and doesn't reach this branch.
-      if (entry.requires_gateway_url || endpointUrl) {
+      if (!usePlatformKey && (entry.requires_gateway_url || endpointUrl)) {
         body.endpoint_url = endpointUrl;
       }
       if (viaNode) {
@@ -1062,7 +1087,7 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} is an SSH service. Use{" "}
           <code>nyxid service add-ssh</code> from your CLI instead
           (certificate-based auth, not a credential binding).
@@ -1092,7 +1117,7 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} uses <code>{entry.auth_method}</code> auth,
           which isn't supported via remote pairing. Complete setup on
           the main Keys page. Your CLI will receive a cancel and
@@ -1121,14 +1146,15 @@ function CatalogConfirmForm({
   const effectiveEndpointUrl = endpointUrl.trim() || prefill.endpoint_url;
 
   // Whether the upstream provider accepts additional scopes on the
-  // initiate request. OAuth always does; `openai`-format device-code
+  // initiate request. Scopeless OAuth and `openai`-format device-code
   // providers (Codex) reject a `scope` parameter, so hide the picker
   // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
   // (NyxID#917). When supported, the sub-flow receives the picker's
   // complete selection as `scopeOverride`; when not, no override.
   const supportsAdditionalScopes =
-    shape === "oauth" ||
-    (shape === "device-code" && entry.device_code_format !== "openai");
+    entry.supports_oauth_scopes !== false &&
+    (shape === "oauth" ||
+      (shape === "device-code" && entry.device_code_format !== "openai"));
   const scopeOverride = supportsAdditionalScopes ? selectedScopes : undefined;
 
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {
@@ -1172,6 +1198,7 @@ function CatalogConfirmForm({
   }
 
   const needsCredentialInput = shape === "api-key" && entry.requires_credential;
+  const isSupabase = entry.slug === "api-supabase";
   const submitLabel = (() => {
     if (loading) return "Creating...";
     if (viaNode) return "Connect via node";
@@ -1192,7 +1219,7 @@ function CatalogConfirmForm({
     loading ||
     !label.trim() ||
     (needsCredentialInput && !viaNode && !credential.trim()) ||
-    (entry.requires_gateway_url && !endpointUrl.trim()) ||
+    (!usePlatformKey && entry.requires_gateway_url && !endpointUrl.trim()) ||
     (!viaNode && !tokenExchangeComplete);
 
   function handleSubmit() {
@@ -1228,6 +1255,7 @@ function CatalogConfirmForm({
         </div>
       </div>
 
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
       <div className="flex flex-col gap-3">
         <Field label="Label" htmlFor="pair-aikey-label">
           <Input
@@ -1240,21 +1268,31 @@ function CatalogConfirmForm({
           />
         </Field>
 
-        {entry.requires_gateway_url ? (
-          <Field label="Instance URL" htmlFor="pair-aikey-url">
+        {!usePlatformKey && entry.requires_gateway_url ? (
+          <Field
+            label={isSupabase ? "Supabase Project URL" : "Instance URL"}
+            htmlFor="pair-aikey-url"
+          >
             <Input
               id="pair-aikey-url"
               value={endpointUrl}
               onChange={(e) => {
                 setEndpointUrl(e.target.value);
               }}
-              placeholder="https://your-instance.example.com"
+              placeholder={
+                isSupabase
+                  ? "https://project-ref.supabase.co"
+                  : "https://your-instance.example.com"
+              }
             />
           </Field>
         ) : null}
 
         {needsCredentialInput && !viaNode ? (
-          <Field label="API key" htmlFor="pair-aikey-credential">
+          <Field
+            label={isSupabase ? "Supabase API key" : "API key"}
+            htmlFor="pair-aikey-credential"
+          >
             <Input
               id="pair-aikey-credential"
               type="password"
@@ -1263,7 +1301,9 @@ function CatalogConfirmForm({
               onChange={(e) => {
                 setCredential(e.target.value);
               }}
-              placeholder="sk-..."
+              placeholder={
+                isSupabase ? "sb_secret_... or sb_publishable_..." : "sk-..."
+              }
             />
             {entry.api_key_url ? (
               <a
@@ -1322,10 +1362,10 @@ function CatalogConfirmForm({
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-[11px] text-muted-foreground">
+            <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-[11px] text-muted-foreground mt-1">
+            <p className="text-11 text-muted-foreground mt-1">
               Credential will be configured on the node agent. NyxID
               never sees or stores it.
             </p>
@@ -1368,7 +1408,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
       {message}
     </p>
   );

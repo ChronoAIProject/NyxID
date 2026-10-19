@@ -69,7 +69,7 @@ function formatRemaining(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
-function DetailRow({
+export function DetailRow({
   label,
   value,
   mono = false,
@@ -104,7 +104,7 @@ function DetailRow({
   );
 }
 
-function formatLocation(preview: AuthDevicePreview): string {
+export function formatLocation(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution !== "verified") return "Not available";
   const locality = [preview.client_city, preview.client_region]
     .filter((value): value is string => Boolean(value))
@@ -122,7 +122,7 @@ function formatLocation(preview: AuthDevicePreview): string {
     : "Not available";
 }
 
-function formatNetwork(preview: AuthDevicePreview): string {
+export function formatNetwork(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution !== "verified") return "Not available";
   const relation =
     preview.network_relation ??
@@ -152,7 +152,7 @@ function formatScreen(preview: AuthDevicePreview): string {
   return `${preview.client_screen_width} x ${preview.client_screen_height} CSS px${ratio}`;
 }
 
-function formatDevice(preview: AuthDevicePreview): string {
+export function formatDevice(preview: AuthDevicePreview): string {
   if (preview.client_label && preview.client_model) {
     return `${preview.client_label} · ${preview.client_model}`;
   }
@@ -181,7 +181,7 @@ function timezoneRow(
   };
 }
 
-function requesterValue(preview: AuthDevicePreview): string {
+export function requesterValue(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution === "verified" && preview.client_ip) {
     return preview.client_ip;
   }
@@ -286,7 +286,7 @@ function ManualCodeModal({
               autoCapitalize="characters"
               autoCorrect={false}
               textContentType="oneTimeCode"
-              maxLength={9}
+              maxLength={11}
               returnKeyType="done"
               selectionColor={colors.primary}
               placeholder="ABCD-EFGH"
@@ -432,7 +432,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     [claimAction],
   );
 
-  const handleScannedCode = (normalized: string) => {
+  const handleScannedCode = (normalized: string, kind: "device" | "agent-key") => {
+    if (kind === "agent-key") {
+      setIsScanning(false);
+      navigation.navigate("AgentKeyLogin", { user_code: normalized });
+      return;
+    }
     const formatted = formatAuthDeviceUserCode(normalized);
     setUserCode(formatted);
     setManualEntryVisible(false);
@@ -600,6 +605,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             <Text style={styles.title}>Approve device login</Text>
           </View>
           <Text style={styles.subtitle}>Review the request details.</Text>
+          {!preview && <PrimaryButton label="Agent Key login" kind="ghost" onPress={() => navigation.navigate("AgentKeyLogin")} />}
 
           {!preview ? (
             <View style={styles.inputSection}>
@@ -615,7 +621,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 autoCapitalize="characters"
                 autoCorrect={false}
                 textContentType="oneTimeCode"
-                maxLength={9}
+                maxLength={11}
                 returnKeyType="done"
                 onSubmitEditing={() => {
                   if (normalizeAuthDeviceUserCode(userCode))
@@ -812,6 +818,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 />
                 <Text style={styles.cautionText}>
                   {"Only approve if you started this sign-in. "}
+                  {"Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "}
                   <Text style={styles.cautionDanger}>
                     If anything looks unfamiliar, reject it.
                   </Text>
@@ -819,7 +826,17 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               </View>
 
               {isAuthenticated ? (
-                <View style={styles.decisionRow}>
+                <View style={{ gap: spacing.md }}>
+                  {preview.supports_grant_choice && <PrimaryButton label="Restricted Agent Key" kind="ghost"
+                    disabled={isPending || isExpired}
+                    onPress={() => navigation.navigate("AgentKeyLogin", {
+                      user_code: confirmedCode ?? userCode, flow: "device",
+                    })} />}
+                  <Text style={styles.cautionText}>
+                    A full account session grants this machine your account, service,
+                    credential, and organization access. A restricted Agent Key grants
+                    only the permissions and resources you confirm next.
+                  </Text>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
                       label={
@@ -835,7 +852,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                       label={
                         decisionPending === "approve"
                           ? "Approving..."
-                          : "Approve"
+                          : "Approve full account session"
                       }
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("approve")}

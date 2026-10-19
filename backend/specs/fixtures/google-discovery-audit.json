@@ -1,0 +1,742 @@
+{
+  "discovery": {
+    "drive": {
+      "revision": "20260913",
+      "discovery_url": "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+      "snapshot_sha256": "1b34312e7a6d46e315824775e78042e6add5349ca679a6adb1cba347a401ade7"
+    },
+    "docs": {
+      "revision": "20260918",
+      "discovery_url": "https://docs.googleapis.com/$discovery/rest?version=v1",
+      "snapshot_sha256": "3dde86b62ff4c0dce737533806a549102eacaeb9e4d1683144da67daa95afdfc"
+    },
+    "sheets": {
+      "revision": "20260909",
+      "discovery_url": "https://sheets.googleapis.com/$discovery/rest?version=v4",
+      "snapshot_sha256": "501ff976598bfe5f1d19bbfaada1e4b33489fee4bff282772a92b31ee6470ec3"
+    },
+    "slides": {
+      "revision": "20260916",
+      "discovery_url": "https://slides.googleapis.com/$discovery/rest?version=v1",
+      "snapshot_sha256": "b9e787fce87cdc0504eba3a153ce2971440e18d07e9a014bc2893a51707496f5"
+    },
+    "calendar": {
+      "revision": "20260826",
+      "discovery_url": "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest",
+      "snapshot_sha256": "ddf2255298e05319ed3241ce0d36b3c21a392c57d5d0b779adce052c4b042f66"
+    },
+    "gmail": {
+      "revision": "20260917",
+      "discovery_url": "https://gmail.googleapis.com/$discovery/rest?version=v1",
+      "snapshot_sha256": "a55e766c8cecbc8c0a6f3da6eea28525e53a4d173b884d0ecb80d0857a2d0711"
+    }
+  },
+  "operation_count": 38,
+  "operations": [
+    {
+      "product": "drive",
+      "operation": "drive_list_files",
+      "method": "GET",
+      "path": "/drive/v3/files",
+      "discovery_matches": [
+        "drive.files.list"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.photos.readonly",
+        "https://www.googleapis.com/auth/drive.readonly"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_create_file",
+      "method": "POST",
+      "path": "/drive/v3/files",
+      "discovery_matches": [
+        "drive.files.create"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_get_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}",
+      "discovery_matches": [
+        "drive.files.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+        "https://www.googleapis.com/auth/drive.photos.readonly",
+        "https://www.googleapis.com/auth/drive.readonly"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_update_file",
+      "method": "PATCH",
+      "path": "/drive/v3/files/{fileId}",
+      "discovery_matches": [
+        "drive.files.update"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.scripts"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_delete_file",
+      "method": "DELETE",
+      "path": "/drive/v3/files/{fileId}",
+      "discovery_matches": [
+        "drive.files.delete"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_copy_file",
+      "method": "POST",
+      "path": "/drive/v3/files/{fileId}/copy",
+      "discovery_matches": [
+        "drive.files.copy"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.photos.readonly"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_export_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}/export",
+      "discovery_matches": [
+        "drive.files.export"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.meet.readonly",
+        "https://www.googleapis.com/auth/drive.readonly"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_upload_file",
+      "method": "POST",
+      "path": "/upload/drive/v3/files",
+      "discovery_matches": [
+        "drive.files.create"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/octet-stream",
+        "multipart/related"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "product": "drive",
+      "operation": "drive_upload_file_content",
+      "method": "PATCH",
+      "path": "/upload/drive/v3/files/{fileId}",
+      "discovery_matches": [
+        "drive.files.update"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/octet-stream",
+        "multipart/related"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.scripts"
+      ]
+    },
+    {
+      "product": "docs",
+      "operation": "docs_create_document",
+      "method": "POST",
+      "path": "/v1/documents",
+      "discovery_matches": [
+        "docs.documents.create"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "product": "docs",
+      "operation": "docs_get_document",
+      "method": "GET",
+      "path": "/v1/documents/{documentId}",
+      "discovery_matches": [
+        "docs.documents.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly"
+      ]
+    },
+    {
+      "product": "docs",
+      "operation": "docs_batch_update_document",
+      "method": "POST",
+      "path": "/v1/documents/{documentId}:batchUpdate",
+      "discovery_matches": [
+        "docs.documents.batchUpdate"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_create_spreadsheet",
+      "method": "POST",
+      "path": "/v4/spreadsheets",
+      "discovery_matches": [
+        "sheets.spreadsheets.create"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_get_spreadsheet",
+      "method": "GET",
+      "path": "/v4/spreadsheets/{spreadsheetId}",
+      "discovery_matches": [
+        "sheets.spreadsheets.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/spreadsheets.readonly"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_batch_update_spreadsheet",
+      "method": "POST",
+      "path": "/v4/spreadsheets/{spreadsheetId}:batchUpdate",
+      "discovery_matches": [
+        "sheets.spreadsheets.batchUpdate"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_get_values",
+      "method": "GET",
+      "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}",
+      "discovery_matches": [
+        "sheets.spreadsheets.values.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/spreadsheets.readonly"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_update_values",
+      "method": "PUT",
+      "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}",
+      "discovery_matches": [
+        "sheets.spreadsheets.values.update"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_append_values",
+      "method": "POST",
+      "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+      "discovery_matches": [
+        "sheets.spreadsheets.values.append"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets"
+      ]
+    },
+    {
+      "product": "sheets",
+      "operation": "sheets_clear_values",
+      "method": "POST",
+      "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+      "discovery_matches": [
+        "sheets.spreadsheets.values.clear"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets"
+      ]
+    },
+    {
+      "product": "slides",
+      "operation": "slides_create_presentation",
+      "method": "POST",
+      "path": "/v1/presentations",
+      "discovery_matches": [
+        "slides.presentations.create"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/presentations"
+      ]
+    },
+    {
+      "product": "slides",
+      "operation": "slides_get_presentation",
+      "method": "GET",
+      "path": "/v1/presentations/{presentationId}",
+      "discovery_matches": [
+        "slides.presentations.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/presentations.readonly"
+      ]
+    },
+    {
+      "product": "slides",
+      "operation": "slides_batch_update_presentation",
+      "method": "POST",
+      "path": "/v1/presentations/{presentationId}:batchUpdate",
+      "discovery_matches": [
+        "slides.presentations.batchUpdate"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/spreadsheets.readonly"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_list_calendars",
+      "method": "GET",
+      "path": "/calendar/v3/users/me/calendarList",
+      "discovery_matches": [
+        "calendar.calendarList.list"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.calendarlist",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_add_to_list",
+      "method": "POST",
+      "path": "/calendar/v3/users/me/calendarList",
+      "discovery_matches": [
+        "calendar.calendarList.insert"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.calendarlist"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_remove_from_list",
+      "method": "DELETE",
+      "path": "/calendar/v3/users/me/calendarList/{calendarId}",
+      "discovery_matches": [
+        "calendar.calendarList.delete"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendarlist"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_create_calendar",
+      "method": "POST",
+      "path": "/calendar/v3/calendars",
+      "discovery_matches": [
+        "calendar.calendars.insert"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendars"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_get_calendar",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "discovery_matches": [
+        "calendar.calendars.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendars",
+        "https://www.googleapis.com/auth/calendar.calendars.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_update_calendar",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "discovery_matches": [
+        "calendar.calendars.patch"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendars"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_delete_calendar",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "discovery_matches": [
+        "calendar.calendars.delete"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.calendars"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_list_events",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "discovery_matches": [
+        "calendar.events.list"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.owned",
+        "https://www.googleapis.com/auth/calendar.events.owned.readonly",
+        "https://www.googleapis.com/auth/calendar.events.public.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_create_event",
+      "method": "POST",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "discovery_matches": [
+        "calendar.events.insert"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_get_event",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "discovery_matches": [
+        "calendar.events.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.events.owned",
+        "https://www.googleapis.com/auth/calendar.events.owned.readonly",
+        "https://www.googleapis.com/auth/calendar.events.public.readonly",
+        "https://www.googleapis.com/auth/calendar.events.readonly",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_update_event",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "discovery_matches": [
+        "calendar.events.patch"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_delete_event",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "discovery_matches": [
+        "calendar.events.delete"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.app.created",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.events.owned"
+      ]
+    },
+    {
+      "product": "calendar",
+      "operation": "calendar_free_busy",
+      "method": "POST",
+      "path": "/calendar/v3/freeBusy",
+      "discovery_matches": [
+        "calendar.freebusy.query"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.events.freebusy",
+        "https://www.googleapis.com/auth/calendar.freebusy",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "product": "gmail",
+      "operation": "gmail_list_messages",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages",
+      "discovery_matches": [
+        "gmail.users.messages.list"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.metadata",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.readonly"
+      ]
+    },
+    {
+      "product": "gmail",
+      "operation": "gmail_get_message",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages/{id}",
+      "discovery_matches": [
+        "gmail.users.messages.get"
+      ],
+      "issues": [],
+      "body_content_types": [],
+      "scopes": [
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.addons.current.message.action",
+        "https://www.googleapis.com/auth/gmail.addons.current.message.metadata",
+        "https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
+        "https://www.googleapis.com/auth/gmail.metadata",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.readonly"
+      ]
+    },
+    {
+      "product": "gmail",
+      "operation": "gmail_send_message",
+      "method": "POST",
+      "path": "/gmail/v1/users/me/messages/send",
+      "discovery_matches": [
+        "gmail.users.messages.send"
+      ],
+      "issues": [],
+      "body_content_types": [
+        "application/json"
+      ],
+      "scopes": [
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.addons.current.action.compose",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send"
+      ]
+    }
+  ],
+  "limits": "Structural metadata only; does not prove examples, MIME serialization, permissions, API enablement or execution."
+}

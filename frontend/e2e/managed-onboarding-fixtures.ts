@@ -1,0 +1,91 @@
+import type { Page } from "@playwright/test";
+import { channelPlatforms } from "./channel-platform-fixtures";
+
+export const managedBot = {
+  id: "managed-whatsapp",
+  platform: "whatsapp",
+  label: "Managed Support",
+  platform_bot_id: "333",
+  phone_number_id: "333",
+  waba_id: "444",
+  platform_bot_username: "+1 555 123 4567",
+  status: "pending_webhook",
+  is_active: true,
+  webhook_registered: false,
+  app_secret_configured: false,
+  lark_verification_token_configured: false,
+  lark_encrypt_key_configured: false,
+  conversations_count: 0,
+  created_at: "2026-09-08T00:00:00Z",
+  updated_at: "2026-09-08T00:00:00Z",
+  user_id: "test-user",
+  credential_source: "platform",
+  managed_setup: {
+    subscription: "subscribed",
+    webhook_override: "failed",
+    registration: "registered",
+    coexistence: false,
+  },
+  webhook_url:
+    "https://nyxid.example/api/v1/webhooks/channel/whatsapp/managed-whatsapp",
+};
+
+export const managedBootstrap = {
+  available: true,
+  app_id: "111",
+  embedded_signup_config_id: "222",
+  graph_version: "v25.0",
+  signup_version: "v4",
+  feature_types: ["", "whatsapp_business_app_onboarding"],
+  signup_extras: {
+    "": {},
+    whatsapp_business_app_onboarding: {
+      featureType: "whatsapp_business_app_onboarding",
+    },
+  },
+};
+
+export async function mockDashboard(page: Page) {
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname.replace("/api/v1", "");
+    let body: unknown = {};
+    if (path === "/users/me")
+      body = {
+        id: "test-user",
+        email: "test@example.com",
+        display_name: "Test User",
+        is_admin: true,
+        is_active: true,
+        email_verified: true,
+        created_at: managedBot.created_at,
+      };
+    else if (path === "/channel-platforms") body = { platforms: channelPlatforms };
+    else if (path === "/channel-bots") body = { bots: [], total: 0 };
+    else if (path === "/channel-bots/managed-whatsapp") body = managedBot;
+    else if (path.endsWith("/health")) body = {
+      id: path.split("/")[2], platform: "x", label: "DM Support", platform_bot_username: "support",
+      user_id: "test-user", mode: "poll", status: "active", webhook_registered: false,
+      poll_error_count: 0, last_polled_at: null, next_poll_at: null, error: null,
+      recommended_action: "none", recommended_action_text: "No recovery action needed.", can_write: true,
+      diagnostics: { last_inbound_at: null, last_inbound_source: null, last_outbound_at: null,
+        last_outbound_error: null, last_webhook_at: null, last_webhook_error: null,
+        subscription_state: null, consecutive_errors: 0, failure_reason: null },
+    };
+    else if (path.endsWith("/activities")) body = { activities: [], total: 0, routes: [], retention_days: 30, page: 1, per_page: 20 };
+    else if (path.includes("conversations"))
+      body = { conversations: [], total: 0 };
+    else if (path === "/orgs") body = { organizations: [], orgs: [] };
+    else if (path === "/api-keys") body = { keys: [] };
+    else if (path === "/nodes") body = { nodes: [] };
+    else if (path === "/runtime-config")
+      body = {
+        api_base_url: "https://api.nyxid.example",
+        release_integrity: {
+          enabled: false,
+          manifest_url: null,
+          verification_ttl_secs: 300,
+        },
+      };
+    await route.fulfill({ json: body });
+  });
+}

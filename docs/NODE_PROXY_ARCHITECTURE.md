@@ -921,33 +921,32 @@ Migration between backends: `nyxid node migrate --to keychain` or `nyxid node mi
 
 ### WebSocket Client
 
-The connection loop uses exponential backoff reconnection:
+The connection loop delays every retry, including clean closes, EOF, read errors,
+and authentication/ownership rejection. The delay is sampled from half to all
+of a doubling window: 1–2s, 2–4s, 4–8s, 8–16s, 16–32s, then 30–60s. Jitter
+spreads reconnecting fleets. Only at least 60 seconds in the authenticated
+serving loop resets the window; connect/auth time and teardown time do not count.
+Shutdown interrupts both the connection and the retry sleep.
 
-```rust
-pub async fn run_connection_loop(config: &NodeConfig, credentials: &CredentialStore) -> ! {
-    let mut backoff = ExponentialBackoff::new(
-        Duration::from_millis(100), // initial
-        Duration::from_secs(60),    // max
-        2.0,                        // multiplier
-    );
+A single lifecycle connects via TLS WebSocket, sends `auth`, waits for `auth_ok`,
+then handles heartbeat and proxy messages. NyxID sends `auth_ok` and records
+`Node connected via WebSocket` only after claiming the MongoDB owner lease and
+publishing the local connection. A live lease from another generation, including
+one left by a crashed process, rejects the handshake with Close `4008` until
+release or expiry (`NODE_OWNER_LEASE_TTL_SECS`, default 90s). Restarting with the
+same `INSTANCE_NAME` does not bypass generation fencing. This ordering also
+makes older CLI versions enter their existing authentication-error backoff.
+`register_ok` remains the one-time registration response carrying credentials.
 
-    loop {
-        match connect_and_serve(config, credentials).await {
-            Ok(()) => {
-                // Clean disconnect: reset backoff, reconnect immediately
-                backoff.reset();
-            }
-            Err(e) => {
-                let delay = backoff.next_delay();
-                tracing::warn!(error = %e, delay_ms = delay.as_millis(), "Connection failed");
-                tokio::time::sleep(delay).await;
-            }
-        }
-    }
-}
-```
-
-A single connection lifecycle: connect via TLS WebSocket, send `auth` message, wait for `auth_ok`, then enter the main message loop handling `heartbeat_ping`, `proxy_request`, and `error` messages. Reader and writer run as separate tasks communicating through an mpsc channel.
+Same-node claim/publication is serialized locally, while MongoDB preserves
+cross-replica exclusivity. Replacement and removal signal the writer separately
+from its bounded data queue, so a full queue or retained sender cannot strand an
+idle reader or socket reservation. Writer completion ends the reader, and
+cleanup matches the exact connection and generation before releasing ownership.
+Handshake acknowledgements and terminal Close delivery have 10-second bounds.
+Established data writes retain the configured heartbeat and operation timeout
+policies; they have no separate short upload deadline. Lifecycle cancellation
+interrupts a blocked write, including a large proxy upload.
 
 ### Proxy Executor
 
@@ -1181,6 +1180,7 @@ Admin routes under the admin router:
 - Registration tokens are one-time use with configurable TTL
 
 ### Credential Isolation
+- Catalog master credentials always use NyxID server transport, including legacy internal services without `platform_key`. HTTP/WebSocket and MCP ignore existing owner `NodeServiceBinding` routes for these rows. This is intentional hardening in 0.20: a server-held operator key must never be forwarded to an owner node. Services using a node-owned credential retain node routing; explicit platform-bound connections reject `node_id` changes with a validation error.
 - Credentials never transit through NyxID when using node proxy
 - NyxID sends only request metadata (method, path, headers, body) to the node
 - The node injects credentials locally before forwarding to the downstream service
@@ -1208,3 +1208,25 @@ Admin routes under the admin router:
 - All node management operations are audit-logged
 - Proxy requests routed through nodes include `routed_via: "node"` and `node_id` in audit data
 - Node connection/disconnection events are logged
+
+## HTTP cancellation for priority service pools
+
+The CLI advertises `http_cancellation` in its live node capabilities. Priority
+pools require that capability on eligible selected/fallback node routes; discovery
+reports `node_upgrade_required` until the agent is upgraded and reconnected.
+Catalog master/platform credentials continue to use server transport and ignore
+legacy owner-node bindings. Legacy round-robin/weighted pools retain their existing
+transport eligibility.
+
+The backend owns a pending guard from dispatch through response completion.
+Header timeout (including the manager's own timeout), request/response drop,
+stream overflow and connection loss terminate correlation and send `proxy_cancel`
+when the connection remains writable. Stream receivers own their cancellation
+guard; no observer retains a sender that could keep a terminated stream alive.
+Normal End disarms cancellation. Remote dispatch retains the owner/session fence
+and propagates cancellation to the owner. The CLI tracks HTTP tasks by request ID
+and aborts the provider request on `proxy_cancel` or connection shutdown.
+
+See [Service pool routing architecture](SERVICE_POOL_ROUTING_PROOF.md) for the
+attempt deadlines, replay evidence and durable accounting that depend on this
+transport lifecycle.

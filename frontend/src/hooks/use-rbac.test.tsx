@@ -53,10 +53,20 @@ beforeEach(() => {
 });
 
 describe("role queries", () => {
+  it("does not request platform roles when disabled", () => {
+    const { result } = renderHook(() => useRoles({ enabled: false }), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
   it("useRoles GETs /admin/roles and returns the raw RoleListResponse", async () => {
     const payload = { roles: [{ id: "role-1", name: "admin" }] };
     mockGet.mockResolvedValue(payload);
-    const { result } = renderHook(() => useRoles(), { wrapper: createWrapper() });
+    const { result } = renderHook(() => useRoles(), {
+      wrapper: createWrapper(),
+    });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith("/admin/roles");
     expect(result.current.data).toBe(payload);

@@ -15,7 +15,7 @@
  *   --border      → border-border
  *   --muted       → text-muted-foreground
  *   --wordmark    → text-nyx-200
- *   --primary     → text-primary
+ *   --primary     → text-primary-text
  */
 
 import type { ReactNode } from "react"
@@ -41,7 +41,7 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
           <NyxidLogo className="h-9 w-auto" />
         </div>
         {step ? (
-          <div className="text-[12px] text-muted-foreground">{formatStepLabel(step)}</div>
+          <div className="text-12 text-muted-foreground">{formatStepLabel(step)}</div>
         ) : null}
       </header>
       {/*

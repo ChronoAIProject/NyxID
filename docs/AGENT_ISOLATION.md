@@ -1,5 +1,50 @@
 # Agent Isolation
 
+Per-thread `nyxid-assistant` credentials carry an `AssistantTurnFence`. With
+the default-off `assistant:live-turn-gate` rollout flag enabled, execution
+requires a live, non-stopped turn; dedicated channel-agent credentials remain
+separate and idle-capable. Deploy all replicas before enabling the flag, and
+disable it before rollback.
+
+NyxBot service ordering does not enable this rollout flag. While it is off,
+personal service calls and existing personal/platform model inference remain
+available to keys first authenticated without a live turn, subject to their
+current grants, ACLs, operation scopes and permission mode. Actions that need
+confirmation and organization connection use require a real live turn. Turn
+selection and organization model consent cannot be borrowed by an idle request.
+An admission captured in a live turn always retains its same-turn and Stop
+fence through final dispatch, independently of the rollout flag.
+
+## Login Credentials Bound to a Key
+
+`nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.
+
+Authentication resolves the live parent key for scopes, service/node restrictions, per-agent bindings, rate limits, and audit attribution. `AuthUser.api_key_credential_id` identifies the calling login credential while `api_key_id` and `api_key_name` remain the parent identity. Child expiry cannot exceed parent expiry. Parent revocation or rotation invalidates all children, and live parent expiry is checked on every authentication.
+
+`whoami` and `status` identify Agent Key authentication. `logout` revokes only the calling child and clears the profile; individual credentials can also be revoked in the key detail page's Login credentials section. The profile holds a protected `token`, an `auth_kind` marker, and safe `agent_key.json` metadata, with no human refresh token. Rejected credentials never refresh or prompt for account login. Abandoned approved exchanges are revoked after their 60-second delivery window by poll/preview cleanup or the configured background sweep.
+
+Login credential labels combine the sanitized client hostname and requested profile (up to 96 characters), so separate profiles on one machine remain identifiable. Public preview exposes request context and status only; key metadata is available through authenticated selection and self routes or credential delivery. Approval, denial, and delivery audits retain the actor's IP and user agent, with the request ID linking the events. A failed expiry cleanup is logged and retained for retry while the sweep continues processing other exchanges.
+
+### Channel list credential boundaries
+
+An Agent Key login does not authorize the human management commands `nyxid channel-bot list` or `nyxid channel-event channel list`. These require human account access (session cookie or account access token): personal lists are owner-scoped and `--org` requires org-admin access. Their existing OAuth-client account policy is unchanged; first-party-only routes separately reject OAuth-client tokens. To use a management list, ask a human to run `nyxid login` and choose account access, or explicitly select an existing human profile. Never fall back to another identity, create credentials or widen permissions automatically.
+
+Agents already have a narrower read-only discovery path: `GET /api/v1/channel-relay/conversations?page=1&per_page=50`, authenticated with the assigned active API key. It lists only that exact key's active conversation assignments, including device channels (`platform=device`). It does not list all bots, grant management access or discover other keys' assignments. There is no separate channel-event discovery endpoint. No assignments means an empty list.
+
+Unsupported credential types return the same 403, `forbidden` / `1002` and message as before, with additive `details.reason = credential_type_unsupported`, `credential_type`, `accepted: ["user_session"]` and a safe hint. The accepted value describes human account recovery, not a scope or resource grant. CLI text and JSON expose that reason plus manual guidance; the two list commands also point to the assigned-conversation route. Scope failures use `insufficient_scope`; resource permission failures are not mislabelled as credential-type failures. Authentication failures use 401 with `authentication_failed` or `credential_expired` when expiry is reported. Deny-only route guards run before credential verification, so their type-based 403 makes no claim about validity (even an expired API-key-shaped token is rejected there before authentication). See [Error Format](API.md#error-format).
+
+## Asset ownership transfer
+
+General Agent Keys with `write` or `admin` scope and `allow_all_services=true`
+can transfer their owner's catalog definitions and supported channel bots through
+`/api/v1/ownership/{kind}/{id}`. An org-owned key acts as that organization;
+a personal key can also act through its owner's active, unrestricted org-admin
+membership. Platform-admin status on the key owner grants no cross-owner override.
+Proxy-only, scheduled-invocation, and limited connected-service keys cannot
+transfer these assets. There is no per-transfer mobile approval. Preview, live
+permission checks, transactional receipts and agent-attributed audit still apply.
+See [Ownership transfers](ADMIN_OWNERSHIP_TRANSFERS.md) for routes and adapter limits.
+
 ## Overview
 
 Agent isolation lets different AI agents (Claude Code, Codex, custom bots, etc.) belonging to the same NyxID user operate with independent credentials, rate limits, scopes, and audit trails. There is no separate "agent" model -- an **API key is the agent identity**.
@@ -19,7 +64,7 @@ graph TD
 
     subgraph NyxID Backend
         AUTH[Auth Middleware<br/>extracts api_key_id]
-        SCOPE[Scope Check<br/>allowed_service_ids]
+        SCOPE[Scope Check<br/>effective allowed_service_ids]
         RATE[Per-Agent Rate Limiter<br/>token bucket per key]
         BIND[Credential Override<br/>agent_service_bindings]
         PROXY[Proxy / LLM Gateway]
@@ -48,9 +93,10 @@ sequenceDiagram
 
     Agent->>Auth: Request with API key
     Auth->>Auth: Load ApiKey from DB
+    Auth->>Auth: Expand same-owner active platform ids when scoped and opted in
     Auth->>Scope: AuthUser { api_key_id, allowed_service_ids, ... }
 
-    alt Service not in allowed_service_ids
+    alt Service not in effective allowed_service_ids
         Scope-->>Agent: 403 ApiKeyScopeForbidden
     end
 
@@ -70,6 +116,52 @@ sequenceDiagram
     Proxy->>Audit: Log with api_key_id + api_key_name
     Proxy-->>Agent: Response + X-NyxID-Agent-Id header
 ```
+
+### Auto-connected platform services
+
+A restricted key can select individual auto-connected `UserService` IDs or set
+`allow_auto_connected_services=true`. The effective allowlist is the explicit
+`allowed_service_ids` union active rows whose `user_id` equals the key owner and
+whose `source` is `auto_provision`. This durable grant follows new services and
+replacement row IDs after reconciliation. Disabling the flag leaves explicit
+selections intact. `allow_all_services=true` takes precedence; storing both flags
+is allowed, and the platform grant becomes effective if the key is later narrowed.
+
+`key_service::effective_allowed_service_ids` expands scope at API-key auth-context
+construction, including MCP and channel relay issuance. Proxy, relay JWT, agent
+binding and exact-approval consumers use the resulting IDs through their existing
+checks. JWT/API-key authentication itself never provisions rows.
+The indexed expansion query only runs for restricted, opted-in keys.
+
+Ownership remains authoritative: a personal platform row cannot be selected for
+an org key, and expansion never includes a different owner's rows. Version 0.20
+includes explicit platform bindings in the auto-connected grant. Human and delegated key listing,
+Agent Key login delivery (login options), and device-code approval/onboarding for
+the acting person's own account invoke shared provisioning, which may idempotently
+create org-owned auto-connected rows only through that person's own active
+Member/Admin memberships with `can_proxy()` and explicit platform-key grants.
+The 0.19.0 guarantee remains: org-targeted device approval/onboarding resolves
+existing org services and never provisions rows for the target org as a side effect
+of targeting. These rows appear as
+auto-connected in org views. Removing an org grant immediately blocks execution
+and the next per-owner reconciliation removes automatic rows and orphan endpoints.
+Legacy no-auth/public-master provisioning remains personal-only during inherited
+membership traversal.
+
+```bash
+nyxid api-key create --name research --scopes proxy --allowed-services github,autoplatform --terminal
+nyxid api-key create --name platform-agent --scopes proxy --allow-auto-connected-services --terminal
+nyxid api-key update KEY_ID --allow-auto-connected-services true
+nyxid api-key update KEY_ID --allow-auto-connected-services false
+nyxid device approve USER_CODE --service autoplatform --allow-auto-connected-services
+```
+
+`--allowed-services` accepts UUIDs or active service slugs. Slug resolution reads
+`/keys`, errors on unknown or ambiguous slugs, and preserves UUID pass-through.
+The browser wizard and mobile login approval expose the same individual and
+durable selections. Scope plans retain explicit IDs separately from the current
+implied service preview, so accepting a plan does not pin implied row identities.
+Scheduled-invocation keys continue requiring exact service/operation grants.
 
 ### Credential Override
 
@@ -112,6 +204,7 @@ erDiagram
         array allowed_service_ids "service scope"
         array allowed_node_ids "node scope"
         bool allow_all_services "default: true"
+        bool allow_auto_connected_services "default: false"
         bool allow_all_nodes "default: true"
         int rate_limit_per_second "optional per-key override"
         int rate_limit_burst "optional per-key override"
@@ -130,6 +223,7 @@ erDiagram
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
+| `allow_auto_connected_services` | `bool` | `false` | Adds active same-owner auto-connected platform services to a restricted key, including future additions |
 | `platform` | `Option<String>` | `None` | Display label (claude-code, codex, openclaw, cursor, generic) |
 | `rate_limit_per_second` | `Option<u32>` | `None` | Per-key rate limit (falls back to user-level when `None`) |
 | `rate_limit_burst` | `Option<u32>` | `None` | Per-key burst capacity |
@@ -143,9 +237,13 @@ erDiagram
 | `rate_limit_per_second` | `Option<u32>` | `None` | Copied from ApiKey for middleware |
 | `rate_limit_burst` | `Option<u32>` | `None` | Copied from ApiKey for middleware |
 
-All new fields are `Option` with `serde(default)`. Existing API keys and auth paths are unaffected.
+Optional metadata uses `serde(default)`; the platform-services grant is a defaulted boolean. Legacy keys keep their existing scope.
 
 ## API Endpoints
+
+General agent keys can read org membership through `GET /api/v1/orgs`, `/orgs/{key}`, `/orgs/{key}/authorization`, `/orgs/{org_id}/members`, `/orgs/{org_id}/members/{member_id}/authorization`, and `/orgs/{org_id}/role-scopes` (all under `/api/v1`; `{key}` accepts UUID or slug). No extra scope or service allowlist is required; active membership governs reads and role scopes require admin. The actor is the key owner: person-owned keys see that person's memberships, while org-owned keys list their own org and receive Direct read access, projected as `your_role: "admin"` without a membership row. All writes, invites (including GET), and primary-org changes remain human-only for API keys. Scheduled-invocation keys remain rejected; delegated `account:read` parity is unchanged.
+
+Agent keys can also GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`, `/user-services`, `/endpoints` (including authorized `?org_id=`), `/endpoints/{id}/authorization`, `/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, `/api-keys/external/{id}/authorization`, and `/mcp/config`, plus `/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints`. Catalog GETs require no proxy scope; template metadata and live platform availability do not expose instance overrides or connection state. Instance-backed private catalog access and mounted-spec fallback require an allowed backing UserService and the same Member/Admin org scopes as inventory. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability. `/mcp/config` requires `proxy` or `proxy:*` scope and matches stateless MCP discovery, including mounted instance specs; assistant chat keys discover services before acknowledgement, with grants enforced at execution. These API-key reads perform no auto-provisioning or lazy pending-OAuth reconciliation. Restricted keys are filtered to their effective service allowlist, including auto-connected expansion; endpoints and credentials must back at least one allowed service. Personal keys list personal and org-shared services through active Member/Admin memberships and effective role scopes; Viewer-only org services are excluded. Org-owned keys list their own services with the existing `credential_source.type: "personal"` tag. `/keys` still includes disabled rows within key scope. All inventory writes and the entire NyxID `/api-keys` management router remain human-only for API keys; delegated `account:read` parity is unchanged.
 
 ### Credential Bindings
 
@@ -166,8 +264,8 @@ All new fields are `Option` with `serde(default)`. Existing API keys and auth pa
 
 | Method | Path | Change |
 |---|---|---|
-| `POST` | `/api/v1/api-keys` | Accepts optional `platform` field |
-| `PUT` | `/api/v1/api-keys/{id}` | Accepts `rate_limit_per_second`, `rate_limit_burst`, `platform` |
+| `POST` | `/api/v1/api-keys` | Accepts optional `platform` and `allow_auto_connected_services` fields |
+| `PUT` | `/api/v1/api-keys/{id}` | Accepts `rate_limit_per_second`, `rate_limit_burst`, `platform`, `allow_auto_connected_services` |
 
 ## CLI
 
@@ -176,7 +274,7 @@ All new fields are `Option` with `serde(default)`. Existing API keys and auth pa
 ```bash
 # Create with optional platform label and service scope
 nyxid api-key create --name "coding-agent" --platform claude-code \
-  --allowed-services "svc-1,svc-2" --allow-all-services false
+  --allowed-services "openai,github" --terminal
 
 # Bind a specific credential to a key for a service
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>
@@ -292,11 +390,12 @@ All changes are additive. No breaking changes for existing users:
 
 | Area | Guarantee |
 |---|---|
+| Platform-services grant | Absent `allow_auto_connected_services` means false. Scope-plan digests remain byte-identical when false or absent; true binds the durable grant and previews current platform rows. |
 | Existing API keys | `allow_all_services=true`, `allow_all_nodes=true`, no rate limit override, no bindings. Behavior identical to before. |
 | Existing auth paths (JWT, session, SA) | New `AuthUser` fields are `None`. No scope enforcement, no rate limit override. |
 | No `--profile` flag | Reads from `~/.nyxid/` (unchanged). |
 | No `agent_service_bindings` | Proxy uses default `UserService.api_key_id` (unchanged). |
-| API responses | New optional fields use `skip_serializing_if`. Existing clients see no new fields unless they opt in. |
+| API responses | Additive grant fields and `allowed_services[].auto_connected` identify platform access. Existing clients may ignore the new fields. |
 
 ## Key Files
 
@@ -312,3 +411,7 @@ All changes are additive. No breaking changes for existing users:
 | `cli/src/auth.rs` | Profile-aware token storage |
 | `cli/src/commands/api_key.rs` | bind command, --platform flag |
 | `cli/docker-entrypoint.sh` | Auto-register in Docker |
+
+### NyxBot access authority
+
+Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.

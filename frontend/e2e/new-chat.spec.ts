@@ -49,7 +49,7 @@ test("a first send stays continuous through the canonical id transition", async 
 
   const echoedMessage = thread(page).getByText(message, { exact: true });
   await expect(echoedMessage).toHaveCount(1, { timeout: 1_000 });
-  await expect(composerInput(page)).toHaveValue("");
+  await expect(composerInput(page)).toHaveText("");
   await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 2_000 });
 
   await expect(
@@ -153,7 +153,7 @@ test("deleting a canonical conversation drops c", async ({
   await sendMessage(page, message);
   await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 2_000 });
   await expect(composerInput(page)).toHaveAttribute(
-    "placeholder",
+    "data-placeholder",
     "Message NyxID Assistant...",
     { timeout: 10_000 },
   );

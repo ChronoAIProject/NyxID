@@ -1,3 +1,4 @@
+pub(crate) mod catalog_admin;
 use std::io::{IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
@@ -5,7 +6,7 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::cli::{OutputFormat, ServiceCommands};
+use crate::cli::{OutputFormat, ServiceCommands, ServicePreferenceCommands};
 use crate::commands::display_endpoint;
 use crate::commands::lark_permission::print_permission_block;
 use crate::commands::node_credential::RciCliHintLines;
@@ -272,10 +273,14 @@ fn build_ws_frame_injections_body(preset: Option<&str>, clear: bool) -> Result<O
 
 pub async fn run(command: ServiceCommands) -> Result<()> {
     match command {
+        ServiceCommands::Preference { command } => run_service_preference(command).await,
         ServiceCommands::Add {
+            catalog,
+            platform_key,
             slug,
             custom,
             custom_slug,
+            twin_of,
             oauth,
             device_code,
             via_node,
@@ -300,6 +305,70 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             no_wait,
             auth,
         } => {
+            if catalog.is_requested() {
+                if platform_key
+                    || custom
+                    || oauth
+                    || device_code
+                    || via_node.is_some()
+                    || org.is_some()
+                {
+                    bail!("Catalog administration cannot be combined with connection options");
+                }
+                catalog_admin::validate_creation_source(
+                    endpoint_url.as_deref(),
+                    twin_of.as_deref(),
+                )?;
+                if catalog.clear_supplier {
+                    bail!("--clear-supplier is only supported for catalog updates");
+                }
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
+                let slug = slug
+                    .as_deref()
+                    .or(custom_slug.as_deref())
+                    .ok_or_else(|| anyhow::anyhow!("Catalog creation requires a slug"))?;
+                let mut body =
+                    serde_json::json!({ "slug": slug, "name": label.as_deref().unwrap_or(slug) });
+                if let Some(source) = twin_of.as_ref() {
+                    body["twin_of_service_id"] = source.clone().into();
+                }
+                if let Some(url) = endpoint_url.as_deref() {
+                    body["base_url"] = url.into();
+                    body["auth_method"] = auth_method.as_deref().unwrap_or("bearer").into();
+                    body["auth_key_name"] =
+                        auth_key_name.as_deref().unwrap_or("Authorization").into();
+                } else if auth_method.is_some() || auth_key_name.is_some() {
+                    bail!("Transport configuration requires --endpoint-url");
+                }
+                let secret =
+                    catalog_admin::credential_from_env(credential_env.as_deref())?.or(credential);
+                if let Some(secret) = secret {
+                    body["credential"] = Value::String(secret);
+                }
+                if let Some(url) = openapi_spec_url {
+                    body["openapi_spec_url"] = url.into();
+                }
+                catalog.apply(&mut api, &mut body).await?;
+                let result: Value = api.post("/services", &body).await?;
+                catalog_admin::print_result(&result, auth.output)?;
+                return Ok(());
+            }
+            if platform_key {
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
+                let slug = slug
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("--platform-key requires a catalog slug"))?;
+                return catalog_admin::connect_platform(
+                    &mut api,
+                    slug,
+                    label.as_deref(),
+                    custom_slug.as_deref(),
+                    org.as_deref(),
+                    admin_only,
+                    auth.output,
+                )
+                .await;
+            }
             // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): route to
             // the browser flow when the invocation isn't "scripted-
             // complete". Flags compatible with prefill (slug, label,
@@ -414,15 +483,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             };
             // Normalize --scope inputs: split each entry on comma/whitespace so
             // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
-            let additional_scopes: Vec<String> = scopes
-                .iter()
-                .flat_map(|raw| {
-                    raw.split(|c: char| c == ',' || c.is_whitespace())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                })
-                .collect();
+            let additional_scopes = super::normalize_oauth_scopes(&scopes);
 
             // `--scope` is forwarded only on the OAuth and device-code flows.
             // Other paths accept the flag for symmetry (e.g. a user adding a
@@ -597,7 +658,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 let method = match auth_method {
                     Some(m) => m,
                     None => prompt_line_default(
-                        "Auth method [bearer/header/query/path/basic/body/bot_bearer/none]: ",
+                        "Auth method [bearer/header/query/path/basic/body/bot_bearer/ifttt_webhook/none]: ",
                         "bearer",
                         "auth-method",
                     )?,
@@ -650,6 +711,47 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 // fields) so later prompts can adapt to what the service
                 // actually expects.
                 let catalog_entry = api.get_value(&format!("/catalog/{slug}")).await;
+                if (terminal || std::io::stdin().is_terminal())
+                    && !oauth
+                    && !device_code
+                    && oauth_client_id.is_none()
+                    && oauth_client_secret.is_none()
+                    && oauth_client_secret_env.is_none()
+                    && copy_oauth_client_from.is_none()
+                    && scopes.is_empty()
+                    && openapi_spec_url.is_none()
+                    && ws_frame_preset.is_none()
+                    && !ws_frame_clear
+                    && credential.is_none()
+                    && credential_env.is_none()
+                    && credential_file.is_none()
+                    && via_node.is_none()
+                    && endpoint_url.is_none()
+                    && auth_method.is_none()
+                    && auth_key_name.is_none()
+                    && catalog_entry
+                        .as_ref()
+                        .is_ok_and(|entry| entry["platform_key"]["available"] == true)
+                    && prompt_line_default(
+                        &catalog_admin::binding_prompt(
+                            catalog_entry.as_ref().expect("available catalog entry"),
+                        ),
+                        "y",
+                        "--platform-key",
+                    )?
+                    .eq_ignore_ascii_case("y")
+                {
+                    return catalog_admin::connect_platform(
+                        &mut api,
+                        &slug,
+                        label.as_deref(),
+                        custom_slug.as_deref(),
+                        org.as_deref(),
+                        admin_only,
+                        auth.output,
+                    )
+                    .await;
+                }
                 let (catalog_name, catalog_auth_method, catalog_auth_key_name) =
                     match &catalog_entry {
                         Ok(entry) => {
@@ -978,7 +1080,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
                         table.set_header([
-                            "ID", "Slug", "Label", "Endpoint", "Status", "Access", "Node",
+                            "ID", "Slug", "Label", "Endpoint", "Status", "Access", "Node", "Key",
+                            "Pref",
                         ]);
 
                         for svc in items {
@@ -992,7 +1095,18 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             let status = display_status(svc);
                             let access = display_access_policy(svc);
                             let node = svc["node_id"].as_str().unwrap_or("--");
-                            table.add_row([id, slug, label, endpoint, status, access, node]);
+                            let preference = display_preference(svc);
+                            table.add_row([
+                                id,
+                                slug,
+                                label,
+                                endpoint,
+                                status,
+                                access,
+                                node,
+                                credential_binding(svc),
+                                preference.as_str(),
+                            ]);
                         }
                         eprintln!("{table}");
                         for line in format_node_managed_list_hint_lines(items) {
@@ -1004,15 +1118,29 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             Ok(())
         }
 
-        ServiceCommands::Show { id, auth } => {
+        ServiceCommands::Show {
+            id,
+            catalog_admin,
+            auth,
+        } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let svc: Value = api.get(&format!("/keys/{id}")).await?;
+            let svc: Value = if catalog_admin {
+                catalog_admin::fetch_catalog_service(&mut api, &id).await?
+            } else {
+                api.get(&format!("/keys/{id}")).await?
+            };
 
             match auth.output {
                 OutputFormat::Json => {
                     println!("{}", serde_json::to_string_pretty(&svc)?);
                 }
                 OutputFormat::Table => {
+                    if catalog_admin {
+                        eprintln!(
+                            "Platform key: {}",
+                            catalog_admin::platform_config_label(&svc)
+                        );
+                    }
                     let name = svc["label"]
                         .as_str()
                         .or(svc["name"].as_str())
@@ -1050,6 +1178,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!();
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
+                    eprintln!("Key:        {}", credential_binding(&svc));
                     eprintln!("Node:       {node}");
                     let credential_type = svc["credential_type"].as_str().unwrap_or("direct");
                     let node_id = svc["node_id"].as_str();
@@ -1263,6 +1392,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         }
 
         ServiceCommands::Update {
+            catalog,
+            use_platform_key,
+            use_own_key,
+            credential_env,
             id,
             label,
             endpoint_url,
@@ -1286,7 +1419,51 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
 
+            if catalog.is_requested() {
+                if use_platform_key
+                    || use_own_key
+                    || node_id.is_some()
+                    || no_node
+                    || admin_only
+                    || member_access
+                {
+                    bail!("Catalog administration cannot be combined with connection options");
+                }
+                let current = catalog_admin::fetch_catalog_service(&mut api, &id).await?;
+                let id = current["id"].as_str().unwrap_or(&id);
+                let mut body = serde_json::json!({});
+                if let Some(value) = label {
+                    body["name"] = value.into();
+                }
+                if let Some(value) = endpoint_url {
+                    body["base_url"] = value.into();
+                }
+                if let Some(value) = openapi_spec_url {
+                    body["openapi_spec_url"] = value.into();
+                }
+                if active || inactive {
+                    body["is_active"] = active.into();
+                }
+                if let Some(secret) = catalog_admin::credential_from_env(credential_env.as_deref())?
+                {
+                    body["credential"] = secret.into();
+                }
+                catalog.apply_update(&mut api, &current, &mut body).await?;
+                let result: Value = api
+                    .put(&format!("/services/{id}"), &body)
+                    .await
+                    .map_err(catalog_admin::catalog_error)?;
+                catalog_admin::print_result(&result, auth.output)?;
+                return Ok(());
+            }
+
             let mut body = serde_json::Map::new();
+            if use_platform_key || use_own_key {
+                body.insert("use_platform_key".into(), Value::Bool(use_platform_key));
+            }
+            if let Some(secret) = catalog_admin::credential_from_env(credential_env.as_deref())? {
+                body.insert("credential".into(), Value::String(secret));
+            }
             let mut user_service_body = serde_json::Map::new();
             let ws_frame_injections =
                 build_ws_frame_injections_body(ws_frame_preset.as_deref(), ws_frame_clear)?;
@@ -2304,7 +2481,10 @@ fn is_headless_environment() -> bool {
 }
 
 fn requires_auth_key_name_prompt(method: &str, auth_key_name_provided: bool) -> bool {
-    !auth_key_name_provided && method != "bot_bearer" && method != "none"
+    !auth_key_name_provided
+        && method != "bot_bearer"
+        && method != "ifttt_webhook"
+        && method != "none"
 }
 
 fn requires_credential_prompt(method: &str, has_node: bool) -> bool {
@@ -2365,6 +2545,7 @@ fn default_auth_key_name(method: &str) -> &'static str {
         "header" => "X-API-Key",
         "query" => "key",
         "path" => "bot",
+        "ifttt_webhook" => "",
         "body" => "app_secret",
         _ => "Authorization",
     }
@@ -2376,6 +2557,7 @@ fn default_auth_key_name(method: &str) -> &'static str {
 fn credential_prompt_label(auth_method: &str, auth_key_name: &str) -> String {
     match auth_method {
         "bot_bearer" => "Enter bot token: ".to_string(),
+        "ifttt_webhook" => "Enter raw IFTTT Webhooks key (not URL): ".to_string(),
         "basic" => "Enter username:password: ".to_string(),
         "body" => {
             let field = auth_key_name.trim();
@@ -3397,6 +3579,7 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -3461,6 +3644,10 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: Some("Renamed".to_string()),
             endpoint_url: None,
@@ -3512,6 +3699,10 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "key-alpha".to_string(),
             label: None,
             endpoint_url: None,
@@ -3552,9 +3743,12 @@ mod command_tests {
         // custom + auth_method=none + terminal forces the scripted path:
         // no catalog lookup, no credential prompt, straight to POST /keys.
         run(ServiceCommands::Add {
+            catalog: Default::default(),
+            platform_key: false,
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -3599,6 +3793,7 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -3739,6 +3934,10 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: None,
@@ -3806,9 +4005,12 @@ mod branch_tests {
 
     fn catalog_add(uri: String, slug: &str, credential: Option<&str>) -> ServiceCommands {
         ServiceCommands::Add {
+            catalog: Default::default(),
+            platform_key: false,
             slug: Some(slug.to_string()),
             custom: false,
             custom_slug: None,
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -3900,7 +4102,7 @@ mod branch_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn rotate_credential_reads_env_var() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/keys/svc-1"))
@@ -3969,7 +4171,7 @@ mod branch_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn credentials_reads_env_vars() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/catalog/lark"))
@@ -4010,6 +4212,58 @@ mod branch_tests {
     }
 
     #[tokio::test]
+    async fn service_preference_set_sends_version_and_reports_conflict() {
+        const CATALOG: &str = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
+        const GROUP: &str = "catalog:aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
+        const ACTIVE: &str = "11111111-1111-4111-8111-111111111111";
+        const OLD: &str = "22222222-2222-4222-8222-222222222222";
+        for status in [200, 409] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/service-preferences"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"groups":[],"version":7,"updated_at":null}),
+                    ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET")).and(path("/api/v1/keys"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys":[{"id":OLD,"catalog_service_id":CATALOG,"slug":"same","is_active":false},{"id":ACTIVE,"catalog_service_id":CATALOG,"slug":"same","is_active":true}]}))).expect(1).mount(&server).await;
+            Mock::given(method("PUT"))
+                .and(path(format!("/api/v1/service-preferences/groups/{GROUP}")))
+                .and(body_json(
+                    serde_json::json!({"ordered":[ACTIVE],"expected_version":7}),
+                ))
+                .respond_with(ResponseTemplate::new(status).set_body_json(
+                    serde_json::json!({"groups":[{"group":GROUP,"ordered":[ACTIVE]}],"version":8,"updated_at":null}),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = run(ServiceCommands::Preference {
+                command: ServicePreferenceCommands::Set {
+                    group: GROUP.into(),
+                    services: vec!["same".into()],
+                    auth: mock_auth(server.uri()),
+                },
+            })
+            .await;
+            if status == 409 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("preference order changed elsewhere; re-run")
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn update_resolves_node_and_clears_openapi() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -4027,6 +4281,10 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: Some("https://new".to_string()),
@@ -4106,6 +4364,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-ssh".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4130,6 +4389,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4152,6 +4412,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4203,6 +4464,10 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: None,
@@ -4241,6 +4506,10 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: None,
@@ -4279,6 +4548,10 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: None,
@@ -4317,6 +4590,10 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Update {
+            catalog: Default::default(),
+            use_platform_key: false,
+            use_own_key: false,
+            credential_env: None,
             id: "svc-1".to_string(),
             label: None,
             endpoint_url: None,
@@ -4360,9 +4637,12 @@ mod branch_tests {
         // org as a UUID -> resolve_org_id returns it without an API call;
         // custom + auth_method=none + terminal forces the scripted path.
         run(ServiceCommands::Add {
+            catalog: Default::default(),
+            platform_key: false,
             slug: None,
             custom: true,
             custom_slug: Some("my-custom".to_string()),
+            twin_of: None,
             oauth: false,
             device_code: false,
             via_node: None,
@@ -4389,5 +4669,270 @@ mod branch_tests {
         })
         .await
         .expect("org add should succeed");
+    }
+}
+
+pub(crate) fn credential_binding(service: &Value) -> &str {
+    service["credential_binding"].as_str().unwrap_or_else(|| {
+        if service["auto_connected"] == true && service["api_key_id"].is_null() {
+            "platform"
+        } else {
+            "user"
+        }
+    })
+}
+
+fn display_preference(service: &Value) -> String {
+    if service["is_active"] == false
+        && let Some(position) = service["preference_position"].as_u64()
+    {
+        return format!("saved:{position}");
+    }
+    service["preference_rank"]
+        .as_u64()
+        .map_or_else(|| "-".into(), |rank| rank.to_string())
+}
+
+fn resolve_preference_ids(items: &[Value], requested: &[String]) -> Result<Vec<String>> {
+    requested
+        .iter()
+        .map(|name| {
+            let row = items
+                .iter()
+                .find(|row| row["id"].as_str() == Some(name))
+                .or_else(|| {
+                    items.iter().find(|row| {
+                        row["slug"].as_str() == Some(name)
+                            && row["is_active"].as_bool() == Some(true)
+                    })
+                })
+                .or_else(|| items.iter().find(|row| row["slug"].as_str() == Some(name)))
+                .with_context(|| format!("Unknown service '{name}'"))?;
+            Ok(row["id"].as_str().context("Service has no id")?.to_string())
+        })
+        .collect()
+}
+
+async fn run_service_preference(command: ServicePreferenceCommands) -> Result<()> {
+    let (auth, change, release) = match command {
+        ServicePreferenceCommands::Show { auth, group } => {
+            (auth, group.map(|group| (group, None)), false)
+        }
+        ServicePreferenceCommands::Set {
+            auth,
+            group,
+            services,
+        } => (auth, Some((group, Some(services))), false),
+        ServicePreferenceCommands::Reset { auth, group } => {
+            (auth, Some((group, Some(vec![]))), false)
+        }
+        ServicePreferenceCommands::ReleaseHidden { auth, yes } => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "Use --yes to confirm releasing unavailable preferences. Orders must be set again if access returns."
+                    );
+                }
+                eprint!(
+                    "Release unavailable preferences? Orders must be set again if access returns. [y/N] "
+                );
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    bail!("Release cancelled");
+                }
+            }
+            (auth, None, true)
+        }
+    };
+    let mut api = if release {
+        ApiClient::from_auth_with_credential_transport(&auth)?
+    } else {
+        ApiClient::from_auth_checked(&auth).await?
+    };
+    let current: Value = api.get("/service-preferences").await?;
+    let inventory: Value = api.get("/keys").await?;
+    let items = inventory["keys"]
+        .as_array()
+        .context("Invalid service inventory")?;
+    let version = current["version"]
+        .as_i64()
+        .context("Invalid preference version")?;
+    let result = if let Some((group, requested)) = change {
+        let group = resolve_preference_group(items, &group)?;
+        let catalog = validate_preference_group(&group)?;
+        let group_items: Vec<_> = items
+            .iter()
+            .filter(|row| row["catalog_service_id"].as_str() == Some(catalog))
+            .cloned()
+            .collect();
+        if requested.is_none() {
+            let mut selected = current.clone();
+            selected["groups"] = Value::Array(
+                current["groups"]
+                    .as_array()
+                    .context("Invalid preference groups")?
+                    .iter()
+                    .filter(|row| row["group"] == group)
+                    .cloned()
+                    .collect(),
+            );
+            return print_preference(&auth.output, &selected, items);
+        }
+        let ids = resolve_preference_ids(&group_items, &requested.unwrap())?;
+        let body = serde_json::json!({"ordered": ids, "expected_version": version});
+        preference_write_result(
+            api.put::<Value, _>(&format!("/service-preferences/groups/{group}"), &body)
+                .await,
+        )?
+    } else if release {
+        preference_write_result(
+            api.delete_with_body::<Value, _>(
+                "/service-preferences/hidden",
+                &serde_json::json!({"expected_version": version}),
+            )
+            .await,
+        )?
+    } else {
+        current
+    };
+    print_preference(&auth.output, &result, items)
+}
+
+fn print_preference(output: &OutputFormat, result: &Value, items: &[Value]) -> Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Table => {
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL_CONDENSED).set_header([
+                "Group",
+                "Position",
+                "Discovery",
+                "Slug",
+                "Label",
+                "ID",
+                "Enabled",
+            ]);
+            for group in result["groups"]
+                .as_array()
+                .context("Invalid preference groups")?
+            {
+                let mut discovery_rank = 0;
+                for (index, id) in group["ordered"]
+                    .as_array()
+                    .context("Invalid group order")?
+                    .iter()
+                    .enumerate()
+                {
+                    if let Some(row) = items.iter().find(|row| row["id"] == *id) {
+                        let discovery = if row["is_active"] == false {
+                            format!("saved:{}", index + 1)
+                        } else if row["is_active"] == true && row["service_type"] == "http" {
+                            discovery_rank += 1;
+                            discovery_rank.to_string()
+                        } else {
+                            "-".to_string()
+                        };
+                        table.add_row([
+                            group["group"].as_str().unwrap_or("-").to_string(),
+                            (index + 1).to_string(),
+                            discovery,
+                            row["slug"].as_str().unwrap_or("-").into(),
+                            row["label"].as_str().unwrap_or("-").into(),
+                            id.as_str().unwrap_or("-").into(),
+                            row["is_active"].as_bool().unwrap_or(false).to_string(),
+                        ]);
+                    }
+                }
+            }
+            eprintln!("{table}");
+        }
+    }
+    Ok(())
+}
+
+fn resolve_preference_group(items: &[Value], value: &str) -> Result<String> {
+    if value.starts_with("catalog:") {
+        return Ok(value.to_string());
+    }
+    let mut catalogs: Vec<_> = items
+        .iter()
+        .filter(|row| row["catalog_service_slug"].as_str() == Some(value))
+        .filter_map(|row| row["catalog_service_id"].as_str())
+        .collect();
+    catalogs.sort_unstable();
+    catalogs.dedup();
+    if catalogs.len() != 1 {
+        bail!("Unknown or ambiguous catalog group '{value}'; use catalog:<UUID>");
+    }
+    Ok(format!("catalog:{}", catalogs[0]))
+}
+
+fn validate_preference_group(group: &str) -> Result<&str> {
+    let catalog = group
+        .strip_prefix("catalog:")
+        .context("Use --group catalog:<UUID>")?;
+    let uuid = uuid::Uuid::parse_str(catalog).context("Use a canonical catalog group UUID")?;
+    if uuid.to_string() != catalog
+        || uuid.get_variant() != uuid::Variant::RFC4122
+        || !(1..=8).contains(&uuid.get_version_num())
+    {
+        bail!("Use a canonical RFC-variant catalog UUID with version 1–8");
+    }
+    Ok(catalog)
+}
+
+fn preference_write_result(result: Result<Value>) -> Result<Value> {
+    match result {
+        Err(error)
+            if error
+                .downcast_ref::<crate::api::ApiError>()
+                .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT) =>
+        {
+            bail!("preference order changed elsewhere; re-run")
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod service_preference_tests {
+    use super::*;
+    #[test]
+    fn service_preference_catalog_uuid_contract() {
+        for id in [
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "aaaaaaaa-aaaa-9aaa-8aaa-aaaaaaaaaaaa",
+            "aaaaaaaa-aaaa-4aaa-1aaa-aaaaaaaaaaaa",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        ] {
+            assert!(
+                validate_preference_group(&format!("catalog:{id}")).is_err(),
+                "{id}"
+            );
+        }
+        for version in 1..=8 {
+            let id = format!("aaaaaaaa-aaaa-{version}aaa-8aaa-aaaaaaaaaaaa");
+            assert_eq!(
+                validate_preference_group(&format!("catalog:{id}")).unwrap(),
+                id
+            );
+        }
+    }
+    #[test]
+    fn service_preference_resolves_active_slug_and_displays_rank() {
+        let items = vec![
+            serde_json::json!({"id":"old", "slug":"same", "is_active":false}),
+            serde_json::json!({"id":"new", "slug":"same", "is_active":true, "preference_rank":2}),
+        ];
+        assert_eq!(
+            resolve_preference_ids(&items, &["same".into(), "old".into()]).unwrap(),
+            vec!["new", "old"]
+        );
+        assert!(resolve_preference_ids(&items, &["missing".into()]).is_err());
+        assert_eq!(display_preference(&items[0]), "-");
+        assert_eq!(display_preference(&items[1]), "2");
     }
 }

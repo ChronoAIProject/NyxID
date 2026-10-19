@@ -123,7 +123,8 @@ impl TelemetryClient {
 
         let (dsn, host) = resolve_dsn()?;
         let distinct_id = resolve_distinct_id(profile).ok()?;
-        let http = Client::builder()
+        let http = crate::tls::client_builder()
+            .ok()?
             .timeout(std::time::Duration::from_millis(TRACK_TIMEOUT_MS))
             .user_agent(concat!("nyxid-cli/", env!("CARGO_PKG_VERSION")))
             .build()

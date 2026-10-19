@@ -12,6 +12,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::service_account::{ServiceAccount, ServiceAccountPurpose};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_token::{
@@ -45,10 +46,25 @@ pub(crate) const DEFAULT_PROXY_USER_AGENT: &str =
 pub enum ProxyBody {
     /// Body has been buffered in memory (approval path, node proxy, Codex path).
     Buffered(Option<bytes::Bytes>),
+    /// Opaque uploads from the machine gateway, with a metered ingress cap.
+    Streaming(axum::body::Body),
+}
+
+impl ProxyBody {
+    fn buffered(self) -> AppResult<Option<bytes::Bytes>> {
+        match self {
+            Self::Buffered(bytes) => Ok(bytes),
+            Self::Streaming(_) => Err(AppError::BadRequest(
+                "This authentication method requires a bounded structured request body".into(),
+            )),
+        }
+    }
 }
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub workspace_destinations_pending: bool,
+    pub target_id: Option<String>,
     pub base_url: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -86,7 +102,7 @@ pub struct EffectiveActor {
 }
 
 impl EffectiveActor {
-    fn from_user_id(user_id: impl Into<String>) -> Self {
+    pub(crate) fn from_user_id(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
         }
@@ -139,6 +155,12 @@ async fn decrypt_master_credential_string(
     })
 }
 
+/// Catalog master credentials stay on NyxID, including legacy internal rows.
+/// Owner nodes may inject their own keys but must never receive this key.
+pub fn uses_server_held_master(target: &ProxyTarget) -> bool {
+    !target.service.requires_user_credential && target.auth_method != "none"
+}
+
 fn master_credential_required(service: &DownstreamService) -> bool {
     // Identity propagation is additive to the service's own auth method. A
     // bearer row may inject both its catalog credential and a delegation token.
@@ -151,6 +173,19 @@ pub async fn authorize_master_credential(
     service: &DownstreamService,
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
+    super::retired_service_service::require_available(service)?;
+    if service.platform_key.is_some() {
+        super::platform_key_service::require(db, service, &actor.user_id).await?;
+        validate_actor_addressed_master_credential_policy(service)?;
+        return Ok(AuthorizedMasterCredential::new(
+            &service.credential_encrypted,
+        ));
+    }
     validate_master_credential_service(service)?;
     validate_actor_addressed_master_credential_policy(service)?;
 
@@ -209,6 +244,21 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
+    super::retired_service_service::require_available(service)?;
+    if let Some(config) = &service.platform_key
+        && (!config.enabled
+            || config.audience != crate::models::downstream_service::PlatformKeyAudience::Public
+            || !crate::services::platform_key_service::has_platform_key(service))
+    {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+    // The remaining legacy server-selected gates (public visibility,
+    // internal master shape) still apply; no anonymous grants are added.
     if !master_credential_required(service) {
         tracing::error!(
             service_id = %service.id,
@@ -368,11 +418,80 @@ pub(crate) fn build_effective_outbound_headers(
         });
     }
     outbound_headers.extend(delegated_headers.iter().cloned());
-    for (name, value) in extra_outbound_headers {
-        outbound_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        outbound_headers.push((name.clone(), value.clone()));
+    apply_server_owned_headers(outbound_headers, extra_outbound_headers)
+}
+
+pub(crate) fn apply_server_owned_headers(
+    mut headers: Vec<(String, String)>,
+    server_owned_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    for (name, value) in server_owned_headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
     }
-    outbound_headers
+    headers
+}
+
+/// Request-local bearer material. Never persisted in MCP sessions or exposed by Debug.
+#[derive(Clone)]
+pub(crate) struct CallerToken(zeroize::Zeroizing<String>);
+
+impl std::ops::Deref for CallerToken {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for CallerToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallerToken([REDACTED])")
+    }
+}
+
+/// The REST passthrough contract: only a supplied Bearer header, never a
+/// synthesized token or an x-api-key. Scheduled invocation credentials stay
+/// inside NyxID. Authentication must succeed before using this value.
+pub(crate) fn caller_bearer_token_for_downstream(
+    headers: &axum::http::HeaderMap,
+    scheduled_invocation: bool,
+) -> Option<CallerToken> {
+    if scheduled_invocation {
+        return None;
+    }
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| CallerToken(zeroize::Zeroizing::new(value.to_owned())))
+}
+
+/// Credential ownership follows the resolved service, falling back to the
+/// authenticated proxy principal (the effective owner for a service account).
+/// This is independent of the caller subject and the eventual billing payer.
+pub(crate) fn delegated_credential_owner<'a>(
+    proxy_resolution_user_id: &'a str,
+    effective_service_owner: Option<&'a str>,
+) -> &'a str {
+    effective_service_owner.unwrap_or(proxy_resolution_user_id)
+}
+
+/// A server-owned Authorization header must survive caller bearer forwarding.
+/// Both HTTP paths use this seam; service credential injection stays separate.
+pub(crate) fn forwarded_caller_token<'a>(
+    target: &ProxyTarget,
+    caller_token: Option<&'a str>,
+    extra_outbound_headers: &[(String, String)],
+) -> Option<&'a str> {
+    if target.service.forward_access_token
+        && !extra_outbound_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        caller_token
+    } else {
+        None
+    }
 }
 
 /// Caller headers that are safe to forward to downstream HTTP services.
@@ -390,6 +509,7 @@ pub(crate) fn build_effective_outbound_headers(
 /// narrow enough to keep sensitive NyxID/infrastructure headers (authorization,
 /// cookie, x-nyxid-*) outside the passthrough.
 const ALLOWED_FORWARD_HEADERS: &[&str] = &[
+    "git-protocol",
     "content-type",
     "accept",
     "accept-language",
@@ -407,6 +527,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "prefer",
     "x-trace-id",
     "range",
+    // PostgREST schema selection and item ranges.
+    "accept-profile",
+    "content-profile",
+    "range-unit",
     "if-range",
     "if-none-match",
     "if-modified-since",
@@ -419,6 +543,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // when they are absent.
     "http-referer",
     "x-title",
+    // LinkedIn API version selection; its `/rest/*` endpoints reject
+    // requests without `LinkedIn-Version`.
+    "linkedin-version",
+    "x-restli-protocol-version",
 ];
 
 /// Namespaced header prefixes that should be forwarded transparently.
@@ -466,7 +594,17 @@ fn is_allowed_forward_header(name_lower: &str) -> bool {
 /// Header names are normalized by `HeaderMap`, matching remains
 /// case-insensitive, and repeated values retain their map iteration order for
 /// the existing deterministic merge rules in `merge_into_header_list`.
+#[cfg(test)]
 pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    collect_forward_headers_with_defaults(headers, &[])
+}
+
+/// An overridable service default also admits the caller's value. Recheck the
+/// default-header denylist so legacy rows cannot open reserved header names.
+pub(crate) fn collect_forward_headers_with_defaults(
+    headers: &http::HeaderMap,
+    default_layers: &[&[DefaultRequestHeader]],
+) -> Vec<(String, String)> {
     // W3C Trace Context requires `tracestate` to be ignored when its
     // accompanying `traceparent` is absent or invalid. Validate before the
     // generic allowlist walk so direct and node-routed HTTP use one policy.
@@ -477,7 +615,15 @@ pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String,
         .iter()
         .filter_map(|(name, value)| {
             let name_lower = name.as_str().to_ascii_lowercase();
-            if !is_allowed_forward_header(&name_lower) {
+            let overridable_default =
+                !default_request_header::is_denylisted_header_name(&name_lower)
+                    && default_layers
+                        .iter()
+                        .flat_map(|layer| layer.iter())
+                        .any(|header| {
+                            header.overridable && header.name.eq_ignore_ascii_case(&name_lower)
+                        });
+            if !is_allowed_forward_header(&name_lower) && !overridable_default {
                 return None;
             }
             if name_lower == "traceparent" && !traceparent_valid {
@@ -642,7 +788,7 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "ifttt_mcp" => Some("authorization".to_string()),
         // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
         // one a caller-supplied or catalog default header could collide with
         // is `Authorization`, so we strip just that. The `X-Amz-*` headers
@@ -779,6 +925,69 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Enforce the IFTTT contract before either direct or node dispatch. A node may
+/// resolve an empty destination from its local credential configuration.
+pub(crate) fn validate_ifttt_request(
+    target: &ProxyTarget,
+    method: &reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    body: Option<&[u8]>,
+    node_routed: bool,
+) -> AppResult<()> {
+    use nyxid_service_adapters::{ifttt, ifttt_mcp};
+    if target.auth_method == ifttt_mcp::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        if node_routed {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth connections use server routing".into(),
+            ));
+        }
+        ifttt_mcp::validate_request(&target.base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
+    if target.auth_method == ifttt::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        let base_url = if node_routed && target.base_url.is_empty() {
+            ifttt::BASE_URL
+        } else {
+            &target.base_url
+        };
+        ifttt::validate_request(base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_ifttt_configuration(target: &ProxyTarget) -> AppResult<()> {
+    if target.service.identity_propagation_mode != "none"
+        || target.service.forward_access_token
+        || target.service.inject_delegation_token
+        || !target.ws_frame_injections.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "IFTTT does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ifttt_delegation(
+    target: &ProxyTarget,
+    delegated: &[DelegatedCredential],
+) -> AppResult<()> {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !delegated.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "IFTTT does not support delegated provider credentials".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// When `target.auth_method` is `"path"`, synthesize a `DelegatedCredential`
 /// so `build_forward_path` / `prepare_delegated_request` inject the path
 /// prefix (e.g. `/bot<token>/`).  Appends in-place and returns the
@@ -865,6 +1074,49 @@ pub(crate) fn prepare_delegated_request(
     })
 }
 
+pub(crate) struct PreparedNodeRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Prepare the same URL substitutions and header precedence for REST and MCP
+/// node frames. The node still owns its local service credential injection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_node_request(
+    target: &ProxyTarget,
+    path: &str,
+    query: Option<&str>,
+    mut base_headers: Vec<(String, String)>,
+    identity_headers: &[(String, String)],
+    delegated: &[DelegatedCredential],
+    caller_token: Option<&str>,
+    extra_outbound_headers: &[(String, String)],
+) -> AppResult<PreparedNodeRequest> {
+    let mut node_delegated = delegated.to_vec();
+    extend_with_path_credential(&mut node_delegated, target);
+    let prepared = prepare_delegated_request(path, query, &node_delegated)?;
+    let path = if prepared.path.starts_with('/') {
+        prepared.path.clone()
+    } else {
+        format!("/{}", prepared.path)
+    };
+    if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
+        base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+    }
+    Ok(PreparedNodeRequest {
+        path,
+        query: prepared.query,
+        headers: build_effective_outbound_headers(
+            target,
+            base_headers,
+            identity_headers,
+            &prepared.delegated_headers,
+            extra_outbound_headers,
+        ),
+    })
+}
+
 /// Resolve a downstream service by its slug.
 /// Returns the service document or NotFound.
 pub async fn resolve_service_by_slug(
@@ -909,6 +1161,7 @@ pub async fn resolve_admin_proxy_target(
 
     // A misconfigured platform row is a server fault, not a caller error:
     // the caller had no say in which service this is.
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::Internal(format!(
             "platform service '{}' is inactive",
@@ -939,6 +1192,9 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url: service.base_url.clone(),
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -966,6 +1222,10 @@ pub async fn resolve_admin_proxy_target(
     })?;
 
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -976,6 +1236,94 @@ pub async fn resolve_admin_proxy_target(
         ws_frame_injections,
         connection_id: None,
     })
+}
+
+/// Resolve the granted catalog endpoint without inheriting owner connections.
+pub async fn resolve_curation_proxy_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    sa: &ServiceAccount,
+    service_id: &str,
+    platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+) -> AppResult<(ProxyTarget, bool)> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
+        .await?
+        .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    super::retired_service_service::require_available(&service)?;
+    let scope_authorized_editor =
+        sa.purpose == ServiceAccountPurpose::CatalogEditor && sa.catalog_scope_authorized;
+    if !scope_authorized_editor && service.proxy_operation_policy.is_none() {
+        return Err(AppError::Forbidden(
+            "Curation proxy target requires an explicit proxy operation policy".into(),
+        ));
+    }
+    if service.service_category == "provider" {
+        return Err(AppError::Forbidden(
+            "Provider services cannot be proxied".into(),
+        ));
+    }
+    let connection = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .find_one(doc! {"user_id": &sa.id, "service_id": service_id})
+        .await?;
+    if connection.as_ref().is_some_and(|c| !c.is_active) {
+        return Err(AppError::Forbidden(
+            "Service account connection is disabled".into(),
+        ));
+    }
+    let (credential, master_credential) = match connection.and_then(|c| c.credential_encrypted) {
+        Some(encrypted) => (
+            decrypt_user_credential(encryption_keys, &encrypted).await?,
+            false,
+        ),
+        None if service.auth_method == "none" && !service.requires_user_credential => {
+            (String::new(), false)
+        }
+        None if scope_authorized_editor
+            && is_valid_master_credential_service(&service)
+            && matches!(service.identity_propagation_mode.as_str(), "jwt" | "both")
+            && service.platform_key.is_none()
+            && service.destination_targets.is_empty() =>
+        {
+            let actor = EffectiveActor::from_user_id(&sa.id);
+            let authorized = authorize_master_credential(db, &service, &actor).await?;
+            crate::mw::rate_limit::enforce_platform_user_limit(
+                db,
+                platform_user_rate_limit,
+                &service.id,
+                &sa.id,
+            )
+            .await?;
+            (
+                decrypt_master_credential_string(encryption_keys, &authorized).await?,
+                true,
+            )
+        }
+        None => {
+            return Err(AppError::Forbidden(
+                "A dedicated service-account connection credential is required".into(),
+            ));
+        }
+    };
+    Ok((
+        ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential,
+            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+            service,
+        },
+        master_credential,
+    ))
 }
 
 /// Resolve the downstream service and credential for a proxy request.
@@ -997,6 +1345,7 @@ pub async fn resolve_proxy_target(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1032,6 +1381,20 @@ pub async fn resolve_proxy_target(
         ));
     }
 
+    if service.platform_key.is_some()
+        && user_conn.is_none()
+        && !user_has_legacy_personal_connection(db, user_id, None, Some(&service.id)).await?
+    {
+        return resolve_catalog_platform_target(
+            db,
+            encryption_keys,
+            user_id,
+            service,
+            platform_user_rate_limit,
+        )
+        .await;
+    }
+
     // For services requiring user credentials, a connection record is mandatory
     if service.requires_user_credential && user_conn.is_none() {
         return Err(AppError::Forbidden(
@@ -1050,12 +1413,18 @@ pub async fn resolve_proxy_target(
     // as `Connect your <provider> instance first` instead of building
     // a request against the placeholder. See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        if service.provider_config_id.is_none() && service.platform_key.is_some() {
+            super::platform_key_service::require(db, &service, user_id).await?;
+        }
         let base_url = resolve_gateway_url_override(db, user_id, &service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
         let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1103,6 +1472,10 @@ pub async fn resolve_proxy_target(
     let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url,
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1117,6 +1490,57 @@ pub async fn resolve_proxy_target(
 
 /// Resolve proxy target with lenient credential handling for node-routed requests.
 ///
+pub(crate) async fn resolve_catalog_platform_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    mut service: DownstreamService,
+    rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+) -> AppResult<ProxyTarget> {
+    if super::platform_key_service::no_auth_platform_service(&service) {
+        super::platform_key_service::require(db, &service, owner_id).await?;
+        return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
+            base_url: service.base_url.clone(),
+            auth_method: "none".into(),
+            auth_key_name: String::new(),
+            credential: String::new(),
+            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            user_service_default_headers: vec![],
+            ws_frame_injections: service.ws_frame_injections.clone(),
+            connection_id: None,
+            service,
+        });
+    }
+    let actor = EffectiveActor::from_user_id(owner_id);
+    let authorized = authorize_master_credential(db, &service, &actor).await?;
+    let (auth_method, auth_key_name) =
+        super::platform_key_service::effective_auth(db, &service).await?;
+    crate::mw::rate_limit::enforce_platform_user_limit(db, rate_limit, &service.id, owner_id)
+        .await?;
+    let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
+    service.auth_method = auth_method.clone();
+    service.auth_key_name = auth_key_name.clone();
+    service.requires_user_credential = false;
+    Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
+        base_url: service.base_url.clone(),
+        auth_method,
+        auth_key_name,
+        credential,
+        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+        user_service_default_headers: vec![],
+        ws_frame_injections: service.ws_frame_injections.clone(),
+        connection_id: None,
+        service,
+    })
+}
+
 /// Unlike `resolve_proxy_target()`, this does NOT require a connection record or
 /// credential for "connection" services. Returns `(ProxyTarget, has_credential)`
 /// where `has_credential` indicates whether a server-side credential was resolved
@@ -1134,6 +1558,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1173,7 +1598,23 @@ pub async fn resolve_proxy_target_lenient(
     // concrete URL (either the user's gateway override or the seed
     // base_url for non-gateway services).
     // See ChronoAIProject/NyxID#160.
+    if service.platform_key.is_some()
+        && !user_has_legacy_personal_connection(db, user_id, None, Some(&service.id)).await?
+    {
+        let target = resolve_catalog_platform_target(
+            db,
+            encryption_keys,
+            user_id,
+            service,
+            platform_user_rate_limit,
+        )
+        .await?;
+        return Ok((target, true));
+    }
     if service.auth_method == "none" {
+        if service.provider_config_id.is_none() && service.platform_key.is_some() {
+            super::platform_key_service::require(db, &service, user_id).await?;
+        }
         let (base_url, has_server_credential) =
             match resolve_gateway_url_override(db, user_id, &service).await {
                 Ok(Some(url)) => (url, true),
@@ -1184,6 +1625,9 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                workspace_destinations_pending:
+                    super::destination_routing::workspace_destinations_pending(&service),
+                target_id: None,
                 base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
@@ -1250,6 +1694,9 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1279,10 +1726,16 @@ pub struct UserServiceResolution {
     /// `UserApiKey.credential_epoch` of that key, or `1` when no user key
     /// was resolved.
     pub credential_epoch: i64,
+    /// Stable, non-secret revision of the catalog master credential. Catalog
+    /// rows keep credential_epoch at one, so health fencing uses this metadata
+    /// to distinguish a rotated platform key.
+    pub master_credential_revision: Option<String>,
     /// True when the injected credential is the catalog service's master
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
     pub master_credential: bool,
+    /// OAuth app provenance of the resolved UserApiKey, for platform charging.
+    pub credential_source: Option<String>,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -1400,165 +1853,177 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
-    // NyxID#974 routing boundary: identical-instance service pools belong
-    // here, before `finish_resolution()`, because this function is the
-    // authoritative place that preserves personal/legacy/org precedence and
-    // chooses the concrete `UserService`. `node_routing_service` only handles
-    // node failover after a service member has already been selected.
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+        let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
+        // NyxID#974 routing boundary: identical-instance service pools belong
+        // here, before `finish_resolution()`, because this function is the
+        // authoritative place that preserves personal/legacy/org precedence and
+        // chooses the concrete `UserService`. `node_routing_service` only handles
+        // node failover after a service member has already been selected.
 
-    // 1. Personal lookup (short-circuit for the common case).
-    let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
-    if let Some(us) = personal {
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                user_id,
-                us,
-                None,
-                None,
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-    if catalog_service_id.is_none()
-        && let Some((us, pool_selection)) = lookup_service_pool_member(db, user_id, slug).await?
-    {
-        tracing::debug!(
-            user_id = %user_id,
-            pool_id = %pool_selection.pool_id,
-            pool_slug = %pool_selection.pool_slug,
-            chosen_user_service_id = %pool_selection.selected_member_id,
-            strategy = %pool_selection.strategy.as_str(),
-            "Resolved proxy target via service pool"
-        );
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                user_id,
-                us,
-                None,
-                Some(pool_selection),
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-
-    // 2. Legacy personal guard. Preserves the invariant that pre-migration
-    //    personal connections beat org-shared credentials. See function doc.
-    if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
-        return Ok(None);
-    }
-
-    // 3. Org fallback. Bounded by a wall-clock timeout so a degraded Mongo
-    //    doesn't make every proxy 404 hang.
-    let memberships =
-        match crate::services::org_service::find_active_memberships_with_timeout(db, user_id).await
+        // 1. Personal lookup (short-circuit for the common case).
+        let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
+        if let Some(us) = personal {
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    Some(encryption_keys),
+                    user_id,
+                    us,
+                    None,
+                    None,
+                    credential_resolution,
+                )
+                .await?,
+            ));
+        }
+        if catalog_service_id.is_none()
+            && let Some((us, pool_selection)) =
+                lookup_service_pool_member(db, user_id, slug).await?
         {
-            Ok(rows) => rows,
-            Err(crate::errors::AppError::OrgQueryTimeout) => return Err(AppError::OrgQueryTimeout),
-            Err(crate::errors::AppError::NotFound(_)) => {
+            tracing::debug!(
+                user_id = %user_id,
+                pool_id = %pool_selection.pool_id,
+                pool_slug = %pool_selection.pool_slug,
+                chosen_user_service_id = %pool_selection.selected_member_id,
+                strategy = %pool_selection.strategy.as_str(),
+                "Resolved proxy target via service pool"
+            );
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    Some(encryption_keys),
+                    user_id,
+                    us,
+                    None,
+                    Some(pool_selection),
+                    credential_resolution,
+                )
+                .await?,
+            ));
+        }
+
+        // 2. Legacy personal guard. Preserves the invariant that pre-migration
+        //    personal connections beat org-shared credentials. See function doc.
+        if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
+            return Ok(None);
+        }
+
+        // 3. Org fallback. Bounded by a wall-clock timeout so a degraded Mongo
+        //    doesn't make every proxy 404 hang.
+        let memberships =
+            match crate::services::org_service::find_active_memberships_with_timeout(db, user_id)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(crate::errors::AppError::OrgQueryTimeout) => {
+                    return Err(AppError::OrgQueryTimeout);
+                }
+                Err(crate::errors::AppError::NotFound(_)) => {
+                    tracing::debug!(
+                        resolution_user_id = %user_id,
+                        "Proxy resolution id is not a user; treating org memberships as empty"
+                    );
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            };
+        if memberships.is_empty() {
+            return Ok(None);
+        }
+
+        // 3. Walk memberships in priority order. find_active_memberships_with_timeout
+        //    has already moved primary_org_id to the front.
+        let mut role_denied = false;
+        for membership in &memberships {
+            let org_us =
+                lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+            let (org_us, pool_selection) = if let Some(org_us) = org_us {
+                (org_us, None)
+            } else if catalog_service_id.is_none() {
+                match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
+                    Some((svc, selection)) => (svc, Some(selection)),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+
+            // Role check: Viewer cannot proxy.
+            if !membership.role.can_proxy() {
+                role_denied = true;
                 tracing::debug!(
-                    resolution_user_id = %user_id,
-                    "Proxy resolution id is not a user; treating org memberships as empty"
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    role = ?membership.role,
+                    "Org membership role insufficient for proxy"
                 );
-                Vec::new()
+                continue;
             }
-            Err(e) => return Err(e),
-        };
-    if memberships.is_empty() {
-        return Ok(None);
-    }
 
-    // 3. Walk memberships in priority order. find_active_memberships_with_timeout
-    //    has already moved primary_org_id to the front.
-    let mut role_denied = false;
-    for membership in &memberships {
-        let org_us =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
-        let (org_us, pool_selection) = if let Some(org_us) = org_us {
-            (org_us, None)
-        } else if catalog_service_id.is_none() {
-            match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
-                Some((svc, selection)) => (svc, Some(selection)),
-                None => continue,
+            if !admin_only_allows_role(&org_us, membership.role) {
+                role_denied = true;
+                tracing::debug!(
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    user_service_id = %org_us.id,
+                    role = ?membership.role,
+                    "Org membership role blocked by admin_only service policy"
+                );
+                continue;
             }
-        } else {
-            continue;
-        };
 
-        // Role check: Viewer cannot proxy.
-        if !membership.role.can_proxy() {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                role = ?membership.role,
-                "Org membership role insufficient for proxy"
-            );
-            continue;
-        }
-
-        if !admin_only_allows_role(&org_us, membership.role) {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
-                role = ?membership.role,
-                "Org membership role blocked by admin_only service policy"
-            );
-            continue;
-        }
-
-        // Scope check: inherited role defaults or member overrides may
-        // restrict access to a subset.
-        let effective_scope =
-            crate::services::org_role_scope_service::effective_scope_for_membership(db, membership)
+            // Scope check: inherited role defaults or member overrides may
+            // restrict access to a subset.
+            let effective_scope =
+                crate::services::org_role_scope_service::effective_scope_for_membership(
+                    db, membership,
+                )
                 .await?;
-        if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
-                "User not in effective service scope for this org membership"
-            );
-            continue;
+            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id)
+            {
+                role_denied = true;
+                tracing::debug!(
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    user_service_id = %org_us.id,
+                    "User not in effective service scope for this org membership"
+                );
+                continue;
+            }
+
+            let routing = OrgRouting {
+                org_user_id: membership.org_user_id.clone(),
+                member_user_id: user_id.to_string(),
+                membership_id: membership.id.clone(),
+            };
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    Some(encryption_keys),
+                    &membership.org_user_id,
+                    org_us,
+                    Some(routing),
+                    pool_selection,
+                    credential_resolution,
+                )
+                .await?,
+            ));
         }
 
-        let routing = OrgRouting {
-            org_user_id: membership.org_user_id.clone(),
-            member_user_id: user_id.to_string(),
-            membership_id: membership.id.clone(),
-        };
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                &membership.org_user_id,
-                org_us,
-                Some(routing),
-                pool_selection,
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-
-    // No org service matched. If at least one was found but blocked by role
-    // or scope, surface that as a 403 instead of a generic 404 -- the user
-    // gets a clearer error and the audit trail captures the denial.
-    if role_denied {
-        return Err(AppError::OrgRoleInsufficient(
-            "your role in the owning org does not permit using this service".to_string(),
-        ));
-    }
-    Ok(None)
+        // No org service matched. If at least one was found but blocked by role
+        // or scope, surface that as a 403 instead of a generic 404 -- the user
+        // gets a clearer error and the audit trail captures the denial.
+        if role_denied {
+            return Err(AppError::OrgRoleInsufficient(
+                "your role in the owning org does not permit using this service".to_string(),
+            ));
+        }
+        Ok(None)
+    })
+    .await
 }
 
 /// Return true when the user has a legacy (pre-migration) personal
@@ -1580,7 +2045,7 @@ pub async fn resolve_proxy_target_from_user_service(
 /// count on each of `user_service_connections` / `user_provider_tokens`.
 /// The short-circuits keep the common "no legacy at all" case to ~2 round
 /// trips. Users fully migrated to `UserService` never hit this path.
-async fn user_has_legacy_personal_connection(
+pub(crate) async fn user_has_legacy_personal_connection(
     db: &mongodb::Database,
     user_id: &str,
     slug: Option<&str>,
@@ -1755,12 +2220,11 @@ pub async fn guard_slug_against_viewer_orgs(
             "user_id": &membership.org_user_id,
             "$or": us_or,
         };
-        let us_hit = db
-            .collection::<crate::models::user_service::UserService>(
-                crate::models::user_service::COLLECTION_NAME,
-            )
-            .count_documents(us_query)
-            .await?;
+        let us_hit = crate::services::service_history::collection::<
+            crate::models::user_service::UserService,
+        >(db, crate::models::user_service::COLLECTION_NAME)
+        .count_documents(us_query)
+        .await?;
         if us_hit > 0 {
             return Err(AppError::OrgRoleInsufficient(
                 "your role in the owning org does not permit using this service".to_string(),
@@ -1842,7 +2306,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
 ) -> AppResult<Option<UserServiceResolution>> {
     resolve_proxy_target_by_user_service_id_with_mode(
         db,
-        encryption_keys,
+        Some(encryption_keys),
         actor_user_id,
         user_service_id,
         expected_slug,
@@ -1864,7 +2328,7 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
 ) -> AppResult<Option<UserServiceResolution>> {
     resolve_proxy_target_by_user_service_id_with_mode(
         db,
-        encryption_keys,
+        Some(encryption_keys),
         actor_user_id,
         user_service_id,
         expected_slug,
@@ -1876,102 +2340,108 @@ pub async fn read_proxy_authority_snapshot_by_user_service_id(
 
 async fn resolve_proxy_target_by_user_service_id_with_mode(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: Option<&EncryptionKeys>,
     actor_user_id: &str,
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
     credential_resolution: ProxyCredentialResolution<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
-        Some(s) => s,
-        None => return Ok(None),
-    };
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+        let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
 
-    // Verify the selected UserService matches the route's identity.
-    // The slug handler passes expected_slug; the catalog-id handler
-    // passes expected_catalog_service_id. Both must match if provided.
-    if let Some(slug) = expected_slug
-        && svc.slug != slug
-    {
-        return Err(AppError::BadRequest(format!(
-            "_nyxid_via UserService '{user_service_id}' has slug '{}', \
-             but the route requested '{slug}'",
-            svc.slug
-        )));
-    }
-    if let Some(catalog_id) = expected_catalog_service_id {
-        let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
-        if svc_catalog != catalog_id {
+        // Verify the selected UserService matches the route's identity.
+        // The slug handler passes expected_slug; the catalog-id handler
+        // passes expected_catalog_service_id. Both must match if provided.
+        if let Some(slug) = expected_slug
+            && svc.slug != slug
+        {
             return Err(AppError::BadRequest(format!(
-                "_nyxid_via UserService '{user_service_id}' belongs to catalog \
-                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+                "_nyxid_via UserService '{user_service_id}' has slug '{}', \
+             but the route requested '{slug}'",
+                svc.slug
             )));
         }
-    }
-
-    // Access gate: resolve the actor's relationship to the service owner.
-    let access =
-        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
-    let allowed = match &access {
-        crate::services::org_service::OwnerAccess::Direct => true,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-            access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy()
-                && admin_only_allows_role(&svc, *role)
-                && access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::Forbidden => false,
-    };
-    if !allowed {
-        return Err(AppError::OrgRoleInsufficient(
-            "you do not have proxy access to this service".to_string(),
-        ));
-    }
-
-    // Build the org_routing context if the service is org-owned.
-    let org_routing = if svc.user_id != actor_user_id {
-        // The service belongs to an org; build the routing context from
-        // the OwnerAccess that we already resolved above. We know the
-        // access is at least AsOrgAdmin or AsOrgMember (Viewer was
-        // rejected), so we can extract the membership_id.
-        let (org_user_id, membership_id) = match &access {
-            crate::services::org_service::OwnerAccess::AsOrgAdmin {
-                org_user_id,
-                membership_id,
-                ..
+        if let Some(catalog_id) = expected_catalog_service_id {
+            let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
+            if svc_catalog != catalog_id {
+                return Err(AppError::BadRequest(format!(
+                    "_nyxid_via UserService '{user_service_id}' belongs to catalog \
+                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+                )));
             }
-            | crate::services::org_service::OwnerAccess::AsOrgMember {
-                org_user_id,
-                membership_id,
-                ..
-            } => (org_user_id.clone(), membership_id.clone()),
-            _ => unreachable!("Direct and Forbidden already handled"),
-        };
-        Some(OrgRouting {
-            org_user_id,
-            member_user_id: actor_user_id.to_string(),
-            membership_id,
-        })
-    } else {
-        None
-    };
+        }
 
-    let owner_id = svc.user_id.clone();
-    Ok(Some(
-        finish_resolution(
-            db,
-            encryption_keys,
-            &owner_id,
-            svc,
-            org_routing,
-            None,
-            credential_resolution,
-        )
-        .await?,
-    ))
+        // Access gate: resolve the actor's relationship to the service owner.
+        let access =
+            crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
+                .await?;
+        let allowed = match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&svc, *role)
+                    && access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !allowed {
+            return Err(AppError::OrgRoleInsufficient(
+                "you do not have proxy access to this service".to_string(),
+            ));
+        }
+
+        // Build the org_routing context if the service is org-owned.
+        let org_routing = if svc.user_id != actor_user_id {
+            // The service belongs to an org; build the routing context from
+            // the OwnerAccess that we already resolved above. We know the
+            // access is at least AsOrgAdmin or AsOrgMember (Viewer was
+            // rejected), so we can extract the membership_id.
+            let (org_user_id, membership_id) = match &access {
+                crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                    org_user_id,
+                    membership_id,
+                    ..
+                }
+                | crate::services::org_service::OwnerAccess::AsOrgMember {
+                    org_user_id,
+                    membership_id,
+                    ..
+                } => (org_user_id.clone(), membership_id.clone()),
+                _ => unreachable!("Direct and Forbidden already handled"),
+            };
+            Some(OrgRouting {
+                org_user_id,
+                member_user_id: actor_user_id.to_string(),
+                membership_id,
+            })
+        } else {
+            None
+        };
+
+        let owner_id = svc.user_id.clone();
+        Ok(Some(
+            finish_resolution(
+                db,
+                encryption_keys,
+                &owner_id,
+                svc,
+                org_routing,
+                None,
+                credential_resolution,
+            )
+            .await?,
+        ))
+    })
+    .await
 }
 
 /// Mirrors `resolve_proxy_target_from_user_service` exactly so that the
@@ -2267,21 +2737,16 @@ async fn lookup_user_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    service.visibility == "public"
-        && service.service_category == "internal"
-        && master_credential_required(service)
-        && service.auth_method != "token_exchange"
-        && !service.requires_user_credential
-        && service.service_type == "http"
-        && service.is_active
-        && !service.credential_encrypted.is_empty()
-        && service.provider_config_id.is_none()
+    super::platform_key_service::legacy_public_master(service)
 }
 
 fn is_auto_provisionable_catalog_service(
     service: &DownstreamService,
     has_provider_requirement: bool,
 ) -> bool {
+    if super::retired_service_service::is_retired(service) {
+        return false;
+    }
     let is_truly_no_auth = service.is_active
         && service.auth_method == "none"
         && !service.requires_user_credential
@@ -2310,7 +2775,7 @@ fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
 ///
 /// Returns `Ok(())` if the service is still eligible or is not auto-provisioned.
 /// Returns `Err(NotFound)` if the service should no longer be accessible.
-async fn verify_auto_provision_eligibility(
+pub(crate) async fn verify_auto_provision_eligibility(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
     effective_owner_id: &str,
@@ -2350,6 +2815,11 @@ async fn verify_auto_provision_eligibility(
             ));
         }
     };
+
+    if ds.platform_key.is_some() && super::platform_key_service::binding(user_service) == "platform"
+    {
+        return super::platform_key_service::require(db, &ds, effective_owner_id).await;
+    }
 
     let spr_count = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
@@ -2398,13 +2868,17 @@ async fn verify_auto_provision_eligibility(
 
 async fn finish_resolution(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    encryption_keys: Option<&EncryptionKeys>,
     effective_owner_id: &str,
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
     pool_selection: Option<service_pool_service::PoolSelection>,
     credential_resolution: ProxyCredentialResolution<'_>,
 ) -> AppResult<UserServiceResolution> {
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+
     let materialize_credentials = credential_resolution.materialize_credentials;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
@@ -2413,8 +2887,7 @@ async fn finish_resolution(
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
 
     // Load the endpoint
-    let endpoint = db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
+    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -2447,6 +2920,108 @@ async fn finish_resolution(
         .clone()
         .unwrap_or_default();
 
+    if (super::platform_key_service::binding(&user_service) == "platform"
+        && (user_service.auth_method != "none"
+            || user_service.credential_binding.as_deref() == Some("platform")
+            || catalog_proxy_authorization.platform_key_configured))
+        || (catalog_proxy_authorization.no_auth_platform_service
+            && catalog_proxy_authorization.platform_key_configured)
+    {
+        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
+        let no_auth = super::platform_key_service::no_auth_platform_service(&catalog_service);
+        if !no_auth && !super::platform_key_service::has_platform_key(&catalog_service) {
+            return Err(AppError::NotFound(
+                "Service is no longer available".to_string(),
+            ));
+        }
+
+        if user_service.node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "Platform keys cannot be routed through a node".to_string(),
+            ));
+        }
+        let (auth_method, auth_key_name) = if no_auth {
+            ("none".into(), String::new())
+        } else {
+            super::platform_key_service::effective_auth(db, &catalog_service).await?
+        };
+        let actor = EffectiveActor::from_user_id(effective_owner_id);
+        let authorized = if no_auth {
+            super::platform_key_service::require(db, &catalog_service, effective_owner_id).await?;
+            None
+        } else {
+            Some(authorize_master_credential(db, &catalog_service, &actor).await?)
+        };
+        let credential = if let Some(authorized) = authorized.filter(|_| materialize_credentials) {
+            crate::mw::rate_limit::enforce_platform_user_limit(
+                db,
+                platform_user_rate_limit,
+                &catalog_service.id,
+                &actor.user_id,
+            )
+            .await?;
+            let decrypted_bytes = Zeroizing::new(
+                decrypt_authorized_master_credential(encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?, &authorized).await?,
+            );
+            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?
+        } else {
+            String::new()
+        };
+        let now = chrono::Utc::now();
+        let mut minimal_service = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            now,
+            None,
+            catalog_billing.clone(),
+        );
+        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
+        minimal_service.base_url = catalog_service.base_url.clone();
+        minimal_service.auth_method = auth_method.clone();
+        minimal_service.auth_key_name = auth_key_name.clone();
+        minimal_service.token_exchange_config = catalog_service.token_exchange_config.clone();
+        minimal_service.inference = catalog_service.inference.clone();
+
+        let uses_master_credential = !no_auth;
+        let master_credential_revision = if !uses_master_credential { None } else {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&catalog_service.credential_encrypted);
+            Some(format!("master:{:x}", hasher.finalize()))
+        };
+        return Ok(UserServiceResolution {
+            target: ProxyTarget {
+                base_url: catalog_service.base_url.clone(),
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
+                auth_method,
+                auth_key_name,
+                credential,
+                service: minimal_service,
+                catalog_default_headers: catalog_default_headers.clone(),
+                user_service_default_headers: user_service_default_headers.clone(),
+                ws_frame_injections: effective_ws_frame_injections.clone(),
+                connection_id: None,
+            },
+            catalog_service_slug: catalog_service_slug.clone(),
+            node_id: None,
+            user_service_id: user_service.id.clone(),
+            has_server_credential: uses_master_credential,
+            api_key_id: None,
+            credential_epoch: 1,
+            master_credential_revision,
+            master_credential: uses_master_credential,
+            credential_source: None,
+            org_routing,
+            pool_selection,
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
+        });
+    }
+
     // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
@@ -2463,6 +3038,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2482,72 +3060,9 @@ async fn finish_resolution(
             has_server_credential: true,
             api_key_id: None,
             credential_epoch: 1,
+            master_credential_revision: None,
             master_credential: false,
-            org_routing,
-            pool_selection,
-            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
-        });
-    }
-
-    if user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-        && user_service.api_key_id.is_none()
-    {
-        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
-        if !is_public_internal_master_credential_service(&catalog_service) {
-            return Err(AppError::NotFound(
-                "Service is no longer available".to_string(),
-            ));
-        }
-
-        let actor = EffectiveActor::from_user_id(effective_owner_id);
-        let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
-        let credential = if materialize_credentials {
-            crate::mw::rate_limit::enforce_platform_user_limit(
-                db,
-                platform_user_rate_limit,
-                &catalog_service.id,
-                &actor.user_id,
-            )
-            .await?;
-            let decrypted_bytes = Zeroizing::new(
-                decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
-            );
-            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                tracing::error!("Credential UTF-8 decode failed: {e}");
-                AppError::Internal("Failed to decode credential".to_string())
-            })?
-        } else {
-            String::new()
-        };
-        let now = chrono::Utc::now();
-        let mut minimal_service = build_minimal_downstream_service(
-            &user_service,
-            &endpoint,
-            now,
-            None,
-            catalog_billing.clone(),
-        );
-        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
-
-        return Ok(UserServiceResolution {
-            target: ProxyTarget {
-                base_url: endpoint.url.clone(),
-                auth_method: user_service.auth_method.clone(),
-                auth_key_name: user_service.auth_key_name.clone(),
-                credential,
-                service: minimal_service,
-                catalog_default_headers: catalog_default_headers.clone(),
-                user_service_default_headers: user_service_default_headers.clone(),
-                ws_frame_injections: effective_ws_frame_injections.clone(),
-                connection_id: None,
-            },
-            catalog_service_slug: catalog_service_slug.clone(),
-            node_id: user_service.node_id.clone(),
-            user_service_id: user_service.id.clone(),
-            has_server_credential: true,
-            api_key_id: None,
-            credential_epoch: 1,
-            master_credential: true,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2563,8 +3078,7 @@ async fn finish_resolution(
         AppError::Internal("Data integrity error: api_key_id missing".to_string())
     })?;
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": ak_id })
         .await?
         .ok_or_else(|| {
@@ -2575,10 +3089,14 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
+        &endpoint.url, user_service.node_id.as_deref(),
+    ).await?;
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
-            encryption_keys,
+            encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?,
             effective_owner_id,
             api_key,
             connection_expiry_notifier,
@@ -2592,7 +3110,7 @@ async fn finish_resolution(
     // since the node agent handles credential injection locally.
     if user_service.node_id.is_some() {
         let credential = if materialize_credentials {
-            match resolve_user_api_key_credential(&api_key, encryption_keys).await {
+            match resolve_user_api_key_credential(&api_key, encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?).await {
                 Ok(cred) => cred,
                 Err(e) => {
                     tracing::debug!(
@@ -2624,6 +3142,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2640,7 +3161,9 @@ async fn finish_resolution(
             has_server_credential,
             api_key_id: Some(api_key.id.clone()),
             credential_epoch: api_key.credential_epoch,
+            master_credential_revision: None,
             master_credential: false,
+            credential_source: api_key.credential_source.clone(),
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2648,14 +3171,14 @@ async fn finish_resolution(
     }
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "API key is {}",
             api_key.status
         )));
     }
 
     let credential = if materialize_credentials {
-        let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+        let credential = resolve_user_api_key_credential(&api_key, encryption_keys.ok_or_else(||AppError::Internal("Credential materialization requires encryption keys".into()))?).await?;
         let credential =
             credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
 
@@ -2686,6 +3209,9 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            workspace_destinations_pending: catalog_proxy_authorization
+                .workspace_destinations_pending,
+            target_id: None,
             base_url: endpoint.url.clone(),
             auth_method: user_service.auth_method.clone(),
             auth_key_name: user_service.auth_key_name.clone(),
@@ -2702,11 +3228,15 @@ async fn finish_resolution(
         has_server_credential: true,
         api_key_id: Some(api_key.id.clone()),
         credential_epoch: api_key.credential_epoch,
+        master_credential_revision: None,
         master_credential: false,
+        credential_source: api_key.credential_source.clone(),
         org_routing,
         pool_selection,
         is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     })
+
+    }).await
 }
 
 async fn load_catalog_service_for_user_service(
@@ -2736,6 +3266,15 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    auth_scheme: Option<String>,
+    platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
+    platform_key_configured: bool,
+    no_auth_platform_service: bool,
+    offering_kind: crate::models::downstream_service::OfferingKind,
+    concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
+    inference: Option<crate::models::downstream_service::ServiceInference>,
+    workspace_destinations_pending: bool,
+    destination_targets: std::collections::BTreeMap<String, String>,
     policy: Option<ProxyOperationPolicy>,
     service_category: Option<String>,
     requires_user_credential: Option<bool>,
@@ -2758,7 +3297,20 @@ async fn load_catalog_proxy_authorization_for_user_service(
         // additive and must not turn that legacy shape into a new outage.
         return Ok(CatalogProxyAuthorization::default());
     };
+    super::destination_routing::validate_credential_source(&service)?;
+    super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        auth_scheme: service.auth_scheme.clone(),
+        platform_key: service.platform_key.clone(),
+        platform_key_configured: service.platform_key.is_some(),
+        no_auth_platform_service: super::platform_key_service::no_auth_platform_service(&service),
+        offering_kind: service.offering_kind,
+        concurrency_policy: service.concurrency_policy.clone(),
+        inference: service.inference.clone(),
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        destination_targets: service.destination_targets,
         policy: service.proxy_operation_policy,
         service_category: Some(service.service_category),
         requires_user_credential: Some(service.requires_user_credential),
@@ -2769,7 +3321,13 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.offering_kind = authorization.offering_kind;
+    service.auth_scheme = authorization.auth_scheme.clone();
+    service.platform_key = authorization.platform_key.clone();
+    service.concurrency_policy = authorization.concurrency_policy.clone();
+    service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
+    service.destination_targets = authorization.destination_targets.clone();
     if let Some(service_category) = authorization.service_category.as_ref() {
         service.service_category = service_category.clone();
     }
@@ -2880,6 +3438,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     Ok(resolve_agent_credential_override_identity(
@@ -2888,6 +3447,7 @@ pub async fn resolve_agent_credential_override(
         user_id,
         api_key_id,
         user_service_id,
+        target,
         connection_expiry_notifier,
     )
     .await?
@@ -2912,6 +3472,7 @@ pub async fn read_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
 ) -> AppResult<Option<AgentCredentialOverrideIdentity>> {
     let Some(override_key_id) = agent_binding_service::resolve_credential_override(
         db,
@@ -2923,13 +3484,20 @@ pub async fn read_agent_credential_override_identity(
     else {
         return Ok(None);
     };
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
-        return Err(AppError::BadRequest(
+        return Err(AppError::CredentialUnavailable(
             "Bound credential is not executable".to_string(),
         ));
     }
@@ -2945,6 +3513,7 @@ pub async fn resolve_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<AgentCredentialOverride>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
@@ -2959,8 +3528,7 @@ pub async fn resolve_agent_credential_override_identity(
         return Ok(None);
     };
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| {
@@ -2971,6 +3539,14 @@ pub async fn resolve_agent_credential_override_identity(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     let api_key = maybe_refresh_provider_backed_api_key(
         db,
         encryption_keys,
@@ -2981,7 +3557,7 @@ pub async fn resolve_agent_credential_override_identity(
     .await?;
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "Override credential is {}",
             api_key.status
         )));
@@ -3108,10 +3684,14 @@ async fn maybe_refresh_provider_backed_api_key(
     .await
     {
         Ok(_) => {
-            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-                .await?;
+            user_api_key_service::sync_refreshed_provider_token_to_api_keys(
+                db,
+                user_id,
+                provider_config_id,
+            )
+            .await?;
 
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .find_one(doc! { "_id": &api_key.id })
                 .await?
                 .ok_or_else(|| {
@@ -3159,7 +3739,7 @@ fn encrypted_material_present(material: Option<&Vec<u8>>) -> bool {
 /// Read-only mirror of credential materialization eligibility. It checks only
 /// durable encrypted seeds and cached material; it never decrypts, refreshes,
 /// mints, touches usage timestamps, or performs provider I/O.
-async fn credential_is_materializable(
+pub(crate) async fn credential_is_materializable(
     db: &mongodb::Database,
     api_key: &UserApiKey,
 ) -> AppResult<bool> {
@@ -3206,11 +3786,13 @@ async fn credential_is_materializable(
 
 fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
     match api_key.credential_type.as_str() {
-        "oauth2" if api_key.provider_config_id.is_some() => AppError::BadRequest(
+        "oauth2" if api_key.provider_config_id.is_some() => AppError::CredentialUnavailable(
             "OAuth connection is not complete. Connect your account first.".to_string(),
         ),
-        "oauth2" => AppError::BadRequest("OAuth token has no credential stored".to_string()),
-        _ => AppError::BadRequest(
+        "oauth2" => {
+            AppError::CredentialUnavailable("OAuth token has no credential stored".to_string())
+        }
+        _ => AppError::CredentialUnavailable(
             "No credential stored. Add a credential or route through a node.".to_string(),
         ),
     }
@@ -3277,13 +3859,20 @@ fn build_minimal_downstream_service(
     token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
     billing: Option<crate::models::service_billing::ServiceBilling>,
 ) -> DownstreamService {
-    let platform_managed_catalog_service = user_service.source.as_deref()
-        == Some(AUTO_PROVISION_SOURCE)
-        && user_service.api_key_id.is_none()
+    let platform_managed_catalog_service = super::platform_key_service::binding(user_service)
+        == "platform"
         && user_service.auth_method != "none"
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        offering_kind: Default::default(),
+        topics: Vec::new(),
+        supplier: None,
+        import_source: None,
+        destination_targets: Default::default(),
+        owner_user_id: None,
+        recommended_skill_refs: None,
+        skills_revision: 0,
         id: user_service
             .catalog_service_id
             .clone()
@@ -3297,7 +3886,9 @@ fn build_minimal_downstream_service(
         auth_method: user_service.auth_method.clone(),
         auth_key_name: user_service.auth_key_name.clone(),
         credential_encrypted: vec![],
+        platform_key: None,
         auth_type: None,
+        auth_scheme: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
         streaming_supported: true,
@@ -3311,6 +3902,10 @@ fn build_minimal_downstream_service(
         requires_user_credential: !platform_managed_catalog_service,
         is_active: true,
         created_by: "system".to_string(),
+        catalog_manager_created: false,
+        tools_manager_created: false,
+        icon_url: None,
+        tools_credential_frozen: false,
         identity_propagation_mode: user_service.identity_propagation_mode.clone(),
         identity_include_user_id: user_service.identity_include_user_id,
         identity_include_email: user_service.identity_include_email,
@@ -3324,6 +3919,10 @@ fn build_minimal_downstream_service(
         repository_url: None,
         issues_url: None,
         capabilities: None,
+        inference: None,
+        git_http: None,
+        concurrency_policy: None,
+        inference_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -3448,13 +4047,18 @@ pub async fn forward_request(
 #[derive(Debug)]
 pub(crate) enum ForwardRequestError {
     Application(AppError),
+    PreDispatchRejected(AppError),
     Transport(reqwest::Error),
+    OutcomeUnknown,
 }
 
 impl ForwardRequestError {
     pub(crate) fn into_app_error(self) -> AppError {
         match self {
-            Self::Application(error) => error,
+            Self::Application(error) | Self::PreDispatchRejected(error) => error,
+            Self::OutcomeUnknown => AppError::Conflict(
+                "Provider outcome is unknown; check the provider before retrying".into(),
+            ),
             Self::Transport(error) => {
                 tracing::error!(
                     timeout = error.is_timeout(),
@@ -3482,8 +4086,124 @@ impl From<reqwest::Error> for ForwardRequestError {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
+
+/// Pool attempts, operation-scoped and permission-bound requests authorize one
+/// exact URL, so a redirect must come back to the caller instead of being
+/// followed to a route nobody evaluated.
+pub fn no_redirect_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // Tests share this process-wide client while starting and dropping many
+        // local mock servers whose ports the OS reuses. A pooled idle socket to
+        // a dropped server would then fail after dispatch and look like an
+        // upstream transport error, so tests never keep idle connections.
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("no-redirect HTTP client")
+    });
+    &CLIENT
+}
+
+fn target_http_client() -> Client {
+    #[cfg(test)]
+    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
+        return build_target_http_client(builder);
+    }
+    static CLIENT: std::sync::LazyLock<Client> =
+        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
+    CLIENT.clone()
+}
+
+fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    // See `no_redirect_http_client`: reused mock-server ports make idle
+    // sockets in this process-wide client fail after dispatch in tests.
+    #[cfg(test)]
+    let builder = builder.pool_max_idle_per_host(0);
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("target HTTP client")
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn forward_request_with_extra_outbound_headers(
+pub(crate) fn forward_request_with_extra_outbound_headers<'a>(
+    client: &'a Client,
+    target: &'a ProxyTarget,
+    method: reqwest::Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: reqwest::header::HeaderMap,
+    body: ProxyBody,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
+    caller_token: Option<&'a str>,
+    token_exchange_cache: &'a TokenExchangeCache,
+    cloud_response_cache: &'a CloudResponseCache,
+    extra_outbound_headers: Vec<(String, String)>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
+    forward_request_with_egress_guard(
+        client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        identity_headers,
+        delegated_credentials,
+        caller_token,
+        token_exchange_cache,
+        cloud_response_cache,
+        extra_outbound_headers,
+        _billing_egress_permit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn forward_request_with_egress_guard<'a>(
+    client: &'a Client,
+    target: &'a ProxyTarget,
+    method: reqwest::Method,
+    path: &'a str,
+    query: Option<&'a str>,
+    headers: reqwest::header::HeaderMap,
+    body: ProxyBody,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
+    caller_token: Option<&'a str>,
+    token_exchange_cache: &'a TokenExchangeCache,
+    cloud_response_cache: &'a CloudResponseCache,
+    extra_outbound_headers: Vec<(String, String)>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
+) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
+    Box::pin(forward_request_with_egress_guard_inner(
+        client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        identity_headers,
+        delegated_credentials,
+        caller_token,
+        token_exchange_cache,
+        cloud_response_cache,
+        extra_outbound_headers,
+        billing_egress_permit,
+        egress_guard,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_request_with_egress_guard_inner(
     client: &Client,
     target: &ProxyTarget,
     method: reqwest::Method,
@@ -3497,8 +4217,30 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     token_exchange_cache: &TokenExchangeCache,
     cloud_response_cache: &CloudResponseCache,
     extra_outbound_headers: Vec<(String, String)>,
-    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    if super::telnyx_platform_service::contract(&target.service).is_some() {
+        let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Managed services require funded execution admission".into(),
+            )
+        })?;
+        proof.validate(target, method.as_str(), path, query, &body)?;
+    }
+    super::destination_routing::validate_outbound_destination(
+        target,
+        method.as_str(),
+        path,
+        &delegated_credentials,
+    )?;
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        validate_ifttt_configuration(target)?;
+    }
+    validate_ifttt_delegation(target, &delegated_credentials)?;
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
@@ -3523,6 +4265,16 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         )
     };
 
+    let destination_client;
+    let client = if target.target_id.is_some()
+        || target.auth_method == "github_git"
+        || target.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool
+    {
+        destination_client = target_http_client();
+        &destination_client
+    } else {
+        client
+    };
     let mut request = client.request(method.clone(), &url);
 
     // Build the final outbound header list up front so reqwest's
@@ -3541,7 +4293,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     //
     // The shared builder applies this exact sequence for both direct and
     // node-routed HTTP requests.
-    let outbound_headers = collect_forward_headers(&headers);
+    let outbound_headers = collect_forward_headers_with_defaults(
+        &headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
     let outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
@@ -3550,6 +4308,78 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         &extra_outbound_headers,
     );
 
+    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        let body = body.buffered()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate())
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        return nyxid_service_adapters::ifttt::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+                &outbound_headers,
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
+            });
+    }
+    if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        let body = body.buffered()?;
+        if let Some(guard) = egress_guard {
+            Box::pin(guard.revalidate())
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        let validate =
+            || -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+                Box::pin(async {
+                    match egress_guard {
+                        Some(guard) => guard.revalidate().await.is_ok(),
+                        None => true,
+                    }
+                })
+            };
+        return nyxid_service_adapters::ifttt_mcp::client()
+            .forward_with_guard(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+                egress_guard
+                    .map(|_| &validate as &nyxid_service_adapters::ifttt_mcp::DispatchGuard<'_>),
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt_mcp::Error::PreDispatchRejected => {
+                    ForwardRequestError::PreDispatchRejected(AppError::Conflict(
+                        "Assistant authority changed before operation dispatch".into(),
+                    ))
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::OutcomeUnknown => {
+                    ForwardRequestError::OutcomeUnknown
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::Request
+                | nyxid_service_adapters::ifttt_mcp::Error::Destination => {
+                    ForwardRequestError::Application(AppError::BadRequest(error.to_string()))
+                }
+                _ => ForwardRequestError::Application(AppError::Internal(error.to_string())),
+            });
+    }
     for (name, value) in &outbound_headers {
         request = request.header(name, value);
     }
@@ -3570,16 +4400,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             )
             .into());
         }
-        match body {
-            ProxyBody::Buffered(existing) => {
-                let merged = inject_credential_into_json_body(
-                    existing.as_deref(),
-                    &target.auth_key_name,
-                    &target.credential,
-                )?;
-                ProxyBody::Buffered(Some(merged))
-            }
-        }
+        let existing = body.buffered()?;
+        let merged = inject_credential_into_json_body(
+            existing.as_deref(),
+            &target.auth_key_name,
+            &target.credential,
+        )?;
+        ProxyBody::Buffered(Some(merged))
     } else {
         body
     };
@@ -3599,6 +4426,12 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             let body_bytes_for_key: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
+                ProxyBody::Streaming(_) => {
+                    return Err(AppError::BadRequest(
+                        "Signed body authentication requires a bounded structured body".into(),
+                    )
+                    .into());
+                }
             };
             let path_and_query = match prepared.query.as_deref() {
                 Some(q) => format!("{}?{}", prepared.path, q),
@@ -3623,6 +4456,11 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                     base_url = %target.base_url,
                     "cloud_response_cache hit"
                 );
+                if let Some(guard) = egress_guard {
+                    Box::pin(guard.revalidate())
+                        .await
+                        .map_err(ForwardRequestError::PreDispatchRejected)?;
+                }
                 return Ok(cached);
             }
             Some(key)
@@ -3639,7 +4477,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             request = request.header(&target.auth_key_name, &target.credential);
         }
         "bearer" => {
-            request = request.bearer_auth(&target.credential);
+            request = request.header(
+                reqwest::header::AUTHORIZATION,
+                super::catalog_auth_scheme::header_value(
+                    target.service.auth_scheme.as_deref(),
+                    &target.credential,
+                )?,
+            );
         }
         "bot_bearer" => {
             // Discord bot tokens use `Authorization: Bot <token>` instead of
@@ -3650,6 +4494,9 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             // Use the request builder's query method to properly URL-encode parameters.
             // This preserves the original HTTP method, headers, and body.
             request = request.query(&[(&target.auth_key_name, &target.credential)]);
+        }
+        "github_git" => {
+            request = request.basic_auth(&target.auth_key_name, Some(&target.credential));
         }
         "basic" => {
             // credential format: "username:password"
@@ -3718,6 +4565,12 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             let body_bytes: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
+                ProxyBody::Streaming(_) => {
+                    return Err(AppError::BadRequest(
+                        "Signed body authentication requires a bounded structured body".into(),
+                    )
+                    .into());
+                }
             };
             let creds = AwsCredentials::from_json(&target.credential).map_err(|e| {
                 tracing::error!(error = %e, "aws_sigv4 credential malformed");
@@ -3746,9 +4599,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
 
     // Forward the caller's NyxID access token when the service is configured for it.
     // This is used by platform apps that trust NyxID JWTs directly.
-    if target.service.forward_access_token
-        && let Some(token) = caller_token
-    {
+    if let Some(token) = forwarded_caller_token(target, caller_token, &extra_outbound_headers) {
         request = request.bearer_auth(token);
     }
 
@@ -3762,8 +4613,16 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             request = request.body(body_bytes);
         }
         ProxyBody::Buffered(None) => {}
+        ProxyBody::Streaming(body) => {
+            request = request.body(reqwest::Body::wrap_stream(body.into_data_stream()));
+        }
     }
 
+    if let Some(guard) = egress_guard {
+        Box::pin(guard.revalidate())
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     let response = request.send().await?;
 
     // Cache successful billing-API responses so a follow-up request
@@ -3833,6 +4692,25 @@ fn inject_credential_into_json_body(
     })?;
 
     Ok(bytes::Bytes::from(bytes))
+}
+
+/// Reuse the exact execution resolver's live ACL, destination and credential
+/// identity checks without requiring access to encryption keys or refreshing.
+pub(crate) async fn read_connection_authority(
+    db: &mongodb::Database,
+    actor: &str,
+    id: &str,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        None,
+        actor,
+        id,
+        None,
+        None,
+        ProxyCredentialResolution::read_only_snapshot(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -4014,6 +4892,7 @@ mod tests {
             rules: vec![crate::models::downstream_service::ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/health".to_string(),
+                ..Default::default()
             }],
         }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
@@ -4085,6 +4964,8 @@ mod tests {
         );
 
         let consent = crate::models::consent::Consent {
+            revision: None,
+            issuance_fence: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
             client_id: app_id.clone(),
@@ -4385,6 +5266,47 @@ mod tests {
     // ---- forward header allowlist tests (NyxID#161) ----
 
     #[test]
+    fn overridable_defaults_admit_caller_headers_without_opening_reserved_names() {
+        let mut headers = http::HeaderMap::new();
+        for name in [
+            "acme-version",
+            "custom-version",
+            "locked-version",
+            "unconfigured-version",
+            "authorization",
+            "host",
+            "x-nyxid-user-id",
+            "connection",
+        ] {
+            headers.insert(
+                http::HeaderName::from_static(name),
+                "caller".parse().unwrap(),
+            );
+        }
+        let make_default = |name: &str, overridable| DefaultRequestHeader {
+            name: name.into(),
+            value: "default".into(),
+            overridable,
+            sensitive: false,
+        };
+        let catalog = vec![
+            make_default("Acme-Version", true),
+            make_default("locked-version", false),
+            make_default("Authorization", true),
+            make_default("Host", true),
+            make_default("X-NyxID-User-Id", true),
+            make_default("Connection", true),
+        ];
+        let user = vec![make_default("Custom-Version", true)];
+        let forwarded = collect_forward_headers_with_defaults(&headers, &[&catalog, &user]);
+        assert_eq!(forwarded.len(), 2);
+        for name in ["acme-version", "custom-version"] {
+            assert!(forwarded.contains(&(name.into(), "caller".into())));
+        }
+        assert!(collect_forward_headers(&headers).is_empty());
+    }
+
+    #[test]
     fn forward_allowlist_accepts_explicit_entries() {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
@@ -4395,6 +5317,23 @@ mod tests {
         assert!(is_allowed_forward_header("tracestate"));
         assert!(is_allowed_forward_header("last-event-id"));
         assert!(is_allowed_forward_header("prefer"));
+    }
+
+    #[test]
+    fn linkedin_version_headers_are_forwarded() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("LinkedIn-Version", "202609".parse().unwrap());
+        headers.insert("X-Restli-Protocol-Version", "2.0.0".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        for (name, value) in [
+            ("linkedin-version", "202609"),
+            ("x-restli-protocol-version", "2.0.0"),
+        ] {
+            assert!(forwarded.iter().any(|(actual_name, actual_value)| {
+                actual_name.eq_ignore_ascii_case(name) && actual_value == value
+            }));
+        }
     }
 
     #[test]
@@ -4543,6 +5482,16 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("tracestate"))
         );
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_postgrest_request_headers() {
+        for header in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                is_allowed_forward_header(header),
+                "PostgREST request header must be forwarded: {header}"
+            );
+        }
     }
 
     #[test]
@@ -5084,12 +6033,18 @@ mod tests {
                 is_active: true,
                 created_at: Utc::now(),
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(Utc::now()),
                 description: None,
                 allowed_service_ids: vec![],
+                allowed_platform_service_ids: Vec::new(),
+                assistant_group_id: None,
+                assistant_agent_owner_id: None,
+                assistant_operation_scopes: Default::default(),
                 allowed_node_ids: vec![],
                 allow_all_services: true,
+                allow_auto_connected_services: false,
                 allow_all_nodes: true,
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
@@ -5114,6 +6069,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
@@ -5149,6 +6105,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5176,6 +6133,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5203,11 +6161,16 @@ mod tests {
             .await
             .unwrap();
 
-        let read_only_identity =
-            read_agent_credential_override_identity(&db, &user_id, &api_key_id, &user_service_id)
-                .await
-                .expect("read-only override authority resolves from durable refresh material")
-                .expect("bound refresh-only override identity");
+        let read_only_identity = read_agent_credential_override_identity(
+            &db,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            &make_proxy_target("https://example.com".into()),
+        )
+        .await
+        .expect("read-only override authority resolves from durable refresh material")
+        .expect("bound refresh-only override identity");
         assert_eq!(read_only_identity.api_key_id, override_credential_id);
         assert_eq!(read_only_identity.credential_epoch, 1);
     }
@@ -5297,11 +6260,21 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "none".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Upload Service".to_string(),
                 slug: "upload-service".to_string(),
@@ -5310,7 +6283,9 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: "Authorization".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -5322,6 +6297,10 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "test".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -5335,6 +6314,10 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                git_http: None,
+                concurrency_policy: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -5356,6 +6339,225 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn ifttt_mcp_preflight_enforces_destination_routing_and_identity() {
+        use nyxid_service_adapters::ifttt_mcp;
+        let mut target = make_proxy_target(ifttt_mcp::BASE_URL.into());
+        target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, true)
+                .is_err()
+        );
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        assert!(
+            validate_ifttt_delegation(
+                &target,
+                &[DelegatedCredential {
+                    provider_slug: "another".into(),
+                    injection_method: "header".into(),
+                    injection_key: "x-key".into(),
+                    credential: "fixture".into(),
+                }]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ifttt_preflight_refuses_unsafe_direct_and_node_calls_and_delegation() {
+        use nyxid_service_adapters::ifttt;
+        let mut target = make_proxy_target(ifttt::BASE_URL.into());
+        target.auth_method = ifttt::AUTH_METHOD.into();
+        for node_routed in [false, true] {
+            assert!(
+                validate_ifttt_request(
+                    &target,
+                    &reqwest::Method::POST,
+                    "trigger/valid_1",
+                    None,
+                    None,
+                    node_routed
+                )
+                .is_ok()
+            );
+            for method in [
+                reqwest::Method::GET,
+                reqwest::Method::HEAD,
+                reqwest::Method::CONNECT,
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &method,
+                        "trigger/valid_1",
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+            for path in [
+                "trigger/e/with/key/caller_key",
+                "trigger/e%2F",
+                "trigger/a-b",
+                "other",
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &reqwest::Method::POST,
+                        path,
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let delegated = vec![DelegatedCredential {
+            provider_slug: "other".into(),
+            injection_method: "header".into(),
+            injection_key: "X-Other-Provider-Key".into(),
+            credential: "private-provider-key".into(),
+        }];
+        let error = validate_ifttt_delegation(&target, &delegated).unwrap_err();
+        assert!(!error.to_string().contains("private-provider-key"));
+        assert!(validate_ifttt_delegation(&target, &[]).is_ok());
+        target.base_url.clear();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.base_url = ifttt::BASE_URL.into();
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.ws_frame_injections.push(
+            serde_json::from_value(serde_json::json!({
+                "trigger": "first_frame_from_downstream", "template": "secret frame",
+            }))
+            .unwrap(),
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.auth_method = "header".into();
+        assert!(validate_ifttt_delegation(&target, &delegated).is_ok());
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::GET,
+                "ordinary",
+                None,
+                None,
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -5403,6 +6605,80 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_supabase_preserves_postgrest_inputs_and_injects_apikey() {
+        use wiremock::matchers::{
+            body_json, header, headers as header_values, method, path, query_param,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let row = serde_json::json!({"title": "Review audit log", "done": false});
+        Mock::given(method("POST"))
+            .and(path("/rest/v1/todos"))
+            .and(query_param("select", "id,title,done"))
+            .and(header("apikey", "sb_secret_test"))
+            .and(header("content-type", "application/json"))
+            .and(header_values(
+                "prefer",
+                vec!["return=representation", "count=exact"],
+            ))
+            .and(header("accept-profile", "analytics"))
+            .and(header("content-profile", "analytics"))
+            .and(header("range-unit", "items"))
+            .and(body_json(&row))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!([
+                {"id": 1, "title": "Review audit log", "done": false}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = crate::services::user_endpoint_service::normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            &server.uri(),
+        )
+        .unwrap();
+        let mut target = make_proxy_target(endpoint);
+        target.auth_method = "header".into();
+        target.auth_key_name = "apikey".into();
+        target.credential = "sb_secret_test".into();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("authorization", "Bearer caller-nyxid-token"),
+            ("apikey", "caller-supplied-key"),
+            ("content-type", "application/json"),
+            ("prefer", "return=representation,count=exact"),
+            ("accept-profile", "analytics"),
+            ("content-profile", "analytics"),
+            ("range-unit", "items"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "todos",
+            Some("select=id,title,done"),
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from(serde_json::to_vec(&row).unwrap()))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("Supabase request should succeed");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert_eq!(requests[0].headers.get_all("apikey").iter().count(), 1);
     }
 
     #[tokio::test]
@@ -5847,6 +7123,51 @@ mod tests {
                 ("Authorization".to_string(), "Bearer user-token".to_string()),
                 ("X-Provider-Key".to_string(), "secret".to_string()),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_forwarding_never_follows_vendor_redirects() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let vendor = MockServer::start().await;
+        Mock::given(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("Location", format!("{}/other", vendor.uri())),
+            )
+            .mount(&vendor)
+            .await;
+        Mock::given(path("/other"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&vendor)
+            .await;
+        let mut target = make_proxy_target(vendor.uri());
+        target.service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        target.auth_method = "bearer".into();
+        target.credential = "fake-local-only".into();
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "start",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 307);
+        let requests = vendor.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers["authorization"],
+            "Bearer fake-local-only"
         );
     }
 
@@ -6322,11 +7643,21 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Lark Bot".to_string(),
                 slug: "api-lark-bot".to_string(),
@@ -6335,7 +7666,9 @@ mod tests {
                 auth_method: "token_exchange".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -6347,6 +7680,10 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -6360,6 +7697,10 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                git_http: None,
+                concurrency_policy: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6522,14 +7863,19 @@ mod tests {
 
     fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
         crate::models::user_service::UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
+            credential_binding: None,
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -6634,6 +7980,50 @@ mod tests {
         assert_eq!(svc.auth_method, "bearer");
     }
 
+    #[test]
+    fn managed_contract_and_restricted_audience_survive_user_service_projection() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "bearer".into();
+        user_service.credential_binding = Some("platform".into());
+        let contract = crate::models::service_billing::ManagedExecutionContract {
+            model: "verified/model".into(),
+            max_input_tokens: 8192,
+            max_output_tokens: 512,
+            max_request_bytes: 4096,
+            max_response_bytes: 65536,
+            tariff_version: "v1".into(),
+            tariff_source: "https://api.telnyx.com/v2/pricing/products/inference".into(),
+            tariff_verified_at: Utc::now(),
+        };
+        let mut service = build_minimal_downstream_service(
+            &user_service,
+            &make_endpoint(),
+            Utc::now(),
+            None,
+            Some(crate::models::service_billing::ServiceBilling {
+                managed_execution: Some(contract.clone()),
+                ..Default::default()
+            }),
+        );
+        let config = crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec!["pilot".into()],
+        };
+        apply_catalog_proxy_authorization(
+            &mut service,
+            &CatalogProxyAuthorization {
+                platform_key: Some(config.clone()),
+                service_category: Some("internal".into()),
+                requires_user_credential: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(service.platform_key, Some(config));
+        assert_eq!(service.billing.unwrap().managed_execution, Some(contract));
+        assert!(!service.requires_user_credential);
+    }
+
     // ─── body auth method guard regression tests ─────────────────────
 
     #[derive(Clone, Default)]
@@ -6652,11 +8042,21 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "body".to_string(),
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Body Auth Service".to_string(),
                 slug: "body-auth-service".to_string(),
@@ -6665,7 +8065,9 @@ mod tests {
                 auth_method: "body".to_string(),
                 auth_key_name: "app_secret".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -6677,6 +8079,10 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -6690,6 +8096,10 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                git_http: None,
+                concurrency_policy: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6873,11 +8283,21 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: auth_method.to_string(),
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Cloud Billing Test".to_string(),
                 slug: "test-cloud-billing".to_string(),
@@ -6886,7 +8306,9 @@ mod tests {
                 auth_method: auth_method.to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -6898,6 +8320,10 @@ mod tests {
                 requires_user_credential: true,
                 is_active: true,
                 created_by: "test".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -6911,6 +8337,10 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                git_http: None,
+                concurrency_policy: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -7118,6 +8548,14 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "ds-test".into(),
             name: "Test".into(),
             slug: "test".into(),
@@ -7128,7 +8566,9 @@ mod tests {
             auth_method: "bearer".into(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -7138,6 +8578,10 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "system".into(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".into(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -7151,6 +8595,10 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            git_http: None,
+            concurrency_policy: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -7265,6 +8713,8 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -7284,6 +8734,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "X-Api-Key".to_string(),
@@ -7303,6 +8755,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "  ".to_string(),
@@ -7319,6 +8773,8 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -7335,6 +8791,8 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "query".to_string(),
             auth_key_name: "key".to_string(),
@@ -7351,6 +8809,8 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "aws_sigv4".to_string(),
             auth_key_name: String::new(),
@@ -7401,6 +8861,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -7419,6 +8881,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "path".to_string(),
             auth_key_name: "bot".to_string(),
@@ -7437,6 +8901,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -7515,6 +8980,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -7541,12 +9007,15 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("OAuth connection")));
+        assert!(
+            matches!(err, AppError::CredentialUnavailable(m) if m.contains("OAuth connection"))
+        );
     }
 
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -7573,7 +9042,7 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("No credential")));
+        assert!(matches!(err, AppError::CredentialUnavailable(m) if m.contains("No credential")));
     }
 
     // ---- forward header: AWS and GCP prefixes ----
@@ -7632,6 +9101,8 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: "https://example.test".into(),
             auth_method: auth_method.into(),
             auth_key_name: auth_key_name.into(),
@@ -7672,6 +9143,55 @@ mod tests {
     fn credential_header_name_header_custom() {
         let t = make_proxy_target_with_auth("header", "X-Api-Key");
         assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn assistant_authorization_survives_cookie_and_jwt_on_direct_and_node_paths() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.service.forward_access_token = true;
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "Authorization".into(),
+            value: "Bearer catalog".into(),
+            overridable: false,
+            sensitive: true,
+        }];
+        let extra = vec![("aUtHoRiZaTiOn".into(), "Bearer assistant-key".into())];
+        for caller in [None, Some("human-jwt")] {
+            // Direct HTTP assembles shared headers, then applies bearer forwarding.
+            let headers = build_effective_outbound_headers(
+                &target,
+                vec![("AUTHORIZATION".into(), "Bearer caller".into())],
+                &[],
+                &[],
+                &extra,
+            );
+            let mut request = reqwest::Client::new().post("https://example.test/v1/responses");
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                request = request.bearer_auth(token);
+            }
+            let request = request.build().unwrap();
+            assert_eq!(request.headers().get_all("authorization").iter().count(), 1);
+            assert_eq!(request.headers()["authorization"], "Bearer assistant-key");
+            // Node HTTP applies caller forwarding before the shared assembly.
+            let mut node_headers = vec![];
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                node_headers.push(("authorization".into(), format!("Bearer {token}")));
+            }
+            let headers = build_effective_outbound_headers(&target, node_headers, &[], &[], &extra);
+            let auth: Vec<_> = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .collect();
+            assert_eq!(auth.len(), 1);
+            assert_eq!(auth[0].1, "Bearer assistant-key");
+        }
+        assert_eq!(
+            forwarded_caller_token(&target, Some("human-jwt"), &[]),
+            Some("human-jwt")
+        );
     }
 
     #[test]

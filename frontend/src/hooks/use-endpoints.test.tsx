@@ -1,3 +1,4 @@
+import type { ServiceEndpoint } from "@/types/api";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -181,8 +182,38 @@ describe("useDiscoverEndpoints", () => {
       wrapper: createWrapper(),
     });
     await result.current.mutateAsync("svc-1");
-    expect(mockPost).toHaveBeenCalledWith(
-      "/services/svc-1/discover-endpoints",
-    );
+    expect(mockPost).toHaveBeenCalledWith("/services/svc-1/discover-endpoints");
+  });
+});
+
+it("sends only an explicit endpoint clear without echoing unchanged fields", async () => {
+  mockPut.mockResolvedValue(undefined);
+  const { result } = renderHook(() => useUpdateEndpoint(), {
+    wrapper: createWrapper(),
+  });
+  await result.current.mutateAsync({
+    serviceId: "svc-1",
+    endpointId: "ep-1",
+    before: {
+      name: "list_items",
+      description: "Saved",
+      method: "GET",
+      path: "/items",
+      parameters: { limit: 10 },
+      request_body_schema: null,
+      response_description: null,
+    } as ServiceEndpoint,
+    data: {
+      name: "list_items",
+      description: "",
+      method: "GET",
+      path: "/items",
+      parameters: '{"limit":10}',
+      request_body_schema: "",
+      response_description: "",
+    },
+  });
+  expect(mockPut).toHaveBeenCalledWith("/services/svc-1/endpoints/ep-1", {
+    description: null,
   });
 });

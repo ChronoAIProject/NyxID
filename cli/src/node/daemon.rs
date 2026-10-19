@@ -6,6 +6,9 @@
 //! - **macOS**: LaunchAgent plist (`~/Library/LaunchAgents/dev.nyxid.node.plist`)
 //! - **Linux**: systemd user unit (`~/.config/systemd/user/nyxid-node.service`)
 
+use crate::tls::environment::{
+    ca_environment_from_env, plist_ca_environment, systemd_ca_environment,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,6 +67,81 @@ fn assert_safe_label(name: &str) -> Result<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Retention must preserve binaries referenced by existing service definitions.
+/// A definition we cannot interpret stops pruning rather than breaking restart.
+pub(crate) fn pinned_binary_paths() -> std::result::Result<Vec<PathBuf>, anyhow::Error> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot locate node service definitions"))?;
+    let mut directories = if cfg!(target_os = "macos") {
+        vec![home.join("Library/LaunchAgents")]
+    } else {
+        vec![home.join(".config/systemd/user")]
+    };
+    if cfg!(target_os = "linux")
+        && let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+    {
+        directories.push(PathBuf::from(xdg).join("systemd/user"));
+    }
+    pinned_binary_paths_in(&directories)
+}
+
+fn pinned_binary_paths_in(
+    directories: &[PathBuf],
+) -> std::result::Result<Vec<PathBuf>, anyhow::Error> {
+    let mut pins = Vec::new();
+    for directory in directories {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("dev.nyxid.node") && name.ends_with(".plist") {
+                let value = plist::Value::from_file(entry.path())?;
+                let program = value.as_dictionary().and_then(|v| v.get("ProgramArguments"))
+                .and_then(plist::Value::as_array).and_then(|v| v.first()).and_then(plist::Value::as_string)
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine pinned node executable; reinstall the daemon before pruning"))?;
+                pins.push(PathBuf::from(program));
+            } else if name.starts_with("nyxid-node") && name.ends_with(".service") {
+                let contents = fs::read_to_string(entry.path())?;
+                pins.push(systemd_pinned_binary(&contents)?);
+            }
+        }
+    }
+    Ok(pins)
+}
+
+fn systemd_pinned_binary(contents: &str) -> std::result::Result<PathBuf, anyhow::Error> {
+    let starts = contents
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        starts.len() == 1,
+        "Cannot determine pinned node executable; reinstall the daemon before pruning"
+    );
+    let mut chars = starts[0].chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            anyhow::ensure!(
+                matches!(chars.next(), Some('\\' | '"' | '\'')),
+                "Node unit has unsupported systemd escapes; migrate the daemon before pruning retained versions"
+            );
+        }
+    }
+    let args = shlex::split(starts[0]).ok_or_else(|| anyhow::anyhow!("Invalid node ExecStart"))?;
+    let path = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Missing node ExecStart"))?;
+    // NyxID's generated units use literal quoted paths. Custom specifiers or
+    // variable expansion require operator migration before automatic pruning.
+    anyhow::ensure!(
+        !path.contains(['%', '$']) && Path::new(path).is_absolute(),
+        "Node service uses an expanded executable path; reinstall with a literal path before pruning retained versions"
+    );
+    Ok(PathBuf::from(path))
+}
+
 /// Install the node agent as a background service (LaunchAgent / systemd unit).
 ///
 /// If `--force` is passed, existing service files are overwritten.
@@ -82,14 +160,20 @@ pub fn install(
         )));
     }
 
-    let config_dir = config::resolve_config_dir_with_profile(config_path, profile)?;
+    crate::tls::shared_config()?;
+    let config_dir = resolve_daemon_config_dir(config_path, profile)?;
     ensure_config_exists(&config_dir)?;
     let config_dir = canonicalize_existing_dir(&config_dir)?;
 
     // Persist the config dir so other daemon subcommands can find it
     save_daemon_config_dir(&config_dir, profile)?;
 
-    let nyxid_bin = resolve_binary()?;
+    let machine_active = config_dir.join("machine-update/active");
+    let nyxid_bin = if machine_active.exists() {
+        machine_active
+    } else {
+        resolve_binary()?
+    };
 
     if cfg!(target_os = "macos") {
         let log_dir = config_dir.join(LOG_DIR_NAME);
@@ -285,6 +369,7 @@ fn install_launchd(
     let stderr_log = log_dir.join("node-agent.err.log");
     let cargo_bin = home_dir()?.join(".cargo/bin").display().to_string();
 
+    let ca_environment = plist_ca_environment(&ca_environment_from_env()?);
     let plist_content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -313,7 +398,7 @@ fn install_launchd(
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:{cargo_bin}</string>
-    </dict>
+{ca_environment}    </dict>
 </dict>
 </plist>"#,
         stdout = xml_escape(&stdout_log.display().to_string()),
@@ -548,6 +633,7 @@ fn install_systemd(
 
     let cargo_bin = home_dir()?.join(".cargo/bin").display().to_string();
 
+    let ca_environment = systemd_ca_environment(&ca_environment_from_env()?);
     let unit_content = format!(
         r#"[Unit]
 Description=NyxID Node Agent
@@ -560,7 +646,7 @@ ExecStart={exec_start}
 Restart=always
 RestartSec=5
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:{cargo_bin}
-
+{ca_environment}
 [Install]
 WantedBy=default.target
 "#
@@ -864,6 +950,12 @@ fn xml_escape(s: &str) -> String {
 
 /// Resolve the absolute path of the `nyxid` binary (current executable).
 fn resolve_binary() -> Result<PathBuf> {
+    if let Ok(active) = crate::commands::update::active_binary_path()
+        && let Ok(versions) = crate::commands::update::installed_versions()
+        && versions.iter().any(|version| version.active)
+    {
+        return Ok(active);
+    }
     std::env::current_exe().map_err(|e| {
         Error::Config(format!(
             "Could not determine nyxid binary path: {e}. \
@@ -928,6 +1020,32 @@ fn read_pid_if_running(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_pins_scan_historical_and_xdg_locations_and_reject_c_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("home/.config/systemd/user");
+        let xdg = tmp.path().join("custom/systemd/user");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(
+            legacy.join("nyxid-node.service"),
+            "[Service]\nExecStart=\"/tmp/old version/nyxid\" node start\n",
+        )
+        .unwrap();
+        fs::write(
+            xdg.join("nyxid-node-alt.service"),
+            "[Service]\nExecStart=/tmp/other/nyxid node start\n",
+        )
+        .unwrap();
+        let paths = pinned_binary_paths_in(&[legacy, xdg]).unwrap();
+        assert!(paths.contains(&PathBuf::from("/tmp/old version/nyxid")));
+        assert!(paths.contains(&PathBuf::from("/tmp/other/nyxid")));
+        assert!(
+            systemd_pinned_binary(r"ExecStart=/tmp/path\x20with\x20spaces/nyxid node start")
+                .is_err()
+        );
+    }
     use std::ffi::OsString;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -1185,5 +1303,79 @@ mod tests {
         let target = launchd_target_for(Some("prod")).expect("launchd target");
         assert!(target.starts_with("gui/"), "{target}");
         assert!(target.ends_with("/dev.nyxid.node.prod"), "{target}");
+    }
+}
+
+#[cfg(test)]
+mod ca_environment_tests {
+    use super::*;
+    use crate::tls::environment::absolute_ca_environment;
+
+    #[test]
+    fn ca_paths_are_absolute_and_proxy_variables_are_never_persisted() {
+        let values = absolute_ca_environment(|name| match name {
+            "NYXID_CA_CERT" => Some("relative ca.pem".into()),
+            "SSL_CERT_FILE" => Some("roots.pem".into()),
+            "SSL_CERT_DIR" => Some(std::env::join_paths(["one", "two"]).unwrap()),
+            _ => panic!("must never inspect proxy variables"),
+        })
+        .unwrap();
+        for (name, value) in &values {
+            if *name == "SSL_CERT_DIR" {
+                assert_eq!(std::env::split_paths(value).count(), 2);
+                assert!(std::env::split_paths(value).all(|p| p.is_absolute()));
+            } else {
+                assert!(Path::new(value).is_absolute());
+            }
+        }
+    }
+
+    #[test]
+    fn launchd_ca_environment_round_trips_xml_metacharacters() {
+        let path = "/tmp/a & <b> \"quoted\" ' % $ \\ café\nnext\rline\tca.pem";
+        let values = vec![
+            ("NYXID_CA_CERT", path.into()),
+            ("SSL_CERT_FILE", "/tmp/bundle.pem".into()),
+            ("SSL_CERT_DIR", "/tmp/certs".into()),
+        ];
+        let xml = format!(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{}</dict></plist>",
+            plist_ca_environment(&values)
+        );
+        let value = plist::Value::from_reader_xml(xml.as_bytes()).unwrap();
+        let dict = value.as_dictionary().unwrap();
+        for (name, path) in values {
+            assert_eq!(dict[name].as_string(), Some(path.as_str()));
+        }
+        assert_eq!(dict.len(), 3);
+    }
+
+    #[test]
+    fn systemd_ca_environment_escapes_quotes_backslashes_specifiers_and_newlines() {
+        let environment =
+            systemd_ca_environment(&[("NYXID_CA_CERT", "/tmp/ca \"x\"\\%n$HOME\n\r\t.pem".into())]);
+        assert_eq!(
+            environment,
+            "Environment=\"NYXID_CA_CERT=/tmp/ca \\\"x\\\"\\\\%%n$HOME\\n\\r\\t.pem\"\n"
+        );
+        assert_eq!(environment.lines().count(), 1);
+    }
+
+    #[test]
+    fn reinstall_renders_only_current_ca_paths_in_both_formats() {
+        let old =
+            absolute_ca_environment(|name| (name == "NYXID_CA_CERT").then(|| "/old/ca.pem".into()))
+                .unwrap();
+        let new = absolute_ca_environment(|name| {
+            (name == "SSL_CERT_FILE").then(|| "/new/roots.pem".into())
+        })
+        .unwrap();
+        let empty = absolute_ca_environment(|_| None).unwrap();
+        for render in [plist_ca_environment, systemd_ca_environment] {
+            assert!(render(&old).contains("/old/ca.pem"));
+            assert!(render(&new).contains("/new/roots.pem"));
+            assert!(!render(&new).contains("NYXID_CA_CERT"));
+            assert!(render(&empty).is_empty());
+        }
     }
 }

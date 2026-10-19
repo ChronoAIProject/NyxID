@@ -1,5 +1,6 @@
-import type { ChannelBotStatus, ChannelPlatform } from "@/types/channels";
+import type { ChannelBotStatus } from "@/types/channels";
 import { getStatusMeta } from "@/lib/status-contract";
+
 
 /**
  * Reads from `STATUS_REGISTRY.channel_bot` so the variant + label for each
@@ -30,23 +31,6 @@ export function statusBadgeVariant(
 
 export function statusLabel(status: ChannelBotStatus): string {
   return getStatusMeta("channel_bot", status)?.label ?? status;
-}
-
-export function platformLabel(platform: ChannelPlatform): string {
-  switch (platform) {
-    case "telegram":
-      return "Telegram";
-    case "discord":
-      return "Discord";
-    case "lark":
-      return "Lark";
-    case "feishu":
-      return "Feishu";
-    case "slack":
-      return "Slack";
-    default:
-      return platform;
-  }
 }
 
 export function conversationTypeLabel(t: string): string {

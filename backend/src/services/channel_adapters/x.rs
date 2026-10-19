@@ -1,0 +1,1644 @@
+//! X user-context Direct Messages with X Activity webhook delivery.
+
+#[path = "x_activity.rs"]
+mod activity;
+#[cfg(test)]
+#[path = "x_webhook_tests.rs"]
+mod webhook_tests;
+#[path = "x_webhooks.rs"]
+mod webhooks;
+
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "recipient cannot receive",
+    "recipient is not able to receive",
+    "cannot send messages to this user",
+    "cannot send a direct message to this user",
+    "not allowed to send a direct message",
+];
+
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
+
+use std::time::Duration;
+
+use axum::http::{HeaderMap, StatusCode};
+use serde_json::{Value, json};
+
+use crate::errors::{AppError, AppResult};
+use crate::models::channel_bot::{ChannelBot, XChannelEvent};
+use crate::services::channel_managed::{
+    ManagedOnboardingDescriptor, PlatformCredentialBacking, PlatformCredentialDescriptor,
+    PlatformCredentialField,
+};
+use crate::services::channel_platform::{
+    BotCredentials, BotIdentity, CredentialResolution, InboundAttachment, InboundMessage,
+    Ingestion, OutboundReply, PlatformAdapter, PlatformVerifySecrets, PollOutcome,
+    RegistrationDescriptor,
+};
+
+pub const REQUIRED_SCOPES: &[&str] = &[
+    "tweet.read",
+    "users.read",
+    "dm.read",
+    "dm.write",
+    "media.write",
+    "offline.access",
+];
+pub const PUBLIC_SCOPES: &[&str] = &[
+    "tweet.read",
+    "tweet.write",
+    "users.read",
+    "dm.read",
+    "dm.write",
+    "media.write",
+    "offline.access",
+];
+
+pub fn selected_events(bot: &ChannelBot) -> &[XChannelEvent] {
+    bot.x_events.as_deref().unwrap_or(&[XChannelEvent::Dm])
+}
+
+pub fn public_events_enabled(bot: &ChannelBot) -> bool {
+    selected_events(bot)
+        .iter()
+        .any(|event| matches!(event, XChannelEvent::Mentions | XChannelEvent::Replies))
+}
+
+pub fn webhook_events_enabled(bot: &ChannelBot) -> bool {
+    selected_events(bot)
+        .iter()
+        .any(|event| *event != XChannelEvent::Dm)
+}
+
+pub fn event_name(event: XChannelEvent) -> &'static str {
+    match event {
+        XChannelEvent::Dm => "dm.received",
+        XChannelEvent::Chat => "chat.received",
+        XChannelEvent::Posts => "post.create",
+        XChannelEvent::Mentions => "post.mention.create",
+        XChannelEvent::Replies => "post.reply.create",
+    }
+}
+
+pub fn validate_events(platform: &str, events: &[XChannelEvent]) -> AppResult<()> {
+    if platform != "x"
+        || events.is_empty()
+        || events.len() > 5
+        || events
+            .iter()
+            .enumerate()
+            .any(|(index, event)| events[..index].contains(event))
+    {
+        return Err(AppError::ValidationError(
+            "X events must be a non-empty selection of dm, chat, mentions, replies, and posts on an X channel"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn is_public_conversation(conversation: &str) -> bool {
+    conversation.strip_prefix("post:").is_some_and(numeric_id)
+}
+const TEXT_LIMIT: usize = 10_000;
+const MAX_PAGES: usize = 10;
+
+#[derive(Default)]
+pub struct XAdapter {
+    #[cfg(test)]
+    pub(crate) api_base: Option<String>,
+}
+
+impl XAdapter {
+    async fn send_post_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty()
+            || reply
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.get("attachments").is_some())
+        {
+            return Err(AppError::ChannelMediaUnsupported);
+        }
+        let text = reply
+            .text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| AppError::ValidationError("A public X reply requires text".into()))?;
+        let request = http
+            .post(format!("{}{X_POST_PATH}", base(self, credentials)))
+            .bearer_auth(credentials.token)
+            .json(&json!({"text": text, "reply": {"in_reply_to_tweet_id": target}}));
+        let response = match credentials.billing {
+            Some(billing) => billing.send_post(request).await?,
+            None => send(request).await?,
+        };
+        let result = response_json(response).await?;
+        let id = result["data"]["id"]
+            .as_str()
+            .filter(|id| numeric_id(id))
+            .ok_or_else(protocol_error)?;
+        Ok(Some(id.into()))
+    }
+}
+
+pub(crate) const X_API_BASE: &str = "https://api.x.com";
+/// `GET`, priced as the catalog `get_me` operation.
+pub(crate) const X_ACCOUNT_PATH: &str = "/2/users/me";
+/// `POST`, priced as the catalog `create_tweet` operation.
+pub(crate) const X_POST_PATH: &str = "/2/tweets";
+
+fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a str {
+    #[cfg(test)]
+    if let Some(base) = &adapter.api_base {
+        return base;
+    }
+    // Only the adapter's own test override may change the host; credential
+    // material never influences request URLs.
+    let _ = (adapter, credentials);
+    X_API_BASE
+}
+
+const PROTOCOL_ERROR_MESSAGE: &str = "X API request failed; retry or check the connected account";
+
+fn protocol_error() -> AppError {
+    AppError::ChannelPlatformError(PROTOCOL_ERROR_MESSAGE.to_string())
+}
+
+fn numeric_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn rate_backoff(headers: &HeaderMap, status: StatusCode) -> Option<Duration> {
+    if status != StatusCode::TOO_MANY_REQUESTS
+        && headers
+            .get("x-rate-limit-remaining")
+            .and_then(|h| h.to_str().ok())
+            != Some("0")
+    {
+        return None;
+    }
+    let reset = headers
+        .get("x-rate-limit-reset")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .map(|reset| {
+            reset
+                .saturating_sub(chrono::Utc::now().timestamp())
+                .saturating_add(1)
+                .max(1) as u64
+        });
+    let retry = headers
+        .get("retry-after")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    Some(Duration::from_secs(
+        reset
+            .into_iter()
+            .chain(retry)
+            .max()
+            .unwrap_or(900)
+            .clamp(1, 86400),
+    ))
+}
+
+/// Refusal causes keyed by `channel_bot_health::failure_code`; keep stable.
+pub(crate) const X_FORBIDDEN_SCOPES: &str =
+    "the X connection lacks a required OAuth scope; reconnect and grant every requested scope";
+pub(crate) const X_FORBIDDEN_ACCESS: &str = "the X app's access level or project enrollment does not allow this endpoint; an administrator must upgrade the X app";
+const X_FORBIDDEN_UNKNOWN: &str = "access denied; check granted scopes first; if scopes are present, verify the app's access level";
+
+/// Classify an X 403 envelope (v2 problem or v1.1 `errors[]`).
+fn forbidden_cause(body: &Value) -> &'static str {
+    let text = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or_default();
+    let codes: Vec<i64> = body
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|error| error.get("code").and_then(Value::as_i64))
+        .collect();
+    let messages: Vec<&str> = body
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .chain([text("detail"), text("title")])
+        .collect();
+    // 453: "You currently have access to a subset of X API endpoints".
+    if text("reason") == "client-not-enrolled"
+        || text("type").ends_with("/client-forbidden")
+        || body.get("required_enrollment").is_some()
+        || codes.contains(&453)
+    {
+        return X_FORBIDDEN_ACCESS;
+    }
+    if text("type").ends_with("/insufficient-scope")
+        || messages
+            .iter()
+            .any(|message| message.to_ascii_lowercase().contains("scope"))
+    {
+        return X_FORBIDDEN_SCOPES;
+    }
+    X_FORBIDDEN_UNKNOWN
+}
+
+fn response_error(status: StatusCode, backoff: Option<Duration>) -> AppError {
+    response_error_with(status, backoff, None)
+}
+
+fn response_error_with(
+    status: StatusCode,
+    backoff: Option<Duration>,
+    forbidden: Option<&'static str>,
+) -> AppError {
+    let cause = match status {
+        StatusCode::UNAUTHORIZED => {
+            "authorization expired or revoked; reconnect the account".to_string()
+        }
+        StatusCode::FORBIDDEN => forbidden.unwrap_or(X_FORBIDDEN_UNKNOWN).to_string(),
+        StatusCode::PAYMENT_REQUIRED => {
+            "the X app's API credits are exhausted; an administrator must restore them (NyxID credits are unaffected)".to_string()
+        }
+        StatusCode::TOO_MANY_REQUESTS => format!(
+            "rate limited; retry after {}s",
+            backoff.unwrap_or(Duration::from_secs(900)).as_secs()
+        ),
+        status if status.is_server_error() => {
+            "X is unavailable; NyxID retries after the provider recovers".to_string()
+        }
+        _ => "X API request failed; inspect the channel health and retry".to_string(),
+    };
+    AppError::ChannelPlatformError(format!("X: {cause} (HTTP {})", status.as_u16()))
+}
+
+async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+    crate::services::channel_platform::mark_provider_attempt();
+    request
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|_| protocol_error())
+}
+
+// Only the outbound boundary interprets recipient refusal prose. Poll/identity errors
+// keep their existing locally authored classification.
+async fn send_response_json(response: reqwest::Response) -> AppResult<Value> {
+    if response.status() == StatusCode::FORBIDDEN {
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        let descriptions = body
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .chain(body.get("detail").and_then(Value::as_str));
+        for description in descriptions {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "X",
+                description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            if matches!(error, AppError::ChannelConversationNotReachable(_)) {
+                return Err(error);
+            }
+        }
+        return Err(response_error_with(
+            StatusCode::FORBIDDEN,
+            None,
+            Some(forbidden_cause(&body)),
+        ));
+    }
+    response_json(response).await
+}
+
+/// Media uploads/status may return a refusal in a successful HTTP response.
+/// Partial errors alongside usable data do not invalidate the result.
+async fn media_response_json(response: reqwest::Response) -> AppResult<Value> {
+    let body = send_response_json(response).await.map_err(media_error)?;
+    if body.get("data").is_none_or(Value::is_null)
+        && (body.get("error").is_some() || body.get("errors").is_some())
+    {
+        return Err(
+            crate::services::channel_platform::classify_upstream_refusal(
+                "X",
+                "provider refusal",
+                &[],
+            ),
+        );
+    }
+    Ok(body)
+}
+
+// Keep transport/malformed-response uncertainty local to media calls. Polling,
+// identity checks and ordinary text sends retain their diagnostic errors.
+fn media_error(error: AppError) -> AppError {
+    if matches!(&error, AppError::ChannelPlatformError(message)
+        if message == PROTOCOL_ERROR_MESSAGE
+            || message == crate::services::channel_billing_service::BILLED_SEND_UNKNOWN_MESSAGE)
+    {
+        media::upload_failed()
+    } else {
+        error
+    }
+}
+
+async fn response_json(response: reqwest::Response) -> AppResult<Value> {
+    if response.status() == StatusCode::FORBIDDEN {
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        return Err(response_error_with(
+            StatusCode::FORBIDDEN,
+            None,
+            Some(forbidden_cause(&body)),
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(response_error(
+            response.status(),
+            rate_backoff(response.headers(), response.status()),
+        ));
+    }
+    response.json().await.map_err(|_| protocol_error())
+}
+
+fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<InboundMessage>> {
+    let sender = event["sender_id"].as_str().ok_or_else(protocol_error)?;
+    if sender == own_id {
+        return Ok(None);
+    }
+    let id = event["id"].as_str().ok_or_else(protocol_error)?;
+    let conversation = event["dm_conversation_id"]
+        .as_str()
+        .ok_or_else(protocol_error)?;
+    let attachments = event["attachments"]["media_keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|key| {
+            includes["media"]
+                .as_array()?
+                .iter()
+                .find(|m| m["media_key"] == *key)
+        })
+        .filter_map(|media| {
+            let kind = match media["type"].as_str() {
+                Some("photo") => "image",
+                Some("video" | "animated_gif") => "video",
+                _ => return None,
+            };
+            let variant = media["variants"].as_array().and_then(|variants| {
+                variants
+                    .iter()
+                    .filter(|v| v["content_type"] == "video/mp4")
+                    .max_by_key(|v| v["bit_rate"].as_u64().unwrap_or(0))
+            });
+            let url = variant
+                .and_then(|v| v["url"].as_str())
+                .or_else(|| media["url"].as_str())
+                .or_else(|| media["preview_image_url"].as_str())?;
+            Some(InboundAttachment {
+                content_type: kind.to_string(),
+                url: url.to_string(),
+                platform_message_id: Some(id.to_string()),
+                file_key: media["media_key"].as_str().map(String::from),
+                image_key: None,
+                filename: None,
+                mime_type: variant
+                    .and_then(|v| v["content_type"].as_str())
+                    .map(String::from),
+                size_bytes: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    // X's one-to-one IDs are the two user IDs joined with a hyphen; groups have a single ID.
+    let private = conversation
+        .split_once('-')
+        .is_some_and(|(a, b)| numeric_id(a) && numeric_id(b));
+    Ok(Some(InboundMessage {
+        platform_message_id: id.to_string(),
+        conversation_id: conversation.to_string(),
+        conversation_type: if private { "private" } else { "group" }.to_string(),
+        sender_platform_id: sender.to_string(),
+        sender_display_name: includes["users"]
+            .as_array()
+            .and_then(|users| users.iter().find(|u| u["id"].as_str() == Some(sender)))
+            .and_then(|u| u["name"].as_str().or_else(|| u["username"].as_str()))
+            .map(String::from),
+        content_type: attachments
+            .first()
+            .map(|a| a.content_type.clone())
+            .unwrap_or_else(|| "text".to_string()),
+        text: event["text"].as_str().map(String::from),
+        attachments,
+        // referenced_tweets are shared posts, never DM reply targets. Preserve optional future event references.
+        reply_to_platform_message_id: event["referenced_events"]
+            .as_array()
+            .and_then(|events| events.iter().find(|e| e["type"] == "replied_to"))
+            .and_then(|e| e["id"].as_str())
+            .map(String::from),
+        thread_id: None,
+        raw_data: event.clone(),
+    }))
+}
+
+fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
+    let attachments = reply.metadata.as_ref().and_then(|m| m.get("attachments"));
+    if let Some(attachments) = attachments
+        && !attachments.as_array().is_some_and(|a| {
+            a.len() == 1
+                && a.iter().all(|a| {
+                    a.as_object().is_some_and(|o| o.len() == 1)
+                        && a["media_id"].as_str().is_some_and(numeric_id)
+                })
+        })
+    {
+        return Err(AppError::ValidationError(
+            "X replies accept one attachment with a numeric media_id".to_string(),
+        ));
+    }
+    let chars = reply
+        .text
+        .as_deref()
+        .unwrap_or_default()
+        .chars()
+        .collect::<Vec<_>>();
+    let mut bodies = chars
+        .chunks(TEXT_LIMIT)
+        .map(|chunk| json!({"text": chunk.iter().collect::<String>()}))
+        .collect::<Vec<_>>();
+    if let Some(attachments) = attachments {
+        if bodies.is_empty() {
+            bodies.push(json!({}));
+        }
+        bodies[0]["attachments"] = attachments.clone();
+    }
+    if bodies.is_empty() {
+        return Err(AppError::ValidationError(
+            "X reply requires text or a media attachment".to_string(),
+        ));
+    }
+    Ok(bodies)
+}
+
+#[async_trait::async_trait]
+impl PlatformAdapter for XAdapter {
+    fn activity_descriptors(
+        &self,
+    ) -> &'static [crate::services::channel_activity_service::ActivityDescriptor] {
+        activity::DESCRIPTORS
+    }
+    fn activity_metadata(
+        &self,
+        inbound: &InboundMessage,
+    ) -> Option<crate::models::channel_activity::ActivityMetadata> {
+        Some(activity::metadata(inbound))
+    }
+
+    fn atomic_inbound_admission(&self) -> bool {
+        true
+    }
+
+    fn display_name(&self) -> &str {
+        "X (Twitter)"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            inbound: &[MediaKind::Image, MediaKind::Video],
+            outbound: &[MediaKind::Image, MediaKind::Video],
+        }
+    }
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: false,
+            thread: false,
+            edit: false,
+        }
+    }
+
+    fn platform_id(&self) -> &str {
+        "x"
+    }
+
+    fn ingestion(&self) -> Ingestion {
+        Ingestion::Poll {
+            min_interval_secs: 60,
+        }
+    }
+
+    fn credential_resolution(&self) -> CredentialResolution {
+        CredentialResolution::OAuthConnection {
+            provider_slug: "twitter",
+            required_scopes: REQUIRED_SCOPES,
+        }
+    }
+
+    fn registration(&self) -> RegistrationDescriptor {
+        RegistrationDescriptor {
+            documentation_url: Some("https://docs.x.com/x-api/activity/introduction"),
+            fields: &[],
+            extra_fields: &[],
+            token_fields: &[],
+            managed_only: true,
+            managed_only_message: "X accounts are connected through Connect X account; developer credentials are not accepted",
+            webhook_ingestion: true,
+            preserve_subscription_on_verify: true,
+            ..Default::default()
+        }
+    }
+
+    fn platform_credentials(&self) -> Option<PlatformCredentialDescriptor> {
+        Some(PlatformCredentialDescriptor {
+            provider: "x",
+            label: "X (Twitter)",
+            backing: PlatformCredentialBacking::ProviderOAuth {
+                provider_slug: "twitter",
+            },
+            fields: &[
+                PlatformCredentialField {
+                    name: "app_bearer_token",
+                    label: "App bearer token",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "X Developer Console > Keys & Tokens > Bearer Token. Use the same app as the OAuth Client ID and Client Secret to enable automatic X Activity webhooks.",
+                },
+                PlatformCredentialField {
+                    name: "consumer_secret",
+                    label: "API key secret",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "Optional legacy OAuth 1.0 consumer secret from the same X app. Verifies the legacy webhook signature header. OAuth 2.0 webhook signatures use the Client Secret below.",
+                },
+                PlatformCredentialField {
+                    name: "client_id",
+                    label: "Client ID",
+                    secret: true,
+                    required: true,
+                    numeric: false,
+                    help: "X Developer Console > App > OAuth 2.0 Client ID.",
+                },
+                PlatformCredentialField {
+                    name: "client_secret",
+                    label: "Client Secret",
+                    secret: true,
+                    required: true,
+                    numeric: false,
+                    help: "X Developer Console > App > OAuth 2.0 Client Secret. Used for OAuth, webhook verification challenges, and X-Twitter-Webhooks-Signature-OAuth2 signatures. Changes apply to every X channel using this app; keep the value in sync with X.",
+                },
+            ],
+            webhook_secret_field: None,
+            setup_checklist: &[
+                "Enable OAuth 2.0 user authentication with a confidential Web App and PKCE in the X Developer Console. Use the OAuth callback URL below.",
+                "Allow tweet.read tweet.write users.read dm.read dm.write media.write offline.access. Existing accounts must consent again to grant missing permissions.",
+                "Fund NyxID's app with paid API credits. All customers' DM traffic consumes this app's credits and limits. Current pricing: https://docs.x.com/x-api/getting-started/pricing (pay-per-usage replaces Basic/Pro subscriptions).",
+                "Set the app bearer token and OAuth Client ID and Client Secret from the same app. Keep the API key secret for legacy webhook signatures. NyxID registers the shared HTTPS webhook and selected per-account subscriptions automatically. Select Verify on existing connections to reconcile setup.",
+                "Select Events to receive on each X channel: ordinary DMs, encrypted chat notifications, mentions, replies, or your own posts. Encrypted chat notifications record activity without exposing message text or granting replies.",
+                "Agents must declare supported activity types before owners enable typed notifications. Existing DM callbacks retain their contract. Publish an opt-out policy for automated replies.",
+            ],
+        })
+    }
+
+    fn managed_onboarding(&self) -> Option<ManagedOnboardingDescriptor> {
+        Some(ManagedOnboardingDescriptor {
+            flow: "oauth_connection",
+            provider: "x",
+            bootstrap_fields: &[],
+            completion_fields: &["connection_id"],
+            graph_version: "",
+            signup_version: "",
+            signup_extras: |_| json!({}),
+            feature_types: &[],
+        })
+    }
+
+    fn dedup_inbound_by_platform_message_id(&self) -> bool {
+        true
+    }
+
+    async fn verify_bot_token(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+    ) -> AppResult<BotIdentity> {
+        let request = http
+            .get(format!("{}{X_ACCOUNT_PATH}", base(self, credentials)))
+            .query(&[("user.fields", "username,name")])
+            .bearer_auth(credentials.token);
+        let response = match credentials.billing {
+            Some(billing) => billing.verify_account(request).await?,
+            #[cfg(test)]
+            None if self.api_base.is_some() => send(request).await?,
+            None => {
+                return Err(AppError::BillingNotConfigured(
+                    "X account verification is missing its billing context".into(),
+                ));
+            }
+        };
+        let body = response_json(response).await?;
+        let id = body["data"]["id"]
+            .as_str()
+            .filter(|id| numeric_id(id))
+            .ok_or_else(protocol_error)?;
+        let username = body["data"]["username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(protocol_error)?;
+        Ok(BotIdentity {
+            platform_bot_id: id.to_string(),
+            display_name: None,
+            platform_bot_username: username.to_string(),
+        })
+    }
+
+    async fn poll_inbound(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        cursor: Option<&str>,
+    ) -> AppResult<PollOutcome> {
+        let own_id = credentials.platform_bot_id.ok_or_else(protocol_error)?;
+        if !numeric_id(own_id) || cursor.is_some_and(|id| !numeric_id(id)) {
+            return Err(protocol_error());
+        }
+        let mut pagination: Option<String> = None;
+        let mut newest = cursor.map(String::from);
+        let mut messages = Vec::new();
+        for page in 0..MAX_PAGES {
+            let mut request = http.get(format!("{}/2/dm_events", base(self, credentials)))
+                .bearer_auth(credentials.token).query(&[
+                    ("event_types", "MessageCreate"),
+                    ("dm_event.fields", "id,text,sender_id,dm_conversation_id,created_at,attachments,referenced_tweets"),
+                    ("expansions", "sender_id,attachments.media_keys"),
+                    ("user.fields", "username,name"),
+                    ("media.fields", "url,preview_image_url,type,variants"), ("max_results", "100"),
+                ]);
+            if let Some(token) = &pagination {
+                request = request.query(&[("pagination_token", token)]);
+            }
+            let response = send(request).await?;
+            let backoff = rate_backoff(response.headers(), response.status());
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                return Ok(PollOutcome {
+                    messages: vec![],
+                    cursor: cursor.map(String::from),
+                    backoff,
+                    notice: None,
+                });
+            }
+            let body = response_json(response).await?;
+            let empty = Vec::new();
+            let events = match body.get("data") {
+                None if body["meta"]["result_count"] == 0 => &empty,
+                Some(Value::Array(events)) => events,
+                _ => return Err(protocol_error()),
+            };
+            if let Some(errors) = body.get("errors") {
+                let errors = errors.as_array().ok_or_else(protocol_error)?;
+                // X can return DMs with failed optional expansions. Only those
+                // errors are safe to ignore when committing the event cursor.
+                let expansion_errors_only = !events.is_empty()
+                    && errors.iter().all(|error| {
+                        matches!(error["resource_type"].as_str(), Some("user" | "media"))
+                    });
+                if !errors.is_empty() && !expansion_errors_only {
+                    return Err(protocol_error());
+                }
+            }
+            if page == 0 {
+                if let Some(event) = events.first() {
+                    let id = event["id"]
+                        .as_str()
+                        .filter(|id| numeric_id(id))
+                        .ok_or_else(protocol_error)?;
+                    if cursor.is_none_or(|cursor| (id.len(), id) > (cursor.len(), cursor)) {
+                        newest = Some(id.to_string());
+                    }
+                }
+                if cursor.is_none() {
+                    return Ok(PollOutcome {
+                        messages: vec![],
+                        cursor: Some(newest.unwrap_or_else(|| "0".to_string())),
+                        backoff,
+                        notice: None,
+                    });
+                }
+            }
+            let mut reached_cursor = false;
+            for event in events {
+                let id = event["id"]
+                    .as_str()
+                    .filter(|id| numeric_id(id))
+                    .ok_or_else(protocol_error)?;
+                if cursor.is_some_and(|cursor| (id.len(), id) <= (cursor.len(), cursor)) {
+                    reached_cursor = true;
+                    break;
+                }
+                if let Some(message) = normalize(event, &body["includes"], own_id)? {
+                    messages.push(message);
+                }
+            }
+            let next = body["meta"]["next_token"]
+                .as_str()
+                .filter(|s| !s.is_empty());
+            let truncated = page + 1 == MAX_PAGES && !reached_cursor && next.is_some();
+            if reached_cursor || next.is_none() || truncated {
+                messages.reverse();
+                return Ok(PollOutcome {
+                    messages,
+                    cursor: newest,
+                    backoff,
+                    notice: truncated.then(|| "Older X DMs were skipped because the backlog exceeded the 10-page polling window.".to_string()),
+                });
+            }
+            if backoff.is_some() {
+                // Never advance past an unfinished page walk or acknowledge a partial batch.
+                return Ok(PollOutcome {
+                    messages: vec![],
+                    cursor: cursor.map(String::from),
+                    backoff,
+                    notice: None,
+                });
+            }
+            let next = next
+                .filter(|s| s.len() <= 4096 && Some(*s) != pagination.as_deref())
+                .ok_or_else(protocol_error)?;
+            pagination = Some(next.to_string());
+        }
+        // The final page always returns above; keep a non-panicking guard for a server path.
+        Err(protocol_error())
+    }
+
+    fn supports_reply_metadata(&self, metadata: &Value) -> bool {
+        metadata.get("attachments").is_some()
+    }
+
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        media::download(
+            &attachment.url,
+            &["pbs.twimg.com", "video.twimg.com", "ton.twitter.com"],
+            Some(base(self, credentials)),
+            Some(credentials.token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
+    async fn send_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        if is_public_conversation(conversation_id) {
+            return Err(AppError::ValidationError(
+                "Public X replies require an incoming mention or reply".into(),
+            ));
+        }
+        if !numeric_id(conversation_id)
+            && !conversation_id
+                .split_once('-')
+                .is_some_and(|(a, b)| numeric_id(a) && numeric_id(b))
+        {
+            return Err(AppError::ValidationError(
+                "Invalid X DM conversation ID".to_string(),
+            ));
+        }
+        if !reply.attachments.is_empty() {
+            if let Some(billing) = credentials.billing {
+                billing.admit().await?;
+            }
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let mut last = None;
+            for attachment in &reply.attachments {
+                let category = match (attachment.kind, attachment.mime_type.as_deref()) {
+                    (MediaKind::Image | MediaKind::Video, Some("image/gif")) => "dm_gif",
+                    (MediaKind::Image, _) => "dm_image",
+                    (MediaKind::Video, _) => "dm_video",
+                    _ => return Err(AppError::ChannelMediaUnsupported),
+                };
+                let upload = media_response_json(
+                    send(
+                        http.post(format!("{}/2/media/upload", base(self, credentials)))
+                            .bearer_auth(credentials.token)
+                            .multipart(
+                                reqwest::multipart::Form::new()
+                                    .text("media_category", category)
+                                    .part("media", media::multipart_part(attachment)?),
+                            ),
+                    )
+                    .await
+                    .map_err(media_error)?,
+                )
+                .await?;
+                let media_id = upload["data"]["id"]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
+                if !numeric_id(media_id) {
+                    return Err(media::upload_failed());
+                }
+                // Video/GIF uploads may finish asynchronously. Never dispatch a
+                // DM before processing succeeds, and bound the entire wait.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut processing = upload["data"]["processing_info"].clone();
+                    loop {
+                        match processing["state"].as_str() {
+                            None | Some("succeeded") => return Ok(()),
+                            Some("pending" | "in_progress") => {
+                                let delay = processing["check_after_secs"]
+                                    .as_u64()
+                                    .unwrap_or(1)
+                                    .clamp(1, 10);
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                                let status = media_response_json(
+                                    send(
+                                        http.get(format!(
+                                            "{}/2/media/upload",
+                                            base(self, credentials)
+                                        ))
+                                        .bearer_auth(credentials.token)
+                                        .query(&[("media_id", media_id), ("command", "STATUS")]),
+                                    )
+                                    .await
+                                    .map_err(media_error)?,
+                                )
+                                .await?;
+                                processing = status["data"]["processing_info"].clone();
+                                if processing.is_null() {
+                                    return Err(media::upload_failed());
+                                }
+                            }
+                            _ => return Err(media::upload_failed()),
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| media::upload_failed())??;
+                let message = OutboundReply {
+                    attachments: vec![],
+                    text: attachment.caption.clone(),
+                    reply_to_platform_message_id: None,
+                    metadata: Some(json!({"attachments": [{"media_id": media_id}]})),
+                };
+                last = self
+                    .send_reply(http, credentials, conversation_id, &message)
+                    .await
+                    .map_err(media_error)?;
+            }
+            return Ok(last);
+        }
+        let mut last = None;
+        for body in reply_bodies(reply)? {
+            let request = http
+                .post(format!(
+                    "{}/2/dm_conversations/{conversation_id}/messages",
+                    base(self, credentials)
+                ))
+                .bearer_auth(credentials.token)
+                .json(&body);
+            let response = match credentials.billing {
+                Some(billing) => billing.send(request).await?,
+                #[cfg(test)]
+                None if self.api_base.is_some() => send(request).await?,
+                None => {
+                    return Err(AppError::BillingNotConfigured(
+                        "X channel send is missing its billing context".into(),
+                    ));
+                }
+            };
+            let response = send_response_json(response).await?;
+            last = Some(
+                response["data"]["dm_event_id"]
+                    .as_str()
+                    .ok_or_else(protocol_error)?
+                    .to_string(),
+            );
+        }
+        Ok(last)
+    }
+
+    fn platform_webhook(&self) -> bool {
+        true
+    }
+
+    fn platform_subscription_content_type(&self) -> &'static str {
+        "application/json"
+    }
+
+    async fn send_bound_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        if crate::services::channel_activity_service::notification_only(original)
+            || conversation_id.starts_with("chat:")
+        {
+            return Err(AppError::Forbidden(
+                "This activity does not support replies".into(),
+            ));
+        }
+        if !is_public_conversation(conversation_id) {
+            if !selected_events(bot).contains(&XChannelEvent::Dm) {
+                return Err(AppError::ValidationError(
+                    "Direct messages are disabled for this X channel".into(),
+                ));
+            }
+            return self
+                .send_reply(http, credentials, conversation_id, reply)
+                .await;
+        }
+        if !public_events_enabled(bot)
+            || original.platform != "x"
+            || original.direction != "inbound"
+            || original.channel_bot_id.as_deref() != Some(bot.id.as_str())
+            || original.platform_conversation_id.as_deref() != Some(conversation_id)
+        {
+            return Err(AppError::Forbidden(
+                "Public X reply is not authorized for this channel message".into(),
+            ));
+        }
+        let target = original
+            .platform_message_id
+            .as_deref()
+            .filter(|id| numeric_id(id))
+            .ok_or_else(|| AppError::ValidationError("Missing incoming X post".into()))?;
+        self.send_post_reply(http, credentials, target, reply).await
+    }
+
+    fn webhook_policy(&self, _body: &[u8]) -> crate::services::channel_platform::WebhookPolicy {
+        crate::services::channel_platform::WebhookPolicy::Immediate(None)
+    }
+
+    fn validate_platform_subscription(
+        &self,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        webhooks::crc_token(query).map(|_| ())
+    }
+
+    fn platform_subscription_handshake(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        webhooks::handshake(credentials, query)
+    }
+
+    fn connection_webhook_configured(&self, credentials: &PlatformVerifySecrets) -> bool {
+        credentials
+            .get("app_bearer_token")
+            .is_some_and(|s| !s.is_empty())
+            && ["client_secret", "consumer_secret"]
+                .iter()
+                .any(|field| credentials.get(field).is_some_and(|s| !s.is_empty()))
+    }
+
+    async fn setup_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot: &ChannelBot,
+        webhook_url: &str,
+        progress: &super::super::channel_platform::WebhookSetupProgress,
+    ) -> AppResult<()> {
+        webhooks::setup(
+            self,
+            http,
+            credentials,
+            &bot.id,
+            selected_events(bot),
+            webhook_url,
+            progress,
+        )
+        .await
+    }
+
+    async fn remove_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        bot_id: &str,
+    ) -> AppResult<()> {
+        webhooks::remove(self, http, credentials, bot_id).await
+    }
+
+    async fn connection_webhook_status(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        bot: &ChannelBot,
+        webhook_url: &str,
+    ) -> AppResult<Option<super::super::channel_platform::LiveWebhookStatus>> {
+        webhooks::status(self, http, credentials, bot, webhook_url)
+            .await
+            .map(Some)
+    }
+
+    async fn platform_webhook_targets(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> AppResult<Vec<String>> {
+        webhooks::verify(credentials, headers, body)?;
+        Ok(webhooks::target(body)?.into_iter().collect())
+    }
+
+    async fn verify_webhook(
+        &self,
+        bot: &ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> AppResult<()> {
+        webhooks::verify(
+            secrets.ok_or_else(webhooks::verification_error)?,
+            headers,
+            body,
+        )?;
+        if webhooks::target(body)?.as_deref() != Some(bot.platform_bot_id.as_str()) {
+            return Err(webhooks::rejected(Some(&bot.id), "account_mismatch"));
+        }
+        let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+        if envelope["data"]["tag"].as_str() != Some(format!("nyxid:{}", bot.id).as_str()) {
+            return Err(webhooks::rejected(
+                Some(&bot.id),
+                "subscription_tag_mismatch",
+            ));
+        }
+        if !selected_events(bot)
+            .iter()
+            .any(|event| envelope["data"]["event_type"] == event_name(*event))
+        {
+            return Err(webhooks::rejected(Some(&bot.id), "event_not_selected"));
+        }
+        Ok(())
+    }
+
+    async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+        webhooks::parse(body)
+    }
+
+    async fn register_webhook(
+        &self,
+        _http: &reqwest::Client,
+        _token: &str,
+        _url: &str,
+        _secret: &str,
+    ) -> AppResult<()> {
+        Err(protocol_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn response_errors_map_to_stable_health_codes() {
+        use crate::services::channel_bot_health::{codes, failure_code};
+        let code = |status, backoff, body: Option<Value>| {
+            failure_code(&response_error_with(
+                status,
+                backoff,
+                body.as_ref().map(forbidden_cause),
+            ))
+        };
+        assert_eq!(
+            code(StatusCode::UNAUTHORIZED, None, None),
+            codes::AUTH_REVOKED
+        );
+        assert_eq!(
+            code(StatusCode::PAYMENT_REQUIRED, None, None),
+            codes::PROVIDER_CREDITS
+        );
+        assert_eq!(
+            code(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(Duration::from_secs(7)),
+                None
+            ),
+            codes::RATE_LIMITED
+        );
+        assert!(
+            response_error(StatusCode::TOO_MANY_REQUESTS, Some(Duration::from_secs(7)))
+                .to_string()
+                .contains("retry after 7s")
+        );
+        assert_eq!(
+            code(StatusCode::BAD_GATEWAY, None, None),
+            codes::PROVIDER_UNAVAILABLE
+        );
+        assert_eq!(
+            code(StatusCode::NOT_FOUND, None, None),
+            codes::PROVIDER_ERROR
+        );
+        // Real X 403 envelopes: project enrollment, v1.1 tier code 453, scopes.
+        for envelope in [
+            json!({"title": "Client Forbidden", "reason": "client-not-enrolled",
+                "type": "https://api.twitter.com/2/problems/client-forbidden",
+                "required_enrollment": "Appropriate Level of API Access"}),
+            json!({"errors": [{"code": 453, "message": "You currently have access to a subset of X API V2 endpoints"}]}),
+        ] {
+            assert_eq!(
+                code(StatusCode::FORBIDDEN, None, Some(envelope.clone())),
+                codes::APP_ACCESS_DENIED,
+                "{envelope}"
+            );
+        }
+        assert_eq!(
+            code(
+                StatusCode::FORBIDDEN,
+                None,
+                Some(
+                    json!({"title": "Forbidden", "detail": "Missing required OAuth2 scope dm.write"})
+                )
+            ),
+            codes::SCOPES_MISSING
+        );
+        assert_eq!(
+            code(
+                StatusCode::FORBIDDEN,
+                None,
+                Some(json!({"title": "Forbidden"}))
+            ),
+            codes::ACCESS_DENIED
+        );
+    }
+
+    use super::*;
+    use crate::services::channel_platform::MaterializedAttachment;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path, query_param},
+    };
+
+    fn credentials() -> BotCredentials<'static> {
+        BotCredentials {
+            billing: None,
+            token: "private-test-token",
+            platform_bot_id: Some("10"),
+            platform_secrets: None,
+        }
+    }
+
+    fn event(id: &str, sender: &str) -> Value {
+        json!({ "id": id, "event_type": "MessageCreate", "sender_id": sender, "dm_conversation_id": "10-20", "text": "private DM" })
+    }
+
+    fn adapter(server: &MockServer) -> XAdapter {
+        XAdapter {
+            api_base: Some(server.uri()),
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_never_replays_history_and_empty_accounts_get_baseline() {
+        for (body, expected) in [
+            (
+                json!({"data": [event("100", "20")], "meta": {"next_token": "older"}}),
+                "100",
+            ),
+            (json!({"meta": {"result_count": 0}}), "0"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), None)
+                .await
+                .unwrap();
+            assert_eq!(outcome.cursor.as_deref(), Some(expected));
+            assert!(outcome.messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pagination_stops_at_cursor_skips_self_and_orders_oldest_first() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/2/dm_events"))
+            .and(header("authorization", "Bearer private-test-token"))
+            .and(query_param("event_types", "MessageCreate")).and(query_param("max_results", "100"))
+            .and(|r: &wiremock::Request| !r.url.query_pairs().any(|(k, _)| k == "pagination_token" || k == "since_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [event("105", "20"), event("104", "10")], "meta": {"next_token": "older"}})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/2/dm_events")).and(query_param("pagination_token", "older"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [event("103", "20"), event("100", "20"), event("99", "20")], "meta": {"next_token": "must-not-fetch"}})))
+            .expect(1).mount(&server).await;
+        let outcome = adapter(&server)
+            .poll_inbound(&reqwest::Client::new(), &credentials(), Some("100"))
+            .await
+            .unwrap();
+        assert_eq!(outcome.cursor.as_deref(), Some("105"));
+        assert_eq!(
+            outcome
+                .messages
+                .iter()
+                .map(|m| m.platform_message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["103", "105"]
+        );
+        assert!(!format!("{outcome:?}").contains("private DM"));
+    }
+
+    #[tokio::test]
+    async fn polling_continues_after_optional_expansion_errors() {
+        let server = MockServer::start().await;
+        let http = reqwest::Client::new();
+        let adapter = adapter(&server);
+        let mut cursor = Some("100".to_string());
+        for id in 101..=106 {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [event(&id.to_string(), "20"), event("100", "20")],
+                    "errors": [
+                        {"resource_type": "user", "resource_id": "30", "type": "https://api.x.com/2/problems/resource-not-found", "detail": "PRIVATE upstream detail"},
+                        {"resource_type": "media", "resource_id": "3_missing", "type": "https://api.x.com/2/problems/resource-not-found"}
+                    ]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter
+                .poll_inbound(&http, &credentials(), cursor.as_deref())
+                .await
+                .expect("optional expansion errors must not stop DM polling");
+            assert_eq!(outcome.cursor.as_deref(), Some(id.to_string().as_str()));
+            assert_eq!(outcome.messages.len(), 1);
+            assert_eq!(outcome.messages[0].platform_message_id, id.to_string());
+            assert!(outcome.messages[0].sender_display_name.is_none());
+            cursor = outcome.cursor;
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_error_arrays_do_not_fail_polling_or_initialization() {
+        for cursor in [None, Some("100")] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "meta": {"result_count": 0}, "errors": []
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), cursor)
+                .await
+                .unwrap();
+            assert_eq!(outcome.cursor.as_deref(), Some(cursor.unwrap_or("0")));
+            assert!(outcome.messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_dm_results_still_fail_without_advancing_the_cursor() {
+        for body in [
+            json!({"data": [event("101", "20")], "errors": [{"resource_type": "dm_event", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": [{"title": "Unknown failure", "detail": "PRIVATE upstream detail"}]}),
+            json!({"meta": {"result_count": 0}, "errors": [{"resource_type": "user", "detail": "PRIVATE upstream detail"}]}),
+            json!({"errors": [{"resource_type": "media", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": {"detail": "PRIVATE upstream detail"}}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let error = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), Some("100"))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ChannelPlatformError(_)));
+            assert!(!error.to_string().contains("PRIVATE"));
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limits_preserve_cursor_until_whole_page_walk_completes() {
+        for (status, partial, expected) in
+            [(429, false, "100"), (200, true, "100"), (200, false, "105")]
+        {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-rate-limit-remaining", "0")
+                        .insert_header("retry-after", "120")
+                        .set_body_json(if partial {
+                            json!({"data": [event("105", "20")], "meta": {"next_token": "older"}})
+                        } else {
+                            json!({"data": [event("105", "20")]})
+                        }),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), Some("100"))
+                .await
+                .unwrap();
+            assert_eq!(outcome.cursor.as_deref(), Some(expected));
+            assert_eq!(outcome.backoff, Some(Duration::from_secs(120)));
+            assert_eq!(
+                outcome.messages.len(),
+                usize::from(status == 200 && !partial)
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_media_and_group_references_preserve_protocol_meaning() {
+        let mut event = event("105", "20");
+        event["dm_conversation_id"] = json!("999");
+        event["referenced_tweets"] = json!([{"id": "30"}]);
+        event["attachments"] = json!({"media_keys": ["3_media"]});
+        let includes = json!({"users": [{"id": "20", "name": "Sender", "username": "sender"}],
+            "media": [{"media_key": "3_media", "type": "video", "preview_image_url": "https://media.example/preview",
+                "variants": [{"bit_rate": 100, "content_type": "video/mp4", "url": "https://media.example/video"}]}]});
+        let message = normalize(&event, &includes, "10").unwrap().unwrap();
+        assert_eq!(message.conversation_type, "group");
+        assert_eq!(message.sender_display_name.as_deref(), Some("Sender"));
+        assert_eq!(message.attachments[0].url, "https://media.example/video");
+        assert_eq!(
+            message.attachments[0].mime_type.as_deref(),
+            Some("video/mp4")
+        );
+        assert!(message.reply_to_platform_message_id.is_none());
+        event["referenced_events"] = json!([{"type": "replied_to", "id": "104"}]);
+        assert_eq!(
+            normalize(&event, &includes, "10")
+                .unwrap()
+                .unwrap()
+                .reply_to_platform_message_id
+                .as_deref(),
+            Some("104")
+        );
+    }
+
+    #[tokio::test]
+    async fn replies_chunk_unicode_and_attach_media_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/2/dm_conversations/10-20/messages"))
+            .and(header("authorization", "Bearer private-test-token"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(json!({"data": {"dm_event_id": "110"}})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let text = "\u{1f642}".repeat(TEXT_LIMIT + 1);
+        let reply = OutboundReply {
+            attachments: vec![],
+            text: Some(text.clone()),
+            metadata: Some(json!({"attachments": [{"media_id": "123"}]})),
+            reply_to_platform_message_id: None,
+        };
+        let id = adapter(&server)
+            .send_reply(&reqwest::Client::new(), &credentials(), "10-20", &reply)
+            .await
+            .unwrap();
+        assert_eq!(id.as_deref(), Some("110"));
+        let requests = server.received_requests().await.unwrap();
+        let bodies = requests
+            .iter()
+            .map(|r| r.body_json::<Value>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies[0]["text"].as_str().unwrap().chars().count(),
+            TEXT_LIMIT
+        );
+        assert_eq!(bodies[1]["text"].as_str().unwrap().chars().count(), 1);
+        assert_eq!(
+            format!(
+                "{}{}",
+                bodies[0]["text"].as_str().unwrap(),
+                bodies[1]["text"].as_str().unwrap()
+            ),
+            text
+        );
+        assert!(bodies[0].get("attachments").is_some());
+        assert!(bodies[1].get("attachments").is_none());
+    }
+
+    #[test]
+    fn x_media_errors_map_only_unknown_outcomes_to_uncertain_delivery() {
+        use crate::services::channel_billing_service::BILLED_SEND_UNKNOWN_MESSAGE;
+        for message in [PROTOCOL_ERROR_MESSAGE, BILLED_SEND_UNKNOWN_MESSAGE] {
+            let error = AppError::ChannelPlatformError(message.into());
+            assert!(
+                media::is_delivery_uncertain(&media_error(error)),
+                "{message}"
+            );
+        }
+        // Shared text-send diagnostics keep their wording.
+        assert!(
+            protocol_error()
+                .to_string()
+                .contains(PROTOCOL_ERROR_MESSAGE)
+        );
+        let refusal = AppError::ChannelConversationNotReachable("X: blocked".into());
+        assert!(!media::is_delivery_uncertain(&media_error(refusal)));
+    }
+
+    #[tokio::test]
+    async fn x_text_and_media_success_keep_partial_errors() {
+        let server = MockServer::start().await;
+        Mock::given(path("/2/dm_conversations/10-20/messages"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"dm_event_id":"110"},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/2/media/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id":"123", "processing_info":{"state":"pending", "check_after_secs":1}},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/2/media/upload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"processing_info":{"state":"succeeded"}},
+                "errors": [{"message":"An optional expansion was unavailable"}],
+            })))
+            .expect(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let mut reply = OutboundReply {
+            attachments: vec![],
+            text: Some("reply".into()),
+            metadata: None,
+            reply_to_platform_message_id: None,
+        };
+        let http = reqwest::Client::new();
+        assert_eq!(
+            adapter(&server)
+                .send_reply(&http, &credentials(), "10-20", &reply)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("110")
+        );
+        reply.text = None;
+        reply.attachments.push(MaterializedAttachment {
+            kind: MediaKind::Image,
+            bytes: bytes::Bytes::from_static(b"image"),
+            filename: Some("image.png".into()),
+            mime_type: Some("image/png".into()),
+            caption: None,
+        });
+        assert_eq!(
+            adapter(&server)
+                .send_reply(&http, &credentials(), "10-20", &reply)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("110")
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn reply_errors_are_local_and_include_retry_after() {
+        for (status, expected) in [
+            (401, "reconnect"),
+            (403, "scopes"),
+            (429, "retry after 45s"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("retry-after", "45")
+                        .set_body_json(json!({"error": "UPSTREAM-SECRET private DM"})),
+                )
+                .mount(&server)
+                .await;
+            let reply = OutboundReply {
+                attachments: vec![],
+                text: Some("reply".into()),
+                metadata: None,
+                reply_to_platform_message_id: None,
+            };
+            let error = adapter(&server)
+                .send_reply(&reqwest::Client::new(), &credentials(), "999", &reply)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ChannelPlatformError(_)));
+            assert!(error.to_string().contains(expected));
+            assert!(!error.to_string().contains("UPSTREAM-SECRET"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_never_moves_backwards_or_accepts_malformed_initial_event() {
+        for (id, cursor, success) in [("99", Some("100"), true), ("not-an-id", None, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"data": [event(id, "20")]})),
+                )
+                .mount(&server)
+                .await;
+            let result = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), cursor)
+                .await;
+            if success {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.cursor.as_deref(), cursor);
+                assert!(outcome.messages.is_empty());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+    #[test]
+    fn initiated_request_has_no_reply_or_thread_context() {
+        let reply = OutboundReply {
+            attachments: vec![],
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert_eq!(
+            reply_bodies(&reply).unwrap(),
+            vec![json!({ "text": "hello" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_recipient_refusals_are_non_retryable_and_redacted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(
+                json!({ "detail": "The recipient cannot receive DMs. private message content" }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = adapter(&server)
+            .send_reply(
+                &reqwest::Client::new(),
+                &credentials(),
+                "10-20",
+                &OutboundReply {
+                    attachments: vec![],
+                    text: Some("hello".into()),
+                    reply_to_platform_message_id: None,
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::ChannelConversationNotReachable(_)
+        ));
+        assert!(!error.to_string().contains("private message content"));
+    }
+}

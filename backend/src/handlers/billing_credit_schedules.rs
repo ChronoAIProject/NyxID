@@ -31,13 +31,14 @@ pub struct CreateCreditScheduleRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     #[serde(default)]
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
-    #[serde(default)]
-    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -47,6 +48,8 @@ pub struct UpdateCreditScheduleRequest {
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub all_services: Option<bool>,
     pub service_refs: Option<Vec<String>>,
     #[serde(
@@ -55,16 +58,20 @@ pub struct UpdateCreditScheduleRequest {
     )]
     pub reason: Option<Option<String>>,
     pub is_active: Option<bool>,
-    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreditSchedulePeriodResponse {
+    pub target_kind: BillingTargetKind,
+    pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
     pub status: SchedulePeriodStatus,
     pub disbursed_count: u64,
     pub amount_micros: i64,
+    pub amount: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -82,12 +89,14 @@ pub struct CreditScheduleResponse {
     pub id: String,
     pub amount_credits: i64,
     pub amount_micros: i64,
+    pub amount: String,
     pub recurrence: ScheduleRecurrence,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub scope: BillingServiceScope,
-    pub service_limits: Vec<super::billing_credits::CreditServiceLimitResponse>,
     pub reason: Option<String>,
     pub is_active: bool,
     pub created_by: String,
@@ -128,12 +137,12 @@ pub async fn create_schedule(
             expiry: body.expiry,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             reason: body.reason,
             created_by: auth_user.user_id.to_string(),
-            service_limits: body.service_limits,
-            request_id: body.request_id,
         },
     )
     .await?;
@@ -141,7 +150,12 @@ pub async fn create_schedule(
         state.db.clone(),
         &auth_user,
         "billing.credit_schedule.created",
-        Some(serde_json::json!({ "schedule_id": schedule.id })),
+        Some(serde_json::json!({ "schedule_id": schedule.id,
+            "target_kind": schedule.target_kind,
+            "target_user_count": schedule.target_user_ids.len(),
+            "target_org_count": schedule.target_org_ids.len(),
+            "target_group_count": schedule.target_group_ids.len(),
+        })),
     );
     Ok(Json(response_after_mutation(&state.db, schedule).await?))
 }
@@ -193,11 +207,12 @@ pub async fn update_schedule(
             expiry: body.expiry,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             reason: body.reason,
             is_active: body.is_active,
-            service_limits: body.service_limits,
         },
     )
     .await?;
@@ -207,6 +222,10 @@ pub async fn update_schedule(
         "billing.credit_schedule.updated",
         Some(serde_json::json!({
             "schedule_id": schedule.id,
+            "target_kind": schedule.target_kind,
+            "target_user_count": schedule.target_user_ids.len(),
+            "target_org_count": schedule.target_org_ids.len(),
+            "target_group_count": schedule.target_group_ids.len(),
             "is_active": schedule.is_active,
         })),
     );
@@ -262,17 +281,15 @@ fn schedule_response(
     CreditScheduleResponse {
         id: schedule.id,
         amount_credits: schedule.amount_credits,
-        amount_micros: schedule.amount_micros,
+        amount_micros: schedule.amount.display_micros(),
+        amount: schedule.amount.to_string(),
         recurrence: schedule.recurrence,
         expiry: schedule.expiry,
         target_kind: schedule.target_kind,
         target_user_ids: schedule.target_user_ids,
+        target_org_ids: schedule.target_org_ids,
+        target_group_ids: schedule.target_group_ids,
         scope: schedule.scope,
-        service_limits: schedule
-            .service_limits
-            .into_iter()
-            .map(super::billing_credits::service_limit_response)
-            .collect(),
         reason: schedule.reason,
         is_active: schedule.is_active,
         created_by: schedule.created_by,
@@ -282,11 +299,16 @@ fn schedule_response(
         last_disbursed_at: schedule.last_disbursed_at,
         skipped_periods: schedule.skipped_periods,
         current_period: period.map(|period| CreditSchedulePeriodResponse {
+            target_kind: period.target_kind,
+            target_user_ids: period.target_user_ids,
+            target_org_ids: period.target_org_ids,
+            target_group_ids: period.target_group_ids,
             start: period.period_start,
             end: period.period_end,
             status: period.status,
             disbursed_count: period.disbursed_count,
-            amount_micros: period.amount_micros,
+            amount_micros: period.amount.display_micros(),
+            amount: period.amount.to_string(),
             expires_at: period.expires_at,
             completed_at: period.completed_at,
         }),
@@ -374,14 +396,13 @@ mod tests {
         targets: Vec<String>,
     ) -> CreateCreditScheduleRequest {
         CreateCreditScheduleRequest {
-            service_limits: Vec::new(),
-            request_id: None,
-
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind,
             target_user_ids: targets,
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             all_services: true,
             service_refs: Vec::new(),
             reason: Some("Monthly credits".to_string()),
@@ -529,12 +550,11 @@ mod tests {
         billing::grants::issue_grants(
             &state.db,
             IssueCreditGrantInput {
-                service_limits: Vec::new(),
-                request_id: None,
-
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![user_id],
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -574,3 +594,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod target_tests;

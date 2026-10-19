@@ -95,7 +95,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn setup_posts_expected_key_body() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/keys"))
@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn setup_errors_when_token_env_unset() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         // No server interaction expected: credential resolution fails first.
         let server = MockServer::start().await;
 
@@ -156,7 +156,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn setup_errors_when_token_env_empty() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
 
         // SAFETY: env mutation serialized by env_lock above.
@@ -181,7 +181,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn setup_surfaces_server_error() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/keys"))

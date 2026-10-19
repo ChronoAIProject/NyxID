@@ -1,10 +1,15 @@
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
+import {
+  currentCreditsActor,
+  reportCreditsDenialHttp,
+  type CreditsDenialRequest,
+} from "@/lib/credits-denial";
 
-const API_ORIGIN = "";
-
-const BASE_URL = `${API_ORIGIN}/api/v1`;
+export function apiUrl(endpoint: string, apiBaseUrl = ""): string {
+  return `${apiBaseUrl.replace(/\/+$/, "")}/api/v1${endpoint}`;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -21,6 +26,10 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
+  /** Opt-in fence for requests bound to a captured account or local CLI session. */
+  readonly authorityGuard?: () => void;
+  readonly apiBaseUrl?: string;
+  readonly credentials?: RequestCredentials;
   readonly method?: string;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
@@ -35,6 +44,12 @@ interface RequestOptions {
    * that authenticate against NyxID itself must NOT set this.
    */
   readonly preserveSessionOn401?: boolean;
+  /**
+   * Foreground operations only: an HTTP 402 `insufficient_credits` opens the
+   * out-of-credits dialog for this operation key. The `ApiError` is still
+   * thrown so callers keep their inline error handling.
+   */
+  readonly creditsDenial?: CreditsDenialRequest;
 }
 
 // Endpoints that should not clear the global auth state on 401 because they
@@ -49,7 +64,7 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/setup",
 ]);
 
-function buildFetchConfig(options: RequestOptions): RequestInit {
+export function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
   // Surface identification for server-side telemetry. Only attached
@@ -71,7 +86,7 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
       ...telemetryHeaders,
       ...headers,
     },
-    credentials: "include",
+    credentials: options.credentials ?? "include",
     signal,
   };
 
@@ -113,6 +128,7 @@ export async function apiClient<T>(
 ): Promise<T> {
   if (import.meta.env.DEV) {
     const { isMockMode, getMockResponse } = await import("./mock-data");
+    options.authorityGuard?.();
     if (isMockMode()) {
       const mock = getMockResponse(
         endpoint,
@@ -123,10 +139,27 @@ export async function apiClient<T>(
     }
   }
 
-  const config = buildFetchConfig(options);
-  const url = `${BASE_URL}${endpoint}`;
+  const response = await apiFetch(endpoint, options);
+  options.authorityGuard?.();
+  if (response.status === 204) return undefined as T;
+  const body = (await response.json()) as T;
+  options.authorityGuard?.();
+  return body;
+}
 
-  const response = await fetch(url, config);
+/** Authenticated transport shared by JSON and streaming API requests. */
+export async function apiFetch(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<Response> {
+  const actorId = options.creditsDenial ? currentCreditsActor() : null;
+  options.authorityGuard?.();
+  const response = await fetch(
+    apiUrl(endpoint, options.apiBaseUrl),
+    buildFetchConfig(options),
+  );
+  // A late response belongs to its original authority, including any 401.
+  options.authorityGuard?.();
   try {
     options.onResponse?.(response);
   } catch {
@@ -143,28 +176,38 @@ export async function apiClient<T>(
 
   if (!response.ok) {
     const errorBody = await parseErrorResponse(response);
+    options.authorityGuard?.();
     redirectToConsentIfRequired(errorBody);
+    reportCreditsDenialHttp(
+      options.creditsDenial,
+      response.status,
+      errorBody,
+      actorId,
+    );
     throw new ApiError(response.status, errorBody);
   }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json() as Promise<T>;
+  return response;
 }
 
 export const api = {
-  get<T>(endpoint: string): Promise<T> {
-    return apiClient<T>(endpoint);
+  get<T>(
+    endpoint: string,
+    options?: Pick<RequestOptions, "authorityGuard">,
+  ): Promise<T> {
+    return apiClient<T>(endpoint, options);
   },
 
   post<T>(endpoint: string, body?: unknown): Promise<T> {
     return apiClient<T>(endpoint, { method: "POST", body });
   },
 
-  put<T>(endpoint: string, body?: unknown): Promise<T> {
-    return apiClient<T>(endpoint, { method: "PUT", body });
+  put<T>(
+    endpoint: string,
+    body?: unknown,
+    options?: Pick<RequestOptions, "authorityGuard">,
+  ): Promise<T> {
+    return apiClient<T>(endpoint, { ...options, method: "PUT", body });
   },
 
   patch<T>(

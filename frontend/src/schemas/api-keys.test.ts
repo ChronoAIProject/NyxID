@@ -137,3 +137,24 @@ describe("API_KEY_SCOPES", () => {
     expect(API_KEY_SCOPES).toHaveLength(9);
   });
 });
+
+it("accepts the durable platform grant with explicit selections and with allow-all", () => {
+  for (const allowAll of [true, false]) {
+    const result = createApiKeySchema.parse({
+      name: "Agent",
+      scopes: ["proxy"],
+      allow_all_services: allowAll,
+      allow_auto_connected_services: true,
+      allowed_service_ids: ["platform-id"],
+    });
+    expect(result.allow_auto_connected_services).toBe(true);
+    expect(result.allowed_service_ids).toEqual(["platform-id"]);
+  }
+  expect(
+    createApiKeySchema.safeParse({
+      name: "Agent",
+      scopes: ["proxy"],
+      allow_auto_connected_services: "true",
+    }).success,
+  ).toBe(false);
+});

@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
@@ -21,7 +22,7 @@ use crate::models::credit_schedule_period::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
-use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN, MAX_SELECTED_USERS};
+use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
 mod progress;
 
@@ -30,19 +31,19 @@ pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
 pub const PERIOD_LEASE_SECS: i64 = 300;
 const MAX_SCHEDULES_PER_TICK: i64 = 500;
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug)]
 pub struct CreateScheduleInput {
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
     pub created_by: String,
-    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
-    pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -51,11 +52,12 @@ pub struct UpdateScheduleInput {
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub all_services: Option<bool>,
     pub service_refs: Option<Vec<String>>,
     pub reason: Option<Option<String>>,
     pub is_active: Option<bool>,
-    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,82 +83,49 @@ pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
 ) -> AppResult<CreditSchedule> {
-    let payload = serde_json::to_string(&input).map_err(|e| AppError::Internal(e.to_string()))?;
-    if let Some(row) =
-        super::submissions::existing(db, &input.created_by, input.request_id.as_deref(), &payload)
-            .await?
-    {
-        let schedule: CreditSchedule =
-            bson::from_document(row.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
-        return insert_schedule_if_absent(db, schedule).await;
-    }
-    let amount_micros = validate_amount(input.amount_credits)?;
+    let amount = validate_amount(input.amount_credits)?;
     validate_expiry(&input.expiry)?;
-    let target_user_ids = validate_targets(db, input.target_kind, &input.target_user_ids).await?;
+    super::targets::validate_shape(
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )?;
+    let target_user_ids = validate_targets(
+        db,
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )
+    .await?;
     let scope =
         super::grants::resolve_service_scope(db, input.all_services, &input.service_refs).await?;
-    let service_limits =
-        super::service_limits::resolve(db, &scope, amount_micros, &input.service_limits).await?;
     let now = Utc::now();
     let schedule = CreditSchedule {
-        id: input
-            .request_id
-            .as_deref()
-            .map(|key| super::submissions::identity(&input.created_by, key))
-            .transpose()?
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        id: Uuid::new_v4().to_string(),
         amount_credits: input.amount_credits,
-        amount_micros,
+        amount,
         recurrence: input.recurrence,
         expiry: input.expiry,
         target_kind: input.target_kind,
         target_user_ids,
+        target_org_ids: input.target_org_ids,
+        target_group_ids: input.target_group_ids,
         scope,
-        service_limits,
         reason: normalize_reason(input.reason)?,
         is_active: true,
-        created_by: input.created_by.clone(),
+        created_by: input.created_by,
         created_at: now,
         updated_at: now,
         last_period_start: None,
         last_disbursed_at: None,
         skipped_periods: 0,
     };
-    if let Some(key) = input.request_id.as_deref() {
-        let snapshot =
-            bson::to_document(&schedule).map_err(|e| AppError::Internal(e.to_string()))?;
-        let frozen =
-            super::submissions::freeze(db, &input.created_by, key, &payload, snapshot).await?;
-        let schedule =
-            bson::from_document(frozen.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
-        insert_schedule_if_absent(db, schedule).await
-    } else {
-        insert_schedule_if_absent(db, schedule).await
-    }
-}
-
-async fn insert_schedule_if_absent(
-    db: &mongodb::Database,
-    schedule: CreditSchedule,
-) -> AppResult<CreditSchedule> {
-    let encoded = bson::to_document(&schedule).map_err(|e| AppError::Internal(e.to_string()))?;
-    let result = db
-        .collection::<CreditSchedule>(CREDIT_SCHEDULES)
-        .update_one(
-            doc! { "_id": &schedule.id },
-            doc! { "$setOnInsert": encoded },
-        )
-        .upsert(true)
-        .await;
-    match result {
-        Ok(_) => {}
-        Err(error) if is_duplicate_key_error(&error) => {}
-        Err(error) => return Err(error.into()),
-    }
     db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
-        .find_one(doc! { "_id": &schedule.id })
-        .await?
-        .ok_or_else(|| AppError::Internal("Recurring allocation disappeared".into()))
+        .insert_one(&schedule)
+        .await?;
+    Ok(schedule)
 }
 
 pub async fn update_schedule(
@@ -179,14 +148,32 @@ async fn update_schedule_with_current(
     current: CreditSchedule,
 ) -> AppResult<CreditSchedule> {
     let amount_credits = input.amount_credits.unwrap_or(current.amount_credits);
-    let amount_micros = validate_amount(amount_credits)?;
+    let amount = validate_amount(amount_credits)?;
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
     validate_expiry(&expiry)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);
-    let requested_targets = input
-        .target_user_ids
-        .unwrap_or_else(|| current.target_user_ids.clone());
-    let target_user_ids = validate_targets(db, target_kind, &requested_targets).await?;
+    let [requested_targets, target_org_ids, target_group_ids] = super::targets::updated_lists(
+        current.target_kind,
+        target_kind,
+        [
+            &current.target_user_ids,
+            &current.target_org_ids,
+            &current.target_group_ids,
+        ],
+        [
+            input.target_user_ids,
+            input.target_org_ids,
+            input.target_group_ids,
+        ],
+    )?;
+    let target_user_ids = validate_targets(
+        db,
+        target_kind,
+        &requested_targets,
+        &target_org_ids,
+        &target_group_ids,
+    )
+    .await?;
 
     let scope = if input.all_services.is_some() || input.service_refs.is_some() {
         let all_services = input.all_services.unwrap_or(current.scope.all_services);
@@ -200,24 +187,6 @@ async fn update_schedule_with_current(
         super::grants::resolve_service_scope(db, all_services, &references).await?
     } else {
         current.scope.clone()
-    };
-    let service_limits = match input.service_limits {
-        Some(inputs) => super::service_limits::resolve(db, &scope, amount_micros, &inputs).await?,
-        None => {
-            if current.service_limits.iter().any(|rule| {
-                rule.limit_micros > amount_micros
-                    || (!scope.all_services
-                        && rule
-                            .service_ids
-                            .iter()
-                            .any(|id| !scope.service_ids.contains(id)))
-            }) {
-                return Err(AppError::ValidationError(
-                    "Update service limits to match the new total and eligible services".into(),
-                ));
-            }
-            current.service_limits.clone()
-        }
     };
     let reason = match input.reason {
         Some(reason) => normalize_reason(reason)?,
@@ -238,12 +207,13 @@ async fn update_schedule_with_current(
             },
             doc! { "$set": {
                 "amount_credits": amount_credits,
-                "amount_micros": amount_micros,
+                "amount": amount,
                 "expiry": encode(&expiry, "schedule expiry")?,
                 "target_kind": encode(&target_kind, "schedule target kind")?,
                 "target_user_ids": encode(&target_user_ids, "schedule targets")?,
+                "target_org_ids": &target_org_ids,
+                "target_group_ids": &target_group_ids,
                 "scope": encode(&scope, "schedule scope")?,
-                "service_limits": encode(&service_limits, "schedule service limits")?,
                 "reason": reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
                 "is_active": input.is_active.unwrap_or(current.is_active),
                 "updated_at": bson::DateTime::from_chrono(updated_at),
@@ -307,6 +277,7 @@ pub async fn disburse_due(
     now: DateTime<Utc>,
     budget: usize,
 ) -> AppResult<DisbursementStats> {
+    super::exact_migration::require_ready(db).await?;
     let mut stats = DisbursementStats::default();
     abandon_elapsed_periods(db, now, &mut stats).await?;
     if budget == 0 {
@@ -376,7 +347,7 @@ pub async fn disburse_due(
                     BillingLedgerEventType::GrantIssued,
                     &grant.recipient_user_id,
                     &grant.id,
-                    grant.amount_micros,
+                    grant.amount,
                     None,
                     format!("grant-issued:{}", grant.id),
                 )
@@ -465,13 +436,14 @@ async fn claim_period(
             "period_start": bson::DateTime::from_chrono(period.start),
             "period_end": bson::DateTime::from_chrono(period.end),
             "status": "disbursing",
-            "amount_micros": schedule.amount_micros,
+            "amount": schedule.amount,
             "expires_at": resolve_expiry(&schedule.expiry, &period, claim_time)
                 .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
             "target_kind": encode(&schedule.target_kind, "period target kind")?,
             "target_user_ids": encode(&schedule.target_user_ids, "period targets")?,
+            "target_org_ids": &schedule.target_org_ids,
+            "target_group_ids": &schedule.target_group_ids,
             "scope": encode(&schedule.scope, "period scope")?,
-            "service_limits": encode(&schedule.service_limits, "period service limits")?,
             "reason": schedule.reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
             "cursor_user_id": Bson::Null,
             "disbursed_count": 0_i64,
@@ -525,6 +497,18 @@ async fn next_recipients(
     limit: usize,
 ) -> AppResult<Vec<String>> {
     match period.target_kind {
+        BillingTargetKind::OrgMembers | BillingTargetKind::Groups => {
+            super::targets::member_recipients(
+                db,
+                period.target_kind,
+                &period.target_org_ids,
+                &period.target_group_ids,
+                Some(period.created_at),
+                period.cursor_user_id.as_deref(),
+                limit,
+            )
+            .await
+        }
         BillingTargetKind::AllUsers => {
             // The claim timestamp excludes later signups. Re-checking
             // is_active while paging deliberately permits an existing owner
@@ -581,38 +565,37 @@ fn grants_for_recipients(
             }),
             recipient_user_id,
             target_kind: period.target_kind,
-            amount_credits: period.amount_micros / CREDIT_MICROS,
-            amount_micros: period.amount_micros,
-            remaining_micros: period.amount_micros,
-            reserved_micros: 0,
+            target_org_ids: period.target_org_ids.clone(),
+            target_group_ids: period.target_group_ids.clone(),
+            amount_credits: period.amount.display_whole(),
+            amount: period.amount,
+            remaining: period.amount,
+            reserved: Credits::ZERO,
             scope: period.scope.clone(),
-            service_limits: period.service_limits.clone(),
             expires_at: period.expires_at,
             reason: period.reason.clone(),
             granted_by: schedule.created_by.clone(),
             status: CreditGrantStatus::Active,
             issued_ledgered_at: None,
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: Credits::ZERO,
             active_settlement: None,
             created_at: now,
             updated_at: now,
             consumed_at: None,
             expired_at: None,
             revoked_at: None,
-            revoke_requested_at: None,
-            revoke_requested_by: None,
         })
         .collect()
 }
 
-pub(super) struct InsertChunkOutcome {
+struct InsertChunkOutcome {
     inserted_indices: Vec<usize>,
     inserted_count: usize,
     duplicate_count: usize,
 }
 
-pub(super) async fn insert_grant_chunk(
+async fn insert_grant_chunk(
     db: &mongodb::Database,
     grants: &[CreditGrant],
 ) -> AppResult<InsertChunkOutcome> {
@@ -788,15 +771,13 @@ async fn abandon_elapsed_periods(
     Ok(())
 }
 
-fn validate_amount(amount_credits: i64) -> AppResult<i64> {
+fn validate_amount(amount_credits: i64) -> AppResult<Credits> {
     if !(1..=MAX_GRANT_CREDITS).contains(&amount_credits) {
         return Err(AppError::ValidationError(format!(
             "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
         )));
     }
-    amount_credits
-        .checked_mul(CREDIT_MICROS)
-        .ok_or_else(|| AppError::ValidationError("credit schedule amount is too large".to_string()))
+    Ok(Credits::from_whole(amount_credits))
 }
 
 fn validate_expiry(expiry: &CreditExpiryPolicy) -> AppResult<()> {
@@ -810,29 +791,18 @@ fn validate_expiry(expiry: &CreditExpiryPolicy) -> AppResult<()> {
     Ok(())
 }
 
+/// The create/update paths validate shape before checking referenced rows.
 async fn validate_targets(
     db: &mongodb::Database,
     target_kind: BillingTargetKind,
     targets: &[String],
+    orgs: &[String],
+    groups: &[String],
 ) -> AppResult<Vec<String>> {
-    match target_kind {
-        BillingTargetKind::AllUsers => {
-            if !targets.is_empty() {
-                return Err(AppError::ValidationError(
-                    "all-users schedules must not include target_user_ids".to_string(),
-                ));
-            }
-            Ok(Vec::new())
-        }
-        BillingTargetKind::SelectedUsers => {
-            if targets.is_empty() || targets.len() > MAX_SELECTED_USERS {
-                return Err(AppError::ValidationError(format!(
-                    "selected schedules require 1-{MAX_SELECTED_USERS} target users"
-                )));
-            }
-            super::grants::resolve_recipients(db, target_kind, targets).await
-        }
-    }
+    super::targets::validate_existing(db, target_kind, targets, orgs, groups).await?;
+    let mut targets = targets.to_vec();
+    targets.sort();
+    Ok(targets)
 }
 
 fn normalize_reason(reason: Option<String>) -> AppResult<Option<String>> {
@@ -857,7 +827,7 @@ fn encode<T: serde::Serialize>(value: &T, label: &str) -> AppResult<Bson> {
         .map_err(|error| AppError::Internal(format!("failed to encode {label}: {error}")))
 }
 
-pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     match error.kind.as_ref() {
         mongodb::error::ErrorKind::Command(command) => command.code == 11000,
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error)) => {
@@ -870,3 +840,6 @@ pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 #[path = "schedules/update_tests.rs"]
 mod update_tests;
+
+#[cfg(test)]
+mod target_tests;

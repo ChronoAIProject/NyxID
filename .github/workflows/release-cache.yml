@@ -1,0 +1,104 @@
+# Keeps a warm Rust build cache for the tag-triggered Release workflow.
+#
+# Release builds run only for tags, and a tag run can restore caches saved on
+# the default branch but not caches saved by an earlier tag. This workflow
+# builds the same dist matrix on `main`, so each release restores compiled
+# dependencies instead of rebuilding them on every platform.
+#
+# The cache key must match release.yml exactly: the same `dist plan` matrix,
+# runners, containers, packages, `dist build` arguments and shared key.
+# The daily run restores each cache (refreshing it under the repository's
+# least-recently-used eviction) and rebuilds only when it is missing.
+name: Release Build Cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - "**/Cargo.toml"
+      - .github/workflows/release.yml
+      - .github/workflows/release-cache.yml
+  # Pull requests that change this workflow build the matrix to verify it,
+  # without saving: caches from pull request refs are not visible to tags.
+  pull_request:
+    paths:
+      - .github/workflows/release-cache.yml
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: "ubuntu-24.04"
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+      - id: plan
+        run: |
+          dist plan --output-format=json > plan-dist-manifest.json
+          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+  warm:
+    name: warm (${{ join(matrix.targets, ', ') }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container && matrix.container.image || null }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust non-interactively if not already installed
+        if: ${{ matrix.container }}
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          fi
+      # Keep in sync with the cache step in release.yml's build-local-artifacts.
+      - name: Restore Rust build cache
+        id: cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist-${{ join(matrix.targets, '-') }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install dist
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: ${{ matrix.install_dist.run }}
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          if [ -d /etc/apt/apt.conf.d ] && [ -w /etc/apt/apt.conf.d ]; then
+            echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/99-noninteractive
+          fi
+          ${{ matrix.packages_install }}
+      - name: Build artifacts
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [[ ",${{ join(matrix.targets, ',') }}," == *",aarch64-unknown-linux-gnu,"* ]]; then
+            export CC=clang
+            export CXX=clang++
+          fi
+          dist build --print=linkage --output-format=json ${{ matrix.dist_args }} > /dev/null

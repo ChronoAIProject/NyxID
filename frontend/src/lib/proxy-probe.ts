@@ -1,3 +1,5 @@
+import { isInsufficientCreditsHttp } from "@/lib/credits-denial";
+
 /**
  * Shared "verify AI service" probe used by the aha ConnectVerifyStep
  * dialog and the standalone VerifyKeyCard on api-key detail.
@@ -108,6 +110,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // `.../user` (works with both OAuth and PAT bearer tokens).
   "api-github": { path: "user" },
   "api-github-pat": { path: "user" },
+  "api-aurinko": { path: "v1/account" },
 
   // Bot APIs — dedicated bot-identity endpoints. Telegram Bot's path
   // is bare because the token is injected via `path` auth method
@@ -120,12 +123,25 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // OAuth user-context providers — /me variants. Recipes are relative
   // to each provider's seeded base_url (see line comments below).
   "api-google": { path: "oauth2/v1/userinfo" }, // base is bare googleapis.com
+  "api-google-workspace": {
+    path: "drive/v3/files?pageSize=1&fields=files(id)",
+  },
+  "api-google-calendar": {
+    path: "calendar/v3/users/me/calendarList?maxResults=1",
+  },
+  "api-google-drive": { path: "drive/v3/files?pageSize=1&fields=files(id)" },
+  "api-google-gmail": { path: "gmail/v1/users/me/messages?maxResults=1" },
+  // Reads require an existing document ID; there is no account-level probe.
+  "api-google-docs": null,
+  "api-google-sheets": null,
+  "api-google-slides": null,
   "api-spotify": { path: "me" }, // base is .../v1
   "api-twitter": { path: "users/me" }, // base is .../2
   "api-reddit": { path: "api/v1/me" }, // base is bare oauth.reddit.com
   "api-twitch": { path: "users" }, // base is .../helix
   "api-microsoft": { path: "me" }, // base is .../v1.0
   "api-facebook": { path: "me" }, // base is .../v21.0
+  "api-linkedin": { path: "v2/userinfo" },
   "api-slack": { path: "auth.test" }, // base is .../api
   "api-lark": { path: "authen/v1/user_info" }, // base is .../open-apis
   "api-feishu": { path: "authen/v1/user_info" }, // base is .../open-apis
@@ -134,6 +150,8 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // No suitable status endpoint / requires special auth we don't emulate
   "api-firecrawl": null, // no public status endpoint
   "api-tiktok": null, // /oauth/userinfo needs POST body
+  "api-ifttt-mcp": null, // OAuth completion establishes the connection; tools are discovered explicitly.
+  "api-ifttt": null, // Every valid operation triggers an Applet; no automatic probe.
   "api-lark-bot": null, // OpenAPI probe path needs OAuth context
   "api-feishu-bot": null, // same as lark-bot
 
@@ -221,7 +239,13 @@ export type DownstreamStatus =
   | "auth_rejected"
   | "not_found"
   | "server_error"
-  | "unexpected";
+  | "unexpected"
+  /**
+   * NyxID's own billing gate refused the request (HTTP 402
+   * `insufficient_credits` envelope). Deliberately inline only: the key may
+   * be pasted from another account, so this never opens the purchase dialog.
+   */
+  | "credits_exhausted";
 
 export interface ProbeOutcome {
   /** Raw HTTP status the fetch resolved to. `null` on network / timeout. */
@@ -278,6 +302,7 @@ export async function probeAgentKey(
 
   let response: Response | null = null;
   let httpStatus: number | null = null;
+  let body: unknown = null;
   try {
     response = await doFetch(url, {
       method: "GET",
@@ -289,13 +314,30 @@ export async function probeAgentKey(
       signal: controller.signal,
     });
     httpStatus = response.status;
+    if (httpStatus === 402) {
+      body = await response
+        .clone()
+        .json()
+        .catch(() => null);
+    }
   } catch {
     // Network error / abort / CORS — response stays null.
   } finally {
     window.clearTimeout(timer);
   }
 
-  return classifyProbe(slug, response, httpStatus);
+  return classifyProbe(slug, response, httpStatus, body);
+}
+
+/**
+ * NyxID's error envelope, not a downstream's own `insufficient_credits`:
+ * the platform always pairs the symbol with its numeric code.
+ */
+function isNyxidCreditsEnvelope(httpStatus: number, body: unknown): boolean {
+  return (
+    isInsufficientCreditsHttp(httpStatus, body) &&
+    (body as { error_code?: unknown }).error_code === 11300
+  );
 }
 
 /**
@@ -306,6 +348,7 @@ export function classifyProbe(
   slug: string,
   response: Response | null,
   httpStatus: number | null,
+  body: unknown = null,
 ): ProbeOutcome {
   if (!response || httpStatus === null) {
     return {
@@ -323,6 +366,19 @@ export function classifyProbe(
   // no value; `Headers.has()` returns true for that. We want the
   // truth signal to be the actual agent id string, so require length.
   // Header lookup is case-insensitive per WHATWG fetch spec.
+  if (isNyxidCreditsEnvelope(httpStatus, body)) {
+    // The gate may refuse before scope checks, so this proves nothing about
+    // the key's reach; report it as not verified rather than as valid.
+    return {
+      httpStatus,
+      reachedNyxid: true,
+      agentKeyValid: false,
+      downstreamStatus: "credits_exhausted",
+      diagnostic:
+        "The account this key bills to is out of credits, so NyxID didn't run the test request. Test again once credits are added.",
+    };
+  }
+
   const agentIdHeader = response.headers.get("x-nyxid-agent-id");
   const agentKeyValid =
     typeof agentIdHeader === "string" && agentIdHeader.length > 0;
@@ -383,6 +439,7 @@ function diagnoseDownstream(
     case "server_error":
       return `Your Agent Key works (proxied through NyxID). The downstream is having issues (HTTP ${String(httpStatus)}). Retry in a minute.`;
     case "unexpected":
+    case "credits_exhausted":
       return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} — inspect the request in your AI tool to confirm the intended call succeeds.`;
   }
 }

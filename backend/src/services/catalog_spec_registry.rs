@@ -24,6 +24,42 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "stripe",
+        include_str!("../../specs/catalog/stripe.openapi.json"),
+    ),
+    (
+        "chrono-sandbox",
+        include_str!("../../specs/catalog/chrono-sandbox.openapi.json"),
+    ),
+    (
+        "cloudflare",
+        include_str!("../../specs/catalog/cloudflare.openapi.json"),
+    ),
+    (
+        "supabase-management",
+        include_str!("../../specs/catalog/supabase-management.openapi.json"),
+    ),
+    (
+        "railway",
+        include_str!("../../specs/catalog/railway.openapi.json"),
+    ),
+    (
+        "ifttt-mcp",
+        include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
+    ),
+    (
+        "ifttt",
+        include_str!("../../specs/catalog/ifttt.openapi.json"),
+    ),
+    (
+        "notion",
+        include_str!("../../specs/catalog/notion.openapi.json"),
+    ),
+    (
+        "aurinko",
+        include_str!("../../specs/catalog/aurinko.openapi.json"),
+    ),
+    (
         "anthropic",
         include_str!("../../specs/catalog/anthropic.openapi.json"),
     ),
@@ -68,12 +104,40 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/google-ai.openapi.json"),
     ),
     (
+        "google-calendar",
+        include_str!("../../specs/catalog/google-calendar.openapi.json"),
+    ),
+    (
+        "google-gmail",
+        include_str!("../../specs/catalog/google-gmail.openapi.json"),
+    ),
+    (
+        "google-drive",
+        include_str!("../../specs/catalog/google-drive.openapi.json"),
+    ),
+    (
+        "google-docs",
+        include_str!("../../specs/catalog/google-docs.openapi.json"),
+    ),
+    (
+        "google-sheets",
+        include_str!("../../specs/catalog/google-sheets.openapi.json"),
+    ),
+    (
+        "google-slides",
+        include_str!("../../specs/catalog/google-slides.openapi.json"),
+    ),
+    (
         "lark",
         include_str!("../../specs/catalog/lark.openapi.json"),
     ),
     (
         "lark-bot",
         include_str!("../../specs/catalog/lark-bot.openapi.json"),
+    ),
+    (
+        "linkedin",
+        include_str!("../../specs/catalog/linkedin.openapi.json"),
     ),
     (
         "microsoft-graph",
@@ -108,6 +172,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/telegram-bot.openapi.json"),
     ),
     (
+        "telnyx",
+        include_str!("../../specs/catalog/telnyx.openapi.json"),
+    ),
+    (
         "twitch",
         include_str!("../../specs/catalog/twitch.openapi.json"),
     ),
@@ -123,8 +191,17 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("chrono-sandbox", "chrono-sandbox"),
+    ("api-ifttt", "ifttt"),
+    ("api-ifttt-mcp", "ifttt-mcp"),
+    ("api-notion", "notion"),
+    ("api-stripe", "stripe"),
+    ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
+    ("api-cloudflare", "cloudflare"),
+    ("api-supabase-management", "supabase-management"),
+    ("api-railway", "railway"),
     ("api-elevenlabs", "elevenlabs"),
     ("api-facebook", "facebook"),
     ("api-feishu", "lark"),
@@ -133,14 +210,23 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-github", "github"),
     ("api-github-pat", "github"),
     ("api-google", "google"),
+    ("api-google-workspace", "google-workspace"),
+    ("api-google-calendar", "google-calendar"),
+    ("api-google-drive", "google-drive"),
+    ("api-google-gmail", "google-gmail"),
+    ("api-google-docs", "google-docs"),
+    ("api-google-sheets", "google-sheets"),
+    ("api-google-slides", "google-slides"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
+    ("api-linkedin", "linkedin"),
     ("api-microsoft", "microsoft-graph"),
     ("api-reddit", "reddit"),
     ("api-slack", "slack"),
     ("api-slack-bot", "slack"),
     ("api-spotify", "spotify"),
     ("api-telegram-bot", "telegram-bot"),
+    ("api-telnyx", "telnyx"),
     ("api-twitch", "twitch"),
     ("api-twilio", "twilio"),
     ("api-twitter", "twitter"),
@@ -153,9 +239,9 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("llm-openrouter", "openrouter"),
 ];
 
-static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
-    LazyLock::new(|| {
-        HOSTED_SPEC_SOURCES
+static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = LazyLock::new(
+    || {
+        let mut specs: HashMap<_, _> = HOSTED_SPEC_SOURCES
             .iter()
             .map(|(key, source)| {
                 let parsed =
@@ -164,8 +250,121 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
                     });
                 (*key, Arc::new(parsed))
             })
+            .collect();
+        // Drive owns the editor bundle; Workspace adds Calendar and Gmail.
+        let mut drive = (*specs["google-drive"]).clone();
+        drive["info"]["description"] =
+            "Google Drive file operations and Docs, Sheets, and Slides editing through one Google OAuth connection. Editor paths declare their Google API servers and accept the full Drive scope, subject to file permissions. Startup automatically activates recognized seeded editor routing. If reconciliation is incomplete, workspace_destinations_not_activated (12300) directs operators to the startup logs and service configuration."
+                .into();
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let servers = specs[key]["servers"].clone();
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                let mut item = item.clone();
+                item["servers"] = servers.clone();
+                assert!(
+                    drive["paths"]
+                        .as_object_mut()
+                        .expect("Drive paths")
+                        .insert(path.clone(), item)
+                        .is_none(),
+                    "Duplicate Drive path"
+                );
+            }
+        }
+        specs.insert("google-drive", Arc::new(drive.clone()));
+        let mut workspace = drive;
+        workspace["info"]["title"] = "Google Workspace".into();
+        workspace["info"]["description"] =
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. Startup automatically activates recognized seeded editor routing. If reconciliation is incomplete, workspace_destinations_not_activated (12300) directs operators to the startup logs and service configuration."
+                .into();
+        for key in ["google-calendar", "google-gmail"] {
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                assert!(
+                    workspace["paths"]
+                        .as_object_mut()
+                        .expect("Workspace paths")
+                        .insert(path.clone(), item.clone())
+                        .is_none(),
+                    "Duplicate Workspace path"
+                );
+            }
+        }
+        specs.insert("google-workspace", Arc::new(workspace));
+        specs
+    },
+);
+
+/// What an overlay says about an operation's effect on existing data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationMarks {
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists, where its method says otherwise (a POST that
+    /// edits, a PUT that only acts). `None` leaves it to the method.
+    /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
+    /// than change it.
+    pub changes_existing: Option<bool>,
+}
+
+impl OperationMarks {
+    pub fn of(operation: &serde_json::Value) -> Self {
+        Self {
+            destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
+            changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+        }
+    }
+}
+
+/// The marks of each overlay's operations, by spec key, keyed by endpoint
+/// name (sanitized operation ID) and by `METHOD path` route.
+static OPERATION_MARKS: LazyLock<HashMap<&'static str, HashMap<String, OperationMarks>>> =
+    LazyLock::new(|| {
+        PARSED_SPECS
+            .iter()
+            .map(|(key, spec)| {
+                let mut operations = HashMap::new();
+                for (path, item) in spec["paths"].as_object().into_iter().flatten() {
+                    for (method, operation) in item.as_object().into_iter().flatten() {
+                        let marks = OperationMarks::of(operation);
+                        if marks == OperationMarks::default() {
+                            continue;
+                        }
+                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()), marks);
+                        if let Some(id) = operation["operationId"].as_str() {
+                            operations.insert(super::openapi_parser::sanitize_name(id), marks);
+                        }
+                    }
+                }
+                (*key, operations)
+            })
             .collect()
     });
+
+/// What the hosted overlay of a catalog service says about this operation,
+/// matched literally by name or route. Marks that narrow (destructive,
+/// changes existing) match either; "only acts" (`changes_existing: false`)
+/// needs the exact route, since it widens what guests may do.
+pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> OperationMarks {
+    let Some(operations) = spec_key_for_slug(slug).and_then(|key| OPERATION_MARKS.get(key)) else {
+        return OperationMarks::default();
+    };
+    let by_name = operations.get(name).copied().unwrap_or_default();
+    let by_route = operations
+        .get(&format!("{} {path}", method.to_ascii_uppercase()))
+        .copied()
+        .unwrap_or_default();
+    OperationMarks {
+        destructive: by_name.destructive || by_route.destructive,
+        changes_existing: if by_name.changes_existing == Some(true)
+            || by_route.changes_existing == Some(true)
+        {
+            Some(true)
+        } else {
+            by_route.changes_existing
+        },
+    }
+}
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
@@ -185,6 +384,11 @@ pub fn spec_for_slug(slug: &str) -> Option<Arc<serde_json::Value>> {
     spec_key_for_slug(slug).and_then(spec_for_key)
 }
 
+/// Resolve either supported identifier on the hosted spec route.
+pub fn spec_for_key_or_slug(key_or_slug: &str) -> Option<Arc<serde_json::Value>> {
+    spec_for_key(key_or_slug).or_else(|| spec_for_slug(key_or_slug))
+}
+
 /// Relative hosted path (`/api/v1/catalog-specs/{spec_key}/openapi.json`)
 /// for a catalog service slug.
 pub fn spec_path_for_slug(slug: &str) -> Option<String> {
@@ -200,7 +404,7 @@ pub fn spec_for_url_path(path: &str) -> Option<Arc<serde_json::Value>> {
     if spec_key.is_empty() || spec_key.contains('/') {
         return None;
     }
-    spec_for_key(spec_key)
+    spec_for_key_or_slug(spec_key)
 }
 
 /// Catalog service slugs that have a hosted overlay.
@@ -210,22 +414,407 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Guests' default access follows what overlays say about an operation:
+    /// Aevatar's destructive marker and NyxID's own changes-existing marker,
+    /// matched by endpoint name or route.
+    #[test]
+    fn overlays_say_what_operations_do_to_existing_data() {
+        let marks = operation_marks;
+        assert!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/deleteMessage",
+                "delete_message"
+            )
+            .destructive
+        );
+        assert!(marks("api-telegram-bot", "post", "/deleteMessage", "renamed").destructive);
+        assert_eq!(
+            marks("api-telegram-bot", "POST", "/sendMessage", "send_message"),
+            OperationMarks::default()
+        );
+        assert!(
+            marks(
+                "api-google-sheets",
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+                "sheets_clear_values"
+            )
+            .destructive
+        );
+        // A POST that edits, and a PUT that only acts.
+        assert_eq!(
+            marks("api-slack", "POST", "/chat.update", "x").changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/editMessageText",
+                "edit_message_text"
+            )
+            .changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks("api-spotify", "PUT", "/me/player/play", "start_playback").changes_existing,
+            Some(false)
+        );
+        // "Only acts" widens, so it needs the exact route, not just a name.
+        assert_eq!(
+            marks("api-spotify", "PATCH", "/anything", "start_playback").changes_existing,
+            None
+        );
+        // "Edits" narrows, so a name is enough.
+        assert_eq!(
+            marks("api-slack", "POST", "/elsewhere", "chat_update").changes_existing,
+            Some(true)
+        );
+        // A PATCH update is left to its method; Aevatar's markers are as they were.
+        assert_eq!(
+            marks("api-google", "PATCH", "/nowhere", "calendar_update_event"),
+            OperationMarks::default()
+        );
+        assert_eq!(
+            marks("custom-service", "DELETE", "/x", "delete_x"),
+            OperationMarks::default()
+        );
+    }
+
+    /// Frozen from 28fd2c44, including the original eight api-google operations.
+    /// Six Drive contracts were deliberately corrected for automatic activation;
+    /// every other historical operation retains its original pin.
+    #[test]
+    fn google_upload_projection_and_full_http_contracts_are_pinned() {
+        let contracts: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-http-contracts.json"
+        ))
+        .unwrap();
+        for slug in ["api-google-drive", "api-google-workspace"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let parsed =
+                crate::services::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+            assert_eq!(
+                parsed.len(),
+                if slug.ends_with("workspace") { 38 } else { 22 }
+            );
+            for endpoint in parsed {
+                let contract = &contracts[&endpoint.name];
+                let operation = &spec["paths"][&endpoint.path][endpoint.method.to_lowercase()];
+                assert_eq!(
+                    operation["parameters"], contract["parameters"],
+                    "{}",
+                    endpoint.name
+                );
+                assert_eq!(
+                    operation["requestBody"], contract["requestBody"],
+                    "{}",
+                    endpoint.name
+                );
+                assert_eq!(endpoint.method, contract["method"]);
+                assert_eq!(endpoint.path, contract["path"]);
+                if !matches!(
+                    endpoint.name.as_str(),
+                    "drive_upload_file" | "drive_upload_file_content"
+                ) {
+                    continue;
+                }
+                assert_eq!(
+                    operation["requestBody"]["content"]["multipart/related"]["schema"]["type"],
+                    "string"
+                );
+                assert!(
+                    operation["requestBody"]["content"]["multipart/related"]["schema"]["example"]
+                        .as_str()
+                        .unwrap()
+                        .contains("text/html")
+                );
+                let param = endpoint
+                    .parameters
+                    .as_ref()
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == "uploadType")
+                    .unwrap();
+                assert_eq!(param["schema"]["enum"], serde_json::json!(["media"]));
+                assert_eq!(param["x-nyxid-mcp-enum"], serde_json::json!(["media"]));
+                let full_param = operation["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == "uploadType")
+                    .unwrap();
+                assert_eq!(
+                    full_param["schema"]["enum"],
+                    serde_json::json!(["media", "multipart"])
+                );
+                assert_eq!(
+                    endpoint.request_content_type.as_deref(),
+                    Some("application/octet-stream")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn existing_google_operation_contracts_are_additive() {
+        use sha2::{Digest, Sha256};
+        let frozen: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-existing-operations.json"
+        ))
+        .unwrap();
+        for (slug, operations) in frozen.as_object().unwrap() {
+            let spec = spec_for_slug(slug).unwrap();
+            for pinned in operations.as_array().unwrap() {
+                let path = pinned["path"].as_str().unwrap();
+                let method = pinned["method"].as_str().unwrap().to_ascii_lowercase();
+                let operation = &spec["paths"][path][&method];
+                assert_eq!(
+                    operation["operationId"], pinned["operation_id"],
+                    "{slug} {method} {path}"
+                );
+                let mut canonical = operation.clone();
+                canonical.sort_all_objects();
+                let digest = hex::encode(Sha256::digest(serde_json::to_vec(&canonical).unwrap()));
+                assert_eq!(
+                    digest, pinned["operation_sha256"],
+                    "changed existing contract: {slug} {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn google_editor_operations_have_verified_origins_scopes_and_policies() {
+        use crate::services::google_workspace::{DRIVE, GoogleProduct};
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-editor-scope-acceptance.json"
+        ))
+        .unwrap();
+        for (slug, proof) in evidence.as_object().unwrap() {
+            let product = GoogleProduct::from_slug(slug).unwrap();
+            let spec = spec_for_slug(slug).unwrap();
+            assert_eq!(
+                spec["servers"],
+                serde_json::json!([{ "url": proof["origin"] }])
+            );
+            let policy = product.operation_policy().unwrap();
+            let operations = proof["operations"].as_object().unwrap();
+            assert_eq!(policy.rules.len(), operations.len());
+            let defaults = product.default_scopes();
+            let allowed = product.allowed_scopes();
+            assert!(defaults.iter().any(|scope| scope == DRIVE));
+            for (id, operation) in operations {
+                let path = operation["path"].as_str().unwrap();
+                let method = operation["method"].as_str().unwrap();
+                assert_eq!(
+                    spec["paths"][path][method.to_ascii_lowercase()]["operationId"],
+                    *id
+                );
+                let scopes = operation["accepted_scopes"].as_array().unwrap();
+                assert!(
+                    scopes.iter().any(|scope| scope == DRIVE),
+                    "{id} does not accept Drive"
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| defaults.iter().any(|s| scope == s))
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| allowed.iter().any(|s| scope == s))
+                );
+                let rule = policy
+                    .rules
+                    .iter()
+                    .find(|rule| rule.method == method && rule.path_template == path)
+                    .unwrap();
+                if path.contains("{range}") {
+                    assert_eq!(
+                        rule.path_parameter_constraints.get("range"),
+                        Some(
+                            &crate::models::downstream_service::ProxyPathConstraint::SheetsA1Range
+                        )
+                    );
+                } else {
+                    assert!(rule.path_parameter_constraints.is_empty());
+                }
+            }
+        }
+    }
     use std::collections::HashSet;
 
-    use super::*;
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let list = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_tasks_query")
+                .unwrap();
+            assert_eq!(list.method, "GET");
+            assert_eq!(list.path, "/approval/v4/tasks");
+            assert_eq!(
+                list.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let forward = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_task_forward")
+                .unwrap();
+            assert_eq!(forward.method, "POST");
+            assert_eq!(forward.path, "/approval/v4/tasks/forward");
+            assert!(forward.request_body_required);
+            assert_eq!(
+                forward.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let schema = forward.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["instance_code", "task_id", "transfer_user_id"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            let parameters = forward.parameters.as_ref().unwrap().as_array().unwrap();
+            assert_eq!(parameters[0]["name"], "user_id_type");
+            assert_eq!(parameters[0]["required"], true);
+            assert_eq!(
+                parameters[0]["schema"]["enum"],
+                serde_json::json!(["open_id", "union_id", "user_id", "user_key"])
+            );
+            assert!(forward.destructive);
+            assert_eq!(forward.changes_existing, Some(true));
+            assert_eq!(
+                operation_marks(slug, "POST", &forward.path, "renamed").changes_existing,
+                Some(true)
+            );
+            assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
+            assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
-        for (key, _) in HOSTED_SPEC_SOURCES {
+        for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
             assert!(
                 spec.get("openapi").is_some(),
                 "spec '{key}' missing openapi version"
             );
-            let endpoints = openapi_parser::parse_openapi_spec_value(&spec)
+            let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec)
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
+        }
+    }
+
+    #[test]
+    fn firecrawl_overlay_exposes_render_cache_sitemap_and_provenance() {
+        let spec = spec_for_slug("api-firecrawl").unwrap();
+        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let scrape = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "scrape")
+            .unwrap();
+        let map = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "map_site")
+            .unwrap();
+        let scrape_request = scrape.request_body_schema.as_ref().unwrap();
+        let map_request = map.request_body_schema.as_ref().unwrap();
+        assert_eq!(scrape_request["additionalProperties"], true);
+        for control in ["formats", "waitFor", "timeout", "maxAge", "storeInCache"] {
+            assert!(
+                scrape_request["properties"].get(control).is_some(),
+                "scrape {control}"
+            );
+        }
+        for control in [
+            "sitemap",
+            "ignoreQueryParameters",
+            "ignoreCache",
+            "limit",
+            "timeout",
+        ] {
+            assert!(
+                map_request["properties"].get(control).is_some(),
+                "map {control}"
+            );
+        }
+        assert_eq!(
+            map_request["properties"]["sitemap"]["enum"],
+            serde_json::json!(["include", "only", "skip"])
+        );
+        let scrape_response = &spec["paths"]["/v2/scrape"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["data"];
+        assert_eq!(scrape_response["properties"]["markdown"]["type"], "string");
+        for field in ["sourceURL", "url", "statusCode", "provider"] {
+            assert!(
+                scrape_response["properties"]["metadata"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "scrape metadata {field}"
+            );
+        }
+        assert_eq!(
+            scrape_response["properties"]["metadata"]["properties"]["provider"]["properties"]["id"]
+                ["type"],
+            "string"
+        );
+        let map_response = &spec["paths"]["/v2/map"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["links"];
+        assert_eq!(map_response["type"], "array");
+    }
+
+    #[test]
+    fn google_workspace_is_the_union_of_all_six_products() {
+        let workspace = spec_for_slug("api-google-workspace").unwrap();
+        let drive = spec_for_slug("api-google-drive").unwrap();
+        let calendar = spec_for_slug("api-google-calendar").unwrap();
+        let gmail = spec_for_slug("api-google-gmail").unwrap();
+        let paths = workspace["paths"].as_object().unwrap();
+        assert_eq!(
+            paths.len(),
+            drive["paths"].as_object().unwrap().len()
+                + calendar["paths"].as_object().unwrap().len()
+                + gmail["paths"].as_object().unwrap().len()
+        );
+        assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
+        assert_eq!(
+            openapi_parser::parse_hosted_openapi_spec_value(&drive)
+                .unwrap()
+                .len(),
+            22
+        );
+        assert_eq!(
+            crate::services::openapi_parser::parse_hosted_openapi_spec_value(&workspace)
+                .unwrap()
+                .len(),
+            38
+        );
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let product = spec_for_key(key).unwrap();
+            for (path, item) in product["paths"].as_object().unwrap() {
+                let mut expected = item.clone();
+                expected["servers"] = product["servers"].clone();
+                assert_eq!(paths[path], expected);
+                assert_eq!(drive["paths"][path], expected);
+            }
+        }
+        for spec in [drive, calendar, gmail] {
+            for (path, item) in spec["paths"].as_object().unwrap() {
+                assert_eq!(&paths[path], item);
+            }
         }
     }
 
@@ -397,6 +986,10 @@ mod tests {
     #[test]
     fn spec_for_url_path_resolves_hosted_paths_only() {
         assert!(spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json").is_some());
+        assert_eq!(
+            spec_for_url_path("/api/v1/catalog-specs/api-firecrawl/openapi.json"),
+            spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json")
+        );
         assert!(spec_for_url_path("/api/v1/catalog-specs/elevenlabs/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/twilio/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/lark-bot/openapi.json").is_some());

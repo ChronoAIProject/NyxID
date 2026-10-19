@@ -12,6 +12,8 @@ import {
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
+import { ServiceIcon } from "@/components/service-icon";
+import { SERVICE_ICONS } from "@/components/service-icons";
 import { formatDate, sanitizeAvatarUrl } from "@/lib/utils";
 import {
   Card,
@@ -81,7 +83,7 @@ export function ProviderCard({
           ? "border-primary/30 bg-primary/5"
           : needsAttention
             ? "border-warning/30 bg-warning/5"
-            : "transition-colors duration-300 hover:border-white/[0.15]"
+            : "transition-colors duration-300 hover:border-hairline-strong"
       }
     >
       <CardHeader className="pb-3">
@@ -97,21 +99,21 @@ export function ProviderCard({
                     : "bg-muted"
             }`}
           >
-            {provider.icon_url ? (
-              <img
-                src={provider.icon_url}
-                alt={provider.name}
-                className="h-4 w-4 rounded"
+            {provider.icon_url || SERVICE_ICONS[provider.slug] ? (
+              <ServiceIcon
+                slug={provider.slug}
+                iconUrl={provider.icon_url}
+                size="sm"
               />
             ) : hasBrand ? (
-              <span className={`text-[13px] font-bold ${brand.textClass}`}>
+              <span className={`text-13 font-bold ${brand.textClass}`}>
                 {brand.initial}
               </span>
             ) : (
               <KeyRound
                 className={`h-5 w-5 ${
                   isConnected && !needsAttention
-                    ? "text-primary"
+                    ? "text-primary-text"
                     : needsAttention
                       ? "text-warning"
                       : "text-muted-foreground"
@@ -137,7 +139,7 @@ export function ProviderCard({
               {llmStatus?.status === "ready" && (
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-10">
                 {provider.provider_type === "api_key"
                   ? "API Key"
                   : provider.provider_type === "device_code"
@@ -174,17 +176,17 @@ export function ProviderCard({
                 Connected {formatDate(token.connected_at)}
               </span>
               {token.label && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   {token.label}
                 </span>
               )}
               {token.gateway_url && (
-                <span className="truncate text-xs text-muted-foreground/70">
+                <span className="truncate text-xs text-text-tertiary">
                   {token.gateway_url}
                 </span>
               )}
               {token.expires_at && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   Expires {formatDate(token.expires_at)}
                 </span>
               )}
@@ -226,7 +228,7 @@ export function ProviderCard({
                     href={provider.documentation_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-0.5 text-xs text-primary hover:underline"
+                    className="inline-flex items-center gap-0.5 text-xs text-primary-text hover:underline"
                   >
                     Docs
                     <ExternalLink className="h-2.5 w-2.5" />
@@ -234,7 +236,7 @@ export function ProviderCard({
                 )}
               </div>
               {connectHint && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   {connectHint}
                 </span>
               )}

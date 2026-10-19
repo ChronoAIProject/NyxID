@@ -29,7 +29,7 @@ Add a service from the catalog (`SLUG`) or a fully custom endpoint (`--custom`).
 - `--scope <scopes>` — extra OAuth scopes on top of the provider's defaults (repeatable).
 - `--oauth-client-id` / `--oauth-client-secret-env` — bring-your-own OAuth app credentials (Lark / Feishu / X).
 - `--via-node <node-id>` — route through a [credential node](/docs/cli/guides/credential-node).
-- `--openapi-spec-url <url>` — OpenAPI spec for endpoint discovery (`""` opts out of the catalog default).
+- `--openapi-spec-url <url>` — OpenAPI spec (JSON or YAML) for endpoint discovery (`""` opts out of the catalog default).
 - `--org <id|slug|name>` — create the service under an organization (admin only).
 - `--terminal` — skip the browser wizard; `--no-wait` — remote-pair mode (resume with `nyxid pairing resume`).
 

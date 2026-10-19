@@ -33,6 +33,29 @@ export function AppRoot() {
 }
 ```
 
+To request an additional allowed OAuth scope or service after the user has
+already authorized the app, pass the core SDK's incremental options through
+the same hook:
+
+```tsx
+function AddAccessButton() {
+  const { loginWithRedirect } = useNyxID();
+  return (
+    <button onClick={() => void loginWithRedirect({
+      includeGrantedScopes: true,
+      scope: "email",
+      requestedServiceIds: ["USER_SERVICE_UUID"],
+    })}>
+      Add access
+    </button>
+  );
+}
+```
+
+Omit `scope` for a service-only request or `requestedServiceIds` for a
+scope-only request. Handle the callback with the core SDK and verify the
+resulting grant before enabling the new capability.
+
 ## Publish
 
 ```bash

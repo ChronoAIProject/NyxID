@@ -1,0 +1,885 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Telnyx API",
+    "version": "v2-nyxid-overlay",
+    "description": "NyxID-hosted overlay for Telnyx AI inference, assistants, speech, messaging, and calling. Paths are relative to /v2. Incoming webhooks and call media streams require a separate application receiver."
+  },
+  "servers": [
+    {
+      "url": "https://api.telnyx.com/v2"
+    }
+  ],
+  "paths": {
+    "/ai/openai/models": {
+      "get": {
+        "operationId": "list_models",
+        "summary": "List available Telnyx AI models.",
+        "x-aevatar-tool": {
+          "name": "list_models",
+          "description": "List available Telnyx AI models.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/openai/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Generate a Telnyx OpenAI-compatible chat completion.",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Generate a Telnyx OpenAI-compatible chat completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "Model ID returned by list_models."
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "role": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "description": "Text or an array of OpenAI-compatible content parts."
+                        }
+                      },
+                      "required": [
+                        "role"
+                      ]
+                    }
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "tool_choice": {
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "auto",
+                      "required"
+                    ]
+                  },
+                  "response_format": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "messages"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/openai/embeddings": {
+      "post": {
+        "operationId": "create_embeddings",
+        "summary": "Create embedding vectors with a Telnyx model.",
+        "x-aevatar-tool": {
+          "name": "create_embeddings",
+          "description": "Create embedding vectors with a Telnyx model.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "input": {
+                    "description": "A string, array of strings, token array, or array of token arrays."
+                  },
+                  "encoding_format": {
+                    "type": "string",
+                    "enum": [
+                      "float",
+                      "base64"
+                    ]
+                  },
+                  "dimensions": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "model",
+                  "input"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/openai/responses": {
+      "post": {
+        "operationId": "create_response",
+        "summary": "Generate a Telnyx OpenAI-compatible response.",
+        "x-aevatar-tool": {
+          "name": "create_response",
+          "description": "Generate a Telnyx OpenAI-compatible response.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "input": {
+                    "description": "Text or OpenAI-compatible input items."
+                  },
+                  "instructions": {
+                    "type": "string"
+                  },
+                  "conversation": {
+                    "type": "string",
+                    "description": "Optional Telnyx conversation ID from create_conversation; omit for a stateless response."
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  },
+                  "reasoning": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/assistants": {
+      "get": {
+        "operationId": "list_assistants",
+        "summary": "List AI assistants on the connected Telnyx account.",
+        "x-aevatar-tool": {
+          "name": "list_assistants",
+          "description": "List AI assistants on the connected Telnyx account.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_assistant",
+        "summary": "Create a Telnyx AI assistant.",
+        "x-aevatar-tool": {
+          "name": "create_assistant",
+          "description": "Create a Telnyx AI assistant.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "instructions": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "voice_settings": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "telephony_settings": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "messaging_settings": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "name",
+                  "instructions"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/assistants/{assistant_id}": {
+      "get": {
+        "operationId": "get_assistant",
+        "summary": "Get a Telnyx AI assistant configuration.",
+        "x-aevatar-tool": {
+          "name": "get_assistant",
+          "description": "Get a Telnyx AI assistant configuration.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "assistant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/ai/conversations": {
+      "post": {
+        "operationId": "create_conversation",
+        "summary": "Create a Telnyx AI conversation for assistant chat or persisted responses.",
+        "x-aevatar-tool": {
+          "name": "create_conversation",
+          "description": "Create a Telnyx AI conversation for assistant chat or persisted responses.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/assistants/{assistant_id}/chat": {
+      "post": {
+        "operationId": "chat_with_assistant",
+        "summary": "Send a message to a Telnyx assistant, which may execute its configured tools.",
+        "x-aevatar-tool": {
+          "name": "chat_with_assistant",
+          "description": "Send a message to a Telnyx assistant, which may execute its configured tools.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "assistant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "conversation_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "stream": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "content",
+                  "conversation_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/conversations/{conversation_id}/messages": {
+      "get": {
+        "operationId": "get_conversation_messages",
+        "summary": "Get messages from a Telnyx AI conversation.",
+        "x-aevatar-tool": {
+          "name": "get_conversation_messages",
+          "description": "Get messages from a Telnyx AI conversation.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/text-to-speech/voices": {
+      "get": {
+        "operationId": "list_voices",
+        "summary": "List available Telnyx text-to-speech voices.",
+        "x-aevatar-tool": {
+          "name": "list_voices",
+          "description": "List available Telnyx text-to-speech voices.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional TTS provider, such as telnyx."
+          }
+        ]
+      }
+    },
+    "/text-to-speech/speech": {
+      "post": {
+        "operationId": "generate_speech",
+        "summary": "Generate speech audio with Telnyx. Binary audio is returned by default.",
+        "x-aevatar-tool": {
+          "name": "generate_speech",
+          "description": "Generate speech audio with Telnyx. Binary audio is returned by default.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/pcm": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "voice": {
+                    "type": "string",
+                    "description": "Provider, model, and voice shorthand, for example Telnyx.Ultra.<voice_id>."
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "language": {
+                    "type": "string"
+                  },
+                  "text_type": {
+                    "type": "string",
+                    "enum": [
+                      "text",
+                      "ssml"
+                    ]
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "enum": [
+                      "binary_output",
+                      "base64_output"
+                    ]
+                  },
+                  "telnyx": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages": {
+      "post": {
+        "operationId": "send_message",
+        "summary": "Send an SMS or MMS message through the connected Telnyx account.",
+        "x-aevatar-tool": {
+          "name": "send_message",
+          "description": "Send an SMS or MMS message through the connected Telnyx account.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "description": "Configured sending number, short code, or alphanumeric sender ID."
+                  },
+                  "to": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Required for SMS."
+                  },
+                  "messaging_profile_id": {
+                    "type": "string"
+                  },
+                  "media_urls": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "SMS",
+                      "MMS"
+                    ]
+                  }
+                },
+                "required": [
+                  "to"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/{id}": {
+      "get": {
+        "operationId": "get_message",
+        "summary": "Get a Telnyx message and delivery status.",
+        "x-aevatar-tool": {
+          "name": "get_message",
+          "description": "Get a Telnyx message and delivery status.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/calls": {
+      "post": {
+        "operationId": "dial_call",
+        "summary": "Place an outbound Telnyx voice call.",
+        "x-aevatar-tool": {
+          "name": "dial_call",
+          "description": "Place an outbound Telnyx voice call.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "connection_id": {
+                    "type": "string",
+                    "description": "Telnyx Voice API connection ID."
+                  },
+                  "from": {
+                    "type": "string",
+                    "description": "Authorized caller ID in E.164 format."
+                  },
+                  "to": {
+                    "type": "string",
+                    "description": "Destination phone number or SIP URI."
+                  },
+                  "timeout_secs": {
+                    "type": "integer"
+                  },
+                  "time_limit_secs": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "connection_id",
+                  "from",
+                  "to"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calls/{call_control_id}": {
+      "get": {
+        "operationId": "get_call_status",
+        "summary": "Get the status of a Telnyx voice call.",
+        "x-aevatar-tool": {
+          "name": "get_call_status",
+          "description": "Get the status of a Telnyx voice call.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "call_control_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "telnyxBearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "telnyxBearerAuth": []
+    }
+  ]
+}

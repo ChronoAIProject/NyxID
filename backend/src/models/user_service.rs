@@ -13,6 +13,12 @@ pub struct UserService {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<crate::models::service_change_event::ServiceChangeSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_change: Option<crate::models::service_change_event::ServiceChangeSummary>,
     /// Proxy path slug (e.g., "llm-openai", "my-custom-api")
     pub slug: String,
     /// FK to UserEndpoint
@@ -20,6 +26,9 @@ pub struct UserService {
     /// FK to UserApiKey (None for no-auth auto-connected services)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
+    /// Selected credential source. Absent preserves legacy resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// "bearer" | "header" | "query" | "basic" | "none"
     pub auth_method: String,
     /// Header name or query param name (e.g., "Authorization", "x-api-key", "key")
@@ -27,6 +36,9 @@ pub struct UserService {
     /// Optional: populated when auto-provisioned from catalog
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
+    /// User-selected image URL, overriding the built-in catalog glyph in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
     /// Optional: route requests through this node agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -145,14 +157,19 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "llm-openai".to_string(),
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("svc-id".to_string()),
+            icon_url: Some("https://example.com/icon.svg".to_string()),
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
@@ -184,6 +201,7 @@ mod tests {
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.node_priority, restored.node_priority);
+        assert_eq!(svc.icon_url, restored.icon_url);
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.identity_propagation_mode, "headers");
         assert!(restored.identity_include_user_id);
@@ -195,14 +213,19 @@ mod tests {
     #[test]
     fn bson_defaults() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "header".to_string(),
             auth_key_name: "X-API-Key".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -246,14 +269,19 @@ mod tests {
     #[test]
     fn bson_identity_defaults() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -304,14 +332,19 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_api_key() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "auto-svc".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -352,14 +385,19 @@ mod tests {
     #[test]
     fn user_service_preexisting_documents_deserialize_missing_state_version_as_zero() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "legacy".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),

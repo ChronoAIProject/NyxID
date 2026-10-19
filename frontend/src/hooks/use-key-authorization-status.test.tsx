@@ -3,6 +3,8 @@ import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useKeyAuthorizationStatus } from "./use-keys";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
 
@@ -24,6 +26,7 @@ function harness() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useAuthStore.setState({ user: { id: "owner" } as User });
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -107,10 +110,11 @@ describe("useKeyAuthorizationStatus", () => {
 
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({
-        queryKey: ["keys"],
+        queryKey: ["keys", "list", "owner"],
         exact: true,
       }),
     );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["keys", "k1", "owner"], exact: true });
   });
 
   it("does not touch the list while still pending", async () => {
@@ -125,7 +129,7 @@ describe("useKeyAuthorizationStatus", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(invalidate).not.toHaveBeenCalledWith({
-      queryKey: ["keys"],
+      queryKey: ["keys", "list", "owner"],
       exact: true,
     });
   });

@@ -1,3 +1,4 @@
+import { NyxAgentHttpFixtures } from "@/lib/assistant/nyxagent-http-fixtures";
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import {
   activeTaskFixture,
@@ -10,10 +11,18 @@ import { matchAssistantHttpScenario } from "@/lib/assistant/assistant-http-scena
 import { trimChatTitle } from "@/lib/assistant/chat-session-state";
 import type { StoredChatMessage } from "@/lib/assistant/chat-types";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
+import { createMockConnectReply } from "@/lib/assistant/mock-setup-journeys";
 
 type JsonRecord = Record<string, unknown>;
 
 export interface AssistantHttpFixtureFaults {
+  readonly nyxagentEnabled?: boolean;
+  /** Enable the existing voice feature for the mock user's composer preview. */
+  readonly voiceEnabled?: boolean;
+  /** Enable internal model and reasoning controls for this mock user. */
+  readonly modelControlsEnabled?: boolean;
+  /** Serve NyxAgent's live change stream (otherwise it answers 404). */
+  readonly nyxagentLive?: boolean;
   readonly historyDelayMs?: number;
   readonly historyErrorStatus?: number;
   readonly sendSilent?: boolean;
@@ -50,7 +59,10 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-function errorResponse(status: number, faults: AssistantHttpFixtureFaults): Response {
+function errorResponse(
+  status: number,
+  faults: AssistantHttpFixtureFaults,
+): Response {
   const sessionCode = faults.unauthorized === "coded" ? 1001 : 0;
   return json(
     {
@@ -177,9 +189,7 @@ function chunkedSse(
       streamController = controller;
       const payloads = [
         ": fixture keepalive\n\n",
-        ...frames.map((frame, index) =>
-          sseLine(JSON.stringify(frame), index),
-        ),
+        ...frames.map((frame, index) => sseLine(JSON.stringify(frame), index)),
       ];
       payloads.splice(Math.min(4, payloads.length), 0, "data: {malformed\n\n");
       payloads.push("data: [DONE]\r\n\r\n");
@@ -223,6 +233,7 @@ function chunkedSse(
 
 export class AssistantHttpFixtureWorld {
   readonly conversations = new Map<string, AssistantFixtureConversation>();
+  private nyxagent = new NyxAgentHttpFixtures();
   private nextConversation = 1;
   private nextTurn = 1;
   private stateEnvelopeOffset = 0;
@@ -235,6 +246,8 @@ export class AssistantHttpFixtureWorld {
 
   readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
     const faults = globalThis.__nyxidAssistantHttpFaults ?? {};
+    const nyxagent = await this.nyxagent.handler({ endpoint, init });
+    if (nyxagent) return nyxagent;
     const method = init.method ?? "GET";
     if (faults.unauthorized && faults.historyErrorStatus === 401) {
       return errorResponse(401, faults);
@@ -256,11 +269,17 @@ export class AssistantHttpFixtureWorld {
         this.stateEnvelopeOffset += 1;
         return json(value);
       }
-      const conversation = this.conversations.get(decodeURIComponent(stateMatch[1]));
-      return conversation ? json(stateSnapshot(conversation)) : json({ status: "not_found" }, 404);
+      const conversation = this.conversations.get(
+        decodeURIComponent(stateMatch[1]),
+      );
+      return conversation
+        ? json(stateSnapshot(conversation))
+        : json({ status: "not_found" }, 404);
     }
 
-    const conversationMatch = /^\/assistant\/conversations\/([^/?]+)$/.exec(endpoint);
+    const conversationMatch = /^\/assistant\/conversations\/([^/?]+)$/.exec(
+      endpoint,
+    );
     if (conversationMatch?.[1]) {
       const conversationId = decodeURIComponent(conversationMatch[1]);
       if (method === "DELETE") {
@@ -375,18 +394,35 @@ export class AssistantHttpFixtureWorld {
         ? matchAssistantHttpScenario(prompt, scenarioState.disabledScenarioIds)
         : null;
     if (isText) {
-      conversation.messages.push(storedMessage(`user-message-${turnId}`, turnId, "user", prompt));
+      conversation.messages.push(
+        storedMessage(`user-message-${turnId}`, turnId, "user", prompt),
+      );
       if (conversation.meta.title === "New chat") {
-        conversation.meta = { ...conversation.meta, title: trimChatTitle(prompt) };
+        conversation.meta = {
+          ...conversation.meta,
+          title: trimChatTitle(prompt),
+        };
       }
     }
-    scenarioState.noteActivity({ scenarioId: scenario?.id ?? null, matched: Boolean(scenario), at: Date.now() });
-    const output = scenario?.reply ?? FIXTURE_REPLY;
+    scenarioState.noteActivity({
+      scenarioId: scenario?.id ?? null,
+      matched: Boolean(scenario),
+      at: Date.now(),
+    });
+    const output = scenario?.id === "connect-github"
+      ? createMockConnectReply()
+      : scenario?.reply ?? FIXTURE_REPLY;
     conversation.stateVersion += 1;
     conversation.progressSequence += 1;
-    conversation.activeTurn = { turnId, taskId: `task-${turnId}`, status: "active" };
+    conversation.activeTurn = {
+      turnId,
+      taskId: `task-${turnId}`,
+      status: "active",
+    };
     conversation.latestTurn = null;
-    conversation.activeTask = activeTaskFixture(actorId, turnId);
+    conversation.activeTask = scenario?.includeActionFrames === false
+      ? null
+      : activeTaskFixture(actorId, turnId);
     conversation.meta = {
       ...conversation.meta,
       messageCount: conversation.messages.length,
@@ -402,7 +438,10 @@ export class AssistantHttpFixtureWorld {
       conversation.pendingInput = null;
       conversation.pendingApproval = null;
       conversation.stateVersion += 1;
-      conversation.progressSequence = Math.max(conversation.progressSequence + 1, 101);
+      conversation.progressSequence = Math.max(
+        conversation.progressSequence + 1,
+        101,
+      );
       if (status === "completed" && !faults.sendSilent) {
         conversation.messages.push(
           storedMessage(messageId, turnId, "assistant", output),
@@ -422,10 +461,18 @@ export class AssistantHttpFixtureWorld {
 
     const frames = faults.sendSilent
       ? [
-          { runStarted: { actorId, runId: turnId, commandId: `command-${turnId}` } },
+          {
+            runStarted: {
+              actorId,
+              runId: turnId,
+              commandId: `command-${turnId}`,
+            },
+          },
           { runFinished: { actorId, runId: turnId, result: {} } },
         ]
-      : assistantFixtureFrames(actorId, turnId, messageId, output);
+      : assistantFixtureFrames(actorId, turnId, messageId, output, {
+          includeActionFrames: scenario?.includeActionFrames,
+        });
     return chunkedSse(frames, {
       signal,
       firstDelayMs:
@@ -440,7 +487,11 @@ export class AssistantHttpFixtureWorld {
 
 export function installAssistantHttpFixtures(): AssistantHttpFixtureWorld {
   const globals = globalThis as typeof globalThis & AssistantHttpFixtureGlobals;
-  const world = globals.__nyxidAssistantHttpFixtureWorld ?? new AssistantHttpFixtureWorld();
+  if (!globals.__nyxidAssistantHttpFixtureWorld && new URLSearchParams(window.location.search).get("mock") === "1") {
+    useAssistantMockScenariosStore.getState().setEnabled(true);
+  }
+  const world =
+    globals.__nyxidAssistantHttpFixtureWorld ?? new AssistantHttpFixtureWorld();
   globals.__nyxidAssistantHttpFixtureWorld = world;
   globalThis.__nyxidAssistantHttpMock = world.handler;
   useAssistantMockScenariosStore.getState().setEngineState("ready");

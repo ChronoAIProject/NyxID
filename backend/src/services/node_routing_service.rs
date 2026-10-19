@@ -213,14 +213,14 @@ async fn resolve_from_user_service(
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Option<String>> {
-    let user_service: Option<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": owner_user_id,
-            "catalog_service_id": service_id,
-            "is_active": true,
-        })
-        .await?;
+    let user_service: Option<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "catalog_service_id": service_id,
+                "is_active": true,
+            })
+            .await?;
 
     let node_id = match user_service.and_then(|s| s.node_id) {
         Some(nid) if !nid.is_empty() => nid,
@@ -262,14 +262,14 @@ pub async fn user_service_has_explicit_node(
     service_id: &str,
 ) -> AppResult<bool> {
     let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
-    let user_service: Option<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": owner_user_id,
-            "catalog_service_id": service_id,
-            "is_active": true,
-        })
-        .await?;
+    let user_service: Option<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "catalog_service_id": service_id,
+                "is_active": true,
+            })
+            .await?;
 
     Ok(user_service
         .and_then(|s| s.node_id)
@@ -351,17 +351,17 @@ async fn load_dispatchable_user_service_catalog_ids_filtered<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "catalog_service_id": { "$type": "string" },
-            "node_id": { "$type": "string", "$ne": "" },
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "catalog_service_id": { "$type": "string" },
+                "node_id": { "$type": "string", "$ne": "" },
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     if services.is_empty() {
         return Ok(vec![]);
@@ -495,6 +495,9 @@ mod tests {
 
     fn node(node_id: &str, owner_id: &str) -> Node {
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: node_id.to_string(),
             user_id: owner_id.to_string(),
             name: format!("test-node-{node_id}"),
@@ -527,6 +530,9 @@ mod tests {
         let mut node = node(node_id, "owner-1");
         let expired_at = Utc::now() - chrono::Duration::seconds(1);
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
+            http_signature_v2: false,
+            proxy_upload_v1: false,
+            http_cancellation: false,
             instance_name: "other-backend".to_string(),
             generation_id: "generation-b".to_string(),
             connection_id: "connection-b".to_string(),

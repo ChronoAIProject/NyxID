@@ -26,7 +26,8 @@ function nullableNumber<T extends z.ZodType<number>>(schema: T) {
     .transform((value) => value ?? null);
 }
 
-const authDevicePreviewSchema = z.object({
+export const authDevicePreviewSchema = z.object({
+  supports_grant_choice: z.boolean().optional().default(false),
   client_label: boundedNullableString(64),
   client_user_agent: boundedNullableString(256),
   client_ip: boundedNullableString(64),

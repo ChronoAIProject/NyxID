@@ -38,6 +38,7 @@ export const nodePendingCredentialInjectionMethodSchema = z.enum([
   "header",
   "query-param",
   "path-prefix",
+  "ifttt-webhook",
 ]);
 
 export const pushNodeCredentialSchema = z.object({

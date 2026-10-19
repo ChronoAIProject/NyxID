@@ -1,3 +1,12 @@
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+  sameValue,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -14,9 +23,15 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { useAuthStore } from "@/stores/auth-store";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
-import type { RotateSecretResponse } from "@/types/service-accounts";
+import type {
+  RotateSecretResponse,
+  ServiceAccount,
+  UpdateServiceAccountRequest,
+} from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
@@ -51,23 +66,56 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { CurationGrantSection } from "./curation-grant-section";
+import { KeyReadGrantSection } from "./key-read-grant-section";
+
+type AccessState = NonNullable<UpdateServiceAccountRequest["expected_access"]>;
+
+function accessState(account: ServiceAccount): AccessState {
+  return {
+    role_ids: [...account.role_ids],
+    allowed_scopes: account.allowed_scopes,
+    purpose: account.purpose ?? "general",
+    platform_protected: account.platform_protected ?? false,
+    catalog_scope_authorized: account.catalog_scope_authorized ?? false,
+    is_active: account.is_active,
+  };
+}
+
+function hasCatalogScopes(scopes: string): boolean {
+  return scopes
+    .split(/\s+/)
+    .some(
+      (scope) =>
+        scope === "catalog:skills:read" || scope === "catalog:skills:write",
+    );
+}
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
 interface ServiceAccountDetailProps {
   readonly saId: string;
-  readonly backTo: { readonly to: string; readonly label: string };
+  readonly backTo: { readonly to: string; readonly label: string; readonly search?: { tab: string } };
   readonly showProviderSections?: boolean;
+  readonly showKeyReadGrantSection?: boolean;
 }
 
-export function ServiceAccountDetail({
+export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
+  return <ServiceAccountDetailEditor key={props.saId} {...props} />;
+}
+
+function ServiceAccountDetailEditor({
   saId,
   backTo,
   showProviderSections = true,
+  showKeyReadGrantSection = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
-  const { data: sa, isLoading, error } = useServiceAccount(saId);
+  const { data: sa, isLoading } = useServiceAccount(saId);
+  useBreadcrumbLabel(sa?.name);
+  const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
+  const [editAccess, setEditAccess] = useState<AccessState | null>(null);
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -110,9 +158,17 @@ export function ServiceAccountDetail({
     },
   });
 
-  function openEditDialog() {
-    if (!sa) return;
-    form.reset({
+  const normalize = (value: UpdateServiceAccountFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    role_ids: normalizedSet((value.role_ids ?? "").split(",")),
+    rate_limit_override: value.rate_limit_override
+      ? Number(value.rate_limit_override)
+      : null,
+  });
+  function editValues(): UpdateServiceAccountFormData {
+    if (!sa) return form.getValues();
+    return {
       name: sa.name,
       description: sa.description ?? "",
       allowed_scopes: sa.allowed_scopes,
@@ -121,60 +177,85 @@ export function ServiceAccountDetail({
         ? String(sa.rate_limit_override)
         : "",
       is_active: sa.is_active,
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!sa) return;
+    form.reset(editValues());
+    setEditAccess(accessState(sa));
+    editReview.cancel();
     setEditOpen(true);
   }
 
-  async function handleEdit(formData: UpdateServiceAccountFormData) {
-    if (!sa) return;
-
-    const newRoleIds = formData.role_ids
-      ? formData.role_ids
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
-    const roleIdsChanged =
-      JSON.stringify([...sa.role_ids].sort()) !==
-      JSON.stringify([...newRoleIds].sort());
-
-    const newRate = formData.rate_limit_override
-      ? Number(formData.rate_limit_override)
-      : null;
-
-    const payload = {
-      ...(formData.name !== sa.name ? { name: formData.name } : {}),
-      ...((formData.description ?? "") !== (sa.description ?? "")
-        ? { description: formData.description || undefined }
-        : {}),
-      ...(formData.allowed_scopes !== sa.allowed_scopes
-        ? { allowed_scopes: formData.allowed_scopes }
-        : {}),
-      ...(roleIdsChanged ? { role_ids: newRoleIds } : {}),
-      ...(newRate !== sa.rate_limit_override
-        ? { rate_limit_override: newRate }
-        : {}),
-      ...(formData.is_active !== sa.is_active
-        ? { is_active: formData.is_active }
-        : {}),
-    };
-
-    if (Object.keys(payload).length === 0) {
-      setEditOpen(false);
-      return;
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0] & {
+      before: object;
+      grantsCatalog: boolean;
     }
-
-    try {
-      await updateMutation.mutateAsync({ saId, data: payload });
+  >(
+    async ({ before: _before, grantsCatalog, ...variables }) => {
+      void _before;
+      const result = await updateMutation.mutateAsync(variables);
+      if (grantsCatalog && !result.catalog_scope_authorized) {
+        throw new Error(
+          "Catalog access was not granted. Reload the account and verify the backend supports catalog scope grants.",
+        );
+      }
       toast.success("Service account updated");
       setEditOpen(false);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update service account");
-      }
+    },
+    (pending) =>
+      !sa ||
+      hasFieldConflicts(
+        pending.before,
+        normalize(editValues()),
+        pending.data,
+      ) ||
+      (pending.data.expected_access !== undefined &&
+        !sameValue(pending.data.expected_access, accessState(sa))),
+    saId,
+  );
+
+  const grantsCatalog =
+    isAdmin &&
+    editAccess !== null &&
+    !editAccess.catalog_scope_authorized &&
+    hasCatalogScopes(form.watch("allowed_scopes"));
+
+  function handleEdit(formData: UpdateServiceAccountFormData) {
+    const before = normalize(
+      form.formState.defaultValues as UpdateServiceAccountFormData,
+    );
+    const patch = changedFields(before, normalize(formData));
+    const changes = describeChanges(before, patch);
+    if (grantsCatalog) {
+      patch.allowed_scopes = formData.allowed_scopes;
+      changes.push({
+        field: "Catalog access",
+        before: "Not granted through scopes",
+        after:
+          "Selected catalog scopes authorize all current and future catalog services; managed by platform administrators",
+      });
     }
+    const changesAccess =
+      patch.allowed_scopes !== undefined ||
+      patch.role_ids !== undefined ||
+      patch.is_active !== undefined;
+    editReview.review(
+      {
+        saId,
+        data: {
+          ...patch,
+          ...(changesAccess && editAccess
+            ? { expected_access: editAccess }
+            : {}),
+        },
+        before,
+        grantsCatalog,
+      },
+      changes,
+    );
   }
 
   async function handleRotateSecret() {
@@ -210,7 +291,7 @@ export function ServiceAccountDetail({
     try {
       await deleteMutation.mutateAsync(saId);
       toast.success("Service account deleted");
-      void navigate({ to: backTo.to });
+      void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (err) {
       toast.error(
         err instanceof ApiError
@@ -222,7 +303,7 @@ export function ServiceAccountDetail({
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !sa) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -232,20 +313,20 @@ export function ServiceAccountDetail({
     );
   }
 
-  if (error || !sa) {
+  if (!sa) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
         <h3 className="mb-2 text-lg font-semibold">
           Service account not found
         </h3>
-        <p className="mb-4 text-[12px] text-muted-foreground">
+        <p className="mb-4 text-12 text-muted-foreground">
           The service account you are looking for does not exist or has been
           deleted.
         </p>
         <Button
           variant="outline"
-          onClick={() => void navigate({ to: backTo.to })}
+          onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
         >
           Back to {backTo.label}
         </Button>
@@ -261,14 +342,18 @@ export function ServiceAccountDetail({
         actions={
           <>
             <Button variant="outline" onClick={openEditDialog}>
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+              <ButtonIcon>
+                <Pencil className="h-3 w-3" />
+              </ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
               onClick={() => setConfirmAction("delete")}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <ButtonIcon variant="destructive">
+                <Trash2 className="h-3 w-3 text-destructive" />
+              </ButtonIcon>
               Delete
             </Button>
           </>
@@ -278,10 +363,7 @@ export function ServiceAccountDetail({
       <DetailSection title="Service Account Information">
         <DetailRow label="ID" value={sa.id} copyable />
         <DetailRow label="Client ID" value={sa.client_id} copyable />
-        <DetailRow
-          label="Secret Prefix"
-          value={`${sa.secret_prefix}...`}
-        />
+        <DetailRow label="Secret Prefix" value={`${sa.secret_prefix}...`} />
         <DetailRow
           label="Status"
           value={sa.is_active ? "Active" : "Inactive"}
@@ -312,11 +394,34 @@ export function ServiceAccountDetail({
 
       <Separator />
 
+      {sa.purpose === "catalog_editor" && (
+        <DetailSection title="Catalog access">
+          <DetailRow
+            label="Catalog coverage"
+            value="All current and future catalog services"
+          />
+          <p className="px-4 py-3 text-12 text-muted-foreground">
+            {sa.catalog_scope_authorized
+              ? "Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit."
+              : "This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes."}
+          </p>
+        </DetailSection>
+      )}
+
+      {sa.purpose !== "catalog_editor" && (
+        <>
+          {showProviderSections && sa.purpose === "curation" && (
+            <CurationGrantSection account={sa} />
+          )}
+          {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+        </>
+      )}
+
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
       ) : (
         <DetailSection title="Provider Connections">
-          <p className="px-4 py-3 text-[12px] text-muted-foreground">
+          <p className="px-4 py-3 text-12 text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
             <code className="rounded bg-muted px-1 font-mono text-xs">
@@ -332,20 +437,25 @@ export function ServiceAccountDetail({
       <DetailSection title="Actions">
         <div className="flex flex-wrap gap-2 px-4 py-3">
           <Button variant="outline" onClick={openRotateDialog}>
-            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <RefreshCw className="h-3 w-3" />
+            </ButtonIcon>
             Rotate Secret
           </Button>
           <Button
             variant="outline"
             onClick={() => setConfirmAction("revoke-tokens")}
           >
-            <ButtonIcon><Ban className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Ban className="h-3 w-3" />
+            </ButtonIcon>
             Revoke Tokens
           </Button>
         </div>
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -360,7 +470,7 @@ export function ServiceAccountDetail({
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -397,8 +507,9 @@ export function ServiceAccountDetail({
                   <FormItem>
                     <FormLabel>Allowed Scopes</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="e.g. openid proxy:* llm:proxy"
+                      <ServiceAccountScopePicker
+                        ownerId={sa.owner_id ?? sa.created_by}
+                        serviceAccountId={sa.id}
                         {...field}
                       />
                     </FormControl>
@@ -442,7 +553,7 @@ export function ServiceAccountDetail({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel className="text-[12px] font-medium">
+                      <FormLabel className="text-12 font-medium">
                         Active
                       </FormLabel>
                       <p className="text-xs text-muted-foreground">
@@ -466,7 +577,15 @@ export function ServiceAccountDetail({
                 >
                   Cancel
                 </Button>
-                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
+                <Button
+                  variant="primary"
+                  type="submit"
+                  isLoading={updateMutation.isPending}
+                  disabled={
+                    (!form.formState.isDirty && !grantsCatalog) ||
+                    updateMutation.isPending
+                  }
+                >
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -500,7 +619,7 @@ export function ServiceAccountDetail({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-[12px] text-amber-700 dark:text-amber-400">
+                  <p className="text-12 text-amber-700 dark:text-amber-400">
                     Save this secret now. It cannot be retrieved later.
                   </p>
                 </div>
@@ -511,7 +630,7 @@ export function ServiceAccountDetail({
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 rounded bg-muted px-2 py-1 text-[12px] font-mono break-all">
+                  <code className="flex-1 rounded bg-muted px-2 py-1 text-12 font-mono break-all">
                     {rotateResult.client_secret}
                   </code>
                   <Button

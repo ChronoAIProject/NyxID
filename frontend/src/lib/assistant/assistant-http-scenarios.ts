@@ -3,14 +3,24 @@ export interface AssistantHttpScenario {
   readonly pattern: RegExp;
   readonly reply: string;
   readonly serviceSlug?: string;
+  /** Link journeys need a settled text response instead of auto-resolved controls. */
+  readonly includeActionFrames?: boolean;
 }
 
 export const assistantHttpScenarios: readonly AssistantHttpScenario[] = [
   {
     id: "connect-github",
     pattern: /connect (to )?(my )?github/i,
-    reply: "I can prepare a brokered GitHub connection for this account.",
-    serviceSlug: "api-github",
+    reply:
+      "I can prepare a brokered GitHub connection for this account. [Connect GitHub](/connect/nyx_clk_fixture_github)",
+    includeActionFrames: false,
+  },
+  {
+    id: "setup-telegram",
+    pattern: /set up (a )?telegram bot/i,
+    reply:
+      "Open [Telegram bot setup](/channel-bots/connect/telegram?label=Helper) to create your bot. I will continue here when it exists.",
+    includeActionFrames: false,
   },
   {
     id: "github-issues",

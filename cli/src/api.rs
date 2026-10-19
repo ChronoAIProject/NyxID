@@ -35,35 +35,6 @@ mod device_login_user_agent_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthDeviceRequestBody {
-    pub client_label: Option<String>,
-    pub client_user_agent: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct AuthDeviceRequestResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthDevicePollBody {
-    pub device_code: String,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct AuthDevicePollResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub token_type: String,
-    pub expires_in: u64,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorEnvelope {
     pub error: String,
@@ -113,21 +84,37 @@ impl ApiError {
     pub fn body_json(&self) -> Option<&serde_json::Value> {
         self.body_json.as_ref()
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthDeviceRequestOutcome {
-    Created(AuthDeviceRequestResponse),
-    NotSupported,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthDevicePollOutcome {
-    Delivered(AuthDevicePollResponse),
-    Error(ErrorEnvelope),
+    pub(crate) fn request_path(&self) -> &str {
+        self.request
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or("")
+    }
 }
 
 pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
+    build_cli_http_client_with_redirect(profile, reqwest::redirect::Policy::limited(10))
+}
+
+pub fn build_credential_http_client(profile: Option<&str>) -> Result<Client> {
+    build_cli_http_client_with_redirect(profile, reqwest::redirect::Policy::none())
+}
+
+fn build_cli_http_client_with_redirect(
+    profile: Option<&str>,
+    redirect: reqwest::redirect::Policy,
+) -> Result<Client> {
+    cli_http_client_builder(profile)?
+        .redirect(redirect)
+        .build()
+        .context("Failed to build HTTP client")
+}
+
+fn cli_http_client_builder(profile: Option<&str>) -> Result<reqwest::ClientBuilder> {
     // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
     // BOTH conditions are true:
     //   (a) the operator has configured a telemetry DSN (or opted into
@@ -172,7 +159,7 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     let user_consented =
         crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
 
-    let mut builder = Client::builder()
+    let mut builder = crate::tls::client_builder()?
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10));
 
@@ -189,72 +176,61 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
         builder = builder.default_headers(default_headers);
     }
 
-    builder.build().context("Failed to build HTTP client")
+    Ok(builder)
 }
 
-pub async fn auth_device_request(
-    base_url: &str,
-    body: &AuthDeviceRequestBody,
-    profile: Option<&str>,
-) -> Result<AuthDeviceRequestOutcome> {
-    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
-    let url = format!("{base}/auth/device/request");
-    let client = build_cli_http_client(profile)?;
-
-    let resp = client
-        .post(&url)
-        .json(body)
-        .send()
-        .await
-        .context("POST /auth/device/request failed")?;
-
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(AuthDeviceRequestOutcome::NotSupported);
+fn credential_request_url(address: &str) -> Result<url::Url> {
+    let address =
+        url::Url::parse(address).map_err(|_| anyhow::anyhow!("Invalid credential request URL"))?;
+    if address.host().is_none()
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || address.fragment().is_some()
+    {
+        bail!("Credential request URL must have a host without userinfo or a fragment");
     }
-
-    if resp.status().is_success() {
-        let body = resp
-            .json::<AuthDeviceRequestResponse>()
-            .await
-            .context("Failed to parse response from /auth/device/request")?;
-        return Ok(AuthDeviceRequestOutcome::Created(body));
+    if address.scheme() != "https"
+        && !(address.scheme() == "http"
+            && matches!(
+                address.host_str(),
+                Some("localhost" | "127.0.0.1" | "[::1]")
+            ))
+    {
+        bail!(
+            "Credential request requires HTTPS; HTTP is allowed only for localhost, 127.0.0.1, or [::1]"
+        );
     }
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    bail!("/auth/device/request failed (HTTP {status}): {body}");
+    Ok(address)
 }
 
-pub async fn auth_device_poll(
-    base_url: &str,
-    body: &AuthDevicePollBody,
+/// Build a client for a credential-bearing API or authentication request.
+/// Remote destinations require HTTPS; local development bypasses proxies.
+pub(crate) fn build_credential_http_client_for_url(
     profile: Option<&str>,
-) -> Result<AuthDevicePollOutcome> {
-    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
-    let url = format!("{base}/auth/device/poll");
-    let client = build_cli_http_client(profile)?;
+    address: &str,
+) -> Result<Client> {
+    credential_http_client_builder(profile, address)?
+        .build()
+        .context("Failed to build credential request client")
+}
 
-    let resp = client
-        .post(&url)
-        .json(body)
-        .send()
-        .await
-        .context("POST /auth/device/poll failed")?;
-
-    if resp.status().is_success() {
-        let body = resp
-            .json::<AuthDevicePollResponse>()
-            .await
-            .context("Failed to parse response from /auth/device/poll")?;
-        return Ok(AuthDevicePollOutcome::Delivered(body));
+fn credential_http_client_builder(
+    profile: Option<&str>,
+    address: &str,
+) -> Result<reqwest::ClientBuilder> {
+    let address = credential_request_url(address)?;
+    let local_http = address.scheme() == "http";
+    let mut builder = cli_http_client_builder(profile)?
+        .https_only(!local_http)
+        .redirect(reqwest::redirect::Policy::none());
+    if local_http {
+        // Match the existing provider OAuth policy: local credentials bypass
+        // proxies, localhost is pinned, and no redirect can leave this origin.
+        builder = builder
+            .no_proxy()
+            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
     }
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    match serde_json::from_str::<ErrorEnvelope>(&body) {
-        Ok(error) => Ok(AuthDevicePollOutcome::Error(error)),
-        Err(_) => bail!("/auth/device/poll failed (HTTP {status}): {body}"),
-    }
+    Ok(builder)
 }
 
 pub struct ApiClient {
@@ -267,6 +243,8 @@ pub struct ApiClient {
     /// a specific API key and must not silently fall back to the user's
     /// saved session access token on the `profile`.
     refresh_disabled: bool,
+    agent_key_auth: bool,
+    login_generation: Option<String>,
 }
 
 impl ApiClient {
@@ -279,24 +257,64 @@ impl ApiClient {
         access_token: String,
         profile: Option<String>,
     ) -> Result<Self> {
-        let client = build_cli_http_client(profile.as_deref())?;
+        let client = build_credential_http_client_for_url(profile.as_deref(), base_url)?;
+        let agent_key_auth = crate::auth::agent_key::is_agent_key_profile(profile.as_deref())
+            && crate::auth::read_saved_token_for(profile.as_deref()).as_deref()
+                == Some(access_token.as_str());
+        let login_generation = crate::auth::login_generation(profile.as_deref());
 
         Ok(Self {
             client,
             base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
             access_token,
             profile,
-            refresh_disabled: false,
+            refresh_disabled: agent_key_auth,
+            agent_key_auth,
+            login_generation,
         })
     }
 
     pub fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        if let Some(resolved) = crate::auth::resolve_access_token_override(auth) {
+            let base_url = auth.resolved_base_url()?;
+            return Ok(Self {
+                client: build_credential_http_client_for_url(auth.profile.as_deref(), &base_url)?,
+                base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
+                access_token: resolved.token,
+                profile: auth.profile.clone(),
+                refresh_disabled: true,
+                agent_key_auth: false,
+                login_generation: None,
+            });
+        }
+        let _lock = crate::auth::acquire_refresh_lock(auth.profile.as_deref())?;
         let base_url = auth.resolved_base_url()?;
         let resolved = crate::auth::resolve_access_token_with_source(auth)?;
         let allow_refresh = resolved.source.allows_session_refresh();
+        if allow_refresh || resolved.source == crate::auth::AccessTokenSource::SavedAgentKey {
+            crate::auth::validate_profile_destination(auth.profile.as_deref(), &base_url)?;
+        }
         let mut client = Self::new_with_profile(&base_url, resolved.token, auth.profile.clone())?;
         client.refresh_disabled = !allow_refresh;
+        client.agent_key_auth = resolved.source == crate::auth::AccessTokenSource::SavedAgentKey;
         Ok(client)
+    }
+
+    /// Bind the hidden-release command's reads, token refresh and writes to
+    /// the same HTTPS/loopback transport before making any request. A saved
+    /// session renews on 401 through this client; caller-selected keys never do.
+    pub fn from_auth_with_credential_transport(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        let mut api = Self::from_auth(auth)?;
+        api.require_credential_transport()?;
+        Ok(api)
+    }
+
+    /// Install HTTPS/exact-loopback and no-redirect guarantees before reading
+    /// or transmitting a caller-supplied downstream credential.
+    pub fn require_credential_transport(&mut self) -> Result<()> {
+        self.client =
+            build_credential_http_client_for_url(self.profile.as_deref(), self.base_url_root())?;
+        Ok(())
     }
 
     /// Build a client after validating the saved session up front.
@@ -327,10 +345,31 @@ impl ApiClient {
         self
     }
 
+    pub fn for_credential_transfer(mut self) -> Result<Self> {
+        self.client =
+            credential_http_client_builder(self.profile.as_deref(), self.base_url_root())?
+                .timeout(std::time::Duration::from_secs(75))
+                .build()
+                .context("Failed to build credential transfer client")?;
+        self.refresh_disabled = true;
+        Ok(self)
+    }
+
     pub fn base_url_root(&self) -> &str {
         self.base_url
             .strip_suffix("/api/v1")
             .unwrap_or(&self.base_url)
+    }
+
+    pub fn is_agent_key_auth(&self) -> bool {
+        self.agent_key_auth
+    }
+
+    fn reject_agent_key_unauthorized(&self, response: &reqwest::Response) -> Result<()> {
+        if self.agent_key_auth && response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            bail!("{}", crate::auth::agent_key::REJECTED_MESSAGE);
+        }
+        Ok(())
     }
 
     /// Attempt to refresh the access token using the saved refresh token.
@@ -339,13 +378,28 @@ impl ApiClient {
     /// source of truth) and owns only the token I/O: read the saved refresh
     /// token, persist the rotated pair, and update this client's in-memory copy.
     async fn try_refresh_token(&mut self) -> bool {
+        let client = self.client.clone();
+        self.try_refresh_token_with_client(&client).await
+    }
+
+    async fn try_refresh_token_with_client(&mut self, client: &Client) -> bool {
         if self.refresh_disabled {
             return false;
         }
         let profile = self.profile.as_deref();
         // Same cross-process discipline as the preflight: lock, then prefer a
         // token another process already rotated over presenting a stale one.
-        let _lock = crate::auth::acquire_refresh_lock(profile).ok();
+        let Ok(_lock) = crate::auth::acquire_refresh_lock(profile) else {
+            return false;
+        };
+        if self.login_generation != crate::auth::login_generation(profile)
+            || crate::auth::validate_profile_destination(profile, self.base_url_root()).is_err()
+        {
+            return false;
+        }
+        if crate::auth::agent_key::is_agent_key_profile(profile) {
+            return false;
+        }
         if let Some(access_token) = crate::auth::fresh_access_token_on_disk(profile)
             && access_token != self.access_token
         {
@@ -357,12 +411,8 @@ impl ApiClient {
             None => return false,
         };
 
-        match crate::auth::exchange_refresh_token(
-            &self.client,
-            self.base_url_root(),
-            &refresh_token,
-        )
-        .await
+        match crate::auth::exchange_refresh_token(client, self.base_url_root(), &refresh_token)
+            .await
         {
             crate::auth::RefreshExchange::Renewed {
                 access_token,
@@ -391,6 +441,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -420,6 +471,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             resp = self
                 .client
@@ -451,6 +503,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -481,6 +534,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("PUT {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -512,6 +566,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("PATCH {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -528,20 +583,32 @@ impl ApiClient {
     }
 
     pub async fn delete_empty(&mut self, path: &str) -> Result<()> {
+        self.delete_empty_with_headers(path, reqwest::header::HeaderMap::new())
+            .await
+    }
+
+    pub async fn delete_empty_with_headers(
+        &mut self,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
             .client
             .delete(&url)
             .bearer_auth(&self.access_token)
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
                 .delete(&url)
                 .bearer_auth(&self.access_token)
+                .headers(headers)
                 .send()
                 .await
                 .with_context(|| format!("DELETE {path} failed (retry)"))?;
@@ -572,6 +639,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -586,6 +654,63 @@ impl ApiClient {
         Self::handle_response(resp, path).await
     }
 
+    pub async fn delete_with_body<T: DeserializeOwned, B: Serialize>(
+        &mut self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{path}", self.base_url);
+        let client = build_credential_http_client_for_url(self.profile.as_deref(), &url)?;
+        let resp = client
+            .delete(url.clone())
+            .bearer_auth(&self.access_token)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?;
+        self.reject_agent_key_unauthorized(&resp)?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.try_refresh_token_with_client(&client).await
+        {
+            let resp = client
+                .delete(url)
+                .bearer_auth(&self.access_token)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("DELETE {path} failed (retry)"))?;
+            return Self::handle_response(resp, path).await;
+        }
+        Self::handle_response(resp, path).await
+    }
+
+    /// Delete an item whose API returns either legacy 204 or a JSON result.
+    pub async fn delete_optional<T: DeserializeOwned>(&mut self, path: &str) -> Result<Option<T>> {
+        let url = format!("{}{path}", self.base_url);
+        let mut resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?;
+
+        self.reject_agent_key_unauthorized(&resp)?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            resp = self
+                .client
+                .delete(&url)
+                .bearer_auth(&self.access_token)
+                .send()
+                .await
+                .with_context(|| format!("DELETE {path} failed (retry)"))?;
+        }
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Self::handle_response(resp, path).await.map(Some)
+    }
+
     #[allow(dead_code)]
     pub async fn post_empty<B: Serialize>(&mut self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url);
@@ -598,6 +723,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -687,6 +813,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("Proxy request to {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !self.refresh_disabled {
             // Drain the auth error body before refreshing so reqwest can reuse
             // the connection for the refresh + retry sequence.
@@ -735,7 +862,7 @@ pub async fn anonymous_post(
 ) -> Result<serde_json::Value> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client(profile)?;
+    let client = build_credential_http_client_for_url(profile, &url)?;
 
     let resp = client
         .post(&url)
@@ -764,7 +891,7 @@ pub async fn anonymous_post_empty(
 ) -> Result<()> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client(profile)?;
+    let client = build_credential_http_client_for_url(profile, &url)?;
 
     let resp = client
         .post(&url)
@@ -876,6 +1003,242 @@ mod tests {
         }
     }
 
+    #[test]
+    fn credential_request_urls_allow_https_and_only_exact_loopback_http() {
+        for address in [
+            "https://service.example/api/v1/service-preferences/hidden",
+            "http://localhost:3001/api/v1/service-preferences/hidden",
+            "http://127.0.0.1:3001/api/v1/service-preferences/hidden",
+            "http://[::1]:3001/api/v1/service-preferences/hidden",
+        ] {
+            assert!(super::credential_request_url(address).is_ok(), "{address}");
+            assert!(
+                ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_ok(),
+                "{address}"
+            );
+        }
+        for address in [
+            "http://service.example/hidden",
+            "http://192.168.1.1/hidden",
+            "http://127.0.0.2/hidden",
+            "http://localhost.service.example/hidden",
+            "http://127.0.0.1.service.example/hidden",
+            "http://[::ffff:127.0.0.1]/hidden",
+            "https://user:dummy@service.example/hidden",
+            "http://localhost@service.example/hidden",
+            "https://service.example/hidden#fragment",
+            "file:///hidden",
+            "ftp://localhost/hidden",
+            "/api/v1/hidden",
+            "//service.example/hidden",
+            "service.example/hidden",
+        ] {
+            assert!(super::credential_request_url(address).is_err(), "{address}");
+            assert!(
+                ApiClient::new(address, uuid::Uuid::new_v4().to_string()).is_err(),
+                "{address}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_credentials_cannot_bypass_transport_validation() {
+        for address in [
+            "http://service.example",
+            "http://127.0.0.2",
+            "https://user:dummy@service.example",
+        ] {
+            let mut auth = auth_args(address.to_string());
+            auth.access_token = Some(uuid::Uuid::new_v4().to_string());
+            assert!(ApiClient::from_auth(&auth).is_err(), "{address}");
+            assert!(
+                ApiClient::from_auth_checked(&auth).await.is_err(),
+                "{address}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_paths_cannot_override_the_validated_destination() {
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        let paths = [
+            "/transport-fixture".to_string(),
+            "relative-fixture".to_string(),
+            format!("//{}/transport-fixture", target.address()),
+            format!("{}/transport-fixture", target.uri()),
+            format!("/../../..//{}/transport-fixture", target.address()),
+        ];
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(paths.len() as u64)
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&target)
+            .await;
+        let mut api = ApiClient::new(
+            &format!("{}/prefix", origin.uri()),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        for route in paths {
+            api.get_value(&route).await.unwrap();
+        }
+        origin.verify().await;
+        target.verify().await;
+    }
+
+    #[tokio::test]
+    async fn api_and_credential_transfer_refuse_body_preserving_redirects() {
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/transport-fixture"))
+            .respond_with(ResponseTemplate::new(307).insert_header("Location", target.uri()))
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(0)
+            .mount(&target)
+            .await;
+        for transfer in [false, true] {
+            let mut api = ApiClient::new(&origin.uri(), uuid::Uuid::new_v4().to_string()).unwrap();
+            if transfer {
+                api = api.for_credential_transfer().unwrap();
+            }
+            let error = api
+                .post::<serde_json::Value, _>(
+                    "/transport-fixture",
+                    &serde_json::json!({
+                        "credential": uuid::Uuid::new_v4().to_string(),
+                    }),
+                )
+                .await
+                .expect_err("credential-bearing requests must not redirect");
+            assert_eq!(
+                error.downcast_ref::<ApiError>().unwrap().status(),
+                reqwest::StatusCode::TEMPORARY_REDIRECT
+            );
+        }
+        origin.verify().await;
+        target.verify().await;
+    }
+
+    #[tokio::test]
+    async fn loopback_api_and_credential_transfer_bypass_environment_proxies() {
+        const CHILD_ORIGIN: &str = "NYXID_TEST_LOOPBACK_PROXY_ORIGIN";
+        const TEST_NAME: &str =
+            "api::tests::loopback_api_and_credential_transfer_bypass_environment_proxies";
+
+        if let Some(address) = std::env::var_os(CHILD_ORIGIN) {
+            let address = address.into_string().expect("child origin must be UTF-8");
+            for transfer in [false, true] {
+                let mut api = ApiClient::new(&address, uuid::Uuid::new_v4().to_string()).unwrap();
+                if transfer {
+                    api = api.for_credential_transfer().unwrap();
+                }
+                assert_eq!(
+                    api.get_value("/transport-fixture").await.unwrap(),
+                    serde_json::json!({"direct": true})
+                );
+            }
+            return;
+        }
+
+        let origin = MockServer::start().await;
+        let proxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/transport-fixture"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"direct": true})),
+            )
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(0)
+            .mount(&proxy)
+            .await;
+
+        // Other HTTP tests read proxy variables without taking env_lock. Set
+        // them only in a child running this exact test, so parallel clients
+        // cannot accidentally send their requests to this test's proxy.
+        let home = tempfile::tempdir().expect("child home");
+        let address = origin.uri().replace("127.0.0.1", "localhost");
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD_ORIGIN, &address)
+            .env("HOME", home.path())
+            .env("HTTP_PROXY", proxy.uri())
+            .env("http_proxy", proxy.uri())
+            .env("HTTPS_PROXY", proxy.uri())
+            .env("https_proxy", proxy.uri())
+            .env("ALL_PROXY", proxy.uri())
+            .env("all_proxy", proxy.uri())
+            .env("NO_PROXY", "")
+            .env("no_proxy", "")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.output())
+            .await
+            .expect("proxy isolation child timed out")
+            .expect("failed to run proxy isolation child");
+        assert!(
+            output.status.success(),
+            "proxy isolation child failed: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        origin.verify().await;
+        proxy.verify().await;
+        assert!(
+            origin
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| {
+                    request
+                        .headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.starts_with("Bearer ") && value.len() > 7)
+                })
+        );
+        assert!(proxy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anonymous_auth_posts_reject_remote_cleartext_before_sending() {
+        let body = serde_json::json!({});
+        let error = super::anonymous_post(
+            "http://cleartext-fixture.invalid",
+            "/auth/register",
+            &body,
+            None,
+        )
+        .await
+        .expect_err("registration requires secure transport");
+        assert!(error.to_string().contains("requires HTTPS"));
+        let error = super::anonymous_post_empty(
+            "http://cleartext-fixture.invalid",
+            "/auth/reset-password",
+            &body,
+            None,
+        )
+        .await
+        .expect_err("password reset requires secure transport");
+        assert!(error.to_string().contains("requires HTTPS"));
+    }
+
     #[tokio::test]
     async fn non_success_response_preserves_typed_error_details() {
         let server = MockServer::start().await;
@@ -958,7 +1321,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME/env mutations across tests
     async fn caller_selected_credentials_never_refresh_or_switch_identity() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
         let _env = EnvGuard::set(&[
@@ -992,7 +1355,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_refreshes_expired_token_and_retries() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 
@@ -1049,7 +1412,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_strips_client_authorization_header() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 

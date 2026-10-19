@@ -39,6 +39,9 @@ export async function openAssistant(
   const search = new URLSearchParams({ mock: "1" });
   if (options.conversation) search.set("c", options.conversation);
   await page.goto(`/assistant?${search.toString()}`);
+  // The earlier engines' sidebar leads with "New chat"; the NyxAgent sidebar
+  // has none (chats start from the NyxBot home or an agent) and leads with
+  // its agents instead.
   await expect
     .poll(
       async () =>
@@ -46,6 +49,7 @@ export async function openAssistant(
           .getByRole("button", { name: "New chat", exact: true })
           .first()
           .isVisible()) ||
+        (await page.getByRole("button", { name: "New agent", exact: true }).first().isVisible()) ||
         (await page.getByRole("button", { name: "Open chats" }).isVisible()),
       { timeout: 20_000 },
     )
@@ -60,7 +64,7 @@ export function thread(page: Page) {
 export function composerInput(page: Page) {
   // Placeholder flips to "Assistant is working..." while a turn runs; match
   // the element, not one placeholder value.
-  return page.locator("textarea");
+  return page.locator("[data-composer-textbox]");
 }
 
 export async function sendMessage(page: Page, text: string): Promise<void> {
@@ -118,8 +122,15 @@ export async function observeTurnContinuity(
         );
       };
       const inspect = () => {
-        const visibleText =
-          document.querySelector("main")?.innerText ?? document.body.innerText;
+        // A contenteditable composer has text nodes; drafts are not transcript echoes.
+        const root = document.querySelector("main") ?? document.body;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const text: string[] = [];
+        while (walker.nextNode()) {
+          const parent = walker.currentNode.parentElement;
+          if (parent && !parent.closest("[data-composer-band]") && isVisible(parent)) text.push(walker.currentNode.textContent ?? "");
+        }
+        const visibleText = text.join("");
         if (visibleText.includes(message)) probe.sawMessage = true;
         const emptyStateVisible =
           visibleText.includes("Start a new conversation") ||

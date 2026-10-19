@@ -17,6 +17,8 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   bot_bearer: "Bot Token (Discord)",
   body: "JSON Body Injection",
   path: "Path Prefix",
+  ifttt_webhook: "IFTTT Webhooks",
+  ifttt_mcp: "IFTTT OAuth",
   oidc: "OIDC / SSO",
   ssh: "SSH Tunnel",
   header: "API Key",
@@ -55,6 +57,29 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
     description:
       "Lets the app access your email address and verification state.",
     risk: "medium",
+  },
+  roles: {
+    title: "Read your roles and permissions",
+    description:
+      "Lets the app see your assigned roles and the permissions they grant.",
+    risk: "medium",
+  },
+  groups: {
+    title: "Read your groups",
+    description: "Lets the app see which groups you belong to.",
+    risk: "medium",
+  },
+  proxy: {
+    title: "Use your connected services",
+    description:
+      "Lets the app send requests through NyxID to the services you authorize below.",
+    risk: "high",
+  },
+  machine: {
+    title: "Use selected Machines",
+    description:
+      "Lets the app use commands and files only on the Machines you explicitly approve. It cannot purchase, pause, resume or delete resources.",
+    risk: "high",
   },
   offline_access: {
     title: "Long-lived access",

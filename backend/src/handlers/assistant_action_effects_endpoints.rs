@@ -254,12 +254,11 @@ async fn resolve_endpoint_owner(
     actor: &str,
     endpoint_id: &str,
 ) -> AppResult<String> {
-    let endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(mongodb::bson::doc! { "_id": endpoint_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    let endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": endpoint_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
     let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_read() {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
@@ -331,12 +330,11 @@ async fn commit_endpoint_delete(
     receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
     was_in_progress: bool,
 ) -> AppResult<bool> {
-    let exists = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(mongodb::bson::doc! { "_id": endpoint_id })
-        .await?
-        .is_some();
+    let exists =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": endpoint_id })
+            .await?
+            .is_some();
     if !exists {
         if was_in_progress {
             mark_completed(&state.db, &receipt).await?;
@@ -394,14 +392,12 @@ async fn commit_external_key_delete(
     receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
     was_in_progress: bool,
 ) -> AppResult<bool> {
-    let exists = state
-        .db
-        .collection::<crate::models::user_api_key::UserApiKey>(
-            crate::models::user_api_key::COLLECTION_NAME,
-        )
-        .find_one(mongodb::bson::doc! { "_id": external_key_id })
-        .await?
-        .is_some();
+    let exists = crate::services::service_history::collection::<
+        crate::models::user_api_key::UserApiKey,
+    >(&state.db, crate::models::user_api_key::COLLECTION_NAME)
+    .find_one(mongodb::bson::doc! { "_id": external_key_id })
+    .await?
+    .is_some();
     if !exists {
         if was_in_progress {
             mark_completed(&state.db, &receipt).await?;
@@ -953,6 +949,7 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
             id: key_id.to_string(),
@@ -991,6 +988,7 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://example.com/revoke".to_string(),
                 auth: "basic".to_string(),
@@ -1011,9 +1009,13 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

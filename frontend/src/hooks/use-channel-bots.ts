@@ -1,27 +1,30 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { channelBotHealthSchema } from "@/schemas/channel-bot-health";
+import { api, apiClient } from "@/lib/api-client";
+import { mutationCreditsDenial } from "@/lib/credits-denial";
 import type {
   ChannelBotListResponse,
   ChannelBotDetail,
   ChannelBotItem,
   CreateChannelBotRequest,
   CreateChannelBotResponse,
+  TelegramBotProfile,
   UpdateChannelBotRequest,
+  VerifyChannelBotResponse,
 } from "@/types/channels";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Query keys
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Bots are scoped either to the caller's personal space or to an org. We
-// encode that in the query key so React Query caches personal and per-org
-// results independently; switching the scope selector must not return stale
-// data from the previous scope.
+// Cache aggregate, personal and per-org lists independently.
 
 const CHANNEL_BOTS_ROOT = ["channel-bots"] as const;
 
 export const channelBotsQueryKeys = {
   all: CHANNEL_BOTS_ROOT,
+  allScopes: () => [...CHANNEL_BOTS_ROOT, "list", "all"] as const,
   list: (orgId: string | null) =>
     [...CHANNEL_BOTS_ROOT, "list", orgId ?? "personal"] as const,
   detail: (id: string) => [...CHANNEL_BOTS_ROOT, "detail", id] as const,
@@ -31,20 +34,31 @@ export const channelBotsQueryKeys = {
 // Queries
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface UseChannelBotsParams {
-  /** `null` or omitted lists personal bots. When set, lists bots owned by the
-   *  given org (caller must be admin of the org). */
-  readonly orgId?: string | null;
-}
+type UseChannelBotsParams =
+  | {
+      /** `null` or omitted lists personal bots. When set, lists bots owned by
+       * the given org (caller must be admin of the org). */
+      readonly orgId?: string | null;
+      readonly scope?: never;
+    }
+  | {
+      readonly scope: "all" | "user";
+      readonly orgId?: never;
+    };
 
 export function useChannelBots(params: UseChannelBotsParams = {}) {
   const orgId = params.orgId ?? null;
   return useQuery({
-    queryKey: channelBotsQueryKeys.list(orgId),
+    queryKey:
+      params.scope === "all"
+        ? channelBotsQueryKeys.allScopes()
+        : channelBotsQueryKeys.list(orgId),
     queryFn: async (): Promise<readonly ChannelBotItem[]> => {
-      const path = orgId
-        ? `/channel-bots?org_id=${encodeURIComponent(orgId)}`
-        : "/channel-bots";
+      const path = params.scope
+        ? `/channel-bots?scope=${params.scope}`
+        : orgId
+          ? `/channel-bots?org_id=${encodeURIComponent(orgId)}`
+          : "/channel-bots";
       const res = await api.get<ChannelBotListResponse>(path);
       return res.bots;
     },
@@ -58,6 +72,39 @@ export function useChannelBot(id: string) {
       return api.get<ChannelBotDetail>(`/channel-bots/${id}`);
     },
     enabled: Boolean(id),
+    refetchInterval: (query) =>
+      query.state.data?.last_verification?.status === "pending" ? 2000 : false,
+  });
+}
+
+/** Diagnostics and the server's recovery recommendation for one bot. */
+export function useChannelBotHealth(id: string) {
+  return useQuery({
+    queryKey: [...channelBotsQueryKeys.detail(id), "health"],
+    queryFn: async () =>
+      channelBotHealthSchema.parse(
+        await api.get(`/channel-bots/${encodeURIComponent(id)}/health`),
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+/** Re-registers the platform webhook subscription and returns fresh health. */
+export function useResubscribeChannelBot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) =>
+      channelBotHealthSchema.parse(
+        await api.post(
+          `/channel-bots/${encodeURIComponent(id)}/resubscribe`,
+          {},
+        ),
+      ),
+    onSettled: (_data, _error, id) => {
+      void queryClient.invalidateQueries({
+        queryKey: channelBotsQueryKeys.detail(id),
+      });
+    },
   });
 }
 
@@ -66,19 +113,36 @@ export function useChannelBot(id: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function useCreateChannelBot() {
+  const link = useChannelConnectLinkContext();
   const queryClient = useQueryClient();
 
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
-      return api.post<CreateChannelBotResponse>("/channel-bots", data);
+      return link
+        ? api.post<CreateChannelBotResponse>(
+            "/channel-connect-links/complete",
+            { ...data, token: link.token },
+          )
+        : api.post<CreateChannelBotResponse>("/channel-bots", data);
     },
-    onSuccess: () => {
-      // Invalidate every list regardless of scope -- the bot could have
-      // landed in any scope the user is viewing.
-      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    onSettled: () => {
+      // Registration can save a bot before webhook setup fails.
+      return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
+  });
+}
+
+/** Looks up a Telegram bot token's name. The token is sent only to NyxID. */
+export function useTelegramBotProfile() {
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (botToken: string): Promise<TelegramBotProfile> =>
+      api.post<TelegramBotProfile>("/channel-bots/telegram/profile", {
+        bot_token: botToken,
+      }),
   });
 }
 
@@ -86,8 +150,12 @@ export function useDeleteChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      return api.delete<void>(`/channel-bots/${id}`);
+    mutationFn: async (
+      id: string,
+    ): Promise<{ webhook_cleanup?: string } | undefined> => {
+      return api.delete<{ webhook_cleanup?: string } | undefined>(
+        `/channel-bots/${id}`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
@@ -95,10 +163,17 @@ export function useDeleteChannelBot() {
   });
 }
 
-export function useUpdateChannelBot() {
+/**
+ * `creditsOwnerId` opts the save into the out-of-credits dialog (X event
+ * subscriptions can be billed). The failed save is never replayed.
+ */
+export function useUpdateChannelBot({
+  creditsOwnerId,
+}: { readonly creditsOwnerId?: string } = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
+    gcTime: 0,
     mutationFn: async ({
       id,
       data,
@@ -106,9 +181,21 @@ export function useUpdateChannelBot() {
       readonly id: string;
       readonly data: UpdateChannelBotRequest;
     }): Promise<ChannelBotDetail> => {
-      return api.patch<ChannelBotDetail>(`/channel-bots/${id}`, data);
+      return apiClient<ChannelBotDetail>(`/channel-bots/${id}`, {
+        method: "PATCH",
+        body: data,
+        ...(creditsOwnerId
+          ? {
+              creditsDenial: mutationCreditsDenial(
+                "channel-bot-update",
+                id,
+                creditsOwnerId,
+              ),
+            }
+          : {}),
+      });
     },
-    onSuccess: (_data, variables) => {
+    onSettled: (_data, _error, variables) => {
       void queryClient.invalidateQueries({
         queryKey: channelBotsQueryKeys.detail(variables.id),
       });
@@ -117,18 +204,28 @@ export function useUpdateChannelBot() {
   });
 }
 
-export function useVerifyChannelBot() {
+export function useVerifyChannelBot({
+  creditsOwnerId,
+}: { readonly creditsOwnerId?: string } = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      return api.post<void>(`/channel-bots/${id}/verify`);
-    },
-    onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({
-        queryKey: channelBotsQueryKeys.detail(id),
+    mutationFn: async (id: string): Promise<VerifyChannelBotResponse> => {
+      return apiClient<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`, {
+        method: "POST",
+        ...(creditsOwnerId
+          ? {
+              creditsDenial: mutationCreditsDenial(
+                "channel-bot-verify",
+                id,
+                creditsOwnerId,
+              ),
+            }
+          : {}),
       });
-      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    },
+    onSettled: () => {
+      return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }

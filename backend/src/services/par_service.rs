@@ -13,6 +13,7 @@ use crate::models::pushed_authorization_request::{
 /// inclusive logins room without violating the spec.
 pub const PAR_TTL_SECS: i64 = 60;
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn create_request(
     db: &mongodb::Database,
@@ -28,6 +29,44 @@ pub async fn create_request(
     resources: &[String],
     external_subject: Option<ExternalSubjectRef>,
     binding_grant_id: Option<&str>,
+) -> AppResult<(String, i64)> {
+    create_request_with_service_access(
+        db,
+        client_id,
+        response_type,
+        redirect_uri,
+        scope,
+        state,
+        code_challenge,
+        code_challenge_method,
+        nonce,
+        prompt,
+        resources,
+        external_subject,
+        binding_grant_id,
+        None,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_request_with_service_access(
+    db: &mongodb::Database,
+    client_id: &str,
+    response_type: &str,
+    redirect_uri: &str,
+    scope: Option<&str>,
+    state: Option<&str>,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+    nonce: Option<&str>,
+    prompt: Option<&str>,
+    resources: &[String],
+    external_subject: Option<ExternalSubjectRef>,
+    binding_grant_id: Option<&str>,
+    service_access_mode: Option<crate::models::consent::ServiceAccessMode>,
+    requested_service_ids: &[String],
 ) -> AppResult<(String, i64)> {
     let request_uri = generate_request_uri();
     let id = hash_request_uri(&request_uri);
@@ -48,6 +87,8 @@ pub async fn create_request(
         external_subject,
         binding_grant_id: binding_grant_id.map(String::from),
         resources: resources.to_vec(),
+        service_access_mode,
+        requested_service_ids: requested_service_ids.to_vec(),
         expires_at,
         created_at: now,
     };
@@ -100,6 +141,8 @@ mod tests {
             external_subject: None,
             binding_grant_id: None,
             resources: Vec::new(),
+            service_access_mode: None,
+            requested_service_ids: Vec::new(),
             expires_at: now - Duration::seconds(1),
             created_at: now - Duration::seconds(PAR_TTL_SECS + 1),
         };

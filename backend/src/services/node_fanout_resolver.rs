@@ -61,14 +61,14 @@ async fn resolve_primary_user_service_node(
     owner_user_id: &str,
     service_id: &str,
 ) -> AppResult<Option<String>> {
-    let user_service = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": owner_user_id,
-            "catalog_service_id": service_id,
-            "is_active": true,
-        })
-        .await?;
+    let user_service =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "catalog_service_id": service_id,
+                "is_active": true,
+            })
+            .await?;
 
     Ok(user_service
         .and_then(|service| service.node_id)
@@ -177,6 +177,9 @@ mod tests {
     fn test_node(owner_id: &str, status: NodeStatus) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: "fanout-node".to_string(),

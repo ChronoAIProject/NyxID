@@ -1,17 +1,27 @@
 {
   "name": "nyxid",
-  "description": "NyxID skills marketplace — credential brokering plus the synchronized Aevatar platform skill family.",
+  "description": "NyxID plugins: the hosted MCP connection and the CLI skill edition.",
   "owner": {
-    "name": "ChronoAIProject"
+    "name": "ChronoAI"
   },
   "plugins": [
     {
       "name": "nyxid",
-      "description": "Brokers downstream credentials through the NyxID CLI or authenticated Web API and bundles synchronized Aevatar platform skills for workflows, teams, services, schedules, channels, and managed Codex.",
-      "version": "0.8.7",
+      "description": "Connect services through NyxID's credential broker and call their APIs without exposing API keys or OAuth tokens to Claude.",
+      "version": "0.9.0",
+      "source": "./integrations/claude-plugin",
+      "author": {
+        "name": "ChronoAI"
+      },
+      "homepage": "https://nyx.chrono-ai.fun"
+    },
+    {
+      "name": "nyxid-cli",
+      "description": "CLI edition: NyxID skills for agents that drive the nyxid CLI or the authenticated Web API, plus the synchronized Aevatar platform skill family. For the hosted MCP connection, install the `nyxid` plugin.",
+      "version": "0.8.8",
       "source": "./",
       "author": {
-        "name": "ChronoAIProject"
+        "name": "ChronoAI"
       },
       "homepage": "https://github.com/ChronoAIProject/NyxID"
     }

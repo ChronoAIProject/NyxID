@@ -59,6 +59,46 @@ describe("TextBlock", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps same-origin channel setup links and removes unsupported query data", () => {
+    render(
+      <TextBlock
+        text={`[Set up Telegram](${window.location.origin}/channel-bots/connect/telegram?label=Helper&bot_token=secret)`}
+      />,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Set up Telegram" }),
+    ).toHaveAttribute(
+      "href",
+      `${window.location.origin}/channel-bots/connect/telegram?label=Helper`,
+    );
+  });
+
+  it("preserves the validated return target on server-generated setup links", () => {
+    const returnTo = `nyxa-${"a".repeat(32)}`;
+    render(
+      <TextBlock
+        text={`[Set up Telegram](${window.location.origin}/channel-bots/connect/telegram?label=Helper&return_to=${returnTo})`}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Set up Telegram" })).toHaveAttribute(
+      "href",
+      `${window.location.origin}/channel-bots/connect/telegram?label=Helper&return_to=${returnTo}`,
+    );
+  });
+
+  it.each([
+    `return_to=nyxa-${"a".repeat(32)}&return_to=nyxa-${"b".repeat(32)}`,
+    `return_to=nyxg-${"a".repeat(32)}&return_to=nyxg-${"b".repeat(32)}`,
+    `return_to=nyxa-${"a".repeat(32)}&%72eturn_to=nyxg-${"b".repeat(32)}`,
+    `%72eturn_to=nyxa-${"a".repeat(32)}`,
+    `return_to=%6eyxa-${"a".repeat(32)}`,
+    `return_to=%20nyxa-${"a".repeat(32)}%20`,
+  ])("drops noncanonical return targets from rendered links: %s", (query) => {
+    render(<TextBlock text={`[Set up Telegram](${window.location.origin}/channel-bots/connect/telegram?label=Helper&${query})`} />);
+    expect(screen.getByRole("link", { name: "Set up Telegram" })).toHaveAttribute("href", `${window.location.origin}/channel-bots/connect/telegram?label=Helper`);
+  });
+
   it("accepts allowed schemes case-insensitively and keeps fragments local", () => {
     render(
       <TextBlock
@@ -94,9 +134,9 @@ describe("TextBlock", () => {
       screen.getByRole("columnheader", { name: "Service" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "Stripe" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("columnheader", { name: "Service" }),
-    ).toHaveStyle({ textAlign: "left" });
+    expect(screen.getByRole("columnheader", { name: "Service" })).toHaveStyle({
+      textAlign: "left",
+    });
     expect(screen.getByRole("columnheader", { name: "Scope" })).toHaveStyle({
       textAlign: "right",
     });
@@ -186,9 +226,7 @@ describe("TextBlock", () => {
     expect(container.querySelector("iframe")).not.toBeInTheDocument();
     expect(container.querySelector("img")).not.toBeInTheDocument();
     expect(container.querySelector("[onerror]")).not.toBeInTheDocument();
-    expect(container).toHaveTextContent(
-      '&lt;img src=x onerror="alert(2)"&gt;',
-    );
+    expect(container).toHaveTextContent('&lt;img src=x onerror="alert(2)"&gt;');
     expect(
       screen.queryByRole("link", { name: "unsafe" }),
     ).not.toBeInTheDocument();
@@ -269,8 +307,9 @@ describe("TextBlock", () => {
     const paragraphs = container.querySelectorAll("p");
     expect(caret).toBeInTheDocument();
     expect(paragraphs).toHaveLength(2);
-    expect(paragraphs[1]?.nextElementSibling?.querySelector("table"))
-      .toBeInTheDocument();
+    expect(
+      paragraphs[1]?.nextElementSibling?.querySelector("table"),
+    ).toBeInTheDocument();
     expect(caret?.previousElementSibling?.tagName).toBe("DIV");
     expect(
       caret?.previousElementSibling?.querySelector("table"),

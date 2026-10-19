@@ -86,6 +86,7 @@ pub struct DeviceCodeApproveInput {
     pub org_id: Option<String>,
     pub label: Option<String>,
     pub default_services: Option<Vec<String>>,
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -103,6 +104,7 @@ pub struct DeviceOnboardInput {
     pub org_id: Option<String>,
     pub label: String,
     pub default_services: Option<Vec<String>>,
+    pub allow_auto_connected_services: bool,
     pub base_url: String,
 }
 

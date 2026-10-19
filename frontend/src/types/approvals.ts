@@ -85,6 +85,9 @@ export interface ApprovalGrantItem {
   readonly requester_id: string;
   readonly requester_label: string | null;
   readonly scope?: string | null;
+  readonly org_scoped: boolean;
+  readonly org_id?: string;
+  readonly org_name?: string;
   readonly granted_at: string;
   readonly expires_at: string;
 }

@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ChannelBotStatus, ChannelPlatform } from "@/types/channels";
+import type { ChannelBotStatus } from "@/types/channels";
 import {
   conversationTypeLabel,
-  platformLabel,
   statusBadgeVariant,
   statusLabel,
 } from "./channel-bot-detail.helpers";
@@ -56,32 +55,6 @@ describe("statusLabel", () => {
 
   it("echoes unknown statuses verbatim", () => {
     expect(statusLabel("archived" as ChannelBotStatus)).toBe("archived");
-  });
-});
-
-describe("platformLabel", () => {
-  it("labels telegram", () => {
-    expect(platformLabel("telegram")).toBe("Telegram");
-  });
-
-  it("labels discord", () => {
-    expect(platformLabel("discord")).toBe("Discord");
-  });
-
-  it("labels lark", () => {
-    expect(platformLabel("lark")).toBe("Lark");
-  });
-
-  it("labels feishu", () => {
-    expect(platformLabel("feishu")).toBe("Feishu");
-  });
-
-  it("labels slack", () => {
-    expect(platformLabel("slack")).toBe("Slack");
-  });
-
-  it("echoes unknown platforms verbatim", () => {
-    expect(platformLabel("matrix" as ChannelPlatform)).toBe("matrix");
   });
 });
 

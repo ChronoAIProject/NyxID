@@ -19,7 +19,11 @@ export function compactCompleteConnectLinkInput(
 ): CompleteConnectLinkInput | undefined {
   if (!values) return undefined;
   return Object.fromEntries(
-    Object.entries(values).filter(([, value]) => value.trim().length > 0),
+    Object.entries(values).filter(
+      ([, value]) =>
+        typeof value === "boolean" ||
+        (typeof value === "string" && value.trim().length > 0),
+    ),
   );
 }
 

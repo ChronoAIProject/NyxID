@@ -1,3 +1,5 @@
+import type { User } from "@/types/api";
+
 /**
  * Feature flag catalog — the single client-side source of truth for flag keys.
  *
@@ -16,10 +18,33 @@
  * every call site becomes compile-time checked.
  */
 export const FEATURE_FLAG = {
+  INVITATION_CODE: "auth:invitation-code",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
+  REMOTE_MACHINES: "experimental:remote-machines",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+  ASSISTANT_VOICE: "assistant:voice",
+  VOICE_GROK: "assistant:voice-grok",
+  VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
+  VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
+  NYXAGENT_ENGINE: "assistant:nyxagent-engine",
+  ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
+  ORG_AGENTS: "assistant:org-agents",
+  MACHINE_CAPABILITIES: "assistant:machine-capabilities",
+  MACHINE_CONTEXTS: "assistant:machine-contexts",
+  AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  AGENT_LEARNING: "assistant:agent-learning",
+  SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+  NYXBOT_ADAPTERS: "nyxbot:service-adapters",
+  NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
+  NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
+  NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
+  NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",
+  NYXBOT_GATEWAY_SLACK: "nyxbot:gateway-slack",
+  NYXBOT_GATEWAY_WHATSAPP: "nyxbot:gateway-whatsapp",
+  NYXBOT_GATEWAY_X: "nyxbot:gateway-x",
+  NYXBOT_GATEWAY_AURINKO: "nyxbot:gateway-aurinko",
 } as const;
 
 type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];
@@ -31,6 +56,13 @@ type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];
 export type FeatureFlag = [FeatureFlagKey] extends [never]
   ? string
   : FeatureFlagKey;
+
+export function userHasFeature(
+  user: Pick<User, "capabilities"> | null | undefined,
+  flag: FeatureFlag,
+): boolean {
+  return user?.capabilities?.enabled_features?.includes(flag) ?? false;
+}
 
 /** All flag keys as an array (iteration, validation, tests). */
 export const FEATURE_FLAG_KEYS = Object.values(FEATURE_FLAG) as FeatureFlag[];

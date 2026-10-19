@@ -45,19 +45,44 @@ export function useCreateAnonymousEndpoint(serviceId: string) {
 export function useUpdateAnonymousEndpoint(serviceId: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    onMutate: (variables) =>
+      queryClient.cancelQueries({
+        queryKey: [
+          "services",
+          variables.serviceId ?? serviceId,
+          "anonymous-endpoints",
+        ],
+      }),
     mutationFn: async ({
+      serviceId: targetServiceId = serviceId,
       ruleId,
       data,
     }: {
+      readonly serviceId?: string;
       readonly ruleId: string;
       readonly data: AnonymousEndpointUpdateData;
     }): Promise<AnonymousEndpointRule> => {
       return api.put<AnonymousEndpointRule>(
-        `/services/${serviceId}/anonymous-endpoints/${ruleId}`,
+        `/services/${targetServiceId}/anonymous-endpoints/${ruleId}`,
         data,
       );
     },
-    onSuccess: () => invalidateAnonymousEndpointQueries(queryClient, serviceId),
+    onSuccess: async (saved, variables) => {
+      await queryClient.cancelQueries({
+        queryKey: [
+          "services",
+          variables.serviceId ?? serviceId,
+          "anonymous-endpoints",
+        ],
+      });
+      const target = variables.serviceId ?? serviceId;
+      queryClient.setQueryData<readonly AnonymousEndpointRule[]>(
+        ["services", target, "anonymous-endpoints"],
+        (current) =>
+          current?.map((rule) => (rule.id === saved.id ? saved : rule)),
+      );
+      invalidateAnonymousEndpointQueries(queryClient, target);
+    },
   });
 }
 

@@ -370,6 +370,67 @@ mod tests {
     }
 
     #[test]
+    fn emit_event_excludes_chrono_sandbox_successes() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let client = test_client_with_sender(tx);
+
+        emit_event(
+            Some(&client),
+            "sandbox-user",
+            None,
+            &TelemetryContext::default(),
+            TelemetryEvent::ProxySuccess {
+                service_slug: "chrono-sandbox".into(),
+                method: "POST".into(),
+                status: 200,
+                latency_ms: 42,
+                auth_kind: "service_account",
+            },
+        );
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn emit_event_keeps_sandbox_errors_and_other_service_successes() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let client = test_client_with_sender(tx);
+
+        for event in [
+            TelemetryEvent::ProxyError {
+                service_slug: "chrono-sandbox".into(),
+                error_code: 8001,
+                status: 503,
+            },
+            TelemetryEvent::ProxySuccess {
+                service_slug: "chrono-storage-service".into(),
+                method: "DELETE".into(),
+                status: 200,
+                latency_ms: 42,
+                auth_kind: "service_account",
+            },
+        ] {
+            emit_event(
+                Some(&client),
+                "user-1",
+                None,
+                &TelemetryContext::default(),
+                event,
+            );
+        }
+
+        let error = rx.try_recv().expect("sandbox errors remain visible");
+        assert_eq!(error.event_name, "proxy.error");
+        assert_eq!(error.properties["service_slug"], "chrono-sandbox");
+        let success = rx.try_recv().expect("other services remain tracked");
+        assert_eq!(success.event_name, "proxy.success");
+        assert_eq!(success.properties["service_slug"], "chrono-storage-service");
+    }
+
+    #[test]
     fn track_silently_drops_when_channel_is_full() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(CaptureJob {

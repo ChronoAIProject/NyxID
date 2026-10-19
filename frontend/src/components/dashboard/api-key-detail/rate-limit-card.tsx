@@ -79,8 +79,8 @@ export function RateLimitCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Gauge className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Rate Limits</CardTitle>
+          <Gauge className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Rate Limits</CardTitle>
         </div>
         <CardDescription>
           Per-agent request rate limits (overrides user-level defaults)

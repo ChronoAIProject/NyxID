@@ -130,6 +130,7 @@ pub struct OnboardDeviceRequest {
     pub label: String,
     pub target_org_id: Option<String>,
     pub default_service_ids: Option<Vec<String>>,
+    pub allow_auto_connected_services: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -249,6 +250,8 @@ struct OnboardDeviceFingerprint<'a> {
     label: &'a str,
     target_owner_user_id: &'a str,
     default_service_ids: &'a [String],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_auto_connected_services: bool,
 }
 
 fn normalize_required(value: String, field: &str, max_len: usize) -> AppResult<String> {
@@ -488,6 +491,42 @@ pub async fn register_node_token(
     }
 }
 
+fn managed_rotation_denied(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(code) if matches!(code.as_str(),
+        "managed_node_mutation_requires_lifecycle" | "managed_node_mapping_missing_reconciliation_required"))
+}
+
+async fn guard_rotation_receipt(
+    state: &AppState,
+    actor: &str,
+    node_id: &str,
+    action_request_id: &str,
+    fingerprint: &str,
+) -> AppResult<()> {
+    if let Err(error) = crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, node_id, "rotate",
+    )
+    .await
+    {
+        if managed_rotation_denied(&error) {
+            // Clean up only this caller's matching historical pending action.
+            // A managed bootstrap revision is never evidence for this action.
+            if let Some(receipt) = state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .find_one(doc! {"user_id":actor,"action":NODE_ROTATE_TOKEN_ACTION,
+                "action_request_id":action_request_id,"request_fingerprint":fingerprint,
+                "resource_id":node_id,"status":"pending"})
+                .await?
+            {
+                release_pending_receipt(state, &receipt).await;
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub async fn rotate_node_token(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -503,6 +542,7 @@ pub async fn rotate_node_token(
         action: NODE_ROTATE_TOKEN_ACTION,
         node_id: &node_id,
     })?;
+    guard_rotation_receipt(&state, &actor, &node_id, &action_request_id, &fingerprint).await?;
     let receipt = match assistant_action_receipts::reserve_or_replay_with_markers(
         &state.db,
         &actor,
@@ -516,9 +556,13 @@ pub async fn rotate_node_token(
     .await?
     {
         ReceiptOutcome::Replay(receipt) => {
+            guard_rotation_receipt(&state, &actor, &node_id, &action_request_id, &fingerprint)
+                .await?;
             return Ok(Json(node_material_replay_response(&receipt)));
         }
         ReceiptOutcome::InProgress(receipt) => {
+            guard_rotation_receipt(&state, &actor, &node_id, &action_request_id, &fingerprint)
+                .await?;
             let current = node_service::get_node_authorization_state(&state.db, &actor, &node_id)
                 .await
                 .map_err(|_| in_progress_conflict())?;
@@ -540,8 +584,17 @@ pub async fn rotate_node_token(
         ReceiptOutcome::Reserved(receipt) => receipt,
     };
     let (raw_token, signing_secret) =
-        node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
-            .await?;
+        match node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
+            .await
+        {
+            Ok(material) => material,
+            Err(error) => {
+                if managed_rotation_denied(&error) {
+                    release_pending_receipt(&state, &receipt).await;
+                }
+                return Err(error);
+            }
+        };
     if state
         .node_dispatch
         .disconnect(&node_id, 4002, "node credentials rotated")
@@ -964,12 +1017,14 @@ pub async fn onboard_device(
     let label = normalize_required(body.label, "label", 128)?;
     let owner_user_id = normalize_owner_id(body.target_org_id, &actor)?;
     let default_service_ids = normalize_default_service_ids(body.default_service_ids)?;
+    let allow_auto_connected_services = body.allow_auto_connected_services.unwrap_or(false);
     ensure_owner_writable(&state, &actor, &owner_user_id).await?;
     let fingerprint = fingerprint_canonical(&OnboardDeviceFingerprint {
         action: DEVICE_ONBOARD_ACTION,
         label: &label,
         target_owner_user_id: &owner_user_id,
         default_service_ids: &default_service_ids,
+        allow_auto_connected_services,
     })?;
     let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
@@ -1013,6 +1068,7 @@ pub async fn onboard_device(
             org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
             label,
             default_services: Some(default_service_ids),
+            allow_auto_connected_services,
             base_url: state.config.base_url.clone(),
         },
     )
@@ -1103,6 +1159,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -1179,6 +1238,9 @@ mod tests {
 
         let now = chrono::Utc::now();
         let node = Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
             name: "retry-node".to_string(),
@@ -1381,6 +1443,129 @@ mod tests {
             .expect("node exists");
         assert_eq!(stored.user_id, actor_id);
         assert!(stored.is_active);
+    }
+
+    #[tokio::test]
+    async fn managed_rotation_rejection_and_legacy_receipt_cannot_disconnect_bootstrap() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("managed_rotation_replay").await;
+        let owner = Uuid::new_v4().to_string();
+        insert_person(&db, &owner).await;
+        let node = test_node(&owner, "managed-node");
+        let node_id = &node.id;
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(NODES).update_one(doc! {"_id":node_id}, doc! {"$set":{"metadata.provisioning_source":"remote_machine","access_revision":1_i64}}).await.unwrap();
+        let managed = crate::services::remote_machine_service::CreateMachineInput::fixed(
+            &owner,
+            true,
+            "test-image",
+        )
+        .preview(node_id, Utc::now());
+        db.collection::<crate::models::remote_machine::ManagedMachine>(
+            crate::models::remote_machine::COLLECTION_NAME,
+        )
+        .insert_one(managed)
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &owner);
+        let body = json!({"actionRequestId":"managed-rotate", "nodeId":node_id});
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/rotate-token",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{first}");
+        assert_eq!(
+            db.collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {"user_id":&owner,"action_request_id":"managed-rotate"})
+                .await
+                .unwrap(),
+            0,
+            "managed rejection must not reserve a receipt"
+        );
+
+        // Reconstruct the pending row left by the old rejected path. Recovery
+        // must reject it even after a legitimate bootstrap replaces credentials.
+        let fingerprint = fingerprint_canonical(&NodeIdentityFingerprint {
+            action: NODE_ROTATE_TOKEN_ACTION,
+            node_id,
+        })
+        .unwrap();
+        assistant_action_receipts::reserve_or_replay_with_markers(
+            &db,
+            &owner,
+            NODE_ROTATE_TOKEN_ACTION,
+            "managed-rotate",
+            &fingerprint,
+            node_id.clone(),
+            Some(0),
+            Some(1),
+        )
+        .await
+        .unwrap();
+        let material = node_service::prepare_managed_credentials(&state.encryption_keys)
+            .await
+            .unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        node_service::activate_managed_credentials(
+            &db,
+            &mut session,
+            node_id,
+            &owner,
+            &crate::crypto::token::hash_token(&material.auth_token),
+            &crate::crypto::token::hash_token(&material.signing_secret),
+            &material.signing_secret_encrypted,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let connection = Uuid::new_v4().to_string();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (_, close) =
+            state
+                .node_ws_manager
+                .register_connection_with_id(node_id, connection.clone(), tx);
+        crate::services::node_owner_service::claim(
+            &db,
+            node_id,
+            &state.replica_identity,
+            &connection,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let (status, retry) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/rotate-token",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{retry}");
+        assert!(state.node_ws_manager.is_connected(node_id));
+        assert!(
+            close.borrow().is_none(),
+            "rejected legacy rotation must not disconnect current WSS"
+        );
+        assert_eq!(
+            db.collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {"user_id":&owner,"action_request_id":"managed-rotate"})
+                .await
+                .unwrap(),
+            0,
+            "owned legacy pending receipt is released, never completed"
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1627,6 +1812,92 @@ mod tests {
             .expect("pending");
         assert_eq!(stored.get_bool("is_active"), Ok(false));
         assert!(stored.get("declined_at").is_some());
+    }
+
+    #[test]
+    fn auto_connected_device_onboard_fingerprint_preserves_legacy_false_requests() {
+        let legacy = json!({
+            "action": DEVICE_ONBOARD_ACTION, "label": "camera",
+            "targetOwnerUserId": "owner", "defaultServiceIds": ["service"]
+        });
+        for flag in [None, Some(false), Some(true)] {
+            let body: OnboardDeviceRequest = serde_json::from_value(json!({
+                "actionRequestId": "test", "label": "camera",
+                "allowAutoConnectedServices": flag
+            }))
+            .unwrap();
+            let fingerprint = OnboardDeviceFingerprint {
+                action: DEVICE_ONBOARD_ACTION,
+                label: "camera",
+                target_owner_user_id: "owner",
+                default_service_ids: &["service".into()],
+                allow_auto_connected_services: body.allow_auto_connected_services.unwrap_or(false),
+            };
+            if flag == Some(true) {
+                assert_ne!(
+                    fingerprint_canonical(&fingerprint).unwrap(),
+                    fingerprint_canonical(&legacy).unwrap()
+                );
+            } else {
+                assert_eq!(serde_json::to_value(&fingerprint).unwrap(), legacy);
+                assert_eq!(
+                    fingerprint_canonical(&fingerprint).unwrap(),
+                    fingerprint_canonical(&legacy).unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_connected_assistant_device_onboard_persists_grant_and_binds_retry() {
+        let Some(db) = connect_test_database("assistant_device_auto_connected").await else {
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+        insert_person(&db, &actor).await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor);
+        let body = json!({ "actionRequestId": "platform-onboard", "label": "camera", "allowAutoConnectedServices": true });
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let stored = db
+            .collection::<crate::models::device_onboard_credential::DeviceOnboardCredential>(
+                crate::models::device_onboard_credential::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": first["resource"]["deviceId"].as_str().unwrap() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.allow_auto_connected_services);
+        let (status, retry) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let mut changed = body;
+        changed["allowAutoConnectedServices"] = json!(false);
+        let (status, _) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            changed,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1906,6 +2177,9 @@ mod tests {
         state.node_ws_manager.record_capabilities(
             &node_id,
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+                http_signature_v2: false,
+                proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..Default::default()
             },

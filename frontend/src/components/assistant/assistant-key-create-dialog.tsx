@@ -1,3 +1,4 @@
+import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -54,9 +55,10 @@ const apiKeySnapshotSchema = z
     platform: z.string().min(1).max(100),
     scopes: z.literal("proxy"),
     is_active: z.literal(true),
-    allowed_service_ids: z.array(actionControlIdentitySchema).min(1).max(64),
+    allowed_service_ids: z.array(actionControlIdentitySchema).max(64),
     allowed_node_ids: z.array(actionControlIdentitySchema).length(0),
     allow_all_services: z.literal(false),
+    allow_auto_connected_services: z.boolean().optional(),
     allow_all_nodes: z.literal(false),
   })
   .passthrough();
@@ -143,8 +145,8 @@ function KeyEffectResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-[13px] font-medium">Existing key</p>
-            <p className="break-all font-mono text-[12px] text-muted-foreground">
+            <p className="text-13 font-medium">Existing key</p>
+            <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -152,7 +154,7 @@ function KeyEffectResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[12px]">
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
               {result.fullKey}
             </code>
             <Button
@@ -166,7 +168,7 @@ function KeyEffectResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-[12px]">
+          <label className="flex cursor-pointer items-start gap-2 text-12">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
@@ -176,7 +178,7 @@ function KeyEffectResult({
         </div>
       )}
       {verified ? (
-        <p className="text-[11px] text-success">
+        <p className="text-11 text-success">
           Exact least-scope access verified.
         </p>
       ) : null}
@@ -209,6 +211,7 @@ export interface AssistantKeyCreateParams {
   readonly name: string;
   readonly platform: string;
   readonly allowedServiceIds: readonly string[];
+  readonly allowAutoConnectedServices?: boolean;
 }
 
 export function AssistantKeyCreateDialog({
@@ -224,6 +227,17 @@ export function AssistantKeyCreateDialog({
   readonly params: AssistantKeyCreateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const [platformGrant, setPlatformGrant] = useState(
+    params.allowAutoConnectedServices,
+  );
+  const [platformIds, setPlatformIds] = useState<readonly string[] | undefined>(
+    params.allowedServiceIds,
+  );
+  const reviewedParams = {
+    ...params,
+    allowedServiceIds: platformIds,
+    allowAutoConnectedServices: platformGrant,
+  };
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -282,6 +296,8 @@ export function AssistantKeyCreateDialog({
         snapshot.id !== effect.resource.keyId ||
         snapshot.name !== expected.name ||
         snapshot.platform !== expected.platform ||
+        (snapshot.allow_auto_connected_services ?? false) !==
+          (expected.allowAutoConnectedServices ?? false) ||
         !sameStringSet(snapshot.allowed_service_ids, expected.allowedServiceIds)
       ) {
         throw new Error("NyxID key verification did not match this action.");
@@ -304,7 +320,7 @@ export function AssistantKeyCreateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const expected = keyCreateActionParamsSchema.parse(params);
+      const expected = keyCreateActionParamsSchema.parse(reviewedParams);
       await verifyAllowedServices(expected.allowedServiceIds);
       const response = assistantKeyCreateResponseSchema.parse(
         await api.post<unknown>("/assistant/actions/key-create", {
@@ -312,6 +328,7 @@ export function AssistantKeyCreateDialog({
           name: expected.name,
           platform: expected.platform,
           allowedServiceIds: [...expected.allowedServiceIds],
+          allowAutoConnectedServices: expected.allowAutoConnectedServices,
         }),
       );
       setResult(response);
@@ -327,7 +344,7 @@ export function AssistantKeyCreateDialog({
   async function retryVerification() {
     if (!result) return;
     try {
-      const expected = keyCreateActionParamsSchema.parse(params);
+      const expected = keyCreateActionParamsSchema.parse(reviewedParams);
       await verifyCreatedKey(result, expected);
     } catch (caught) {
       setError(
@@ -365,7 +382,7 @@ export function AssistantKeyCreateDialog({
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Name</span>
               <span className="min-w-0 truncate font-medium">
@@ -381,7 +398,7 @@ export function AssistantKeyCreateDialog({
             <div className="space-y-2">
               <span className="text-muted-foreground">Allowed services</span>
               <div className="flex flex-wrap gap-1.5">
-                {params.allowedServiceIds.map((serviceId) => (
+                {(platformIds ?? params.allowedServiceIds).map((serviceId) => (
                   <Badge
                     key={serviceId}
                     variant="secondary"
@@ -392,15 +409,24 @@ export function AssistantKeyCreateDialog({
                 ))}
               </div>
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Proxy access only. All services outside this list and every node
-              are denied.
+            <p className="text-11 leading-relaxed text-muted-foreground">
+              Proxy access follows these service selections. Node access is denied.
             </p>
           </div>
         ) : null}
 
+        {!result && (
+          <AssistantPlatformServiceFields
+            selectedIds={platformIds}
+            allowAll={platformGrant}
+            onAllowAllChange={setPlatformGrant}
+            onIdsChange={setPlatformIds}
+            disabled={submitting || verifying}
+          />
+        )}
+
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

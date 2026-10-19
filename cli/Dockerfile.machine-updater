@@ -1,0 +1,38 @@
+# A static, shell-free companion. Shares the CLI's Sigstore/TUF verifier.
+FROM rust:1.98.1-alpine AS builder
+RUN apk add --no-cache build-base cmake clang lld perl linux-headers python3
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY backend/ backend/
+COPY cli/ cli/
+COPY cloud-auth/ cloud-auth/
+COPY service-adapters/ service-adapters/
+COPY permissions/ permissions/
+COPY mcp-demo/ mcp-demo/
+COPY nyxid-crypto/ nyxid-crypto/
+COPY machine/ machine/
+COPY machine-updater/ machine-updater/
+ARG TARGETARCH
+RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
+    --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
+    cargo build --release -p nyxid-machine-updater && cp target/release/nyxid-machine-updater /nyxid-machine-updater
+FROM scratch AS production
+COPY --from=builder /nyxid-machine-updater /nyxid-machine-updater
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/nyxid-machine-updater"]
+
+FROM builder AS tests-build
+RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/build/target,sharing=locked \
+    --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
+    cargo test --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
+    && python3 -c 'import json,shutil; [shutil.copy(v["executable"],"/updater-tests") for l in open("/tmp/tests.json") if (v:=json.loads(l)).get("executable") and v.get("profile",{}).get("test") and v.get("target",{}).get("kind")==["bin"]]'
+FROM alpine:3.22 AS e2e
+RUN apk add --no-cache nodejs npm openssl && npm install --prefix /test ws
+COPY --from=tests-build /updater-tests /updater-tests
+COPY cli/tests/machine_updater_fixture.mjs /test/fixture.mjs
+COPY cli/resources/machine-container/seccomp.json /test/seccomp.json
+COPY cli/tests/machine_updater_driver.sh /test/driver.sh
+ENTRYPOINT ["sh", "/test/driver.sh"]
+
+# Keep the shell-free production image as the default build target.
+FROM production AS final

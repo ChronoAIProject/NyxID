@@ -1,3 +1,13 @@
+import type { z } from "zod";
+import type { platformCredentialsSchema } from "@/schemas/admin-platform-credentials";
+import type {
+  adminUsageResponseSchema,
+  adminUsageSearchSchema,
+  usageStatsSchema,
+  usageIdentitySchema,
+  usageServiceSchema,
+  usageRankingSchema,
+} from "@/schemas/admin-usage";
 import type { PlatformRole } from "./api";
 import type {
   DataTableFilterField,
@@ -136,7 +146,7 @@ export interface AdminAuditLogEntry {
   readonly service_name?: string | null;
   /** Canonical service slug resolved server-side. */
   readonly service_slug?: string | null;
-  /** Acting user's display name resolved server-side; absent for userless events or deleted users. */
+  /** Acting person, organization, or service-account name resolved server-side. */
   readonly user_display_name?: string | null;
   /** Acting user's email resolved server-side. */
   readonly user_email?: string | null;
@@ -459,3 +469,16 @@ export interface UpdateInviteCodeRequest {
 export interface DeactivateInviteCodeResponse {
   readonly message: string;
 }
+export type PlatformCredentials = z.infer<typeof platformCredentialsSchema>;
+export interface PlatformCredentialsUpdate {
+  readonly fields?: Record<string, string | null>;
+  readonly regenerate_verify_token?: boolean;
+}
+
+// Dedicated admin usage API types are inferred from the receipt validators.
+export type AdminUsageResponse = z.infer<typeof adminUsageResponseSchema>;
+export type AdminUsageSearch = z.infer<typeof adminUsageSearchSchema>;
+export type AdminUsageStats = z.infer<typeof usageStatsSchema>;
+export type AdminUsageIdentity = z.infer<typeof usageIdentitySchema>;
+export type AdminUsageService = z.infer<typeof usageServiceSchema>;
+export type AdminUsageRanking = z.infer<typeof usageRankingSchema>;

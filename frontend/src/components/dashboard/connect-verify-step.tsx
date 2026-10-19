@@ -222,7 +222,7 @@ function Body({
           className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
           aria-hidden
         />
-        <p className="text-[12px] leading-relaxed text-muted-foreground">
+        <p className="text-12 leading-relaxed text-muted-foreground">
           Your AI tools need an{" "}
           <span className="font-medium text-foreground">Agent Key</span> to
           call <span className="font-medium text-foreground">{createdKey.serviceName}</span>{" "}
@@ -345,7 +345,7 @@ function InlineStatus({
   return (
     <div className="flex items-start gap-2">
       <span className="mt-0.5 shrink-0">{icon}</span>
-      <p className={`text-[12px] leading-relaxed ${toneClass}`}>{children}</p>
+      <p className={`text-12 leading-relaxed ${toneClass}`}>{children}</p>
     </div>
   );
 }
@@ -363,10 +363,10 @@ function AgentKeyPanel({
   return (
     <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="space-y-1">
-        <p className="text-[12px] font-semibold text-foreground">
+        <p className="text-12 font-semibold text-foreground">
           Your new Agent Key
         </p>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Save this now. The full secret is only shown here once. Scoped to{" "}
           <span className="font-medium text-foreground">
             {createdKey.serviceName}
@@ -378,7 +378,7 @@ function AgentKeyPanel({
       <CopyableField label="Base URL" value={proxyUrl} />
       {showOpenAiEnvSnippet && (
         <>
-          <p className="text-[11px] text-muted-foreground pt-1">
+          <p className="text-11 text-muted-foreground pt-1">
             Most OpenAI-compatible tools (openai-python, Cursor, Continue.dev, …)
             read these two env vars.
           </p>

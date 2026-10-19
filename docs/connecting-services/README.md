@@ -26,6 +26,8 @@ If you're unsure, **[start with Web UI](web-ui.md)**. The other paths are equiva
 
 ## Did it work?
 
+For **IFTTT**, follow the [IFTTT setup guide](ifttt.md) to connect with browser OAuth and discover its AI tools, including Applet creation. **IFTTT Webhooks** remains a separate connection for triggering configured events. Neither connection runs an automatic credential probe; a Webhooks test can run real Applet actions, and event acceptance does not confirm completion.
+
 After any path completes, you should be able to make a real downstream call through NyxID's proxy and get a real response back, not an auth error.
 
 For the Web UI and CLI paths, the path itself runs the verification call. If you're using AI-driven or Direct API, the verification is the explicit final step in those guides.
@@ -48,6 +50,7 @@ For private APIs the catalog doesn't know about, see the **Custom services** sec
 
 ## Related
 
+- [Cloudflare, Supabase Management, and Railway OAuth](../CLOUD_PLATFORM_OAUTH.md) — register cloud management apps and connect their APIs
 - [docs/SETUP.md](../SETUP.md) — self-host setup (macOS, Linux, or Windows via WSL)
 - [docs/MCP_DELEGATION_FLOW.md](../MCP_DELEGATION_FLOW.md) — MCP auth + delegation under the hood
 - [docs/AI_AGENT_PLAYBOOK.md](../AI_AGENT_PLAYBOOK.md) — patterns for using NyxID from agent code

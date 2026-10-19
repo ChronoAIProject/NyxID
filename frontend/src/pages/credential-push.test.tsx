@@ -89,8 +89,13 @@ vi.mock("@/hooks/use-services", () => ({
   useTestSshConnection: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({ data: { can_transfer: false } }),
+}));
+
 vi.mock("@/hooks/use-providers", () => ({
   useMyProviderTokens: () => ({ data: [] }),
+  useProvider: () => ({ data: undefined }),
 }));
 
 vi.mock("@/hooks/use-developer-apps", () => ({

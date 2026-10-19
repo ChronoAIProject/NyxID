@@ -53,6 +53,8 @@ pub struct ApproveDeviceCodeRequest {
     pub label: Option<String>,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +64,8 @@ pub struct OnboardDeviceRequest {
     pub label: String,
     #[serde(default)]
     pub default_services: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Deserialize)]
@@ -222,6 +226,7 @@ pub async fn onboard_device(
             org_id: org_id.clone(),
             label,
             default_services: req.default_services,
+            allow_auto_connected_services: req.allow_auto_connected_services,
             base_url: state.config.base_url.clone(),
         },
     )
@@ -343,6 +348,7 @@ where
             org_id,
             label,
             default_services: req.default_services,
+            allow_auto_connected_services: req.allow_auto_connected_services,
         },
     )
     .await
@@ -798,6 +804,7 @@ mod tests {
                     org_id: None,
                     label: Some("Kitchen cam".to_string()),
                     default_services: None,
+                    allow_auto_connected_services: false,
                 },
                 move |_state, _user_id, _context| {
                     tokio::spawn(async move {
@@ -844,6 +851,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
             |_state, _user_id, _context| panic!("notification should not dispatch on failure"),
         )
@@ -986,6 +994,7 @@ mod tests {
                 org_id: None,
                 label: "Kitchen Camera".to_string(),
                 default_services: None,
+                allow_auto_connected_services: false,
             }),
         )
         .await
@@ -1025,6 +1034,7 @@ mod tests {
                 org_id: None,
                 label: "Kitchen Camera".to_string(),
                 default_services: None,
+                allow_auto_connected_services: false,
             }),
         )
         .await

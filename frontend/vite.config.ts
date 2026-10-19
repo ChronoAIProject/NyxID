@@ -4,9 +4,27 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
+import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
+import { routingPreview } from "./dev/routing-preview"
+import { machineSeccomp } from "./scripts/machine-seccomp"
+import { buildVersion } from "./scripts/build-version"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
+
+// Match the production document header before Vite injects its asset requests.
+function telegramClaimReferrer(): Plugin {
+  return {
+    name: "telegram-claim-referrer",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+          res.setHeader("Referrer-Policy", "no-referrer")
+        next()
+      })
+    },
+  }
+}
 
 // Backend CSRF middleware compares the request Origin against FRONTEND_URL.
 // When multiple worktrees run in parallel, Vite may pick a port other than
@@ -15,12 +33,12 @@ const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 // backend always sees the expected dev origin.
 const expectedOrigin = process.env.FRONTEND_URL || "http://localhost:3000"
 
-function originRewrite(proxyReq: import("http").ClientRequest) {
-  if (proxyReq.getHeader("origin")) {
-    proxyReq.setHeader("origin", expectedOrigin)
+function originRewrite(req: import("http").IncomingMessage) {
+  if (req.headers.origin) {
+    req.headers.origin = expectedOrigin
   }
-  if (proxyReq.getHeader("referer")) {
-    proxyReq.setHeader("referer", `${expectedOrigin}/`)
+  if (req.headers.referer) {
+    req.headers.referer = `${expectedOrigin}/`
   }
 }
 
@@ -39,9 +57,14 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
+  agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
+    ? new https.Agent({ proxyEnv: process.env })
+    : undefined,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configure: (proxy: any) => {
-    proxy.on("proxyReq", originRewrite)
+    // Proxy agents can send headers before proxyReq; rewrite before request creation.
+    proxy.on("start", originRewrite)
     proxy.on("proxyRes", cookieRewrite)
   },
 }
@@ -217,12 +240,18 @@ function docsSync(): Plugin {
 // reload, while a reload landing on the SAME build stops instead of looping.
 // `SOURCE_COMMIT` lets a build pipeline pin it to a commit; otherwise the config
 // evaluation time is enough, since a new evaluation means a new build.
-const BUILD_ID = process.env.SOURCE_COMMIT || Date.now().toString(36)
+const SOURCE_COMMIT = process.env.SOURCE_COMMIT || process.env.NYXID_GIT_HASH || null
+const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), docsSync()],
+  plugins: [
+    ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
+    telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
+    buildVersion(BUILD_ID, SOURCE_COMMIT),
+  ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
     alias: {

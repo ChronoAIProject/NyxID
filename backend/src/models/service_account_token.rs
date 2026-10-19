@@ -22,6 +22,9 @@ pub struct ServiceAccountToken {
 
     pub revoked: bool,
 
+    #[serde(default)]
+    pub credential_generation: i64,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -43,6 +46,7 @@ mod tests {
             scope: "proxy:* llm:proxy".to_string(),
             expires_at: Utc::now(),
             revoked: false,
+            credential_generation: 0,
             created_at: Utc::now(),
         }
     }

@@ -5,13 +5,15 @@ production typed-chat probe (2026-08-11).
 
 ## System boundary
 
-The browser assistant is a three-hop system with two mutually exclusive send
+The browser assistant is a three-hop system with three mutually exclusive send
 engines:
 
 ```text
 React browser
   -> NyxID /api/v1/assistant/**
-     -> default: admin-managed DownstreamService slug "aevatar"
+     -> default: admin-managed DownstreamService slug "llm-nyx"
+        -> NyxAgent /v1/responses; NyxID persists transcripts
+     -> retained: admin-managed DownstreamService slug "aevatar"
         -> Aevatar /api/chat and conversation-history resources
      -> experimental: admin-managed DownstreamService slug "chrono-llm-public"
         -> Chrono LLM /v1/chat/completions (relative to the service base_url)
@@ -39,6 +41,19 @@ memory-only Direct seam is in
 `frontend/src/hooks/use-assistant-direct.ts:useDirectAssistantChat` and
 `frontend/src/lib/assistant/direct-transport.ts:DirectAssistantTransport`.
 
+## Default NyxAgent engine
+
+New-draft precedence is NyxAgent (`assistant:nyxagent-engine`, default on), then
+Direct (`experimental:direct-chat-engine`, default off), then Aevatar. Existing
+IDs keep their engine, and the sidebar merges enabled engine indexes by latest
+message time. There is no runtime fallback. See [NyxAgent engine](08-nyxagent-engine.md)
+for its complete contract. NyxID owns durable conversations, ordered text messages,
+an active-turn fence, and encrypted per-person Agent Keys. Detached workers own
+upstream SSE and survive browser disconnect; Stop explicitly cancels upstream.
+All failed turns discard the upstream context binding. A new session receives a
+bounded transcript recap, so NyxAgent's memory-storage restarts preserve readable
+history without replaying an uncertain tool operation.
+
 ## Authentication boundary
 
 All stateful assistant routes are nested beneath `/api/v1/assistant` in the human-only router. A verified `AuthUser` is required, and the router rejects:
@@ -56,7 +71,7 @@ The route placement and rejection layers are authoritative: `backend/src/routes.
 
 ## Platform service selection
 
-Assistant handlers do not resolve a user-owned `UserService`. The default
+Assistant handlers do not resolve a user-owned `UserService`. The retained
 Aevatar handlers resolve the active admin-managed `DownstreamService` whose
 slug is `aevatar`; the Direct handler uses `chrono-llm-public`. Both require the
 row not to need a per-user credential and call the administrative proxy path.
@@ -76,7 +91,7 @@ and must set `requires_user_credential` to `false`.
 The Direct surface is default-off and independently enforced on every direct
 route through the effective per-user feature resolution for
 `experimental:direct-chat-engine`. When disabled, all three routes are
-not-found-shaped and the frontend remains on Aevatar. The current implementation
+not-found-shaped; new drafts choose NyxAgent when enabled, otherwise Aevatar. The current implementation
 does not include the endpoint selector, consolidated wire-log flag,
 `/assistant/chat-config`, or gear panel proposed by the
 [endpoint selector addendum](direct-chronollm-endpoints-addendum.md).
@@ -128,7 +143,7 @@ The pinned Mainnet configuration expects `urn:aevatar:api`. NyxID tool callbacks
 
 The upstream source anchors are `src/Aevatar.Mainnet.Host.Api/appsettings.json`, `src/Aevatar.AI.ToolProviders.NyxId/NyxIdToolOptions.cs`, `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionsOptions.cs`, and `NyxIdAssistantActionRegistryStartup.cs` in Aevatar.
 
-## Default Aevatar engine and legacy history
+## Retained Aevatar engine and legacy history
 
 Aevatar's `POST /api/chat` classifies every request by the presence of a top-level `type` property. This dispatch rule is implemented in upstream `src/Aevatar.Mainnet.Host.Api/Chat/MainnetChatEndpoints.cs:ClassifyRequestAsync`.
 
@@ -158,7 +173,7 @@ The identity is immutable for that delivery; a missing or conflicting identity
 is a protocol error, not a cache rekey or recovery opportunity.
 
 The typed actor and Studio workflow remain mutually exclusive upstream. Within
-the default Aevatar engine, the browser exposes only the typed send path;
+the retained Aevatar engine, the browser exposes only the typed send path;
 retaining legacy read/delete does not permit a second Aevatar send path. The
 separately feature-gated Direct engine is selected before dispatch and never
 acts as a fallback after an Aevatar failure.

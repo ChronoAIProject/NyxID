@@ -1,6 +1,10 @@
-import { ApiError } from "@/lib/api-client";
-import { isTelemetryActive } from "@/lib/telemetry";
+import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
+import {
+  currentCreditsActor,
+  reportCreditsDenialHttp,
+  type CreditsDenialRequest,
+} from "@/lib/credits-denial";
 import type { ApiErrorResponse } from "@/types/api";
 import {
   captureAssistantWireLogHeader,
@@ -8,8 +12,8 @@ import {
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { assistantRequestErrorMessage, withAssistantTrace } from "./request-error";
 
-const API_PREFIX = "/api/v1";
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
 const DEBUG_LOG_HEADER = "X-NyxID-Debug-Upstream-Log";
@@ -17,13 +21,18 @@ const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEAD_SESSION_CODES = new Set([1001, 2000, 2001, 2002]);
 const responseWireLogExchangeIds = new WeakMap<Response, string>();
 
-type AssistantMethod = "GET" | "POST" | "DELETE";
+type AssistantMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 export interface AssistantHttpRequest {
+  readonly apiBaseUrl?: string;
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
   readonly method?: AssistantMethod;
   readonly signal?: AbortSignal;
+  /** Revalidate the account that authorized a foreground management request. */
+  readonly authorityGuard?: () => void;
+  /** Foreground sends only; see `RequestOptions.creditsDenial`. */
+  readonly creditsDenial?: CreditsDenialRequest;
 }
 
 export interface AssistantHttpMockRequest {
@@ -61,6 +70,7 @@ function conversationIdFromEndpoint(endpoint: string): string | null {
 
 function suppressWireLog(endpoint: string): boolean {
   return (
+    endpoint.startsWith("/assistant/nyxagent/") ||
     endpoint === "/assistant/conversations" ||
     endpoint.startsWith("/assistant/wire-logs/")
   );
@@ -92,7 +102,10 @@ async function captureResponse(
   const wireLogId = response.headers.get(DEBUG_ID_HEADER);
   const exchangeId = wireLogId
     ? captureAssistantWireLogId(wireLogId, meta)
-    : captureAssistantWireLogHeader(response.headers.get(DEBUG_LOG_HEADER), meta);
+    : captureAssistantWireLogHeader(
+        response.headers.get(DEBUG_LOG_HEADER),
+        meta,
+      );
   if (!exchangeId) return;
   responseWireLogExchangeIds.set(response, exchangeId);
 
@@ -152,13 +165,14 @@ function fallbackError(status: number): ApiErrorResponse {
   };
 }
 
-async function parseError(response: Response): Promise<ApiErrorResponse> {
+async function parseError(
+  response: Response,
+): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
   try {
     const value = (await response.json()) as Record<string, unknown>;
-    return {
+    const parsed: ApiErrorResponse = {
       error: typeof value.error === "string" ? value.error : "unknown_error",
-      error_code:
-        typeof value.error_code === "number" ? value.error_code : -1,
+      error_code: typeof value.error_code === "number" ? value.error_code : -1,
       message:
         typeof value.message === "string" && value.message
           ? value.message
@@ -166,9 +180,11 @@ async function parseError(response: Response): Promise<ApiErrorResponse> {
       ...(typeof value.consent_url === "string"
         ? { consent_url: value.consent_url }
         : {}),
+      ...(value.details !== undefined ? { details: value.details } : {}),
     };
+    return { parsed, raw: value };
   } catch {
-    return fallbackError(response.status);
+    return { parsed: fallbackError(response.status), raw: null };
   }
 }
 
@@ -192,41 +208,69 @@ async function mockResponse(
   return globalThis.__nyxidAssistantHttpMock?.({ endpoint, init });
 }
 
+async function withNetworkError<T>(
+  request: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  try {
+    return await request();
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    throw new ApiError(0, {
+      error: "network_error",
+      error_code: -1,
+      message: assistantRequestErrorMessage(0),
+    });
+  }
+}
+
 export async function assistantHttp(
   endpoint: string,
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
+  options.authorityGuard?.();
   const method = options.method ?? "GET";
-  const init: RequestInit = {
+  const actorId = options.creditsDenial ? currentCreditsActor() : null;
+  const init = buildFetchConfig({
+    ...options,
     method,
-    credentials: "include",
     headers: {
-      "Content-Type": "application/json",
-      ...(isTelemetryActive() ? { "X-NyxID-Client": "ui" } : {}),
       ...wireHeaders(endpoint),
       ...options.headers,
     },
-    signal: options.signal,
-    ...(options.body === undefined
-      ? {}
-      : { body: JSON.stringify(options.body) }),
-  };
-  const response =
-    (await mockResponse(endpoint, init)) ??
-    (await fetch(`${API_PREFIX}${endpoint}`, init));
+  });
+  const mocked = await withNetworkError(
+    () => mockResponse(endpoint, init),
+    options.signal,
+  );
+  // Account changes are authority failures, not transport failures.
+  options.authorityGuard?.();
+  const response = mocked ?? (await withNetworkError(
+    () => fetch(apiUrl(endpoint, options.apiBaseUrl), init),
+    options.signal,
+  ));
+  options.authorityGuard?.();
 
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
 
-  const errorBody = await parseError(response);
-  if (
-    response.status === 401 &&
-    DEAD_SESSION_CODES.has(errorBody.error_code)
-  ) {
+  const { parsed: errorBody, raw } = await parseError(response);
+  options.authorityGuard?.();
+  // Classify the raw envelope: the parsed shape defaults a missing symbol.
+  reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
+  if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
     useAuthStore.getState().setUser(null);
   }
   redirectToConsent(errorBody);
-  throw new ApiError(response.status, errorBody);
+  throw new ApiError(response.status, {
+    ...errorBody,
+    message: withAssistantTrace(
+      assistantRequestErrorMessage(response.status, errorBody.message),
+      response.headers.get("X-NyxID-Trace-Id"),
+    ),
+  });
 }
 
 export async function assistantJson<T>(
@@ -234,6 +278,9 @@ export async function assistantJson<T>(
   options: AssistantHttpRequest = {},
 ): Promise<T> {
   const response = await assistantHttp(endpoint, options);
+  options.authorityGuard?.();
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  const result = (await response.json()) as T;
+  options.authorityGuard?.();
+  return result;
 }

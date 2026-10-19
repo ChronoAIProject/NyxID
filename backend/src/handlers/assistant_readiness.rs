@@ -12,6 +12,14 @@ pub struct AssistantReadinessResponse {
     revision: &'static str,
     evaluated_at: DateTime<Utc>,
     capabilities: Vec<AssistantCapabilityResponse>,
+    nyxagent: NyxAgentReadinessResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct NyxAgentReadinessResponse {
+    enabled: bool,
+    row: crate::services::assistant_nyxagent::RowContract,
+    credential_exists: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +59,26 @@ pub async fn get_readiness(
         revision: snapshot.revision,
         evaluated_at: snapshot.evaluated_at,
         capabilities,
+        nyxagent: NyxAgentReadinessResponse {
+            enabled: crate::services::assistant_nyxagent::require_enabled(
+                &state.db,
+                &auth_user.user_id.to_string(),
+            )
+            .await
+            .is_ok(),
+            row: crate::services::assistant_nyxagent::catalog_contract(
+                &state.db,
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap_or_else(|_| crate::services::assistant_nyxagent::row_contract(None, None)),
+            credential_exists: crate::services::assistant_agent_credential_service::exists(
+                &state.db,
+                &auth_user.user_id.to_string(),
+            )
+            .await
+            .unwrap_or(false),
+        },
     })
 }
 

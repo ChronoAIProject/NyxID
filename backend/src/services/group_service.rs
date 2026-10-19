@@ -143,7 +143,14 @@ pub async fn update_group(
         update.insert("slug", s);
     }
     if let Some(d) = description {
-        update.insert("description", d);
+        update.insert(
+            "description",
+            if d.trim().is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(d.trim().to_string())
+            },
+        );
     }
     if let Some(r) = role_ids {
         update.insert("role_ids", r);
@@ -431,6 +438,18 @@ mod tests {
         assert_eq!(updated.name, "Renamed");
         assert_eq!(updated.slug, "renamed");
         assert_eq!(updated.description.as_deref(), Some("New desc"));
+        let cleared = update_group(&db, &group.id, None, None, Some("  "), None, None)
+            .await
+            .unwrap();
+        assert_eq!(cleared.description, None);
+        let raw = db
+            .collection::<mongodb::bson::Document>(GROUPS)
+            .find_one(doc! { "_id": &group.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.get("description"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(cleared.name, "Renamed");
     }
 
     #[tokio::test]

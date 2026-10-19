@@ -43,9 +43,148 @@ pub async fn execute_proxy_request(
     use_binary_proxy_chunks: bool,
     http_client: &Client,
 ) {
+    static IFTTT: std::sync::LazyLock<
+        std::result::Result<nyxid_service_adapters::ifttt::Client, String>,
+    > = std::sync::LazyLock::new(|| {
+        let builder = crate::tls::client_builder().map_err(|e| e.to_string())?;
+        nyxid_service_adapters::ifttt::Client::new(builder).map_err(|e| e.to_string())
+    });
+    let ifttt_client = match IFTTT.as_ref() {
+        Ok(client) => client,
+        Err(error) => {
+            metrics.record_error();
+            let request_id = request["request_id"].as_str().unwrap_or("");
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    &format!("HTTP client configuration failed: {error}"),
+                    502,
+                    false,
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+    execute_proxy_request_with_ifttt_client(
+        request,
+        credentials,
+        signing_secret,
+        replay_guard,
+        metrics,
+        tx,
+        use_binary_proxy_chunks,
+        http_client,
+        ifttt_client,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_proxy_request_with_ifttt_client(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    use_binary_proxy_chunks: bool,
+    http_client: &Client,
+    ifttt_client: &nyxid_service_adapters::ifttt::Client,
+) {
+    execute_proxy_request_inner(
+        request,
+        credentials,
+        signing_secret,
+        replay_guard,
+        metrics,
+        tx,
+        use_binary_proxy_chunks,
+        http_client,
+        ifttt_client,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_proxy_upload(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    http_client: &Client,
+    upload: super::proxy_upload::VerifiedUpload,
+) {
+    execute_proxy_request_inner(
+        request,
+        credentials,
+        None,
+        replay_guard,
+        metrics,
+        tx,
+        true,
+        http_client,
+        nyxid_service_adapters::ifttt::client(),
+        Some(upload),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_proxy_request_inner(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    use_binary_proxy_chunks: bool,
+    http_client: &Client,
+    ifttt_client: &nyxid_service_adapters::ifttt::Client,
+    upload: Option<super::proxy_upload::VerifiedUpload>,
+) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
 
+    let target_selected = request.get("target_id").is_some_and(|id| !id.is_null());
+    let base_url = request["base_url"].as_str().unwrap_or("");
+    if target_selected && base_url.is_empty() {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response_with_reason(
+                request_id,
+                "Target-selected request is missing its authorized base URL",
+                502,
+                false,
+                Some("target_base_url_missing"),
+            ),
+        )
+        .await;
+        return;
+    }
+    if upload.is_none()
+        && (target_selected || request.get("signature_version").is_some())
+        && (request["signature_version"].as_u64() != Some(2)
+            || signing_secret.is_none()
+            || request["signature"].as_str().is_none())
+    {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "Target-selected requests require HTTP signature v2",
+                403,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
     // 1. Verify HMAC signature if signing is enabled
     if let Some(secret) = signing_secret {
         let timestamp = request["timestamp"].as_str();
@@ -119,13 +258,43 @@ pub async fn execute_proxy_request(
         }
     };
 
+    if upload.is_some() && (cred.aws_sigv4_credential().is_some() || cred.ifttt_key().is_some()) {
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "This credential requires a bounded structured request",
+                400,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
+    if target_selected
+        && !cred.header().is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("Authorization") && value.starts_with("Bearer ")
+        })
+    {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "Target-selected requests require a bearer credential",
+                403,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
     // 3. Build the downstream HTTP request
     let method_str = request["method"].as_str().unwrap_or("GET");
     let path = request["path"].as_str().unwrap_or("/");
     let query = request["query"].as_str();
-    let base_url = request["base_url"].as_str().unwrap_or("");
 
-    // If NyxID sent an empty base_url, resolve from local credential config
+    // Legacy requests with an empty base_url resolve from local credential config.
     let effective_base_url = if base_url.is_empty() {
         match cred.target_url() {
             Some(url) => url,
@@ -158,6 +327,94 @@ pub async fn execute_proxy_request(
         format!("/{path}")
     };
 
+    if let Some(key) = cred.ifttt_key() {
+        let method = match reqwest::Method::from_bytes(method_str.as_bytes()) {
+            Ok(method) => method,
+            Err(_) => {
+                metrics.record_error();
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(request_id, "Invalid HTTP method", 400, false),
+                )
+                .await;
+                return;
+            }
+        };
+        let body = match request.get("body").and_then(serde_json::Value::as_str) {
+            Some(encoded) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    metrics.record_error();
+                    let _ = send_ws_message(
+                        tx,
+                        proxy_error_response(request_id, "Invalid base64 request body", 400, false),
+                    )
+                    .await;
+                    return;
+                }
+            },
+            None => None,
+        };
+        let ifttt_headers = request["headers"]
+            .as_object()
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (name.clone(), value.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        match ifttt_client
+            .forward(
+                effective_base_url,
+                &method,
+                path,
+                query,
+                key,
+                body.as_deref(),
+                &ifttt_headers,
+            )
+            .await
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                // The adapter returns a locally constructed, credential-free receipt.
+                let headers = extract_response_headers(&response);
+                let bytes = response.bytes().await.expect("buffered IFTTT receipt");
+                metrics.record_success();
+                let _ = send_ws_message(
+                    tx,
+                    serde_json::json!({
+                        "type": "proxy_response", "request_id": request_id,
+                        "status": status, "headers": headers,
+                        "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    })
+                    .to_string(),
+                )
+                .await;
+            }
+            Err(error) => {
+                metrics.record_error();
+                let status = if matches!(error, nyxid_service_adapters::ifttt::Error::Transport(_))
+                {
+                    502
+                } else {
+                    400
+                };
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(request_id, &error.to_string(), status, false),
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
     // Path-prefix injection: prepend /{prefix}{credential} to the URL path
     let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
         format!("/{prefix}{credential}{normalized_path}")
@@ -178,6 +435,28 @@ pub async fn execute_proxy_request(
     }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let destination_client;
+    let http_client = if target_selected || upload.as_ref().is_some_and(|upload| upload.git()) {
+        destination_client = match target_http_client() {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        &format!("TLS client configuration failed: {error}"),
+                        502,
+                        false,
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+        &destination_client
+    } else {
+        http_client
+    };
     let mut req_builder = http_client.request(method.clone(), &url);
 
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
@@ -214,7 +493,25 @@ pub async fn execute_proxy_request(
     }
 
     // 5. Inject header credentials (legacy header/bearer path).
-    if let Some((hdr_name, hdr_value)) = cred.header() {
+    if upload.as_ref().is_some_and(|upload| upload.git()) {
+        let Some((_, token)) = cred.header().filter(|(name, value)| {
+            name.eq_ignore_ascii_case("Authorization") && value.starts_with("Bearer ")
+        }) else {
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    "GitHub git requires a token credential",
+                    400,
+                    false,
+                ),
+            )
+            .await;
+            return;
+        };
+        req_builder =
+            req_builder.basic_auth("x-access-token", Some(token.trim_start_matches("Bearer ")));
+    } else if let Some((hdr_name, hdr_value)) = cred.header() {
         req_builder = req_builder.header(hdr_name, hdr_value);
     }
 
@@ -275,9 +572,12 @@ pub async fn execute_proxy_request(
         }
     }
 
+    let streamed_request = upload.is_some();
     // 6b. Attach the body now that any signing pass that needed to read
     //     it has run.
-    if let Some(bytes) = body_bytes {
+    if let Some(upload) = upload {
+        req_builder = req_builder.body(upload.into_body());
+    } else if let Some(bytes) = body_bytes {
         req_builder = req_builder.body(bytes);
     }
 
@@ -285,7 +585,7 @@ pub async fn execute_proxy_request(
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
-            let is_streaming = should_stream_response(&response, status);
+            let is_streaming = streamed_request || should_stream_response(&response, status);
 
             if is_streaming {
                 stream_proxy_response(
@@ -348,8 +648,34 @@ pub async fn execute_proxy_request(
     }
 }
 
+#[cfg(any(test, feature = "node-proxy-test"))]
+tokio::task_local! { pub static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
+
+fn target_http_client() -> std::result::Result<Client, String> {
+    #[cfg(any(test, feature = "node-proxy-test"))]
+    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
+        return Ok(build_target_http_client(builder));
+    }
+    static CLIENT: std::sync::LazyLock<std::result::Result<Client, String>> =
+        std::sync::LazyLock::new(|| {
+            crate::tls::client_builder()
+                .map(build_target_http_client)
+                .map_err(|e| e.to_string())
+        });
+    CLIENT.clone()
+}
+
+fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("target HTTP client")
+}
+
 pub fn build_http_client() -> Result<Client> {
-    Ok(Client::builder()
+    Ok(crate::tls::client_builder()?
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()?)
@@ -538,6 +864,233 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::append_query_param;
+
+    #[tokio::test]
+    async fn selected_request_without_base_url_never_uses_local_credential_target() {
+        use super::super::config::{CredentialConfig, NodeConfig};
+        use super::super::encryption::LocalEncryption;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let configured_url = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+        let mut config: NodeConfig = toml::from_str(
+            r#"
+                [server]
+                url = "https://nyxid.test"
+                [node]
+                id = "test-node"
+                auth_token_encrypted = ""
+            "#,
+        )
+        .unwrap();
+        config.credentials.insert(
+            "workspace".into(),
+            CredentialConfig::new_header(
+                "Authorization".into(),
+                Some(encryption.encrypt("Bearer fixture-token").unwrap()),
+                Some(configured_url),
+            ),
+        );
+        let credentials = super::CredentialStore::from_config(&config, &encryption).unwrap();
+        let secret = "ab".repeat(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let replay = tokio::sync::Mutex::new(super::ReplayGuard::new());
+        let metrics = super::NodeMetrics::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        for missing in [false, true] {
+            let mut request = serde_json::json!({
+                "request_id": "missing-target-origin", "service_id": "workspace-id",
+                "service_slug": "workspace", "target_id": "docs", "signature_version": 2,
+                "base_url": "", "method": "POST", "path": "/v1/documents/doc:batchUpdate",
+                "query": "", "body": "", "timestamp": chrono::Utc::now().to_rfc3339(),
+                "nonce": uuid::Uuid::new_v4().to_string(),
+            });
+            let message = serde_json::json!([
+                "nyxid-node-http.v2",
+                request["timestamp"],
+                request["nonce"],
+                request["service_id"],
+                request["service_slug"],
+                request["target_id"],
+                "",
+                request["method"],
+                request["path"],
+                "",
+                "",
+            ])
+            .to_string();
+            let mut mac = Hmac::<Sha256>::new_from_slice(&hex::decode(&secret).unwrap()).unwrap();
+            mac.update(message.as_bytes());
+            request["signature"] = hex::encode(mac.finalize().into_bytes()).into();
+            if missing {
+                request.as_object_mut().unwrap().remove("base_url");
+            }
+            // The verifier independently rejects the origin even with a matching HMAC.
+            assert!(!super::signing::verify_request_signature(
+                &request,
+                &secret,
+                request["signature"].as_str().unwrap(),
+            ));
+            super::execute_proxy_request(
+                &request,
+                &credentials,
+                Some(&secret),
+                &replay,
+                &metrics,
+                &tx,
+                false,
+                &client,
+            )
+            .await;
+            let Some(super::NodeWsMessage::Text(frame)) = rx.recv().await else {
+                panic!("expected a node error frame");
+            };
+            let response: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(response["type"], "proxy_error");
+            assert_eq!(response["status"], 502);
+            assert_eq!(response["reason"], "target_base_url_missing");
+            assert_eq!(response["retryable"], false);
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept(),)
+                .await
+                .is_err(),
+            "the configured local target must receive no connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn ifttt_node_uses_local_encrypted_key_and_rejects_unsafe_calls() {
+        use super::super::config::NodeConfig;
+        use super::super::secret_backend::SecretBackend;
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"}, "node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        let key = "ifttt_node_test_key-NOT_REAL";
+        config
+            .add_ifttt_credential_via("api-ifttt", key, None, &backend)
+            .unwrap();
+        assert_eq!(
+            config.credentials["api-ifttt"].injection_method,
+            "ifttt_webhook"
+        );
+        assert!(!toml::to_string(&config).unwrap().contains(key));
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        assert!(credentials.get("api-ifttt").unwrap().header().is_none());
+        assert!(
+            credentials
+                .get("api-ifttt")
+                .unwrap()
+                .raw_credential()
+                .is_none()
+        );
+        let mut fixture = nyxid_service_adapters::test_support::fixture(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let body = br#"{"event":"inside","body":{"nested":true},"authorization":"payload"}"#;
+        let mut request = serde_json::json!({
+            "request_id":"request", "service_slug":"api-ifttt", "base_url":"",
+            "method":"POST", "path":"trigger/event/json", "body":base64::engine::general_purpose::STANDARD.encode(body),
+            "headers":{"User-Agent":"node-custom/1"}
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let guard = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let http_client = build_http_client().unwrap();
+        execute_proxy_request_with_ifttt_client(
+            &request,
+            &credentials,
+            None,
+            &guard,
+            &metrics,
+            &tx,
+            false,
+            &http_client,
+            &fixture.client,
+        )
+        .await;
+        let NodeWsMessage::Text(receipt) = rx.recv().await.unwrap() else {
+            panic!("expected text receipt")
+        };
+        assert!(!receipt.contains(key));
+        let received = fixture.requests.recv().await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&received)
+                .starts_with(&format!("POST /trigger/event/json/with/key/{key} HTTP/1.1"))
+        );
+        assert!(String::from_utf8_lossy(&received).contains("user-agent: node-custom/1"));
+        assert!(received.ends_with(body));
+        // Backend node frames encode absent HTTP bodies as empty base64 strings.
+        request["path"] = "trigger/event_only".into();
+        request["body"] = "".into();
+        execute_proxy_request_with_ifttt_client(
+            &request,
+            &credentials,
+            None,
+            &guard,
+            &metrics,
+            &tx,
+            false,
+            &http_client,
+            &fixture.client,
+        )
+        .await;
+        let NodeWsMessage::Text(receipt) = rx.recv().await.unwrap() else {
+            panic!("expected receipt")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&receipt).unwrap()["status"],
+            200
+        );
+        let received = fixture.requests.recv().await.unwrap();
+        assert!(received.ends_with(b"\r\n\r\n{}"));
+        for (method, path) in [
+            ("GET", "trigger/event"),
+            ("POST", "trigger/e/with/key/injected"),
+            ("POST", "trigger/%252f/json"),
+        ] {
+            request["method"] = method.into();
+            request["path"] = path.into();
+            execute_proxy_request_with_ifttt_client(
+                &request,
+                &credentials,
+                None,
+                &guard,
+                &metrics,
+                &tx,
+                false,
+                &http_client,
+                &fixture.client,
+            )
+            .await;
+            let NodeWsMessage::Text(error) = rx.recv().await.unwrap() else {
+                panic!("expected error")
+            };
+            let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["type"], "proxy_error");
+            assert_eq!(error["retryable"], false);
+            assert_eq!(error["status"], 400);
+            assert!(fixture.requests.try_recv().is_err());
+        }
+        // Unknown modes fail closed at store load; they never fall back to Header.
+        config
+            .credentials
+            .get_mut("api-ifttt")
+            .unwrap()
+            .injection_method = "future_adapter".into();
+        assert!(CredentialStore::from_config_with_backend(&config, &backend).is_err());
+    }
 
     #[test]
     fn append_query_param_url_encodes_name_and_value() {

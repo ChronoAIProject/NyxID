@@ -1,5 +1,7 @@
 import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { useOverlayLayer } from "@/lib/overlay-layer";
 import { cn } from "@/lib/utils";
 
 const Popover = PopoverPrimitive.Root;
@@ -8,7 +10,10 @@ const PopoverTrigger = PopoverPrimitive.Trigger;
 const PopoverContent = React.forwardRef<
   React.ComponentRef<typeof PopoverPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
->(({ className, align = "center", sideOffset = 4, ...props }, ref) => (
+>(({ className, align = "center", sideOffset = 4, style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <PopoverPrimitive.Portal>
     <PopoverPrimitive.Content
       ref={ref}
@@ -19,9 +24,12 @@ const PopoverContent = React.forwardRef<
         className,
       )}
       {...props}
+      style={{ ...style, zIndex: layer }}
     />
   </PopoverPrimitive.Portal>
-));
+  </OverlayLayer>
+  );
+});
 PopoverContent.displayName = PopoverPrimitive.Content.displayName;
 
 export { Popover, PopoverTrigger, PopoverContent };

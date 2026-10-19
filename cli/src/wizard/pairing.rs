@@ -763,6 +763,9 @@ pub fn prefill_api_key_create(p: &ApiKeyCreatePrefill) -> Value {
             Value::Number(serde_json::Number::from(v)),
         );
     }
+    if p.allow_auto_connected_services {
+        obj.insert("allow_auto_connected_services".into(), Value::Bool(true));
+    }
     if p.allow_all_services {
         obj.insert("allow_all_services".into(), Value::Bool(true));
     }
@@ -1409,6 +1412,7 @@ mod tests {
             scopes: None,
             expires_in_days: None,
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             allowed_services_csv: None,
             allowed_nodes_csv: None,
@@ -1603,6 +1607,7 @@ mod tests {
             scopes: Some("proxy".into()),
             expires_in_days: Some(30),
             allow_all_services: true,
+            allow_auto_connected_services: true,
             allow_all_nodes: true,
             allowed_services_csv: Some("svc1,svc2".into()),
             allowed_nodes_csv: Some("n1".into()),
@@ -1611,7 +1616,8 @@ mod tests {
         };
         let v = prefill_api_key_create(&p);
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 10);
+        assert_eq!(obj.len(), 11);
+        assert_eq!(v["allow_auto_connected_services"], true);
         assert_eq!(v["expires_in_days"], 30);
     }
 

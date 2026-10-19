@@ -91,6 +91,8 @@ pub async fn cmd_register(
 
 pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Result<()> {
     init_tracing(log_level);
+    // Invalid explicit trust configuration is permanent for this process.
+    crate::tls::shared_config()?;
 
     let config_dir = config::resolve_config_dir(config_path);
     let config_file = config_dir.join("config.toml");
@@ -1322,6 +1324,7 @@ async fn oauth_refresh_loop(
                 &refresh_tok,
                 auth_method,
                 cred.oauth_client_id_param_name.as_deref(),
+                &cred.oauth_request_options,
             )
             .await
             {
@@ -1443,6 +1446,12 @@ fn store_pending_credential_locally(
     secret: &str,
 ) -> Result<()> {
     match pending.injection_method.as_str() {
+        "ifttt-webhook" | "ifttt_webhook" => node_config.add_ifttt_credential_via(
+            &pending.service_slug,
+            secret,
+            pending.target_url.as_deref(),
+            backend,
+        ),
         "header" => node_config.add_header_credential_via(
             &pending.service_slug,
             &pending.field_name,
@@ -1560,6 +1569,42 @@ fn merge_oauth_scopes(defaults: &[String], additional: &[String]) -> Vec<String>
         }
     }
     merged
+}
+
+fn resolve_oauth_scopes(
+    config: &oauth::OAuthConfig,
+    scopes: Option<&str>,
+    additional_scopes: &[String],
+) -> Result<String> {
+    if !config.request_options.supports_oauth_scopes {
+        if scopes.is_some_and(|value| !value.trim().is_empty()) || !additional_scopes.is_empty() {
+            return Err(super::error::Error::Validation(
+                "This provider does not accept OAuth scopes. Remove --scope and --scopes.".into(),
+            ));
+        }
+        return Ok(String::new());
+    }
+    // Preserve the legacy --scopes string exactly when no additive scopes exist.
+    if additional_scopes.is_empty() {
+        return Ok(scopes
+            .map(str::to_string)
+            .unwrap_or_else(|| config.default_scopes.join(" ")));
+    }
+    if config.device_code_format == "openai" {
+        return Err(super::error::Error::Validation(
+            "This provider's device code endpoint does not accept additional OAuth scopes \
+             (OpenAI-format device code providers ignore the `scope` parameter). \
+             Remove --scope and try again."
+                .into(),
+        ));
+    }
+    let base_scopes = match scopes {
+        Some(value) if !value.trim().is_empty() => {
+            value.split_whitespace().map(String::from).collect()
+        }
+        _ => config.default_scopes.clone(),
+    };
+    Ok(merge_oauth_scopes(&base_scopes, additional_scopes).join(" "))
 }
 
 fn parse_header(header: &str) -> Result<(String, String)> {
@@ -1684,7 +1729,7 @@ fn migrate_config(
                 // switch from file → keychain (or vice versa) on a node
                 // with a path-prefix or cloud-billing credential would
                 // silently drop the encrypted-payload pointer.
-                "header" | "path_prefix" | "aws_sigv4" => {
+                "header" | "path_prefix" | "aws_sigv4" | "ifttt_webhook" => {
                     cred_config.header_value_encrypted = encrypted;
                 }
                 "query_param" => cred_config.param_value_encrypted = encrypted,
@@ -2344,7 +2389,14 @@ async fn cmd_credentials_setup(
             let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
             // Store credential using the injection method matching the auth method
-            if auth_method == "path" {
+            if auth_method == "ifttt_webhook" {
+                node_config.add_ifttt_credential_via(
+                    service,
+                    &secret,
+                    target_url.as_deref(),
+                    &backend,
+                )?;
+            } else if auth_method == "path" {
                 node_config.add_path_prefix_credential_via(
                     service,
                     auth_key_name,
@@ -2479,8 +2531,11 @@ async fn cmd_credentials_add_oauth(
             extra_auth_params: None,
             oauth_client_id: None,
             client_id_param_name: None,
+            request_options: Default::default(),
         }
     };
+
+    let final_scopes = resolve_oauth_scopes(&oauth_config, scopes.as_deref(), additional_scopes)?;
 
     // 2. Get client credentials
     let cid = match client_id.or_else(|| oauth_config.oauth_client_id.clone()) {
@@ -2505,40 +2560,6 @@ async fn cmd_credentials_add_oauth(
                 Err(_) => None,
             }
         }
-    };
-
-    // 3. Determine scopes
-    //
-    // `scopes` (--scopes) is the legacy power-user escape hatch: if set, it
-    // replaces the catalog's default_scopes entirely. `additional_scopes`
-    // (--scope, repeatable) is the additive path from issue #181: any extras
-    // are merged on top of whichever base scope set we ended up using.
-    //
-    // Backward-compat: when the caller supplied no additional scopes we take
-    // the exact pre-feature code path (single `unwrap_or_else`) so any edge-
-    // case whitespace / empty-string behavior of the legacy `--scopes` flag
-    // is preserved byte-for-byte. Only the new `--scope` path goes through
-    // the split + merge logic.
-    let final_scopes = if additional_scopes.is_empty() {
-        scopes.unwrap_or_else(|| oauth_config.default_scopes.join(" "))
-    } else {
-        // OpenAI-format device code providers do not accept a `scope` field,
-        // so reject additional scopes for them explicitly (mirrors the backend
-        // `ensure_additional_scopes_supported` check).
-        if oauth_config.device_code_format == "openai" {
-            return Err(super::error::Error::Validation(
-                "This provider's device code endpoint does not accept additional OAuth scopes \
-                 (OpenAI-format device code providers ignore the `scope` parameter). \
-                 Remove --scope and try again."
-                    .to_string(),
-            ));
-        }
-
-        let base_scopes: Vec<String> = match scopes.as_deref() {
-            Some(s) if !s.trim().is_empty() => s.split_whitespace().map(String::from).collect(),
-            _ => oauth_config.default_scopes.clone(),
-        };
-        merge_oauth_scopes(&base_scopes, additional_scopes).join(" ")
     };
 
     // 4. Run the OAuth flow
@@ -2595,6 +2616,7 @@ async fn cmd_credentials_add_oauth(
         };
         cred.oauth_token_endpoint_auth_method = Some(oauth_config.token_endpoint_auth_method);
         cred.oauth_client_id_param_name = oauth_config.client_id_param_name;
+        cred.oauth_request_options = oauth_config.request_options;
     }
 
     node_config.save(config_file)?;
@@ -2673,6 +2695,31 @@ mod tests {
         assert_eq!(
             merge_oauth_scopes(&[], &["b".to_string()]),
             vec!["b".to_string()]
+        );
+    }
+
+    #[test]
+    fn scopeless_node_oauth_rejects_cli_scopes_but_ignores_stale_defaults() {
+        let config = oauth::oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": "https://api.notion.com/v1/oauth/token",
+            "supports_oauth_scopes": false,
+            "default_scopes": ["stale-default"]
+        }))
+        .unwrap();
+        assert_eq!(resolve_oauth_scopes(&config, None, &[]).unwrap(), "");
+        assert!(resolve_oauth_scopes(&config, Some("read"), &[]).is_err());
+        assert!(resolve_oauth_scopes(&config, None, &["read".into()]).is_err());
+        let legacy = oauth::oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": "https://example.com/token", "default_scopes": ["read"]
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_oauth_scopes(&legacy, None, &["write".into()]).unwrap(),
+            "read write"
+        );
+        assert_eq!(
+            resolve_oauth_scopes(&legacy, Some("  custom  "), &[]).unwrap(),
+            "  custom  "
         );
     }
 

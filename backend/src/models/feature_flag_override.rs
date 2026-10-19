@@ -5,9 +5,10 @@ pub const COLLECTION_NAME: &str = "feature_flag_overrides";
 
 /// The scope a single feature-flag override applies to.
 ///
-/// Resolution applies overrides most-specific-first. Within an org context:
-/// `User` > `Role` > `Org` > `Global` > code default. In the personal (non-org)
-/// context: `User` (personal) > `Global` > code default.
+/// Resolution applies `code default -> Global -> Org -> User` in both org and
+/// personal contexts. Personal contexts consider active org memberships, with
+/// disable winning conflicts at the same scope. Legacy org `Role` and `User`
+/// rows apply after `Org` and before the platform `User` override.
 ///
 /// `Global` rows are platform-level (no org) and affect everyone, org or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +54,9 @@ pub struct FeatureFlagOverride {
     #[serde(default)]
     pub org_user_id: Option<String>,
     pub flag_key: String,
+    /// Runtime definition identity; null/missing belongs to a built-in flag.
+    #[serde(default)]
+    pub definition_id: Option<String>,
     pub target_kind: FlagTargetKind,
     /// `None` for org scope; role string for role scope; member_user_id for
     /// user scope. Legacy/org rows deserialize the missing field as `None`.
@@ -91,6 +95,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: Some(uuid::Uuid::new_v4().to_string()),
             flag_key: "example_ui".to_string(),
@@ -113,6 +118,7 @@ mod tests {
     #[test]
     fn missing_target_key_defaults_to_none() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: Some(uuid::Uuid::new_v4().to_string()),
             flag_key: "example_ui".to_string(),
@@ -132,6 +138,7 @@ mod tests {
     #[test]
     fn global_row_has_no_org() {
         let row = FeatureFlagOverride {
+            definition_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             org_user_id: None,
             flag_key: "example_ui".to_string(),
@@ -155,6 +162,7 @@ mod tests {
     #[test]
     fn missing_org_user_id_defaults_to_none() {
         let mut doc = bson::to_document(&FeatureFlagOverride {
+            definition_id: None,
             id: "x".to_string(),
             org_user_id: Some("org".to_string()),
             flag_key: "example_ui".to_string(),

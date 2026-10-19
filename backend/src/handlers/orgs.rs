@@ -7,8 +7,9 @@
 //! - One-time invite issue / list / cancel / redeem
 //!
 //! All write operations on a specific org require admin role on that org.
-//! Read operations require any active membership. Org creation is open to
-//! any authenticated person user.
+//! Metadata reads accept API keys and require active membership or Direct
+//! ownership; role-scope reads require admin or Direct access. Writes and
+//! invite reads remain human-only. Org creation requires a person user.
 
 use axum::{
     Json,
@@ -143,14 +144,14 @@ pub struct OrgResponse {
     pub created_at: String,
     pub updated_at: String,
     pub remote_credential_integrity_verification_opt_out: bool,
-    /// Caller's role in this org. Always present in single-org responses.
+    /// Caller's membership role, or Admin as the read projection of Direct ownership.
     pub your_role: OrgRoleWire,
     pub member_count: u64,
-    /// Whether this org is the caller's selected primary organization.
+    /// Whether this org is the caller's selected primary organization; false for Direct.
     pub is_primary: bool,
     /// Number of pending, non-expired invites issued for this org.
     pub active_invite_count: u64,
-    /// Feature-flag keys enabled for the *calling member* in this org, already
+    /// Feature-flag keys enabled for the calling actor in this org, already
     /// resolved server-side (per-user > per-role > per-org > code default).
     /// The frontend gates UI on membership in this list; see
     /// `feature_flag_service` and `frontend/src/lib/feature-flags.ts`.
@@ -170,6 +171,7 @@ pub struct OrgListItem {
     pub avatar_url: Option<String>,
     /// See [`OrgResponse::contact_email`].
     pub contact_email: Option<String>,
+    /// Caller's membership role, or Admin as the read projection of Direct ownership.
     pub your_role: OrgRoleWire,
     pub created_at: String,
 }
@@ -728,35 +730,57 @@ pub(crate) async fn create_org_with_id(
 
 /// GET /api/v1/orgs
 ///
-/// List orgs the caller is an active member of.
+/// API-key readable: list a person's active memberships, or just the owning
+/// org for an org-owned key, with Direct access projected as `your_role: admin`.
 pub async fn list_orgs(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<OrgListResponse>> {
     let actor = auth_user.user_id.to_string();
-    let memberships = org_service::list_memberships_for_member(&state.db, &actor, false).await?;
-
-    let mut items = Vec::with_capacity(memberships.len());
-    for m in memberships {
-        if let Ok(org) = org_service::get_org_user(&state.db, &m.org_user_id).await {
-            let contact_email = org_service::contact_email_for_display(&org);
-            let slug = slug_for_response(&org);
-            items.push(OrgListItem {
-                id: org.id,
-                slug,
-                display_name: org.display_name,
-                avatar_url: org.avatar_url,
-                contact_email,
-                your_role: m.role.into(),
-                created_at: org.created_at.to_rfc3339(),
-            });
+    let orgs = if let Some(org) = fetch_user(&state.db, &actor)
+        .await?
+        .filter(|user| user.user_type.is_org())
+    {
+        let role = org_service::read_role_for_org(&state.db, &actor, &org).await?;
+        vec![(org, role)]
+    } else {
+        let memberships =
+            org_service::list_memberships_for_member(&state.db, &actor, false).await?;
+        let mut orgs = Vec::with_capacity(memberships.len());
+        for membership in memberships {
+            let org = match org_service::get_org_user(&state.db, &membership.org_user_id).await {
+                Ok(org) => org,
+                // The org may disappear after its membership was listed.
+                Err(AppError::OrgNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            orgs.push((org, membership.role));
         }
+        orgs
+    };
+
+    let mut items = Vec::with_capacity(orgs.len());
+    for (org, role) in orgs {
+        let contact_email = org_service::contact_email_for_display(&org);
+        let slug = slug_for_response(&org);
+        items.push(OrgListItem {
+            id: org.id,
+            slug,
+            display_name: org.display_name,
+            avatar_url: org.avatar_url,
+            contact_email,
+            your_role: role.into(),
+            created_at: org.created_at.to_rfc3339(),
+        });
     }
 
     Ok(Json(OrgListResponse { orgs: items }))
 }
 
 /// GET /api/v1/orgs/{key}
+///
+/// API-key readable by members or the owning org. An org-owned key receives
+/// its own profile with Direct access projected as Admin, without membership.
 pub async fn get_org(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -764,16 +788,15 @@ pub async fn get_org(
 ) -> AppResult<Json<OrgResponse>> {
     let actor = auth_user.user_id.to_string();
     let org = org_service::find_org_by_key(&state.db, &key).await?;
+    let role = org_service::read_role_for_org(&state.db, &actor, &org).await?;
     let org_id = org.id.clone();
-    let membership = require_org_member(&state.db, &actor, &org_id).await?;
 
     let members = org_service::list_members_for_org(&state.db, &org_id, false).await?;
     let contact_email = org_service::contact_email_for_display(&org);
     let slug = slug_for_response(&org);
     let opt_out = org_service::remote_credential_integrity_verification_opt_out(&org);
     let enabled_features =
-        feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
-            .await?;
+        feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, role).await?;
     let (is_primary, active_invite_count) = org_state_for_actor(&state.db, &actor, &org_id).await?;
 
     Ok(Json(OrgResponse {
@@ -785,9 +808,9 @@ pub async fn get_org(
         created_at: org.created_at.to_rfc3339(),
         updated_at: org.updated_at.to_rfc3339(),
         remote_credential_integrity_verification_opt_out: opt_out,
-        your_role: membership.role.into(),
+        your_role: role.into(),
         member_count: members.len() as u64,
-        is_primary,
+        is_primary: actor != org_id && is_primary,
         active_invite_count,
         enabled_features,
     }))
@@ -797,6 +820,7 @@ pub async fn get_org(
 ///
 /// Assistant evidence projection.  Keep the ACL exactly aligned with
 /// `get_org`; only the typed, non-free-text fields are emitted.
+/// API-key readable; an org-owned key reads its own org as Direct/Admin.
 pub async fn get_org_authorization(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -922,13 +946,16 @@ pub async fn delete_org(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// GET /api/v1/orgs/{org_id}/members
+///
+/// API-key readable by active members; an org-owned key reads its own roster
+/// through Direct access without requiring a membership for the org itself.
 pub async fn list_members(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(org_id): Path<String>,
 ) -> AppResult<Json<MemberListResponse>> {
     let actor = auth_user.user_id.to_string();
-    let _ = require_org_member(&state.db, &actor, &org_id).await?;
+    let _ = org_service::get_org_for_read(&state.db, &actor, &org_id).await?;
 
     let memberships = org_service::list_members_for_org(&state.db, &org_id, false).await?;
 
@@ -942,13 +969,16 @@ pub async fn list_members(
 }
 
 /// GET /api/v1/orgs/{org_id}/members/{member_id}/authorization
+///
+/// API-key readable by active members; an org-owned key has Direct access to
+/// member authorization metadata within its own org.
 pub async fn get_member_authorization(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((org_id, member_id)): Path<(String, String)>,
 ) -> AppResult<Json<MemberAuthorizationEvidenceResponse>> {
     let actor = auth_user.user_id.to_string();
-    let _ = require_org_member(&state.db, &actor, &org_id).await?;
+    let _ = org_service::get_org_for_read(&state.db, &actor, &org_id).await?;
     let membership = state
         .db
         .collection::<OrgMembership>(crate::models::org_membership::COLLECTION_NAME)

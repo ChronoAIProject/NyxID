@@ -1,3 +1,7 @@
+import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
+import { AutomationsPage } from "@/pages/automations";
+import { MachinesPage } from "@/pages/machines";
+import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
 import {
   lazy,
   Suspense,
@@ -11,10 +15,12 @@ import { ApprovalsView } from "@/components/assistant/approvals-view";
 import {
   AssistantChatPage,
   DirectAssistantChatPage,
+  NyxAgentAssistantChatPage,
 } from "@/components/assistant/assistant-chat-page";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
-import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
+import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
+import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-button";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
 import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
@@ -24,6 +30,7 @@ import {
   isDirectConversationId,
 } from "@/lib/assistant/conversation-ids";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
@@ -101,11 +108,63 @@ function sidebarConversation(
   };
 }
 
+type WorkspaceView =
+  | "plugins"
+  | "approvals"
+  | "automations"
+  | "machines"
+  | "machine-setup"
+  | "machine-pair";
+
+const workspaceTitles: Record<WorkspaceView, string> = {
+  plugins: "Plugins",
+  approvals: "Approvals",
+  automations: "Automations",
+  machines: "Machines",
+  "machine-setup": "Add a machine",
+  "machine-pair": "Pair a machine",
+};
+
+function workspaceActiveView(view: WorkspaceView) {
+  return view === "machine-setup" || view === "machine-pair"
+    ? "machines"
+    : view;
+}
+
+function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
+  if (view === "plugins") return <PluginsView />;
+  if (view === "approvals") return <ApprovalsView />;
+  return (
+    <div
+      className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
+      style={{ paddingBottom: "max(2rem, var(--sab))" }}
+    >
+      <Suspense
+        fallback={
+          <p role="status" className="text-12 text-text-tertiary">
+            Loading {workspaceTitles[view]}...
+          </p>
+        }
+      >
+        {view === "automations" ? (
+          <AutomationsPage />
+        ) : view === "machines" ? (
+          <MachinesPage />
+        ) : view === "machine-setup" ? (
+          <MachineSetupPage />
+        ) : (
+          <MachinePairPage />
+        )}
+      </Suspense>
+    </div>
+  );
+}
+
 function AssistantWorkspacePage({
   view,
   directEnabled,
 }: {
-  readonly view: "plugins" | "approvals";
+  readonly view: WorkspaceView;
   readonly directEnabled: boolean;
 }) {
   const navigate = useNavigate();
@@ -125,17 +184,17 @@ function AssistantWorkspacePage({
   );
 
   function createNewChat() {
-    void navigate({
-      to: "/assistant" as never,
-      search: { draft: true } as never,
-    });
+    void navigateWithBuildUpdate(() => navigate({
+      to: "/assistant",
+      search: { draft: true },
+    }));
   }
 
   function selectConversation(conversationId: string) {
-    void navigate({
-      to: "/assistant" as never,
-      search: { c: conversationId } as never,
-    });
+    void navigateWithBuildUpdate(() => navigate({
+      to: "/assistant",
+      search: { c: conversationId },
+    }));
   }
 
   async function deleteConversation(conversationId: string) {
@@ -163,12 +222,12 @@ function AssistantWorkspacePage({
     }
   }
 
-  const title = view === "plugins" ? "Plugins" : "Approvals";
+  const title = workspaceTitles[view];
   const sidebar = (
-    <AssistantSidebar
+    <AssistantEngineSidebar engine="actor"
       conversations={conversations}
       activeConversationId={undefined}
-      activeView={view}
+      activeView={workspaceActiveView(view)}
       notice={
         actorChat.listError
           ? `Could not load chats. ${actorChat.listError}`
@@ -186,7 +245,37 @@ function AssistantWorkspacePage({
       sidebar={sidebar}
       headerActions={<AssistantHeaderActions activeConversationId={null} />}
     >
-      {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
+      <WorkspaceContent view={view} />
+    </AssistantShell>
+  );
+}
+
+/**
+ * Workspace views for NyxAgent users: the NyxAgent sidebar (agents and
+ * groups), and none of the earlier engines' chat lists are fetched.
+ */
+function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
+  const navigate = useNavigate();
+  function openAssistant(search: { c?: string } = {}) {
+    void navigateWithBuildUpdate(() => navigate({ to: "/assistant", search: search }));
+  }
+  return (
+    <AssistantShell
+      title={workspaceTitles[view]}
+      headerActions={<NyxBotSettingsButton />}
+      sidebar={
+        <AssistantEngineSidebar
+          engine="nyxagent"
+          conversations={[]}
+          activeConversationId={undefined}
+          activeView={workspaceActiveView(view)}
+          onNewChat={() => openAssistant()}
+          onSelect={(id) => openAssistant({ c: id })}
+          onDelete={(id) => nyxAgentTransport.delete(id)}
+        />
+      }
+    >
+      <WorkspaceContent view={view} />
     </AssistantShell>
   );
 }
@@ -194,9 +283,10 @@ function AssistantWorkspacePage({
 export function AssistantPage({
   view = "chat",
 }: {
-  readonly view?: "chat" | "plugins" | "approvals";
+  readonly view?: "chat" | WorkspaceView;
 }) {
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const selectedConversationId = useRouterState({
     select: (state) =>
       parseAssistantSearch(state.location.search as Record<string, unknown>).c,
@@ -208,7 +298,9 @@ export function AssistantPage({
   });
 
   if (view !== "chat") {
-    const workspace = (
+    const workspace = nyxagentEnabled ? (
+      <NyxAgentWorkspacePage view={view} />
+    ) : (
       <AssistantWorkspacePage view={view} directEnabled={directEnabled} />
     );
     return AssistantHttpFixtureBoundary && fixtureMode() ? (
@@ -228,13 +320,14 @@ export function AssistantPage({
       </Suspense>
     );
   }
-  if (
-    assistantChatSurface({
+  const surface = assistantChatSurface({
+      nyxagentEnabled,
       directEnabled,
       drafting,
       selectedConversationId,
-    }) === "direct"
-  ) {
+    });
+  if (surface === "nyxagent") return <NyxAgentAssistantChatPage />;
+  if (surface === "direct") {
     return <DirectAssistantChatPage />;
   }
   return <AssistantChatPage />;

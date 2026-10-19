@@ -122,7 +122,7 @@ export function AssistantPendingCredentialCancelDialog({
         </DialogHeader>
 
         {!resultId ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Pending credential</span>
               <Badge
@@ -155,7 +155,7 @@ export function AssistantPendingCredentialCancelDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

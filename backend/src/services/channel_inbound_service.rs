@@ -1,0 +1,451 @@
+//! Shared post-parse channel routing and callback dispatch.
+
+use crate::AppState;
+use crate::services::{channel_relay_service, channel_routing_service};
+use crate::telemetry::{
+    TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
+};
+
+pub(crate) struct InboundDeps<'a> {
+    pub(crate) db: &'a crate::db::DbHandle,
+    pub(crate) config: &'a crate::config::AppConfig,
+    pub(crate) billing: &'a super::billing::BillingService,
+    pub(crate) jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    pub(crate) http_client: &'a reqwest::Client,
+    pub(crate) encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
+    pub(crate) token_exchange_cache:
+        &'a std::sync::Arc<crate::services::provider_token_exchange_service::TokenExchangeCache>,
+    pub(crate) telemetry: Option<&'a TelemetryClient>,
+}
+
+impl<'a> From<&'a AppState> for InboundDeps<'a> {
+    fn from(value: &'a AppState) -> Self {
+        Self {
+            db: &value.db,
+            config: &value.config,
+            billing: &value.billing,
+            jwt_keys: &value.jwt_keys,
+            http_client: &value.http_client,
+            encryption_keys: value.encryption_keys.as_ref(),
+            token_exchange_cache: &value.token_exchange_cache,
+            telemetry: value.telemetry.as_deref(),
+        }
+    }
+}
+
+/// Truncated SHA-256 of a platform conversation ID, for use in telemetry
+/// properties where raw conversation IDs must not be emitted. Returns the
+/// first 16 hex chars (8 bytes) of the digest — enough entropy for
+/// per-conversation cardinality analysis, short enough to stay ergonomic.
+pub(crate) fn hash_conversation_id(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(id.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
+}
+
+pub(crate) async fn process_inbound_messages(
+    state: InboundDeps<'_>,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+    messages: &[crate::services::channel_platform::InboundMessage],
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if messages.is_empty() {
+        return Ok(true);
+    }
+
+    // Parse bot owner UUID once (used for relay token generation per-message)
+    let bot_owner_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
+        |e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("invalid bot owner user_id: {e}").into()
+        },
+    )?;
+
+    let mut complete = true;
+    let mut stamped = false;
+    for inbound in messages {
+        let activity = adapter.activity_metadata(inbound);
+        let notification = activity
+            .as_ref()
+            .is_some_and(|value| !value.reply_supported);
+        if let Some(billing) = super::channel_billing_service::ChannelBilling::for_bot(
+            state.db,
+            state.billing,
+            bot,
+            None,
+        ) && let Err(error) = if activity
+            .as_ref()
+            .is_some_and(|value| value.kind == "encrypted_chat")
+        {
+            billing.received_chat(&inbound.platform_message_id).await
+        } else if super::channel_adapters::x::is_public_conversation(&inbound.conversation_id) {
+            billing.received_post(&inbound.platform_message_id).await
+        } else {
+            billing.received(&inbound.platform_message_id).await
+        } {
+            tracing::warn!(bot_id = %bot.id, stage = "billing", error_code = error.error_code(), "channel webhook billing admission failed");
+            if super::channel_billing_service::blocks_channel(&error)
+                && super::channel_billing_service::suspend(&state, bot, adapter)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            return Err(Box::new(error));
+        }
+        // Liveness is stamped once per batch, only after billing admitted the
+        // delivery; a diagnostics write failure never blocks processing.
+        if !stamped {
+            super::channel_bot_service::record_inbound_success(state.db, bot).await;
+            stamped = true;
+        }
+        if adapter.dedup_inbound_by_platform_message_id()
+            && !adapter.atomic_inbound_admission()
+            && channel_relay_service::inbound_platform_message_exists(
+                state.db,
+                &bot.id,
+                &bot.platform,
+                &inbound.platform_message_id,
+            )
+            .await?
+        {
+            continue;
+        }
+        // Resolve which agent should handle this message
+        let route = match channel_routing_service::resolve_agent(
+            state.db,
+            &bot.id,
+            &inbound.conversation_id,
+            Some(&inbound.sender_platform_id),
+            &bot.user_id,
+        )
+        .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                if bot.platform == "x" {
+                    tracing::warn!(bot_id = %bot.id, stage = "routing", "X webhook has no eligible agent route");
+                }
+                tracing::debug!(
+                    bot_id = %bot.id,
+                    conversation_id = %inbound.conversation_id,
+                    "no agent route found, skipping message"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bot_id = %bot.id,
+                    error_code = e.error_code(),
+                    "agent resolution failed"
+                );
+                complete = false;
+                continue;
+            }
+        };
+
+        if route.conversation.user_id != bot.user_id {
+            complete = false;
+            continue;
+        }
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+
+        let mut metadata = channel_relay_service::inbound_metadata(
+            &bot.id,
+            &route.conversation.id,
+            &bot.user_id,
+            &bot.platform,
+            inbound,
+            &route.api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        metadata.activity = activity.clone();
+        // Additive facts are dormant by default and limited to direct NyxBot
+        // routes. Metadata failure must not change legacy message delivery.
+        if !notification {
+            match super::channel_thread_service::inbound_facts(
+                state.db,
+                bot,
+                &route.api_key_id,
+                adapter,
+                inbound,
+            )
+            .await
+            {
+                Ok(facts) => metadata.thread_context = facts,
+                Err(_) => tracing::debug!(bot_id = %bot.id, "Channel thread facts unavailable"),
+            }
+        }
+        if notification {
+            metadata.attachments.clear();
+            metadata.thread_id = None;
+            metadata.content_type = "unknown".into();
+        }
+        let stored = if adapter.atomic_inbound_admission() {
+            super::channel_admission_service::store(state.db, metadata).await
+        } else {
+            state
+                .db
+                .collection::<crate::models::channel_message::ChannelMessage>(
+                    super::channel_activity_service::collection(&metadata),
+                )
+                .insert_one(&metadata)
+                .await
+                .map(|_| Some(metadata))
+                .map_err(crate::errors::AppError::from)
+        };
+        let stored_message = match stored {
+            Ok(Some(message)) => message,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(bot_id = %bot.id, stage = "storage", error_code = error.error_code(), "failed to admit inbound message");
+                complete = false;
+                continue;
+            }
+        };
+        if bot.platform == "x" {
+            tracing::info!(bot_id = %bot.id, message_id = %stored_message.id,
+                kind = activity.as_ref().map(|value| value.kind.as_str()),
+                "X webhook activity recorded");
+        }
+
+        // Telemetry: channel.message_received is sampled at 10% per
+        // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash,
+        // NOT the user id: hashing on user_id would make each owner either
+        // 100% in or 100% out of the sample and skew the funnel toward
+        // whichever high-volume owner happens to hash in. Conversation-
+        // keyed sampling gives ~10% of messages per conversation, which
+        // averages to ~10% across owners. Webhook ingress has no AuthUser /
+        // TelemetryContext — use default context and None for api_key_id.
+        let distinct_id = bot.user_id.clone();
+        let conversation_hash = hash_conversation_id(&route.conversation.platform_conversation_id);
+        if should_sample_event("channel.message_received", &conversation_hash, 10) {
+            emit_event(
+                state.telemetry,
+                &distinct_id,
+                None,
+                &TelemetryContext::default(),
+                TelemetryEvent::ChannelMessageReceived {
+                    platform: bot.platform.clone(),
+                    conversation_id_hash: conversation_hash,
+                },
+            );
+        }
+
+        // Look up the API key for signing and name attribution
+        let api_key = match channel_routing_service::load_callback_key(
+            state.db,
+            &route,
+            &bot.user_id,
+        )
+        .await
+        {
+            Ok(k) if route.conversation.platform == bot.platform => k,
+            _ => {
+                tracing::warn!(
+                    api_key_id = %route.api_key_id,
+                    "API key not found for callback signing"
+                );
+                let _ = super::channel_activity_service::update_callback_status(
+                    state.db,
+                    &stored_message,
+                    "failed",
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let extended = activity.as_ref().is_some_and(|value| {
+            super::channel_activity_callback_service::supports(
+                &route.conversation,
+                &api_key,
+                &value.kind,
+            )
+        });
+        if notification && !extended {
+            super::channel_activity_service::update_callback_status(
+                state.db,
+                &stored_message,
+                "not_enabled",
+            )
+            .await?;
+            continue;
+        }
+
+        // Public posts and manager setup messages do not prove the sender's
+        // NyxID identity. Their agents receive reply authority only.
+        let user_access_token = if notification
+            || bot.credential_source == "telegram_manager"
+            || (bot.platform == "x"
+                && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
+        {
+            None
+        } else {
+            let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
+            let rbac_data =
+                crate::services::rbac_helpers::build_rbac_claim_data(state.db, &bot.user_id, scope)
+                    .await
+                    .ok();
+            let agent_scope = crate::crypto::jwt::RelayAgentScope {
+                api_key_id: api_key.id.clone(),
+                api_key_name: api_key.name.clone(),
+                allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(
+                    state.db, &api_key,
+                )
+                .await?,
+                allowed_node_ids: api_key.allowed_node_ids.clone(),
+                allow_all_services: api_key.allow_all_services,
+                allow_all_nodes: api_key.allow_all_nodes,
+            };
+            crate::crypto::jwt::generate_relay_access_token(
+                state.jwt_keys,
+                state.config,
+                &bot_owner_uuid,
+                scope,
+                rbac_data.as_ref(),
+                &agent_scope,
+            )
+            .ok()
+        };
+
+        let reply_token = if notification {
+            None
+        } else {
+            match crate::crypto::jwt::generate_relay_reply_token(
+                state.jwt_keys,
+                state.config,
+                &api_key.id,
+                &route.conversation.id,
+                &stored_message.id,
+                &route.conversation.platform,
+            ) {
+                Ok(token) => Some(token),
+                Err(e) => {
+                    tracing::error!(
+                        message_id = %stored_message.id,
+                        error = %e,
+                        "failed to generate relay reply token"
+                    );
+                    let _ = super::channel_activity_service::update_callback_status(
+                        state.db,
+                        &stored_message,
+                        "failed",
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        };
+
+        // Build the callback payload
+        let mut payload = channel_relay_service::build_callback_payload(
+            &stored_message,
+            &route.conversation,
+            &route.api_key_id,
+            &api_key.name,
+            inbound,
+            reply_token,
+            &state.config.base_url,
+        );
+
+        if extended {
+            payload.activity = activity.as_ref().map(|value| {
+                super::channel_activity_service::CallbackActivity::new(
+                    value,
+                    &inbound.platform_message_id,
+                )
+            });
+            payload.conversation.conversation_type = inbound.conversation_type.clone();
+            if notification {
+                payload.raw_platform_data = None;
+                payload.content.text = None;
+                payload.content.attachments.clear();
+                payload.content.content_type = "unknown".into();
+                payload.thread_id = None;
+                payload.reply_to_message_id = None;
+                payload.reply_to_platform_message_id = None;
+            }
+        }
+
+        // Forward to the agent's callback URL
+        let key_is_current =
+            channel_routing_service::load_callback_key(state.db, &route, &bot.user_id)
+                .await
+                .is_ok_and(|current| {
+                    current.state_version == api_key.state_version
+                        && current.key_hash == api_key.key_hash
+                });
+        let current_route = state.db.collection::<crate::models::channel_conversation::ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(bson::doc! {"_id": &route.conversation.id, "user_id": &bot.user_id, "is_active": true, "agent_api_key_id": &api_key.id, "retired_by_transfer": {"$ne": true}}).await?;
+        let route_is_current = current_route.as_ref().is_some_and(|current| {
+            !extended
+                || activity.as_ref().is_some_and(|value| {
+                    super::channel_activity_callback_service::supports(
+                        current,
+                        &api_key,
+                        &value.kind,
+                    )
+                })
+        });
+        if !key_is_current || !route_is_current {
+            let _ = super::channel_activity_service::update_callback_status(
+                state.db,
+                &stored_message,
+                "failed",
+            )
+            .await;
+            continue;
+        }
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+        let delivery = channel_relay_service::forward_to_agent(
+            state.http_client,
+            state.config,
+            state.jwt_keys,
+            &route.callback_url,
+            payload,
+            &api_key.id,
+            &api_key.key_hash,
+            user_access_token.as_deref(),
+        )
+        .await;
+
+        // Sync 200+body replies are no longer supported (per ADR-013 / NyxID#221
+        // comment 2). Agents must return 202 and post replies asynchronously
+        // via POST /api/v1/channel-relay/reply. The callback status only
+        // reflects delivery of the webhook to the agent's callback URL.
+        match delivery.result {
+            Ok(()) => {
+                let _ = super::channel_activity_service::update_callback_status(
+                    state.db,
+                    &stored_message,
+                    "delivered",
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    message_id = %stored_message.id,
+                    upstream_status = ?delivery.http_status,
+                    error = %e,
+                    "callback delivery failed"
+                );
+                let _ = super::channel_activity_service::record_callback_failure(
+                    state.db,
+                    &stored_message,
+                    delivery.http_status,
+                )
+                .await;
+            }
+        }
+
+        // Touch conversation last_message_at timestamp
+        if !notification {
+            let _ =
+                channel_routing_service::touch_conversation(state.db, &route.conversation.id).await;
+        }
+    }
+
+    Ok(complete)
+}

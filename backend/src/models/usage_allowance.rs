@@ -20,6 +20,8 @@ pub enum AllowanceRecurrence {
 pub struct UsageAllowance {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
     pub service_id: String,
     pub service_slug: String,
     pub metric: BillingMetric,
@@ -28,6 +30,10 @@ pub struct UsageAllowance {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub is_active: bool,
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

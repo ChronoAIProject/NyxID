@@ -1,3 +1,5 @@
+import "./lib/platform-personal-handoff";
+import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -11,6 +13,8 @@ import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
+import { shouldRetryQuery } from "./lib/query-retry";
+import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -30,17 +34,7 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 60 * 1000,
-      retry: (failureCount, error) => {
-        if (
-          error &&
-          typeof error === "object" &&
-          "status" in error &&
-          (error as { status: number }).status === 401
-        ) {
-          return false;
-        }
-        return failureCount < 3;
-      },
+      retry: shouldRetryQuery,
     },
   },
 });
@@ -57,8 +51,22 @@ if (import.meta.env.DEV) {
   (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
 }
 
+function isLoginApprovalPage() {
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+}
+
 function Root() {
   const [ready, setReady] = useState(false);
+  const [agentKeyLogin, setAgentKeyLogin] = useState(
+    isLoginApprovalPage,
+  );
+  useEffect(
+    () =>
+      router.subscribe("onResolved", () => {
+        setAgentKeyLogin(isLoginApprovalPage());
+      }),
+    [],
+  );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
@@ -77,13 +85,13 @@ function Root() {
   // MCP tabs) still fetch it via their own hook invocations.
   const telemetryMightInit = !consentAsked || consentEnabled;
   const { data: publicConfig } = usePublicConfig({
-    enabled: telemetryMightInit,
+    enabled: telemetryMightInit && !agentKeyLogin,
   });
 
   useEffect(() => {
     useAuthStore
       .getState()
-      .checkAuth()
+      .checkAuth({ ephemeral: isLoginApprovalPage() })
       .finally(() => {
         setReady(true);
       });
@@ -97,7 +105,7 @@ function Root() {
   // stays undefined forever and we simply never initialize — which is
   // the correct outcome.
   useEffect(() => {
-    if (!ready || !publicConfig) return;
+    if (!ready || !publicConfig || agentKeyLogin) return;
     initTelemetry({
       dsn: publicConfig.telemetry_dsn,
       host: publicConfig.telemetry_host,
@@ -110,7 +118,7 @@ function Root() {
     if (isAuthenticated && user?.id) {
       telemetryIdentify(user.id);
     }
-  }, [ready, publicConfig, consentEnabled, isAuthenticated]);
+  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard
@@ -133,7 +141,11 @@ function Root() {
         router.getMatchedRoutes(path).foundRoute,
       );
       if (pathMatchesRoute && !isPublicPath(path)) {
-        router.navigate({ to: "/login" });
+        preserveTelegramClaimForLogin();
+        router.navigate({
+          to: "/login",
+          search: { return_to: window.location.origin + path + window.location.search },
+        });
       }
     }
   }, [ready, isAuthenticated]);
@@ -147,7 +159,8 @@ function Root() {
   return (
     <>
       <RouterProvider router={router} />
-      <ConsentBanner />
+      <BuildUpdateBanner ready={ready} queryClient={queryClient} />
+      {!agentKeyLogin && <ConsentBanner />}
     </>
   );
 }

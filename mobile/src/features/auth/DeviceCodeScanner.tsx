@@ -27,11 +27,11 @@ import {
   typeScale,
   TOUCH_TARGET,
 } from "../../theme/designTokens";
-import { extractAuthDeviceUserCodeFromQr } from "./deviceUserCode";
+import { extractLoginRequestFromQr } from "./deviceUserCode";
 
 type DeviceCodeScannerProps = {
   onCancel: () => void;
-  onCode: (userCode: string) => void;
+  onCode: (userCode: string, kind: "device" | "agent-key") => void;
   onManualEntry: () => void;
   paused?: boolean;
 };
@@ -82,13 +82,13 @@ export function DeviceCodeScanner({
     if (paused || scanHandled.current) return;
     scanHandled.current = true;
 
-    const userCode = extractAuthDeviceUserCodeFromQr(result.data);
-    if (!userCode) {
+    const request = extractLoginRequestFromQr(result.data);
+    if (!request) {
       setScanError("This QR code is not a valid NyxID login request.");
       return;
     }
 
-    onCode(userCode);
+    onCode(request.userCode, request.kind);
   };
 
   const retryScan = () => {

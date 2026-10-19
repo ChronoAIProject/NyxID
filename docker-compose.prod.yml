@@ -16,6 +16,10 @@
 # Override the version by exporting NYXID_VERSION (defaults to `latest`).
 
 services:
+  mongodb-init:
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-nyxid}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD must be set}
   # Lock the Mongo password down: require it to be supplied via the env file,
   # rather than the dev override's hardcoded value.
   mongodb:
@@ -35,7 +39,7 @@ services:
       # Constructed here so ${MONGO_ROOT_PASSWORD} is interpolated by compose.
       # env_file entries are passed through to the container verbatim (no
       # ${...} expansion), so DATABASE_URL must live in this block.
-      DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin
+      DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin&replicaSet=nyxid-rs
       # INSTANCE_NAME and INTERNAL_ADVERTISE_URL default from each container's
       # unique HOSTNAME. The private listener is reachable only on this network.
       INTERNAL_BIND_ADDR: 0.0.0.0:3002
@@ -43,8 +47,8 @@ services:
     volumes:
       - ./keys:/app/keys:ro
     depends_on:
-      mongodb:
-        condition: service_healthy
+      mongodb-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
       interval: 10s

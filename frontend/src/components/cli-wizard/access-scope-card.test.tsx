@@ -64,8 +64,8 @@ beforeEach(() => {
   mockUseKeys.mockReturnValue({
     isLoading: false,
     data: [
-      { id: "svc-1", label: "OpenAI", slug: "llm-openai" },
-      { id: "svc-2", label: "GitHub", slug: "github" },
+      { is_active: true, id: "svc-1", label: "OpenAI", slug: "llm-openai" },
+      { is_active: true, id: "svc-2", label: "GitHub", slug: "github" },
     ],
   })
   mockUseNodes.mockReturnValue({
@@ -162,4 +162,40 @@ describe("AccessScopeCard", () => {
       within(nodes).getByText(/None available\. Add one first/i),
     ).toBeInTheDocument()
   })
+})
+
+it("groups platform rows and preserves explicit ids under the durable grant", async () => {
+  mockUseKeys.mockReturnValue({
+    isLoading: false,
+    data: [
+      {
+        id: "platform",
+        label: "Platform Search",
+        slug: "search",
+        is_active: true,
+        auto_connected: true,
+      },
+      {
+        id: "disabled",
+        label: "Disabled service",
+        slug: "disabled",
+        is_active: false,
+        auto_connected: false,
+      },
+    ],
+  })
+  const user = userEvent.setup()
+  const onChange = vi.fn()
+  render(<Harness onChangeSpy={onChange} />)
+  const checkbox = screen.getByRole("checkbox", { name: "Platform Search" })
+  await user.click(checkbox)
+  await user.click(
+    screen.getByRole("checkbox", { name: /includes ones added later/ }),
+  )
+  expect(checkbox).toBeChecked()
+  expect(checkbox).toBeDisabled()
+  const next = onChange.mock.calls.at(-1)![0] as AccessScopeState
+  expect(next.allowAutoConnectedServices).toBe(true)
+  expect([...next.selectedServiceIds]).toEqual(["platform"])
+  expect(screen.queryByText("Disabled service")).not.toBeInTheDocument()
 })

@@ -14,29 +14,28 @@ const {
   loginFn,
   registerFn,
   toastFns,
-} =
-  vi.hoisted(() => ({
-    config: {
-      value: {
-        invite_code_required: true,
-        email_auth_enabled: true,
-        social_providers: ["google", "github"] as string[],
-      } as Record<string, unknown> | undefined,
-    },
-    deviceState: {
-      phase: "idle" as string,
-      request: null,
-      remainingSeconds: null,
-      error: null,
-    },
-    mockDeviceClose: vi.fn(),
-    mockDeviceStart: vi.fn(),
-    mockNavigate: vi.fn(),
-    mockOpenExternal: vi.fn(),
-    loginFn: vi.fn(),
-    registerFn: vi.fn(),
-    toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
-  }));
+} = vi.hoisted(() => ({
+  config: {
+    value: {
+      invite_code_required: true,
+      email_auth_enabled: true,
+      social_providers: ["google", "github"] as string[],
+    } as Record<string, unknown> | undefined,
+  },
+  deviceState: {
+    phase: "idle" as string,
+    request: null,
+    remainingSeconds: null,
+    error: null,
+  },
+  mockDeviceClose: vi.fn(),
+  mockDeviceStart: vi.fn(),
+  mockNavigate: vi.fn(),
+  mockOpenExternal: vi.fn(),
+  loginFn: vi.fn(),
+  registerFn: vi.fn(),
+  toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
+}));
 
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({ data: config.value }),
@@ -198,12 +197,12 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });
 
-  it("redirects to a same-origin return_to instead of the dashboard", async () => {
+  it("preserves the approval code query when redirecting to a same-origin return_to", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => {});
-    const returnTo = `${window.location.origin}/keys`;
+    const returnTo = `${window.location.origin}/login/device?user_code=2ABCDEFGH`;
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} returnTo={returnTo} />);
 
@@ -277,10 +276,7 @@ describe("AuthFlow — login", () => {
 
   it("maps invite_code_already_redeemed to the already-redeemed message", () => {
     render(
-      <AuthFlow
-        initialPanel={0}
-        socialError="invite_code_already_redeemed"
-      />,
+      <AuthFlow initialPanel={0} socialError="invite_code_already_redeemed" />,
     );
     expect(screen.getByTestId("social-error")).toHaveTextContent(
       "This invite code has already been redeemed with this account.",
@@ -306,11 +302,62 @@ describe("AuthFlow — login", () => {
 });
 
 describe("AuthFlow — register", () => {
+  it("allows email registration without a code when the flag is disabled", async () => {
+    config.value = {
+      invite_code_required: false,
+      email_auth_enabled: true,
+      social_providers: ["google"],
+    };
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={1} />);
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
+    expect(
+      screen.queryByPlaceholderText("NYX-XXXXXXXX"),
+    ).not.toBeInTheDocument();
+
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
+    const nameInput = screen.getByPlaceholderText("John Doe");
+    // Wait for the panel transition's delayed autofocus before typing fields.
+    await waitFor(() => expect(nameInput).toHaveFocus());
+    await user.type(nameInput, "Ada Lovelace");
+    await user.type(
+      screen.getByPlaceholderText("you@example.com"),
+      "ada@example.com",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Re-enter your password"),
+      "Hunter22",
+    );
+    await user.click(screen.getByRole("button", { name: "Create Account" }));
+
+    // Validation and submit run asynchronously; the instrumented coverage
+    // build can exceed the default 1 s wait.
+    await waitFor(
+      () => {
+        expect(registerFn).toHaveBeenCalledWith({
+          display_name: "Ada Lovelace",
+          email: "ada@example.com",
+          password: "Hunter22",
+          invite_code: "",
+        });
+      },
+      { timeout: 5000 },
+    );
+  });
+
   it("blocks the email step and shows the invite gate when no code is entered", async () => {
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} />);
 
-    await user.click(screen.getByRole("button", { name: /Continue with Email/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
 
     expect(
       screen.getByText("An invite code is required to use NyxID at this time."),
@@ -319,7 +366,7 @@ describe("AuthFlow — register", () => {
   });
 
   it("submits the registration with the normalized invite code on the happy path", async () => {
-    registerFn.mockResolvedValue({ message: "Check your email." });
+    registerFn.mockResolvedValue({ message: "Registration processed. You can now sign in." });
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} initialInviteCode="nyx-abcd1234" />);
 
@@ -328,7 +375,10 @@ describe("AuthFlow — register", () => {
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",
@@ -343,7 +393,7 @@ describe("AuthFlow — register", () => {
         invite_code: "NYX-ABCD1234",
       });
     });
-    expect(toastFns.info).toHaveBeenCalledWith("Check your email.");
+    expect(toastFns.info).toHaveBeenCalledWith("Registration processed. You can now sign in.");
     // The success path slides back to the login view via a timed fade —
     // flush those pending timers inside act() so they don't leak.
     await act(async () => {
@@ -367,7 +417,10 @@ describe("AuthFlow — register", () => {
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",

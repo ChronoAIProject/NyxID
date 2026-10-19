@@ -103,6 +103,17 @@ describe("DeveloperAppDetail", () => {
     mocks.updateMutateAsync.mockResolvedValue(oauthClient);
   });
 
+  it("returns to the organization's Developer Apps tab", async () => {
+    mocks.useDeveloperApp.mockReturnValue({ data: undefined, isLoading: false });
+    render(<DeveloperAppDetail clientId="client-1" backTo={{
+      to: "/orgs/org-1", label: "Engineering", search: { tab: "developer-apps" },
+    }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Back to Engineering" }));
+    const options = mocks.navigate.mock.calls.at(-1)![0];
+    expect(options.to).toBe("/orgs/org-1");
+    expect(options.search({ action: "create-key" })).toEqual({ tab: "developer-apps" });
+  });
+
   it("uses the include-all catalog for default service declarations", async () => {
     const user = userEvent.setup();
 

@@ -10,6 +10,18 @@ const RANDOM_TOKEN_LENGTH: usize = 32;
 /// Prefix length for API keys (used for lookup without exposing the full key).
 const API_KEY_PREFIX_LENGTH: usize = 8;
 
+pub const AGENT_KEY_PREFIX: &str = "nyxid_ag_";
+pub const AGENT_KEY_DISPLAY_HEX_LENGTH: usize = API_KEY_PREFIX_LENGTH;
+
+pub fn agent_key_display_prefix(secret: &str) -> Option<&str> {
+    let body = secret.strip_prefix(AGENT_KEY_PREFIX)?;
+    let display = body.get(..AGENT_KEY_DISPLAY_HEX_LENGTH)?;
+    if !display.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    secret.get(..AGENT_KEY_PREFIX.len() + AGENT_KEY_DISPLAY_HEX_LENGTH)
+}
+
 /// Generate an API key.
 ///
 /// Returns a tuple of (prefix, full_key, sha256_hash):
@@ -64,6 +76,24 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_display_prefix_is_shared_and_handles_short_or_non_ascii_input() {
+        for secret in [
+            "",
+            "nyxid_ag_",
+            "nyxid_ag_1234567",
+            "nyxid_ag_1234567\u{00e9}",
+            "nyxid_ag_not_hex!",
+            "nyx_12345678",
+        ] {
+            assert_eq!(agent_key_display_prefix(secret), None);
+        }
+        assert_eq!(
+            agent_key_display_prefix("nyxid_ag_0123456789abcdef"),
+            Some("nyxid_ag_01234567")
+        );
+    }
 
     #[test]
     fn test_api_key_format() {

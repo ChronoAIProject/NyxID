@@ -172,6 +172,7 @@
     "/me/player/play": {
       "put": {
         "operationId": "start_playback",
+        "x-nyxid-changes-existing": false,
         "summary": "Start or resume playback",
         "x-aevatar-tool": {
           "name": "start_playback",
@@ -217,6 +218,7 @@
     "/me/player/pause": {
       "put": {
         "operationId": "pause_playback",
+        "x-nyxid-changes-existing": false,
         "summary": "Pause playback",
         "x-aevatar-tool": {
           "name": "pause_playback",

@@ -9,6 +9,8 @@
 //! mostly no-ops -- the real message processing stays in the legacy handler at
 //! `handlers/openclaw_channel.rs` until the full migration is complete.
 
+use crate::services::channel_platform::MediaCapabilities;
+
 use crate::errors::AppResult;
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
@@ -31,8 +33,33 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn supports_text_reply(&self) -> bool {
+        false
+    }
+    fn display_name(&self) -> &str {
+        "OpenClaw"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::NONE
+    }
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: false,
+            reply_to: false,
+            thread: false,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "openclaw"
+    }
+
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        super::super::channel_platform::RegistrationDescriptor {
+            enabled: false,
+            ..Default::default()
+        }
     }
 
     /// Webhook verification is handled by the legacy OpenClaw handler which
@@ -91,17 +118,16 @@ impl PlatformAdapter for OpenClawAdapter {
     }
 
     /// OpenClaw channel replies go through the existing webhook response or a
-    /// separate callback mechanism. For now, this is a no-op -- the relay
-    /// system will forward to the agent's callback URL which handles the reply
-    /// externally.
+    /// separate callback mechanism. Explicitly report that no dispatch occurred.
     async fn send_reply(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         _conversation_id: &str,
         _reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
-        Ok(None)
+        let _bot_token = credentials.token;
+        Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
     }
 
     /// OpenClaw webhooks are configured at the per-mapping level, not via a
@@ -121,10 +147,12 @@ impl PlatformAdapter for OpenClawAdapter {
     async fn verify_bot_token(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let _bot_token = credentials.token;
         Ok(BotIdentity {
             platform_bot_id: "openclaw".to_string(),
+            display_name: None,
             platform_bot_username: "openclaw".to_string(),
         })
     }
@@ -241,17 +269,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_reply_returns_none() {
+    async fn send_reply_explicitly_refuses_dispatch() {
         let adapter = OpenClawAdapter;
         let http = reqwest::Client::new();
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("test".to_string()),
             reply_to_platform_message_id: None,
             metadata: None,
         };
-        let result = adapter.send_reply(&http, "", "conv_id", &reply).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        let result = adapter
+            .send_reply(&http, &"".into(), "conv_id", &reply)
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
+        ));
     }
 
     #[tokio::test]
@@ -268,17 +301,36 @@ mod tests {
     async fn verify_bot_token_returns_placeholder() {
         let adapter = OpenClawAdapter;
         let http = reqwest::Client::new();
-        let identity = adapter.verify_bot_token(&http, "any_token").await.unwrap();
+        let identity = adapter
+            .verify_bot_token(&http, &"any_token".into())
+            .await
+            .unwrap();
         assert_eq!(identity.platform_bot_id, "openclaw");
         assert_eq!(identity.platform_bot_username, "openclaw");
     }
 
     fn make_test_bot() -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
+            x_events: None,
+            last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "openclaw".to_string(),
             label: "OpenClaw Bot".to_string(),
+            credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "openclaw".to_string(),
             platform_bot_username: "openclaw".to_string(),
@@ -294,5 +346,27 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+    #[tokio::test]
+    async fn unsupported_send_makes_no_http_request() {
+        let server = wiremock::MockServer::start().await;
+        let reply = OutboundReply {
+            attachments: vec![],
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert!(matches!(
+            OpenClawAdapter
+                .send_reply(
+                    &reqwest::Client::new(),
+                    &server.uri().as_str().into(),
+                    &server.uri(),
+                    &reply
+                )
+                .await,
+            Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
+        ));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

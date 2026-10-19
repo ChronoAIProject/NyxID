@@ -1,52 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { formatCreditUnits, formatMicrocredits } from "./credits";
+import {
+  decimalCredits,
+  exactCredits,
+  formatExactCredits,
+  legacyCredits,
+  parseCredits,
+} from "./credits";
+import { total } from "./billing-display";
+import { billingUsageRowSchema } from "@/schemas/billing";
 
-describe("credit formatters", () => {
-  it("keeps all six fractional digits without Number conversion", () => {
-    expect(
-      formatMicrocredits("100250001", { suffix: false, locale: "en-US" }),
-    ).toBe("100.250001");
-    expect(formatMicrocredits("5", { suffix: false, locale: "en-US" })).toBe(
-      "0.000005",
-    );
+const row = (amount: string) =>
+  billingUsageRowSchema.parse({
+    metric: "cache_read_tokens",
+    lago_metric_code: "cache",
+    layer: "platform",
+    quantity: 1,
+    requests: 0,
+    bytes: 0,
+    events: 1,
+    lago_acked: true,
+    estimated_credits_micros: 0,
+    estimated_credits: amount,
   });
 
-  it("formats values at the signed i64 boundary exactly", () => {
-    expect(
-      formatMicrocredits("9223372036854775807", {
-        suffix: false,
-        locale: "en-US",
-      }),
-    ).toBe("9,223,372,036,854.775807");
-    expect(
-      formatCreditUnits("9223372036854775807", {
-        suffix: false,
-        locale: "en-US",
-      }),
-    ).toBe("9,223,372,036,854,775,807");
+describe("exact credits", () => {
+  it("preserves fractions and large values without floating point", () => {
+    const amount = "9999999999999999999999.999999999999";
+    expect(decimalCredits(parseCredits(amount))).toBe(amount);
+    expect(decimalCredits(parseCredits("0.0000008") * 44_608n)).toBe(
+      "0.0356864",
+    );
+    expect(legacyCredits(35_686)).toBe("0.035686");
+    expect(() => legacyCredits(Number.MAX_SAFE_INTEGER + 1)).toThrow();
   });
+  it("never displays a sub-display-precision nonzero amount as zero", () => {
+    expect(formatExactCredits("0.0000008")).toBe("<0.000001");
+    expect(formatExactCredits("-0.0000008")).toBe(">-0.000001");
+    expect(formatExactCredits("0.0356864")).toBe("0.035686");
+    expect(formatExactCredits("0.0356865")).toBe("0.035687");
+  });
+  it("sums exact API values before formatting and preserves unknown values", () => {
+    expect(
+      total([row("0.0000008"), row("0.0000008")], "estimated_credits_micros"),
+    ).toBe("0.0000016");
+    expect(exactCredits(null, 123)).toBeNull();
+    expect(exactCredits(undefined, 123)).toBe("0.000123");
+    expect(row("0.0000008").estimated_credits).toBe("0.0000008");
+    expect(() => row("0.0000000000001")).toThrow();
+  });
+});
 
-  it("localizes fractional digits and retains locale signs without losing precision", () => {
-    expect(formatMicrocredits("1234500", { locale: "ar-EG" })).toBe(
-      "١٫٢٣٤٥ credits",
-    );
-    expect(formatMicrocredits("-1234500", { locale: "ar-EG" })).toBe(
-      "؜-١٫٢٣٤٥ credits",
-    );
-    expect(formatMicrocredits("-1", { locale: "ar-EG", suffix: false })).toBe(
-      "؜-٠٫٠٠٠٠٠١",
-    );
-    expect(
-      formatMicrocredits("922337203685477580700000001", { locale: "ar-EG" }),
-    ).toBe("٩٢٢٬٣٣٧٬٢٠٣٬٦٨٥٬٤٧٧٬٥٨٠٬٧٠٠٫٠٠٠٠٠١ credits");
-    expect(formatMicrocredits("-1", { locale: "en-US" })).toBe(
-      "-0.000001 credits",
-    );
-  });
-
-  it("uses the locale's grouping and decimal separator", () => {
-    expect(
-      formatMicrocredits("1234500000", { suffix: false, locale: "de-DE" }),
-    ).toBe("1.234,5");
-  });
+it("compact headlines preserve exact displayed digits", async () => {
+  const { formatCompactCredits } = await import("./credits");
+  expect(formatCompactCredits("1234.56789")).toBe("1.2K");
+  expect(formatCompactCredits("9999999999999999.123456789012")).toBe("10,000T");
+  expect(formatCompactCredits("-1250000.000000000001")).toBe("-1.3M");
+  expect(formatCompactCredits("0.000000000001")).toBe("<0.000001");
 });

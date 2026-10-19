@@ -49,6 +49,39 @@ function Harness({
 }
 
 describe("UpstreamScopePicker", () => {
+  it("locks required permissions and retains them when other scopes change", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <Harness
+        catalog={[
+          ...CATALOG,
+          {
+            scope: "required.action",
+            label: "Required action",
+            description: "Use this service.",
+            required: true,
+          },
+        ]}
+        onChangeSpy={onChange}
+      />,
+    );
+    const send = screen.getByRole("button", { name: /Required action/ });
+    expect(send).toHaveAttribute("aria-pressed", "true");
+    expect(send).toBeDisabled();
+    expect(send).toHaveTextContent("required");
+    await user.click(send);
+    expect(onChange).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /Read posts/ }));
+    expect(onChange).toHaveBeenLastCalledWith(["required.action"]);
+    await user.type(
+      screen.getByPlaceholderText(/custom.scope/),
+      "another.scope",
+    );
+    await user.click(screen.getByRole("button", { name: /^Add$/ }));
+    expect(onChange).toHaveBeenLastCalledWith(["required.action", "another.scope"]);
+  });
+
   it("renders catalog scopes as pills, defaults marked and pre-selected", () => {
     render(<Harness />);
     const readPosts = screen.getByRole("button", { name: /Read posts/i });

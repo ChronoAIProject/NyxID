@@ -86,7 +86,7 @@ function isDntActive(): boolean {
  * surface-identification headers on DNT browsers.
  */
 export function isTelemetryActive(): boolean {
-  if (isDntActive()) return false;
+  if (isDntActive() || isSensitiveCurrentPage()) return false;
   return telemetryActive;
 }
 
@@ -119,6 +119,10 @@ export const AUTOCAPTURE_DENYLIST = [
  * response) that would leak if captured.
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
+  /^\/nyxbot\/link(?:\/|$)/,
+  /^\/onboarding\/link(?:\/|$)/,
+  /^\/connect\/bot\/[^/]+/,
+  /^\/login\/(?:device|agent-key|code)(?:\/|$)/,
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,
   /\/oauth\/callback/,
@@ -126,9 +130,17 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/approve\/[^/]+/,
 ];
 
+function isSensitivePath(path: string): boolean {
+  return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(path));
+}
+
+function isSensitiveCurrentPage(): boolean {
+  return typeof window !== 'undefined' && isSensitivePath(window.location.pathname);
+}
+
 function stripQueryString(url: string | undefined): string | undefined {
   if (!url) return url;
-  const idx = url.indexOf('?');
+  const idx = url.search(/[?#]/);
   return idx >= 0 ? url.slice(0, idx) : url;
 }
 
@@ -208,11 +220,17 @@ export function initTelemetry(args: InitTelemetryArgs): void {
 
     // --- Egress hook: last chance to drop / mutate before send ---
     before_send: (event) => {
-      if (!event) return null;
+      if (!event || isSensitiveCurrentPage() || isDntActive()) return null;
 
       // Strip query strings from every captured URL.
       if (event.properties) {
         const props = event.properties as Record<string, unknown>;
+        for (const value of [props.$pathname, props.$current_url, props.$referrer]) {
+          if (typeof value !== 'string') continue;
+          try {
+            if (isSensitivePath(new URL(value, window.location.origin).pathname)) return null;
+          } catch { /* Ignore malformed metadata; no URL is forwarded unchanged below. */ }
+        }
         if (typeof props.$current_url === 'string') {
           props.$current_url = stripQueryString(props.$current_url);
         }
@@ -249,7 +267,7 @@ export function initTelemetry(args: InitTelemetryArgs): void {
  * auth store's post-login hook.
  */
 export function identify(userId: string): void {
-  if (!inited) return;
+  if (!isTelemetryActive()) return;
   if (!userId) return;
   posthog.identify(userId);
 }
@@ -273,7 +291,7 @@ export function reset(): void {
  * No-op when telemetry is off.
  */
 export function capture(event: UiEvent): void {
-  if (!inited) return;
+  if (!isTelemetryActive()) return;
   posthog.capture(event.name, event.props as Record<string, unknown>);
 }
 
@@ -285,7 +303,7 @@ export function capture(event: UiEvent): void {
  * No-op when telemetry is off.
  */
 export function captureException(err: unknown): void {
-  if (!inited) return;
+  if (!isTelemetryActive()) return;
   posthog.captureException?.(err as Error);
 }
 

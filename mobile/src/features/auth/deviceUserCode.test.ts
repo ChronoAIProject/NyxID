@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   extractAuthDeviceUserCodeFromQr,
   normalizeAuthDeviceUserCode,
+  formatAuthDeviceUserCode,
   type AuthDeviceQrTrustPolicy,
 } from "./deviceUserCode";
 
@@ -18,6 +19,12 @@ const developmentTrust: AuthDeviceQrTrustPolicy = {
   webOrigins: [...productionTrust.webOrigins, "http://localhost:3000"],
   allowHttp: true,
 };
+
+test("eight-character QR codes retain the installed public format", () => {
+  const code = extractAuthDeviceUserCodeFromQr("https://app.nyxid.test/login/device?user_code=ABCD-EFGH", productionTrust);
+  assert.equal(code, "ABCDEFGH");
+  assert.equal(formatAuthDeviceUserCode(code!), "ABCD-EFGH");
+});
 
 test("extracts a code from the trusted HTTPS device-login URL", () => {
   assert.equal(

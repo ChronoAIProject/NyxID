@@ -1,3 +1,4 @@
+import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -33,6 +34,7 @@ const authorizationEvidenceSchema = z
     is_active: z.literal(true),
     allowed_service_ids: z.array(actionControlIdentitySchema).max(64),
     allow_all_services: z.literal(false),
+    allow_auto_connected_services: z.boolean().optional(),
     state_version: z.number().int().positive(),
   })
   .passthrough();
@@ -101,6 +103,17 @@ export function AssistantKeyScopeDialog({
   readonly params: AssistantKeyScopeParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const [platformGrant, setPlatformGrant] = useState(
+    params.allowAutoConnectedServices,
+  );
+  const [platformIds, setPlatformIds] = useState<readonly string[] | undefined>(
+    params.addServiceIds,
+  );
+  const reviewedParams = {
+    ...params,
+    addServiceIds: platformIds,
+    allowAutoConnectedServices: platformGrant,
+  };
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -144,6 +157,16 @@ export function AssistantKeyScopeDialog({
     setVerified(false);
     try {
       const snapshot = await readEvidence(keyId);
+      if (
+        expected.allowAutoConnectedServices !== undefined &&
+        (snapshot.allow_auto_connected_services ?? false) !==
+          expected.allowAutoConnectedServices
+      ) {
+        throw new Error(
+          "NyxID key verification did not match the platform-services grant.",
+        );
+      }
+
       const held = new Set(snapshot.allowed_service_ids);
       const missing = expected.addServiceIds.filter((id) => !held.has(id));
       if (missing.length > 0 || snapshot.allow_all_services) {
@@ -167,13 +190,14 @@ export function AssistantKeyScopeDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const expected = keyExtendScopeActionParamsSchema.parse(params);
+      const expected = keyExtendScopeActionParamsSchema.parse(reviewedParams);
       const before = await readEvidence(expected.keyId);
       const response = assistantKeyExtendResponseSchema.parse(
         await api.post<unknown>("/assistant/actions/keys/extend-scope", {
           actionRequestId,
           keyId: expected.keyId,
           addServiceIds: [...expected.addServiceIds],
+          allowAutoConnectedServices: expected.allowAutoConnectedServices,
           expectedStateVersion: before.state_version,
         }),
       );
@@ -208,7 +232,7 @@ export function AssistantKeyScopeDialog({
         </DialogHeader>
 
         {!resultKeyId ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Key</span>
               <Badge
@@ -221,7 +245,7 @@ export function AssistantKeyScopeDialog({
             <div className="space-y-2">
               <span className="text-muted-foreground">Add services</span>
               <div className="flex flex-wrap gap-1.5">
-                {params.addServiceIds.map((serviceId) => (
+                {(platformIds ?? params.addServiceIds).map((serviceId) => (
                   <Badge
                     key={serviceId}
                     variant="secondary"
@@ -235,14 +259,25 @@ export function AssistantKeyScopeDialog({
           </div>
         ) : null}
 
+        {!resultKeyId && (
+          <AssistantPlatformServiceFields
+            keyId={params.keyId}
+            selectedIds={platformIds}
+            allowAll={platformGrant}
+            onAllowAllChange={setPlatformGrant}
+            onIdsChange={setPlatformIds}
+            disabled={submitting || verifying}
+          />
+        )}
+
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-[11px] text-success">
+          <p className="text-11 text-success">
             Exact widened service set verified.
           </p>
         ) : null}
@@ -272,7 +307,7 @@ export function AssistantKeyScopeDialog({
                   isLoading={verifying}
                   onClick={() => {
                     const expected =
-                      keyExtendScopeActionParamsSchema.parse(params);
+                      keyExtendScopeActionParamsSchema.parse(reviewedParams);
                     void verifyScope(resultKeyId, expected);
                   }}
                 >

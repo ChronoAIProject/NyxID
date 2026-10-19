@@ -28,10 +28,14 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [External API Keys](#external-api-keys)
   - [User Services](#user-services)
   - [Third-party Connector Integration](#third-party-connector-integration)
+  - [Bot connection links](#bot-connection-links)
   - [Service Catalog](#service-catalog)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
+  - [Service Pools](#service-pools)
+  - [Oracle Pool Lifecycle](#oracle-pool-lifecycle-unreleased)
+  - [Managed Execution Status](#managed-execution-status)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -47,10 +51,14 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
+  - [Catalog Skill Curation](#catalog-skill-curation)
   - [Notification Settings](#notification-settings)
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
+  - [Telegram New Channel Creation](#telegram-new-channel-creation)
+  - [NyxBot service adapters](#nyxbot-service-adapters)
   - [Webhooks](#webhooks)
+- [Assistant voice and dictation](#assistant-voice-and-dictation)
 
 ---
 
@@ -63,11 +71,19 @@ Most endpoints require authentication. NyxID supports three active authenticatio
 3. **API Key** -- `X-API-Key: <key>` header
 
 Endpoints marked **Auth: None** do not require authentication.
-Endpoints marked **Auth: Required** require any of the above.
+Endpoints marked **Auth: Required** require one of the above, subject to the route's credential-type restrictions.
 Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = true`.
 Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
+
+### Channel management and agent discovery
+
+`GET /api/v1/channel-bots` (`nyxid channel-bot list`) and `GET /api/v1/channel-conversations` (`nyxid channel-event channel list`, filtered to device channels) are human account management lists. Use a human session cookie or account access token. Personal lists are owner-scoped; `org_id` / CLI `--org` requires org-admin access. API keys (including Agent Key logins), delegated, relay and service-account tokens cannot use these lists. Existing OAuth-client account access remains subject to the route's current policy; separate first-party-only routes also reject OAuth-client tokens.
+
+Recovery is explicit: a human can run `nyxid login` and choose account access, or select an existing human account profile. Neither the CLI nor an agent should automatically switch identity, create credentials or widen permissions after a denial.
+
+For existing read-only agent discovery, use `GET /api/v1/channel-relay/conversations?page=1&per_page=50` with the assigned active API key. It returns only active conversations assigned to that exact key, including device channels (`platform=device`); it grants no bot inventory or management access. There is no separate channel-event discovery endpoint. A key without assignments receives an empty list. The management lists remain closed to API keys.
 
 ---
 
@@ -95,6 +111,35 @@ The `session_token` field is only present when `error_code` is `2002` (MFA requi
 ```
 
 Internal errors never leak implementation details. The `message` for error codes `1006` and `1007` is always `"An internal error occurred"`.
+
+Credential-type denials add fixed, metadata-only `details`; the existing HTTP status, error key, numeric code and message remain unchanged:
+
+```json
+{
+  "error": "forbidden",
+  "error_code": 1002,
+  "message": "Forbidden: API keys cannot access this endpoint",
+  "details": {
+    "reason": "credential_type_unsupported",
+    "credential_type": "api_key",
+    "accepted": ["user_session"],
+    "hint": "Ask a human to run `nyxid login` and choose account access, or use an existing human account profile. Do not switch identity automatically."
+  }
+}
+```
+
+`credential_type` is one of `api_key`, `delegated`, `relay`, `service_account`, or `oauth_client`. `accepted: ["user_session"]` names the supported recovery credential (a human account cookie or account access token), not an exhaustive route ACL or a permission grant. Ownership and scope checks still apply. Guidance never includes credentials, caller identifiers, resource IDs or content.
+
+| Status | `details.reason` | Meaning / next step |
+| --- | --- | --- |
+| 403 | `credential_type_unsupported` | This route excludes the supplied credential type; ask a human to choose the supported account access explicitly. |
+| 403 | `insufficient_scope` | A scope gate refused access; ask the owner to review only the required scopes. Changing identity is not an automatic remedy. |
+| 401 | `authentication_failed` | Authentication failed (including invalid credentials); this is not a credential-type permission denial. |
+| 401 | `credential_expired` | The authenticator reported expiry; this is not a credential-type permission denial. |
+
+Resource permission denials retain their existing errors and are not labelled `credential_type_unsupported`. Older servers may omit `details`; clients must preserve their existing fallback. Credential-type middleware intentionally performs deny-only checks before authentication: its 403 does **not** certify that a credential is valid. For example, an expired API-key-shaped token still hits that early 403 on an excluded management route; on the assigned-conversation route it reaches authentication and returns 401. This ordering is unchanged.
+
+CLI text errors preserve the existing `Error: ...` line and append the accepted credential and manual next step. JSON errors preserve the `http_error` wrapper, original `path` (including query parameters) and complete server `body`, and only add a `guidance` object with the stable reason and safe next steps. The added guidance contains no request identifiers or credentials. For the two channel lists, guidance includes the assigned-conversation alternative. No login, refresh, identity fallback or credential creation is triggered by these 403 responses.
 
 ---
 
@@ -126,6 +171,7 @@ Internal errors never leak implementation details. The `message` for error codes
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
 
@@ -453,7 +499,9 @@ curl -X POST http://localhost:3001/api/v1/auth/refresh \
 
 #### POST /api/v1/auth/device/request
 
-Start a first-party device login for a CLI, desktop app, or other input-constrained client. This public contract is stable and versioned with `/api/v1`.
+Start a legacy account-only device login. New clients use the isolated
+[v2 exchange](#selectable-device-login-v2) below to let the human choose the
+grant. This route remains compatible with existing account-only clients.
 
 **Auth:** None
 
@@ -466,6 +514,7 @@ Start a first-party device login for a CLI, desktop app, or other input-constrai
 
 ```json
 {
+  "supports_grant_choice": false,
   "client_label": "Desktop workstation",
   "client_user_agent": "desktop-app/1.4"
 }
@@ -484,7 +533,7 @@ Start a first-party device login for a CLI, desktop app, or other input-constrai
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -569,6 +618,14 @@ Fetch the non-mutating anti-phishing context shown by first-party review surface
 
 `client_label` and `client_user_agent` are requester-supplied free text. `client_ip` is the server-resolved request address observed at `/request`; legacy rows return `null`. All auth-device rows expire after 10 minutes.
 
+`supports_grant_choice` is an explicit capability advertisement. It is `true`
+only for grant-capable `/auth/device/v2/request` rows and is `false` for
+legacy rows. Clients must use this field instead of inspecting the public code
+format. Legacy and v2 requests default to eight normalized characters for installed
+app compatibility. `AUTH_DEVICE_EIGHT_CHAR_CODES=false` restores the old
+nine-character v2 marker during rollout rollback. Old readers and non-reserving
+writers must be drained before eight-character v2 issuance (see ADR-015).
+
 #### POST /api/v1/auth/device/approve
 
 Atomically approve a pending request and prepare a first-party token pair for one poller.
@@ -598,6 +655,101 @@ Atomically reject a pending request. No tokens are minted, and the requester's n
 **Response (200):** `{ "ok": true }`
 
 Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
+
+#### Selectable Device Login V2
+
+Options expose per-key effective bindings and platform availability metadata.
+`allow_auto_connected_services` covers active same-owner rows with either
+`source=auto_provision` or `credential_binding=platform`, including future rows.
+This durable grant is disclosed as extra access; unreported provider scopes are
+never exact. New-client approval submits snapshots for explicit and current
+implied connections. See [DEVICE_LOGIN_PROTOCOL.md](DEVICE_LOGIN_PROTOCOL.md).
+
+The browser hint allowlist, three-step approval and additive consent snapshots are documented in [DEVICE_LOGIN_PROTOCOL.md](DEVICE_LOGIN_PROTOCOL.md).
+
+Plain `nyxid login` deliberately defaults to this exchange: it provides requester attribution (IP, timezone, origin, screen) and human choice of account access or a restricted Agent Key. `nyxid login --callback` opts into the legacy local callback, which grants full account access without requester review. The CLI prints/opens only the bare verification URI for manual code entry; `--clipboard` copies the user code for pasting, except in JSON/no-wait modes, which do not copy or open a browser.
+
+New clients start with `POST /api/v1/auth/device/v2/request`, using the same
+client-context body as the legacy request, plus optional `requested_profile`.
+The response has the same fields, with a `nyx_adc2_` poll secret and a
+human code: `2-XXXX-XXXX` in compatibility mode, or `XXXX-XXXX` after the
+staged issuance gate is enabled. Use `/auth/device/v2/poll` or the browser-only
+`/auth/device/v2/poll-web` with `{"device_code":"nyx_adc2_<secret>"}`.
+
+V2 requests live in separate storage. Old replicas return an unsupported route
+without consuming new grants, and old TTL indexes cannot remove v2 cleanup
+work. Clients must not retry a v2 request through the legacy poll route.
+Legacy requests only offer account access.
+
+The shared public `/auth/device/preview` checks both protocol collections, rejects ambiguous codes, and
+includes the requested profile and sanitized requester context. Human decisions
+require a first-party personal session or an access JWT without an OAuth client
+ID. Third-party OAuth, delegated, relay, service-account and API-key credentials
+cannot approve or mint login grants.
+
+| Method and path | Body | Result |
+|---|---|---|
+| `POST /auth/device/options` | `{"user_code":"XXXX-XXXX"}` | Eligible personal/org keys and resource choices |
+| `POST /auth/device/approve` | `{"user_code":"XXXX-XXXX"}` | Full account approval |
+| `POST /auth/device/approve-agent-key` | Human code, `selection`, optional `credential_expires_at` | Restricted child credential approval |
+| `POST /auth/device/deny` | Human code | Denial without issuance |
+
+`selection` uses the Agent Key login contract: `{"kind":"existing","api_key_id":"<UUID>"}`
+or a `kind: "new"` selection containing the confirmed key permissions. Restricted
+decisions use a distinct fail-closed route so an old replica cannot silently
+interpret that choice as full account approval. Creation and delivery revalidate
+eligibility and effective authority.
+
+Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
+includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
+`auth_kind: "agent_key"` includes `credential`, `credential_id`,
+`credential_expires_at`, `label` and safe `api_key` metadata. Explicit Agent Key
+clients must reject an account grant. The existing device error contract applies;
+clients persist server backoff and stop on terminal outcomes.
+
+Browser account delivery returns `{"ok":true,"auth_kind":"account_session"}`
+and a cookie. Claim, bearer-session revocation and cookie-session insertion are
+one transaction. Browser restricted delivery returns
+`{"ok":false,"auth_kind":"agent_key","login_code":{"request_id":"<UUID>","code":"XXXX-XXXX","expires_at":"<RFC3339>"}}`.
+This code hands the credential to `nyxid login --code`; it never establishes an
+account cookie. Creating the handoff extends the initial 60-second delivery
+window to five minutes after approval; repeated handoff calls never extend that
+fixed deadline. Browser
+handoff and direct CLI delivery race atomically, with exactly one recipient.
+
+KMS failure before delivery preserves retryability. Abandoned approvals revoke
+their issued session or child; parent key configuration and other consumers
+remain intact. Cleanup completes before terminal TTL removal.
+
+#### One-Time Login Codes
+
+An authenticated human can create a five-minute code before opening a CLI. All
+paths below are under `/api/v1`; only redemption is public.
+
+| Method and path | Body or result |
+|---|---|
+| `POST /auth/login-code/options` | Eligible Agent Keys and resource choices |
+| `POST /auth/login-code` | `{"auth_kind":"account_session"}` or `{"auth_kind":"agent_key","selection":{...},"credential_expires_at":null}` |
+| `POST /auth/login-code/redeem` | `{"code":"XXXX-XXXX","requested_profile":"work","client_label":"Workstation"}` plus optional client context |
+| `GET /auth/login-code/{id}` | Issuer-only status and sanitized redemption context; no code or credential |
+| `DELETE /auth/login-code/{id}` | Cancel a pending code |
+| `POST /auth/login-code/{id}/revoke` | Revoke its delivered account session or child credential |
+
+Mint returns `request_id`, the secret `code` shown once, and `expires_at`.
+Redemption returns the same tagged delivery as v2 polling. Issuance and claim are
+one transaction; concurrent redemption has one winner and failures leave no
+orphan grant. Mint/redeem are limited by source and issuer, including invalid-code
+attempts. Terminal status is `redeemed`, `cancelled`, `expired` or `revoked`;
+`can_revoke` indicates delivered credentials. The numeric error definitions are
+authoritative in `backend/src/errors/mod.rs`. Codes belong in neither URLs, logs,
+telemetry nor persistent browser storage.
+
+First-party access JWTs carry `sid`. Protected requests and refresh validate the
+bound session's liveness, so issuer revocation invalidates both existing and
+refreshed access tokens and cascades to the user's session-fallback MCP sessions
+(the only ones that authenticate without a bearer). MCP sessions of OAuth clients
+such as Claude and Codex present their own bearer on every request and survive.
+Legacy first-party tokens without `sid` retain their existing compatibility behavior.
 
 ---
 
@@ -1200,6 +1352,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `base_url`         | string | HTTP only | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
 | `auth_type`        | string | HTTP only | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
 | `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
+| `auth_scheme` | string | No | Catalog bearer authorization scheme: an RFC 9110 token of 1–64 ASCII bytes. Omitted means `Bearer`. Valid only with bearer auth (including the `oauth2` alias). No user-connection override. |
 | `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 | `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
 | `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
@@ -1408,6 +1561,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `name`         | string  | No       | New display name (1-200 chars)                                          |
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
+| `auth_scheme` | string or null | No | Replace the bearer scheme; `null` restores `Bearer`, omission preserves it. Catalog Managers follow own/shared row field rules; Tools Managers cannot set it. Admin Tool changes demote operations. |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
@@ -1620,6 +1774,15 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 ### SSH
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
+
+NyxBot callers retain these routes under the existing permission modes. Exact
+certificate/session admission binds the connection (or existing catalog-only
+authority), requested parameters and bounded lifetime. Organization use asks in
+Auto and Ask every time; Full access admits without a prompt. Retry the same
+request with `X-NyxID-Acknowledgement-Id` after allowing its action card. A tunnel
+or terminal card authorizes that one session's dynamic traffic, with live
+revocation checks; it does not represent per-frame approval. See
+[NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
@@ -1941,7 +2104,7 @@ Contract guarantees for `contract_version: "1.0"`:
 - `is_generic_proxy: true` means the service exposes only NyxID's generic HTTP request operation. It is not a declared OpenAPI operation and must not be admitted as one.
 - Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
 - `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
-- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader. Stateful MCP sessions may show only the subset activated for that session.
+- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader, including auto-connected service expansion. Assistant chat keys discover services before acknowledgement on both surfaces; platform grants and account acknowledgement gate execution, not discovery. MCP adds its protocol-specific account/meta-tools separately. Stateful MCP sessions may show only the subset activated for that session.
 
 `catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
 
@@ -1955,7 +2118,7 @@ Schema contract:
 
 Platform services are included only when the user has a valid connection with satisfied credentials. `provider` services are excluded because they are not proxyable. User-managed services additionally require an executable server credential or an in-scope dispatchable node route.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`), or non-Curation service-account access token. Tokens and API keys require `proxy` or `proxy:*` scope. Scheduled-invocation keys, Curation service accounts, delegated tokens, and relay tokens are rejected.
 
 **Response (200):**
 
@@ -2408,6 +2571,7 @@ List all active provider configurations.
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "authorization_nonce_required": false,
       "token_endpoint_auth_method": "client_secret_post",
       "extra_auth_params": null,
       "device_code_format": "rfc8628",
@@ -2456,6 +2620,7 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `authorization_nonce_required` | boolean | No | Default `false`; generate a fresh nonce for each hosted OAuth2 authorization-code attempt. See the hosted nonce contract below. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
 | `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
@@ -2467,6 +2632,14 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
+
+**Hosted authorization nonce contract:** `authorization_nonce_required` is additive and default-off. Omitted create values become `false`; omitted updates preserve the stored value. Responses include the setting; consumers of older servers should treat a missing response field as `false`. Explicit `true` is rejected for provider types other than `oauth2`; missing/false remain valid. It is a client-bound OAuth setting under the existing Admin/Catalog Manager permission rules.
+
+When explicitly enabled, NyxID generates 32 cryptographically random bytes, encodes them as URL-safe base64 without padding, stores the value separately as `OAuthState.authorization_nonce`, and sends exactly that value once as `nonce` on the hosted OAuth2 authorization request. It is independent of OAuth state, PKCE and ChatConnect popup correlation. Enabled configurations reject authorization URLs containing a `nonce` query parameter (including a percent-encoded key) or a fragment, and reject `client_id_param_name` equal to `nonce` after trimming. Validation applies to the effective configuration on later URL/parameter edits too. `extra_auth_params` cannot override nonce, state or PKCE.
+
+This capability applies only to hosted OAuth2 authorization-code initiation, including ChatConnect and hosted connect links; node-owned OAuth and public login/OIDC have separate flows. Callback handling does not require a nonce or consume external ID tokens. Attempts started before activation remain valid, including legacy states without this field. Code exchange, refresh and revocation requests are unchanged; existing tokens need no migration or reconnection solely for this setting.
+
+Upgrade **all backend replicas before activation**: older initiators ignore the capability. Configure Hubstaff explicitly after upgrade while retaining `hubstaff:read`, PKCE S256 and the existing client authentication. No `openid` scope or provider-slug inference is needed. This contract does not establish live Hubstaff validation.
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
 
@@ -2550,6 +2723,11 @@ Get a single provider configuration by ID.
 
 Returns a single provider object (same shape as list response items).
 
+Provider responses include the saved `authorization_url`, `token_url`, and
+`revocation_url`, plus `has_client_id` and `has_client_secret` booleans. These
+allow editors to display configured values without returning stored client
+credentials. Device-flow URLs remain available in their corresponding fields.
+
 **Errors:**
 - `1003 not_found` -- Provider does not exist
 
@@ -2590,6 +2768,7 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `authorization_nonce_required` | boolean | No | Set or clear the hosted OAuth2 authorization nonce capability. Omission preserves the stored setting. |
 | `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
 | `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
 | `device_code_url`   | string   | No       | Device authorization endpoint                        |
@@ -2607,6 +2786,11 @@ Update a provider configuration. Only the provided fields are updated (partial u
 Returns the updated provider object.
 
 Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
+
+An explicit empty `default_scopes` array clears the scope list. Trimmed-empty
+`description`, `api_key_instructions`, `api_key_url`, `icon_url`, and
+`documentation_url` strings remove the corresponding optional stored field.
+Blank replacement credentials should be omitted to preserve existing secrets.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -2781,6 +2965,36 @@ curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef
 ---
 
 ### User Provider Tokens
+
+#### Codex API-Key Connection
+
+`GET /api/v1/providers/codex-connection` returns the authenticated account,
+`openai` provider, nullable connection `{id,state_version}`, nullable `service_id`,
+`feature: "openai_responses"` and status `not_connected`, `saved`, `usable` or
+`reconnect_required`. Only first-party human authentication is accepted.
+
+After explicit local destination/account consent, the dedicated CLI helper posts
+`{account_id,api_key,expected_connection}` to the same route. First import uses
+`expected_connection: null`; replacing a reviewed connection must send its exact
+ID and version. Stale consent returns409. The local helper supports only Codex
+API-key file storage, never ChatGPT OAuth subscription tokens. It preserves local
+files, disables redirects and exposes only redacted results.
+
+`POST /api/v1/providers/codex-connection/verify` accepts
+`{"connection":{"id":"<UUID>","state_version":1},"model":"gpt-4.1-mini"}`.
+It makes a small paid Responses request through the ordinary metered proxy with
+the exact saved service selector. `usable` requires a bounded, completed response
+using the current key epoch and service/endpoint binding; another personal or org
+credential cannot satisfy verification. Authentication rejection reports
+`reconnect_required`; network, body or completion failures do not report ready.
+
+Import, replacement and endpoint/key/service provisioning are transactional.
+Same-value user replacement advances credential epoch; verification and lazy
+refresh do not. Disable/Delete invalidate live usable status. Explicit reconnect
+creates a fresh service when the previous one is disabled or deleted, preserving
+its tombstone. NyxID deletion does not revoke an upstream API key or modify local
+Codex. See [the lifecycle and consent guide](CODEX_CONNECTION.md) for storage
+fallbacks, separate OAuth authorization and release capability checks.
 
 Users connect to providers by submitting API keys or completing OAuth flows. These endpoints manage the user's provider token lifecycle.
 
@@ -3034,6 +3248,66 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+#### Agent discovery order per service group
+
+`GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
+"catalog:<catalog UUID>", "ordered": ["<UserService UUID>"] }], "version": 3,
+"updated_at": "<RFC3339>" }`. A missing document returns `groups: []`, version 0
+and a null timestamp. IDs are filtered through live owner, organization and
+service-scope visibility before grouping. Custom `connection:` singleton groups
+are omitted. No stored, hidden or capacity counts are returned. General API keys
+and delegated exact `account:read` GETs may read authorized metadata; service
+accounts and relay tokens cannot read this route.
+
+`PUT /api/v1/service-preferences/groups/{group}` accepts only `{ "ordered": [...],
+"expected_version": 3 }`. `group` must be `catalog:<canonical lowercase RFC-variant UUID>` with a recognized version (1–8, including the existing v4/v5 catalogs); nil/max and unknown versions are rejected;
+connection IDs must be canonical lowercase RFC4122 UUID v4 strings, unique,
+authorized members of that group and at most 200. `ordered: []` explicitly resets
+this group's currently authorized order to default. A nonempty submission appends
+any stored, currently authorized group IDs omitted by a stale draft in their
+previous relative order. The server replaces only this group's visible occupied
+slots; additional IDs follow its last slot. All unrelated, hidden and stale IDs
+and their relative order remain unchanged. A logically identical group order is a
+no-op even when its stored IDs are interleaved with other groups.
+
+The resulting account document may contain at most 200 IDs across all services.
+Capacity returns an actionable generic 400: reset another service or explicitly
+release unavailable preferences. It reveals no hidden IDs or counts. Resets work
+at capacity. No save or read automatically prunes storage.
+
+`DELETE /api/v1/service-preferences/hidden` accepts only `{ "expected_version": 3 }`
+and explicitly releases stored IDs outside the actor's current authorized
+inventory, including deleted or lost-access organization connections. Accessible
+custom singleton IDs and disabled rows are retained, as are every visible group's
+relative order. If access returns, released orders must be set again. The CLI and
+inline capacity banner require explicit confirmation before this action.
+
+Both writes require a verified first-party human session/access token. API keys,
+delegated tokens, service accounts, relay and OAuth application tokens cannot
+write. Both enforce 16 KiB bodies, reject unknown fields and accept expected
+versions 0 through 9007199254740990. Invalid input returns 400; stale versions or
+insert/CAS races return 409 (`Conflict`, code 1004). Changed writes increment the
+version with BSON-millisecond timestamps and chained audits: scoped saves include
+only `{group, count, version}`; releases include only `{released_hidden, version}`.
+No-op writes retain metadata and produce no audit.
+
+`GET /keys` and `GET /keys/{id_or_slug}` add `preference_rank`, a dense 1-based rank
+within the authorized active HTTP catalog group, and `preference_position`, the
+saved position among authorized stored group IDs including disabled rows. Both
+are null for custom singleton groups; disabled rows have a null discovery rank.
+The CLI hidden-release command requires verified HTTPS remotely, refuses
+redirects on reads, refresh and DELETE (including retry), and preserves its
+existing profile/identity and caller-selected-credential fences. Local HTTP is
+limited to exact localhost/127.0.0.1/[::1] destinations, bypasses proxies and pins
+localhost to loopback. Other transport helpers retain their existing behavior.
+
+The UI shows `Discovery #n` and `Saved #p · disabled` separately. Restricted MCP
+callers see dense ranks over their own fully scoped discovery inventory, which
+can differ from the owner's REST pills. Preference never changes named execution,
+retries, pools, grants, approvals, authority digests, billing or `/mcp/config`.
+Part A also leaves implicit LLM gateway connection selection unchanged.
+
+
 The unified keys API auto-provisions UserEndpoint + UserApiKey + UserService records from a single request. This is the primary entry point for users connecting external services.
 
 #### POST /api/v1/keys
@@ -3061,13 +3335,21 @@ Create a new key from catalog or custom endpoint. Auto-provisions all 3 records 
 
 #### GET /api/v1/keys
 
-List all user's keys (combined endpoint + key + service view).
+List all user's keys (combined endpoint + key + service view) for existing human/API-key/delegated callers. CatalogEditor service accounts receive all platform catalog entries with `resource_type: "catalog_service"` and catalog UUIDs when a platform administrator has saved `catalog:skills:read` on the account and the token/live account scopes include it. No catalog role, additional `user-services:read`, or resource grant is required for this scope-granted mode. Existing role-based editors retain their previous role and additional read scope checks until an explicit admin scope save. General/Curation service accounts with `user-services:read` in both the token and live account scopes and a live key read grant receive `{"keys":[...]}` containing only the grant's currently readable, nonsecret metadata entries. See the detail response below for the SA entry fields. Curation accounts also require their live Curation grant.
 
 **Auth:** Required
 
 #### GET /api/v1/keys/{id}
 
-Get a single key's combined view.
+Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response. CatalogEditor must use a catalog UUID returned by its `/keys` list; General/Curation must use an exact UserService UUID.
+
+**CatalogEditor auth:** platform-admin scope grant plus token/live `catalog:skills:read`. Existing role-based editors additionally require token/live `user-services:read` and global role permission `nyxid:catalog:skills:read` until an admin saves catalog scopes. The response contains `resource_type: "catalog_service"`. See [Platform catalog editors](SERVICE_ACCOUNTS.md#platform-catalog-editors) for scope setup and compatibility.
+
+**General/Curation SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Slug access, HEAD, upgrades, and key writes are not included.
+
+The SA response includes identity/label, service type and active state, catalog association, effective `recommended_skills`/`recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It excludes credentials, raw URLs, headers, frame injections, and routing/authentication configuration. No credential resolution or OAuth reconciliation occurs.
+
+Platform admins manage exact grants with `PUT`/`DELETE /api/v1/admin/service-accounts/{sa_id}/key-read-grant`; admins/operators can inspect them with `GET`. PUT accepts `{"user_service_ids":["<uuid>"],"expires_at":"<optional future RFC3339>"}` and replaces all targets. See [Connection metadata reads](SERVICE_ACCOUNTS.md#connection-metadata-reads) for setup and lifecycle.
 
 **Auth:** Required
 
@@ -3257,6 +3539,8 @@ List user's service bindings.
 | `auth_method` | string | Credential injection method |
 | `auth_key_name` | string | Header or parameter name used for credential injection |
 | `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `icon_url` | URL string, omitted | Per-connection icon override set by the user |
+| `catalog_icon_url` | URL string, omitted | The catalog service's icon (its provider's uploaded icon, or a Tool's own icon); clients show it when there is no `icon_url` override |
 | `node_id` | UUID string, omitted | Selected credential node |
 | `node_priority` | integer | Node routing priority |
 | `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |
@@ -3297,6 +3581,8 @@ Deactivate a service binding.
 
 Registered developer apps should use connect links for browser-based connector setup instead of inferring an attempt from changes to `/user-services`.
 
+For channel bot setup, see [Bot connection links](#bot-connection-links). Bot links use the same create-link, human-setup, and signed-notification pattern through separate endpoints.
+
 1. Obtain a normal user OAuth access token through the authorization-code flow.
 2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
 3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
@@ -3315,6 +3601,7 @@ Content-Type: application/json
 {
   "service_slug": "github",
   "label": "Work account",
+  "scopes": ["public_repo"],
   "callback_url": "desktop-app://connect/return",
   "expires_in": 900
 }
@@ -3332,6 +3619,15 @@ Content-Type: application/json
 
 Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
 
+`scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 16 KiB before trimming or deduplication (including the spaces inserted between array entries), at most 256 bytes per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. There is no scope-count cap. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry. OAuth initiation uses query parameters; proxy request-line limits and upstream authorization-URL limits can reject large scope lists below the parser's byte bound.
+
+`endpoint_url` is an optional HTTP(S) service URL prefill for connectors that require a gateway URL. It appears as an editable Service URL on the hosted page; the user confirms the final value during completion. It is ignored when the user selects a NyxID platform key.
+The CLI accepts the same value through `nyxid connect <service_slug> --endpoint-url <url>`.
+
+Creation returns HTTP 400 (`AppError::ValidationError`) for malformed/oversized scopes or non-empty scopes on API-key/no-auth services, providers with `supports_oauth_scopes = false`, and OpenAI-format device-code providers. An empty list preserves the existing behavior for every connection method.
+
+**Public preview:** `POST /api/v1/connect-links/preview` with `{ "token": "nyx_clk_<opaque-secret>" }` returns service and request details, including `connect_method` (`oauth`, `device_code`, `api_key`, or `none`) and `scopes: ["public_repo"]`. The `scopes` array is always present, possibly empty, including for legacy stored links. The hosted page displays these creator-selected permissions for human review; completion cannot edit them.
+
 **Polling response:**
 
 ```json
@@ -3341,6 +3637,7 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
   "service_name": "GitHub",
   "service_slug": "github",
   "expires_at": "2026-08-05T10:15:00.000Z",
+  "scopes": ["public_repo"],
   "requesting_app_id": "desktop-client-id",
   "requesting_app_name": "Desktop App",
   "last_error": "provider_access_denied",
@@ -3349,6 +3646,8 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 ```
 
 `status` is one of `pending`, `completed`, `expired`, or `cancelled`. A completed response includes `connected_service: { "id", "slug" }`. Terminal responses with a callback include the fully merged `callback_url`.
+
+Polling always includes `scopes` (possibly `[]`) in every state. MCP `nyx__connect_service` accepts the same optional `scopes` array, or a comma/space-separated string, and echoes normalized scopes in its `pending_connection` response. Omit `credential` to use the hosted OAuth flow when requesting scopes.
 
 `last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
 
@@ -3378,6 +3677,8 @@ Content-Type: application/json
 - `DELETE /api/v1/developer/oauth-clients/{client_id}/connection-webhook` disables delivery and removes the stored encrypted secret.
 
 Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
+
+Apps that also create [bot connection links](#bot-connection-links) receive `channel_connect.completed`, `channel_connect.cancelled`, and `channel_connect.expired` through this registered webhook and signing key. Existing service event names and payloads are unchanged.
 
 Abandoned app-bound links are expired by a background sweep, so `connect_link.expired` delivery does not require the app to poll or revisit the hosted page.
 
@@ -3433,6 +3734,81 @@ Envelope timestamps use RFC 3339 UTC serialization. The wire-format assertion em
 
 ---
 
+### Bot connection links
+
+Tracked bot setup uses `POST /api/v1/channel-connect-links` and the hosted page `/connect/bot/{token}`. Existing [service connection links](#third-party-connector-integration) retain their API and webhook contracts. Reusable `/channel-bots/connect/{platform}` pages remain available; those URLs do not create a tracked callback request.
+
+#### POST /api/v1/channel-connect-links
+
+**Auth:** Account session, user OAuth access token, or Agent Key with write access to the selected owner. Delegated, relay, and service-account tokens are rejected. Agent Keys may create, read, and cancel requests; setup completion requires a human account.
+
+**Create request for a direct webhook:**
+
+```json
+{
+	"platform": "discord",
+	"label": "Support bot",
+	"requested_by": "Support platform",
+	"webhook_url": "https://app.example.com/events/nyxid",
+	"callback_url": "https://app.example.com/setup/return?state=request-123",
+	"expires_in": 900
+}
+```
+
+| Field | Required | Contract |
+|---|---|---|
+| `platform` | Yes | Enabled platform ID from `GET /api/v1/channel-platforms`. |
+| `label` | Yes | Fixed bot name. |
+| `target_org_id` | No | Organization UUID the actor administers. Omit for personal ownership. |
+| `requested_by` | No | Display name. Verified OAuth app or Agent Key attribution takes precedence. |
+| `webhook_url` | No | Public HTTPS destination for direct callers. OAuth app callers use their registered connection webhook and cannot supply this field. |
+| `callback_url` | No | Browser return URI. OAuth app callbacks use the existing registered redirect matching policy; other callers use HTTP(S) URLs. |
+| `expires_in` | No | Seconds, default `900`, clamped to `60`–`3600`. |
+
+**Response: `200 OK`**
+
+```json
+{
+	"id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+	"connect_url": "https://app.nyxid.dev/connect/bot/nyx_bcl_<opaque-secret>",
+	"expires_at": "2026-09-30T08:15:00Z",
+	"webhook_signing_secret": "nyx_bwh_<opaque-secret>",
+	"webhook_signing_key_id": "key_<opaque-id>"
+}
+```
+
+The signing fields are returned once for a direct webhook and are `null` otherwise. The hosted token is a single-use secret. Status, preview, browser callbacks, and notification events never return credentials or signing secrets. The platform, label, and owner are fixed at creation.
+
+#### Status, cancellation, and hosted setup endpoints
+
+All paths below are under `/api/v1/channel-connect-links`.
+
+| Method | Path | Access and behavior |
+|---|---|---|
+| `GET` | `/{id}` | Authorized owner writer; returns status and webhook delivery state, and reconciles saved setup. |
+| `POST` | `/{id}/cancel` | Authorized owner writer; cancels an unstarted request. Started setup returns a conflict. |
+| `POST` | `/preview` | Public, rate-limited; accepts `{ "token": "..." }`. Omits owner, bot, provider, callback, and delivery details. |
+| `POST` | `/decline` | Human account with owner write access; accepts `{ "token": "..." }` and uses the same cancellation rules. |
+| `POST` | `/complete` | Human account; accepts the token and the platform's manual registration fields. |
+| `POST` | `/managed/start` | Human account; accepts the token and starts the platform's managed OAuth authorization. |
+| `POST` | `/managed/complete` | Human account; accepts the token and managed completion fields. Supports JSON and `Accept: text/event-stream` progress. |
+| `POST` | `/telegram/start` | Human account; accepts the token and creates or resumes the linked Telegram approval request. |
+| `POST` | `/retry` | Human account; accepts the token and repairs or verifies an already saved bot. |
+
+`status` is `pending`, `completed`, `cancelled`, or `expired`. The private status response includes `bot_id`, `connection_id`, `telegram_request_id`, `last_error`, and `delivery_status`. Delivery is `pending`, `delivered`, `abandoned`, or `none` after a terminal result; before that it may be `null`. `telegram_requires_original_actor` tells another org administrator that the account which started Telegram approval must resume it. A terminal `callback_url` includes the merged `status`, `channel_connect_link_id`, and optional `bot_id` parameters.
+
+#### Bot setup notifications
+
+Events are `channel_connect.completed`, `channel_connect.cancelled`, and `channel_connect.expired`. They use the [connection lifecycle signature headers and HMAC contract](#connection-lifecycle-webhooks). The event ID, occurrence time, and result data remain stable across retries. Receivers deduplicate by `event_id` and acknowledge with a 2xx response.
+
+Bot delivery uses five-minute leases and at most five cycles of three bounded HTTP attempts. A separate worker recovers completion, expiry, and interrupted delivery without app polling. `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=0` disables both the bot worker and the existing service-link expiry sweep.
+
+For manual setup, `completed` can include `bot_status: "pending_webhook"`. `bot_status` and `webhook_registered` describe whether platform delivery is ready. The optional browser return follows explicit user continuation so the user can save a one-time platform verification secret first.
+
+The [bot-link lifecycle and webhook payload](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links) describe recovery deadlines, Telegram approval expiry, and late worker completion. The [implementation map](CHANNEL_BOT_RELAY.md#bot-link-implementation-and-compatibility) identifies the storage, handler, worker, frontend, and CLI code.
+
+---
+
 ### Service Catalog
 
 Read-only catalog of available service templates for users.
@@ -3441,13 +3817,23 @@ Read-only catalog of available service templates for users.
 
 List all available service templates from the admin-managed catalog.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
 
 #### GET /api/v1/catalog/{slug}
 
 Get a specific catalog template by slug.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+#### GET /api/v1/catalog/{slug}/endpoints
+
+Return operations parsed from the admin-configured catalog OpenAPI spec. If no readable catalog template matches, a readable user-service slug can resolve its owner-scoped mounted spec.
+
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+Service accounts remain rejected: catalog detail resolves restricted platform grants through a User actor, while SA tokens carry the SA ID.
+
+Catalog entries use template slugs, resource URIs and skills, with live platform grants determining `platform_key.available` and inference binding/status. They do not include instance overrides or connection flags. API keys can use instance-backed private catalog access and mounted-spec fallback only within their effective service allowlist, including auto-connected expansion, and active Member/Admin org scopes. Org-owned keys act as the org. Catalog discovery does not provision services or reconcile pending OAuth credentials.
 
 ---
 
@@ -3481,6 +3867,113 @@ curl http://localhost:3001/api/v1/sessions \
 ```
 
 ---
+
+### Service Pools
+
+Service pools group owned connections under one proxy slug. Management and
+inspection require authentication and owner access. Organization management
+requires an owner or admin membership. The full routing, member, and retry
+contracts are documented in [Service pools](SERVICE_POOLS.md).
+
+| Method | Path under `/api/v1` | Purpose |
+|---|---|---|
+| GET / POST | `/service-pools` | List or create pools; optional `org_id` selects an organization owner |
+| GET / PUT / DELETE | `/service-pools/{pool_id}` | Read, update, or delete a pool |
+| PUT / POST | `/service-pools/{pool_id}/members` | Replace all members or add a member |
+| DELETE | `/service-pools/{pool_id}/members/{user_service_id}` | Remove a member |
+| GET | `/service-pools/candidates` | Inspect connections for a new pool |
+| GET | `/service-pools/{pool_id}/candidates` | Inspect connections for an existing pool or draft |
+| GET | `/service-pools/{pool_id}/health` | Inspect all saved members, including unavailable members |
+| POST | `/service-pools/{pool_id}/health/reset` | Reset cooldowns for one member or the whole pool |
+
+Updates accept `expected_revision`; a stale revision returns HTTP 409. Settings
+and members can be saved in the same update. Health reset accepts
+`{"user_service_id":"<connection-id>"}` for one member or `{}` for all members.
+
+Candidate and health inspection accept these query parameters:
+
+| Parameter | Behavior |
+|---|---|
+| `check_operation` | Defaults to `true`. Set `false` to browse connection inventory without checking operation permissions or cooldowns. |
+| `method`, `path` | Checked operation, defaulting to `POST /` for Same API or `POST chat/completions` for AI chat. Paths follow proxy canonical-path validation. |
+| `strategy`, `member_contract` | Draft routing strategy and contract for candidate inspection. Health uses the saved configuration. |
+| `peer_ids`, `declared_peer_ids` | Comma-separated draft connection UUIDs and Same API compatibility declarations, capped at 50 IDs each. |
+| `selected_only` | With `true`, candidate inspection returns the selected `peer_ids` independently of search and pagination. |
+| `search`, `limit`, `after` | Literal, case-insensitive search over connection and original catalog service names and slugs, applied before candidate pagination. `limit` defaults to 100 and is clamped to 1–100. |
+| `org_id` | Organization owner for new-pool candidate inspection. Existing-pool routes resolve the owner from the pool. |
+
+Responses contain `operation_checked`, `method`, `path`, `candidates`,
+`has_more`, and `next_cursor`. Explicit inventory mode returns
+`operation_checked: false` and null method/path values. Each candidate includes
+its connection ID, `name`, `slug`, eligibility and reason, credential binding,
+protocol, compatibility requirements, and cooldown metadata. Inventory results
+do not establish that a particular operation can execute. Inspection is
+read-only and never decrypts credentials or sends a request to a provider.
+The connection `name` and name search use the same label as the Services page:
+the owned stored key's label, falling back to the owned endpoint label and then
+the connection slug. Explicit platform bindings use the endpoint label even
+when a personal key is retained. Connection-label lookups project only IDs and labels.
+
+Candidates also carry `catalog_service_id`, `group_name`, and `group_slug` for
+grouped connection selectors. Catalog-backed connections use the original
+service's name and slug; group them by `catalog_service_id`, since different
+services can share a display name. Custom connections have a null catalog ID,
+`group_name: "Custom connections"`, and a null `group_slug`. Group metadata
+describes only the returned connections; pagination still counts connections,
+and one service's connections may span multiple pages.
+
+A connection with an inactive stored credential or missing credential material
+returns `eligible: false` with `reason: "credential_unavailable"`; other
+connections remain in the response. Repair that connection before selecting it.
+Priority execution skips such members before dispatch. Database and data
+integrity errors still fail the request.
+
+### Managed Execution Status
+
+The Telnyx platform offering reserves NyxID credits before provider dispatch and
+settles validated token usage. These authenticated reads expose execution
+metadata without prompts, completions, provider credentials, or raw usage
+responses. Existing credential-type and scope checks still apply. A person can
+read their own acting executions and liabilities funded by their personal
+wallet, including their service accounts; a service account can see only its
+own acting executions. There is no caller-selected billing owner.
+
+#### GET /api/v1/billing/executions
+
+**Auth: Required.** Returns a JSON array of the latest 50 visible executions,
+ordered by descending `created_at` and then descending ID. It accepts no
+pagination or owner selection parameters.
+
+#### GET /api/v1/billing/executions/{id}
+
+**Auth: Required.** Returns one visible execution. An invalid UUID, absent row,
+or inaccessible execution returns `404`.
+
+Both endpoints use this metadata shape:
+
+```json
+{
+  "id": "0e8569b5-16ba-4205-a91f-047ace6c6588",
+  "service_slug": "telnyx-platform",
+  "model": "THE_VERIFIED_MODEL_ID",
+  "state": "pending",
+  "maximum_credits": "0.001",
+  "pending_reason": "outcome_unknown",
+  "created_at": "2026-10-16T00:00:00Z",
+  "updated_at": "2026-10-16T00:00:01Z"
+}
+```
+
+`maximum_credits` is an exact decimal string containing the reservation ceiling.
+`service_slug` and `pending_reason` may be null. States are `prepared`, `funded`,
+`dispatch_admitted`, `pending`, `evidence_ready`, `cancelling`, `released`, and
+`settled`. A pending execution retains possible liability; reading its status
+does not replay the provider call or resolve missing evidence. Successful HTTP
+execution responses include `X-NyxID-Execution-Id`; uncertain outcomes return
+`managed_execution_pending` with the UUID in the error message.
+
+See [Telnyx platform billing](TELNYX_PLATFORM_BILLING.md) for the supported
+operation, funding behavior, activation requirements, and recovery limits.
 
 ### Proxy
 
@@ -3953,11 +4446,20 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `response_type`         | string | Yes      | Must be `code`                           |
 | `client_id`             | string | Yes      | UUID of the registered OAuth client      |
 | `redirect_uri`          | string | Yes      | Must match a registered redirect URI     |
-| `scope`                 | string | No       | Space-separated scopes (default: the client's configured `allowed_scopes`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
+| `scope`                 | string | No       | Space-separated scopes. Ordinary authorization defaults to the client's configured `allowed_scopes`; incremental authorization preserves the existing grant when omitted and adds only the requested scopes when supplied. Additional scopes include `roles` (RBAC claims) and `groups` (group memberships). |
 | `state`                 | string | No       | Opaque value for CSRF protection         |
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |
 | `nonce`                 | string | No       | Value included in ID token for replay protection |
+| `include_granted_scopes` | boolean | No | `true` requests additive OAuth scopes and service access, like Google's incremental authorization option |
+| `service_access_mode`   | string | No       | `incremental` is the NyxID-specific alias for add-only consent; omission keeps ordinary authorization/review behavior unless `include_granted_scopes=true` |
+| `requested_service_ids` | repeated string | No | Exact UserService UUIDs required by an incremental request (maximum 100 entries, deduplicated); requires `include_granted_scopes=true` or `service_access_mode=incremental` |
+| `resource`              | repeated string | No | RFC 8707 resources; in incremental mode their services are also required, and they narrow the initial access token rather than the accumulated refresh/binding grant |
+| `binding_grant_id`      | string | No       | SHA-256 of an existing binding handle, to update that exact binding; external subject must match, including an absent subject in incremental mode |
+
+Incremental authorization requires a live consent for the current user and client. NyxID signs the existing grant and requested IDs, then asks the user to confirm additions. Existing A/B plus newly approved C/D produces A/B/C/D in the authorization code, refresh token, and broker binding. Existing unrestricted access stays unrestricted; a restricted grant cannot become unrestricted in this mode. Unknown, disabled, or inaccessible new service IDs are rejected. Concurrent grant changes or revocation invalidate stale decisions/codes and require restarting authorization; routine broker refresh-token rotation does not change the grant.
+
+`POST /oauth/par` accepts the same `include_granted_scopes`, `service_access_mode`, and repeated `requested_service_ids` form fields. Callers must start at the authorization/PAR endpoint, not construct a consent page URL or provide a grant snapshot themselves. See [incremental service access and the Aevatar integration contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally).
 
 **Response (200):**
 
@@ -4004,6 +4506,7 @@ Token endpoint. Exchanges an authorization code for access, refresh, and ID toke
 | `client_id`     | string | Yes      | UUID of the OAuth client                 |
 | `client_secret` | string | No       | Required for confidential clients        |
 | `code_verifier` | string | No       | PKCE code verifier (required if PKCE used)|
+| `resource`      | repeated string | No | Requested access-token resources within the granted authority; incremental codes default to the authorize request's resources when omitted, while refresh/binding authority retains the accumulated service grant |
 
 **Request Body (refresh_token grant):**
 
@@ -5034,9 +5537,141 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
 
 ---
 
+### Provider-linked service configuration
+
+Both provider/service endpoints require admin access:
+`GET /api/v1/providers/{provider_id}/services` lists canonical links and legacy
+provider requirements. `PUT /api/v1/providers/{provider_id}/services/{service_id}` links an existing catalog
+service; `POST /api/v1/services` also accepts `provider_config_id` for atomic
+creation/linking. A service already linked to another provider is not rebound.
+Direct-auth services retain their authentication method without adding provider
+requirements.
+
+Service updates accept a write-only `credential` (blank preserves), `platform_key`,
+credential-class billing lanes, and `proxy_operation_policy`. Omitted policy
+preserves; null clears; `{ "rules": [] }` denies every endpoint. Rules contain
+an HTTP `method` and absolute `path_template`, and apply to all service bindings.
+New shared keys default disabled/restricted. Admin response
+`credential_configured` is true/false after authorized inspection, or null when
+unreadable; non-admin responses return null without inspecting the credential.
+
+Platform Operations routes and its three named MCP operation tools are removed.
+See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md) for
+linking, access, billing, and migration behavior, and [Admin form save
+behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
+
 ### Admin
 
-All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+Admin endpoints require the authenticated user to hold the applicable platform or scoped permission described for each route. Admin user management includes self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### Feature flag roles and management
+
+The system roles `feature-flag-operator` and `feature-flag-admin` can be assigned
+to any user through the existing user role assignments or through a group.
+They grant only feature flag administration; neither role grants access to
+unrelated admin pages or the admin user directory.
+
+| Caller | List flags | Create flags | Edit rollout and metadata |
+| --- | --- | --- | --- |
+| Platform Admin | All | Yes | All |
+| Platform Operator | All | No | No |
+| `feature-flag-operator` | Flags they created | Yes | Flags they created |
+| `feature-flag-admin` | All | Yes | All |
+
+Permissions combine: a Platform Operator who also holds `feature-flag-operator`
+retains the platform-wide read permission but can write only their own flags.
+Feature flag admin access wins when both feature flag roles are held.
+Authorization resolves current direct and group roles on every API request.
+
+The roles carry `nyxid:feature_flags:own:write` and
+`nyxid:feature_flags:admin`, respectively. Startup seeds both as non-default,
+protected system roles. A pre-existing custom/client role with the same slug is
+left untouched so existing assignments never acquire permissions implicitly.
+
+`GET /api/v1/admin/feature-flags` merges built-in code definitions and runtime
+flags, filtering the list to the caller's read scope. Each flag includes additive
+`created_by` (null for built-ins) and `can_edit` fields. Runtime creator identity
+is immutable; changing or clearing the free-text `owner` does not change access.
+Built-in keys are reserved and cannot be claimed through creation.
+
+`POST /api/v1/admin/feature-flags` creates a runtime flag:
+
+```json
+{
+  "key": "my-team:new-feature",
+  "description": "Enables the new feature for our rollout.",
+  "default_enabled": false
+}
+```
+
+Keys are 1–128 ASCII lowercase letters, digits, colons, underscores or hyphens,
+starting with a letter or digit. Descriptions are required and limited to 512
+characters after trimming. `default_enabled` defaults to false. Unknown fields
+are rejected. The server binds `created_by` to the authenticated user, persists a
+UUID v4 definition in `feature_flag_definitions`, and returns 201 with `key` and
+`created_by`. Duplicate built-in or runtime keys return 409.
+
+Runtime flags use the existing global, organization, and personal override
+precedence and appear in resolved `enabled_features` on `/users/me` and org
+responses. Creating a flag makes it available for consumers to use its key;
+application behavior still requires a consumer for that key. Built-in definitions
+win if a later deployment introduces the same key. Overrides and metadata bind
+runtime definition UUIDs separately from built-ins, so old settings never carry
+across that boundary or from a retired built-in into a newly created flag.
+Replacement unique indexes include that identity and are created before the
+legacy indexes are retired.
+
+Deploy the backend before the frontend so `/admin/feature-flag-targets` is
+available when the updated rollout picker starts using it. Upgrade all backend
+replicas before creating runtime keys that match retired
+built-ins. Older binaries recreate the legacy unique indexes on startup. Before
+rolling back to such a binary, remove any rows split across definition identities
+for the same key and target. A runtime definition shadowed by a built-in remains
+stored and becomes visible again if that built-in is retired; retirement cleanup
+can remove the runtime definition and its identity-bound settings when needed.
+
+Existing `PUT /api/v1/admin/feature-flags/{flag_key}` and `DELETE` at the same
+path set and clear rollout overrides. Metadata PUT/PATCH retain their existing
+contracts. Every write checks the caller's permission and, for operators, the
+immutable creator. `DELETE` clears an override; it does not remove the definition.
+
+`GET /api/v1/admin/feature-flag-targets` supplies bounded rollout suggestions
+without granting access to `/admin/users`. It requires `flag_key` naming an
+editable flag and `kind=person|org`; optional `search` is a literal, case-insensitive
+email/name/slug match (max 128 bytes), and `limit` is clamped to 1–20. Results
+contain only active accounts with `id`, `email`, nullable `display_name`, and
+nullable `slug`. A caller who cannot edit the referenced flag receives 403.
+Successful searches emit metadata-only audit events containing the flag key and
+target kind. Creation and existing writes retain audit events.
+
+`GET /users/me` includes `capabilities.read_feature_flags`,
+`create_feature_flags`, and `manage_all_feature_flags`. The admin navigation and
+route guard expose `/admin/feature-flags` to these role holders without opening
+other admin pages. The page uses each flag's `can_edit` for write controls.
+
+#### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
+
+Update only the supplied metadata fields for a registered feature flag.
+
+**Auth:** Platform Admin, feature flag Admin, or feature flag Operator for a flag they created
+
+| Field | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
+| `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+
+Unknown fields are rejected. An empty object leaves the metadata unchanged.
+An unknown flag key returns a bad-request error.
+
+**Response (200):** The saved metadata descriptor: `key`, effective `description`,
+`code_description`, nullable `custom_description`, nullable `owner`, and nullable
+`metadata_updated_at` / `metadata_updated_by`.
+
+For example, `{"owner":"Identity team"}` changes only the owner. The existing
+`PUT` route at this path keeps its replacement contract: omitted fields are
+cleared. Clients that need sparse updates should use `PATCH`.
+
+---
 
 #### GET /api/v1/admin/users
 
@@ -6400,6 +7035,52 @@ curl -X DELETE http://localhost:3001/api/v1/admin/users/user-uuid-here/roles/rol
 
 ---
 
+### Admin Usage
+
+Platform-wide usage reports live under `/api/v1/admin/usage`
+(`GET /admin/usage`, `GET /admin/usage/analytics`,
+`GET /admin/usage/identities`, and `GET`/`PUT /admin/usage/workspace`). The
+full query and response contract is in
+[BILLING_ANALYTICS.md](BILLING_ANALYTICS.md#api-and-reporting-semantics).
+
+**Auth:** Admin or Operator, or any user holding the
+`nyxid:admin:usage:read` permission through a direct or group role. The seeded
+system role **Usage Viewer** (`usage_viewer`) carries it; assign it with
+`POST /api/v1/admin/users/{user_id}/roles/{role_id}` or add the permission to a
+custom role. Holders get read-only access: `PUT /admin/usage/workspace` stays
+admin-only. `GET /api/v1/users/me` reports the result as
+`capabilities.read_admin_usage`.
+
+#### GET /api/v1/admin/usage/identities
+
+Options for the Usage page's actor/owner filters, or labels for saved filter
+ids. Returns only `id`, `label` and optional `detail` (email, `Organization` or
+`Service account`).
+
+| Parameter | Type   | Description                                                             |
+|-----------|--------|-------------------------------------------------------------------------|
+| `kind`    | string | `actors` (people and service accounts) or `owners` (also organizations) |
+| `search`  | string | Case-insensitive substring                                              |
+| `ids`     | string | Comma-separated ids (at most 100) to label instead of searching         |
+
+Admins and Operators search the whole directory. Callers with only the usage
+permission see only identities recorded in the usage rollups, and the List
+report redacts its `selected_user` unless that identity appears in the report.
+
+```json
+{
+  "options": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "label": "Jane Doe", "detail": "jane@example.com" }
+  ],
+  "total": 1
+}
+```
+
+**Errors:** `400` invalid `kind` or more than 100 `ids`; `403` without usage
+access; `503` (`12200`) when the lookup times out.
+
+---
+
 ### Admin Groups
 
 All admin group endpoints require the authenticated user to have `is_admin = true`.
@@ -7694,7 +8375,65 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## X channel event selection
+
+Human owners and owning-org admins can `PATCH /api/v1/channel-bots/{id}` with `{"x_events":["dm","mentions","replies"]}`. Choose any nonempty, unique subset. New and legacy X bots default to `dm`; omitting `x_events` preserves it. The field is X-only and appears on bot detail responses.
+
+`mentions` receives explicit @mentions; `replies` receives direct replies to the connected account's posts. Public events require configured X webhook credentials and user OAuth permission `tweet.write` in addition to the DM channel scopes. A missing scope fails before saving. After validation, NyxID saves the desired selection and reconciles X subscriptions; an upstream failure can therefore return an error with the selection already saved. Refresh bot detail for current status and use `POST /api/v1/channel-bots/{id}/verify` to retry after correcting the cause.
+
+Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1/channel-relay/reply` with the callback's NyxID `message_id` and reply token. Replies are text-only and target that incoming post; caller metadata cannot change the target. Public callbacks omit owner access tokens. Public initiated sends and edits are unsupported. See [X channel setup and limitations](CHANNEL_BOT_RELAY.md#select-mentions-and-replies) for the CLI, routing, scope and billing details.
+
+## Channel bot health
+
+`GET /api/v1/channel-bots/{id}/health` returns metadata-only delivery diagnostics for anyone who can read the bot:
+- `diagnostics`: inbound, reply and webhook timestamps and errors, `subscription_state`, `consecutive_errors` and the stable `failure_reason`;
+- `mode` (`webhook` or `poll`);
+- the stable `recommended_action` (`none`, `reconnect`, `resubscribe`, `verify`, `wait_rate_limit`, `enable_billing`, `contact_admin`, `gateway`) and `recommended_action_text`;
+- `can_write`.
+
+Unauthorized callers get the not-found shape.
+
+`POST /api/v1/channel-bots/{id}/resubscribe` needs write access and is X-only. It re-registers the X Activity subscription, reads it back live, records a `channel_bot_resubscribed` audit row, and returns fresh health.
+
+Admins can use `GET /api/v1/admin/channel-bots` (`platform`, `status`, `limit` 1-500, `offset`; ordered by id), `GET /api/v1/admin/channel-bots/{id}/health` and `GET /api/v1/admin/channel-bots/webhook-rejections`. The last returns per-platform counters of deliveries refused before a bot was authenticated.
+
+All of these routes are denied to delegated `account:read` tokens. Failure codes and recovery are described in [X channel workflow, health and recovery](CHANNEL_BOT_RELAY.md#x-channel-workflow-health-and-recovery).
+
+## Telegram New Channel Creation
+
+Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
+
+Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. New website requests use `auto_connect: true`: the initial authenticated action authorizes connection of one fresh bot through the private Telegram handoff, and the verified creation event queues server completion with live destination-access checks. Omitting the flag preserves the legacy exact-bot approval and browser confirmation flow.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | `/channel-bots/telegram-new` | Read availability and the current creation request; optional `?request_id={uuid}` reads an actor-owned request including completed setup |
+| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?, auto_connect?}`; the website sends `auto_connect: true` |
+| GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
+| POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
+| DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
+| POST | `/channel-bots/telegram-new/claims/preview` | Human-only, non-mutating preview of `{code}`; returns `{bot_username, expires_at}` without provider calls |
+| POST | `/channel-bots/telegram-new/claims/redeem` | Human-only `{code, label, target_org_id?}`; atomically save the claim destination and return HTTP 202 with the connection request; worker completes setup |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Legacy completion: confirm `{telegram_bot_id, revision}` and connect or retry |
+| POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
+
+Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
+
+The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
+
+---
+
 ## Webhooks
+
+### Aurinko email channel
+
+The existing channel APIs accept `platform: "aurinko"`. The platform descriptor is available through `GET /api/v1/channel-platforms`, including account-token and signing-secret fields, setup instructions, and capabilities. Registration uses `POST /api/v1/channel-bots` with `label`, `bot_token`, `app_secret`, and optional `target_org_id`. Credential rotation uses the existing PATCH endpoint; `POST /api/v1/channel-bots/{id}/verify` repairs the bound subscription without changing its mailbox.
+
+`POST /api/v1/webhooks/channel/aurinko/{id}` verifies Aurinko's signed raw request before returning a plaintext `validationToken` challenge or processing a notification. Successful/ignored notifications return 200; verification failures return 401, malformed requests 400, and recoverable failures 503 with `Retry-After: 10`. It never returns Aurinko's unsubscribe signal, 422.
+
+Agents reply through `POST /api/v1/channel-relay/reply` with `{"message_id":"INBOUND_UUID","reply":{"text":"Reply text"}}`, using the assigned agent key or message-bound reply token. The original email determines the single recipient; recipient overrides, channel attachments, initiated sends, and edits are unsupported. A durable send barrier prevents automatic resubmission after an uncertain provider POST.
+
+Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{"webhook_cleanup":"failed"}`; existing platforms retain HTTP 204. Both outcomes deactivate the bot locally. Failed cleanup requires removal of the remaining exact callback subscription in Aurinko or a later deletion retry. See [Aurinko integration](AURINKO_INTEGRATION.md) for the complete contract and independent AI Service setup.
 
 ### Inbound Triggers
 
@@ -7824,3 +8563,244 @@ Content-Type: application/json
 Default limits:
 - **Per-IP:** 30 requests per 1-second window
 - **Global:** 10 requests/second sustained with burst capacity of 30
+
+
+### Catalog Skill Curation
+
+CatalogEditor and legacy Curation service accounts use the `/catalog-curation` runtime routes below. A platform administrator grants CatalogEditor authority by saving `catalog:skills:read` and/or `catalog:skills:write` on the service account. Matching token/live scopes then cover all existing and future catalog entries. Existing role-based editors retain exact global `nyxid:catalog:skills:read/write` permission checks until an explicit admin scope save. The remaining grant requirements in this section apply only to legacy Curation. Legacy Curation runtime requests require the verified SA token, the live unexpired embedded grant, and the exact token/live account scope; their reads reveal only grant-listed catalog services. Both modes deny human credentials, API keys, delegated tokens, and relay tokens. The separate `/admin/service-accounts/{id}/curation-grant` management routes require a human platform admin.
+
+| Method | Path | Scope or authority |
+| --- | --- | --- |
+| POST / DELETE | `/api/v1/admin/service-accounts/{id}/curation-grant` | Human platform admin; sticky Curation purpose/protection |
+| GET | `/api/v1/catalog-curation/services` | `catalog:skills:read` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:read` |
+| GET | `/api/v1/catalog-curation/services/{id}/openapi.json` | `catalog:skills:read` |
+| PUT | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:write` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills/history` | `catalog:skills:read` |
+| POST | `/api/v1/catalog-curation/services/{id}/skills/restore` | `catalog:skills:write` |
+
+PUT accepts a complete `recommended_skills` and/or `recommended_skill_refs` list, optional `clear_refs`, and required `base_revision` plus UUID `request_id`. Restore accepts `revision`, `base_revision`, and `request_id`. Both reject unknown fields. Revision and budget changes, service state, history, and actor/request receipts commit atomically. Conflicting revisions or reuse of a committed ID with changed input return 409; exhausted budget returns 429. Pure no-ops write no receipt/history/revision and spend no budget.
+
+Human `POST/PUT /api/v1/services` use the same skill validation/history path; updates accept `skills_revision`, `skills_request_id`, optional refs, and `clear_skill_refs`. Omitted update revision means expected zero. Mixed metadata effects retain full request idempotency even when skills are unchanged.
+
+The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
+
+
+## Assistant voice and dictation
+
+The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,
+options, controls, captions and billing. Platform audio in a private specialist
+thread does not require granting OpenAI as a tool. The live conversation, agent
+and key binding, platform ACL, operation restrictions and billing admission still
+apply. BYOK retains the exact selected connection's ownership and grant checks.
+
+Dictation adds two first-party human browser routes:
+
+| Route | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/dictation/options?conversation_id={id}` | Read-only eligibility and price discovery. Returns `options`, `transcription_model` (`gpt-live-transcribe`) and `max_seconds` (`120`). Options use the voice option schema with platform OpenAI sources. No funds are reserved by discovery. |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/dictation` | Same-origin WebSocket upgrade authenticated by a live browser session. Requires enabled voice features and a private authorized conversation; delegated credentials cannot execute it. |
+
+Within five seconds of upgrading, send one JSON message containing
+`client_request_id` and `preferences` (the existing voice preferences schema).
+The server selects only platform OpenAI transcription. After the server's `ready`
+event, send binary PCM16 mono audio at 24 kHz, at most 4096 bytes per message, or
+the exact text message `{"type":"stop"}`. Capture is bounded to 120 seconds.
+Provider commands, keys, tools and destination overrides are not accepted.
+
+Server events are `ready` (`session_id`, `model`), `delta` and `completed`
+(`item_id`, `order`, `text`; completion also includes `confirmed_seconds`),
+`stopped` (`confirmed`), and `error` (the standard sanitized `error` envelope).
+The browser reviews the resulting text before inserting it into a draft; the
+transport never submits a chat message. Closing capture releases the microphone
+immediately while the server drains forwarded audio within a bounded deadline
+and settles provider-confirmed input duration. See the
+[transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
+for limits, exact duration handling and recovery.
+
+## Assistant skill review and image input
+
+`GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
+UUID alongside the existing `limit` and `before_seq` pagination parameters.
+It includes that acknowledgement in the history response even when the card is
+outside the normal recent-card window. The caller must have access to the
+conversation, and the selected card must belong to that same authorized
+conversation. Omitting `card` preserves the existing history request behavior.
+
+Authored skill tool results and proposal listings include `review_url`, an
+absolute link to `/assistant?c={conversation_id}&card={acknowledgement_id}`.
+Proposal listings also expose the associated card state. Group pending-action
+responses carry an optional review link so the reviewing owner can open the
+complete file review. Authored review links replace chat confirmation phrases:
+typed channel replies cannot approve publication. The link identifies a review
+surface and grants no additional authority. See [Agent learning](AGENT_LEARNING.md)
+for the full draft, approval and explicit expired-card renewal contracts.
+
+`GET /api/v1/assistant-attachments/{id}/content` accepts a live conversation
+Agent Key for model image input. Alongside user-uploaded image selection, it can
+serve retained tool-returned raster images from that key's active turn. It
+rechecks conversation, owner, key, Stop, organization access and retention;
+an unrelated key or turn cannot retrieve the pixels. Capability negotiation
+controls optional model image rounds, so older NyxAgent deployments retain
+text-only behavior. See [Uploads](chat/10-uploads.md) for content limits and
+fallback behavior.
+
+## Tools
+
+See [TOOLS.md](TOOLS.md) for the model, publication boundary, roles and CLI walkthrough.
+
+`GET /api/v1/tools` and `GET /api/v1/tools/{slug}` return published, credential-ready offerings under the caller's live platform-key ACL. Fields include supplier, topics, import source, access lanes, exact decimal pricing, limits, and published operation classifications. `GET /api/v1/tools/topics` returns the controlled vocabulary. Metadata reads support delegated `account:read`; catalog-editor service accounts use `/services` routes.
+
+`POST /api/v1/services/{id}/endpoints/{endpoint_id}/publication` accepts `{ "state": "published" }`. The bulk `/api/v1/services/{id}/publication` accepts `{ "state": "paused", "endpoint_names": ["search"] }` (1–200 distinct names). States are draft, validated, published and paused. Only published operations execute; blocked tool operations return HTTP 404 / code 12700, including the HTTP and WS proxy. MCP calls return `isError` with the same code.
+
+Tool service writes and publication require platform admin authority in Phase 1. `/keys` hides platform tool bindings and retains BYOK bindings with `offering_kind`; human `/catalog` excludes tools by default (`?offering_kind=tool` or `include_all=true` opts in). MCP discovery includes tools under unchanged `{service_slug}__{endpoint.name}` identities. Runtime overlay storage and editor scopes are Phase 2.
+
+`POST /api/v1/services` supports `twin_of_service_id` (catalog UUID or slug) with a required new `slug`. It clones allowed transport/spec/discovery metadata and all endpoint rows into an internal, provider-less `tool` with no credential, default enabled/public platform-key configuration, and `catalog_twin` provenance. Copied endpoints receive new UUIDs, generation 1 and inactive draft state in the catalog create transaction. Request metadata overrides copied fields. Source credentials and provider links are never copied; configure the credential after creation. Eligible existing rows can instead flip through `PUT /services/{id}` with `offering_kind=tool`, retaining existing published operations. Manager twins use sanitized inheritance, restricted empty audience and live creator/role fences. See [Tools](TOOLS.md) for supported `admin tools add|apply|validate|icon` workflows. No tool rows are seeded.
+
+Tools updates distinguish omission from JSON `null` for `supplier` and `import_source`: omit to retain, null to clear. `GET /api/v1/keys?include_tool_bindings=true` includes otherwise-hidden platform Tool bindings with the existing KeyResponse shape; default listing still hides them and includes BYOK rows. Owner, membership, restricted API-key and delegated read semantics are unchanged. Tools `limits` is null when `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`, otherwise `{ rate_limit_per_second, burst }`.
+
+CLI catalog creation requires `--endpoint-url` or `--twin-of` (otherwise the local error is `Catalog creation requires --endpoint-url or --twin-of`). Catalog updates support `--clear-supplier`, conflicting with `--supplier`. Tools table output formats prices as `Free` or `<credits> credits / <metric>`, limits as `<n>/s, burst <b>` or `none`, and topics as a comma-separated list. `tools show` prints rows for each operation (name, method, path, risk, data scope, cost class). JSON output remains the raw response.
+
+## Oracle pool lifecycle (unreleased)
+
+Oracle is an authenticated asynchronous browser-worker task relay. Pool management
+accepts the same JWT/general API-key callers as other Oracle consumer operations;
+shared worker and installation tokens do not authorize management. The pool owner
+is the existing person/org `user_id`; platform visibility grants discovery/use,
+not ownership. The first tagged release containing issues #1527/#1542 adds:
+
+| Method and path | Request | Success / conflicts |
+|---|---|---|
+| `POST /api/v1/oracle/pools/{id_or_slug}/transfer` | `owner_user_id` UUID, optional `rotate_worker_token` (default false), optional `visibility:"private"` for org-visible → person | 200 `{pool, worker_token?}`, no-store; source/destination manager ACL, active own-person or active managed org, ten-pool destination limit |
+| `DELETE /api/v1/oracle/pools/{id_or_slug}` | No body | 200 `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}`, identical on authorized retry; 409 `oracle_pool_active_work` for queued/dispatched tasks or queued/delivered commands; 403 forbidden, 404 unknown |
+
+Transfer preserves pool identity/settings/history and the shared token by default.
+Owner changes require fresh installation credentials. Deletion reserves the slug,
+hides discovery and invalidates all workers at commit. Durable bounded cleanup
+then closes idle sessions and removes worker rows and encrypted login material;
+`cleanup:"asynchronous"` acknowledges this policy, not physical completion.
+Terminal task TTLs and readable history remain. Idle online
+workers do not block deletion. Settle active work before deletion. All replicas and
+old in-flight requests must be upgraded/drained before lifecycle operations are
+used. See [Oracle Relay](ORACLE_RELAY.md#pool-ownership-and-deletion-unreleased-1527-1542)
+for retention, retry, concurrency, token and deployment contracts and CLI examples.
+
+DELETE also settles deadline-expired worker commands from any generation in at
+most sixteen separately committed batches of 256 IDs per request. HTTP 409 /
+11017 can therefore mean that bounded expiry progress was made and more remains;
+retry DELETE. Unexpired work still blocks deletion. Authorization is checked for
+every batch, and an interruption or later conflict preserves committed expiry.
+Already-deleted pools skip expiry and return their stable acknowledgement.
+## Complete channel replies
+
+`POST /api/v1/channel-relay/reply` and `/thread-reply` accept one complete
+logical text reply in the existing request shape. NyxID splits it for the
+platform, preserves order and the bound destination, and consumes a reply
+token once for the entire request. HTTP 200 means every part has a valid
+platform acceptance receipt and persisted delivery metadata; the existing
+`message_id` and `platform_message_id` identify the last part. Partial or
+uncertain sends return an error and must not be automatically replayed.
+
+Text-only requests are limited to 2 MiB of serialized JSON before token
+consumption. Plans exceeding 64 platform parts are rejected before sending.
+Rich content, media, edits and proactive sends retain their separate contracts.
+See [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md) for platform bounds,
+metadata retention, ingress configuration and CMAEG deadline coordination.
+
+## Channel media delivery substitutions
+
+`POST /api/v1/channel-relay/reply`, `/thread-reply` and `/send` accept the existing
+media request shape and may add `delivered_as` to a successful response. For
+Telegram and telegram-new, a narrowly classified photo-specific 400 refusal
+can send the same image once as a document under the
+[relay fallback rules](CHANNEL_BOT_RELAY.md#image-outcomes-and-telegram-document-fallback).
+A response with `"delivered_as": ["file"]` reports this actual transport kind,
+and the outbound message's `content_type` is `file`. The reply anchor, topic and
+caption are preserved. Other adapters can omit this field.
+
+## NyxBot exact service selection and consent
+
+An authenticated first-party human owner may prefix a new NyxAgent message with
+`/service <connection UUID or unambiguous connection slug>` followed by a newline
+and the request. The composer offers the same next-message choice. The selector
+lasts one admitted turn and chooses identity, not permission. API keys (including
+conversation, delegated and service-account keys), guests and webhook inputs
+cannot install human selection. Ordinary new turns clear it. An approved-card
+continuation inherits only that card's exact target and operation; expired,
+denied or consumed cards install no selection.
+
+Assistant raw proxy/LLM/SSH exec retries accept
+`X-NyxID-Acknowledgement-Id`; MCP service and native tools accept the existing
+`acknowledgement_id`. Native Oracle submit, attach and extract request bodies add
+optional `acknowledgement_id: string`. NyxID consumes this control metadata only
+for assistant execution; ordinary endpoint clients keep their payload contract.
+No acknowledgement transport metadata reaches the provider. Assistant chat keys
+use exact SSH exec and bounded certificate/tunnel/terminal session admission.
+For assistant calls, organization use asks in Auto and Ask every time and Full
+access proceeds without a prompt. Certificate cards bind the subject public key
+and principal; session cards bind the exact connection, principal/initial terminal
+geometry and maximum lifetime (at most one hour). Resume the same request with
+`X-NyxID-Acknowledgement-Id`. Session consent covers dynamic session traffic;
+revocation, config drift or elapsed authority closes the session. Ordinary client
+routing and existing personal catalog-only access are retained.
+
+Organization-use refusals persist the existing action card and return its
+`acknowledgement_id`. Full access bypasses consent while retaining preference
+and authority checks. Raw stateless org model consent admits an exact model and
+connection for the resumed turn; MCP/stateful actions retain exact semantic
+request consent. Machine exec cards explicitly admit declared exact organization
+connections for that command/job. See [execution contract](NYXBOT_SERVICE_EXECUTION.md).
+
+## NyxBot service adapters
+
+The default-off `nyxbot:service-adapters` flag gates adapter setup and execution.
+Upgrade every API replica before enabling it. The existing
+`GET /api/v1/channel-platforms` contract is unchanged. See the
+[operator guide](NYXBOT_SERVICE_ADAPTERS.md) for provider setup, supported
+credential modes, dynamic instructions, FAQ grants and billing requirements.
+
+Prefix every path below with `/api/v1`. Binding management and secret/session
+issuance require a first-party human account and verify ownership. Administrator
+account/allocation routes additionally require the administrator role. Capability
+metadata allows delegated `account:read`. List routes accept `after` and return
+`next_after_id`; an absent cursor marks the final page.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/channel-adapters` | Versioned executable descriptors in `adapters`, including legacy/disabled profiles. |
+| GET | `/channel-adapter-bindings` | Owner's bindings, readiness and next cursor. |
+| POST | `/channel-adapter-bindings` | Verify provider resources and create a binding; returns its descriptor and readiness. |
+| POST | `/channel-adapter-bindings/{id}/disable` | Disable admission and start cleanup; 204. |
+| POST | `/channel-adapter-bindings/{id}/verify` | Reverify and enable; returns the updated binding. |
+| DELETE | `/channel-adapter-bindings/{id}` | Remove a disabled, settled binding; 204. |
+| POST | `/channel-adapter-bindings/{id}/custom-llm-setup` | ElevenLabs Custom LLM URL, API key and model; secret-bearing response. |
+| POST | `/channel-adapter-bindings/{id}/sessions` | Issue a distinct ElevenLabs guest session and `extra_body` authentication. |
+| POST | `/channel-adapter-bindings/{id}/sessions/{sid}/end` | End an owned ElevenLabs guest session; 204. |
+| GET, POST | `/admin/channel-adapter-accounts` | List or configure trusted provider accounts; POST returns 204. |
+| DELETE | `/admin/channel-adapter-accounts/{id}` | Remove trust after allocations are removed; 204. |
+| GET, POST | `/admin/channel-adapter-allocations` | List or allocate platform number/application resources with tariff evidence. |
+| DELETE | `/admin/channel-adapter-allocations/{id}` | Revoke allocation; pending cleanup prevents premature removal. |
+
+Binding creation accepts `adapter_id`, `contract_version: 1`, `label`, `agent_id`,
+`credential` and provider-specific resource settings. `credential` is either
+`{"kind":"connection","user_service_id":"..."}` or
+`{"kind":"platform","catalog_service_id":"..."}`. Carrier settings include
+`account_id`, `resource_id`, `phone_number`, `application_id`, `voice` and
+`language`; user-owned Telnyx additionally supplies `webhook_public_key`.
+ElevenLabs uses its agent ID as `application_id`. Creation verifies ownership
+without placing a call or sending SMS. A binding response contains identifiers,
+configuration, `enabled`, `revision`, `verified_at`, `webhook_url` and per-operation
+`availability`; it never returns stored credentials.
+
+Provider-facing routes authenticate their own protocol instead of a human login:
+
+| Method | Path | Authentication and transport |
+| --- | --- | --- |
+| POST | `/webhooks/call-adapters/{id}` | Telnyx Ed25519 or Twilio signature plus bound resource proof; bounded body, XML response. |
+| POST | `/webhooks/call-adapters/{id}/sms-receipts/{send}` | Signed, correlated delivery receipt; bounded body, XML response. |
+| GET | `/webhooks/call-adapters/{id}/socket/{sid}` | Admitted session ticket, plus Twilio signature when applicable; WebSocket upgrade. |
+| POST | `/webhooks/call-adapters/{id}/v1/chat/completions` | Custom LLM bearer and separately issued guest-session credentials; bounded JSON input and SSE output. |
+
+Caller messages never grant owner authority. Specialist guest grants, live
+binding/session authority and catalog operation policy remain mandatory at
+execution. Provider retries do not automatically repeat uncertain effects.

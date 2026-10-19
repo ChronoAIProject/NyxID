@@ -200,6 +200,18 @@ pub struct OracleTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_model_switcher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_model_effort: Option<String>,
+    #[serde(default = "super::oracle_pool::default_require_model_match")]
+    pub require_model_match: bool,
+    #[serde(default)]
+    pub excluded_worker_ids: Vec<String>,
+    #[serde(default)]
+    pub reroute_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_script_version: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub completed_at: Option<DateTime<Utc>>,
@@ -224,6 +236,12 @@ mod tests {
 
     fn make_task() -> OracleTask {
         OracleTask {
+            failure_detail: None,
+            observed_model_switcher: None,
+            observed_model_effort: None,
+            require_model_match: true,
+            excluded_worker_ids: Vec::new(),
+            reroute_count: 0,
             id: uuid::Uuid::new_v4().to_string(),
             pool_id: uuid::Uuid::new_v4().to_string(),
             submitter_user_id: uuid::Uuid::new_v4().to_string(),
@@ -232,7 +250,7 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
             prompt: "What is the BEDC closure of item 8?".to_string(),
-            model_label: Some("chatgpt-5.5-pro".to_string()),
+            model_label: Some("chatgpt-6-pro".to_string()),
             project_url: None,
             tag: Some("bedc-deep".to_string()),
             pdf_base64: None,
@@ -298,11 +316,21 @@ mod tests {
             "max_retries",
             "attempt_count",
             "dispatch_attempt_id",
+            "failure_detail",
+            "observed_model_switcher",
+            "observed_model_effort",
+            "require_model_match",
+            "excluded_worker_ids",
+            "reroute_count",
         ] {
             doc.remove(field);
         }
 
         let restored: OracleTask = bson::from_document(doc).expect("deserialize legacy task");
+        assert!(restored.require_model_match);
+        assert!(restored.failure_detail.is_none());
+        assert!(restored.excluded_worker_ids.is_empty());
+        assert_eq!(restored.reroute_count, 0);
         assert_eq!(restored.retry_count, 0);
         assert_eq!(restored.max_retries, DEFAULT_ORACLE_TASK_MAX_RETRIES);
         assert_eq!(restored.attempt_count, 0);

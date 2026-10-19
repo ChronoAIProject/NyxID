@@ -266,8 +266,9 @@ deliberately hide).
 ### 3.4 Flag gating (server-side)
 
 Every direct handler resolves the caller's effective flags via
-`feature_flag_service::resolve_personal_features` (grant-union incl. org
-grants — the `/users/me` path) and returns `AppError::NotFound` when
+`feature_flag_service::resolve_personal_features` (the same default → global
+→ org → role → user precedence as the `/users/me` path) and returns
+`AppError::NotFound` when
 `experimental:direct-chat-engine` is off. The flag also drives FE engine
 selection (§5); the server check is the authority.
 

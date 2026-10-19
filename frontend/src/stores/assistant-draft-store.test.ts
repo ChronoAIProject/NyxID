@@ -91,3 +91,17 @@ describe("useAssistantDraftStore", () => {
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
   });
 });
+
+it("drops the retired Ask/Full draft preference from persisted drafts", () => {
+  localStorage.setItem(
+    "nyxid.assistant_drafts",
+    JSON.stringify({
+      state: { ownerUserId: "one", drafts: {}, nyxAgentAccessMode: "full" },
+      version: 1,
+    }),
+  );
+  useAssistantDraftStore.getState().saveDraft("one", "screen:nyxagent:assistant", "Work");
+  const stored = localStorage.getItem("nyxid.assistant_drafts") ?? "";
+  expect(stored).toContain("Work");
+  expect(stored).not.toContain("nyxAgentAccessMode");
+});

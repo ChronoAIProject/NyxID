@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { useApprovalGrants, useRevokeGrant } from "@/hooks/use-approvals";
+import { Link } from "@tanstack/react-router";
+import {
+  useApprovalGrants,
+  useRevokeGrant,
+  useServiceApprovalConfigs,
+} from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -32,19 +37,47 @@ export function ApprovalGrantsPage() {
   const [revokeGrantId, setRevokeGrantId] = useState<string | null>(null);
 
   const perPage = 20;
-  const { data, isLoading, error, refetch } = useApprovalGrants(page, perPage);
+  const { data, isLoading, error, refetch } = useApprovalGrants(page, perPage, {
+    includeAdminOrgs: true,
+  });
+  const {
+    data: configData,
+    isLoading: configsLoading,
+    error: configsError,
+  } = useServiceApprovalConfigs();
   const revokeMutation = useRevokeGrant();
 
   const grants = data?.grants ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const hasGrantModeService = (configData?.configs ?? []).some(
+    (config) =>
+      config.approval_mode === "grant" ||
+      config.rules.some(
+        (rule) => rule.effect === "require_approval" && rule.mode === "grant",
+      ),
+  );
+  const hasDominantOrgPolicies =
+    (configData?.dominant_org_policies?.length ?? 0) > 0;
+  const grantModeStatusUnavailable = Boolean(configsError);
+  const grantModeKnownOff =
+    !hasGrantModeService && !hasDominantOrgPolicies && !grantModeStatusUnavailable;
 
   const revokeTarget = grants.find((g) => g.id === revokeGrantId);
 
   async function handleRevoke() {
     if (!revokeGrantId) return;
+    if (revokeTarget?.org_scoped && !revokeTarget.org_id) {
+      toast.error("This organization grant is missing its owner information");
+      setRevokeGrantId(null);
+      return;
+    }
     try {
-      await revokeMutation.mutateAsync({ grantId: revokeGrantId });
+      await revokeMutation.mutateAsync(
+        revokeTarget?.org_scoped
+          ? { grantId: revokeGrantId, orgId: revokeTarget.org_id }
+          : { grantId: revokeGrantId },
+      );
       toast.success("Grant revoked");
     } catch (err) {
       toast.error(
@@ -68,23 +101,42 @@ export function ApprovalGrantsPage() {
         description="Manage active approval grants. Revoking a grant will require re-approval on the next request."
       />
 
-      {isLoading ? (
+      {isLoading || (grants.length === 0 && configsLoading) ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
             <Skeleton key={`grant-skel-${String(i)}`} className="h-12 w-full" />
           ))}
         </div>
       ) : error ? (
-        <ErrorBanner message="Failed to load grants. Please try again." onRetry={refetch} />
+        <ErrorBanner
+          message="Failed to load grants. Please try again."
+          onRetry={refetch}
+        />
       ) : grants.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
-          <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Active Grants</p>
-            <p className="text-[12px] text-muted-foreground">
-              Services using per-request approval do not create grants. Only
-              services set to time-based grant mode will appear here.
+          <div className="max-w-md space-y-2">
+            <p className="text-12 font-medium text-muted-foreground">
+              {grantModeStatusUnavailable
+                ? "Policy Status Unavailable"
+                : grantModeKnownOff
+                  ? "Grant Mode Is Off"
+                  : "No Active Grants"}
             </p>
+            <p className="text-12 text-muted-foreground">
+              {grantModeStatusUnavailable
+                ? "No grants are active, but approval policy status could not be loaded."
+                : hasGrantModeService
+                ? "Your grant-enabled services have no active grants. Grants appear here after an approval is granted."
+                : grantModeKnownOff
+                  ? "All configured services use per-request approval. Enable time-based grant mode for a service to create standing approvals."
+                  : "No grants are active. Organization policies are managed by an org admin and may define grant mode separately."}
+            </p>
+            {(grantModeKnownOff || hasDominantOrgPolicies) && (
+              <Button asChild variant="outline" className="mt-2">
+                <Link to="/approvals/settings">Configure approval policies</Link>
+              </Button>
+            )}
           </div>
         </div>
       ) : (
@@ -92,20 +144,44 @@ export function ApprovalGrantsPage() {
           {/* Mobile card view */}
           <div className="flex flex-col gap-3 md:hidden">
             {grants.map((grant) => (
-              <div key={grant.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+              <div
+                key={grant.id}
+                className="relative rounded-xl border border-border/50 bg-card p-4"
+              >
                 <div className="absolute right-3 top-3">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setRevokeGrantId(grant.id)}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    aria-label={`Revoke grant for ${grant.service_name}`}
+                    onClick={() => setRevokeGrantId(grant.id)}
+                  >
                     <Trash2 className="h-3.5 w-3.5 text-destructive" />
                   </Button>
                 </div>
-                <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{grant.service_name}</p>
-                <p className="text-[11px] text-muted-foreground">{grant.requester_label ?? grant.requester_type}</p>
+                <div className="flex min-w-0 items-center gap-2 pr-10">
+                  <p className="truncate text-13 font-semibold text-foreground">
+                    {grant.service_name}
+                  </p>
+                  {grant.org_scoped && (
+                    <Badge
+                      variant="info"
+                      className="max-w-[12rem] shrink-0 truncate"
+                      title={grant.org_name ?? "Organization"}
+                    >
+                      Org: {grant.org_name ?? "Organization"}
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-11 text-muted-foreground">
+                  {grant.requester_label ?? grant.requester_type}
+                </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {isExpiringSoon(grant.expires_at) && (
                     <Badge variant="warning">Expiring soon</Badge>
                   )}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                   <span>Granted {formatDate(grant.granted_at)}</span>
                   <span>Expires {formatDate(grant.expires_at)}</span>
                 </div>
@@ -129,14 +205,25 @@ export function ApprovalGrantsPage() {
                 {grants.map((grant) => (
                   <TableRow key={grant.id}>
                     <TableCell className="font-medium">
-                      {grant.service_name}
+                      <div className="flex items-center gap-2">
+                        <span>{grant.service_name}</span>
+                        {grant.org_scoped && (
+                          <Badge
+                            variant="info"
+                            className="max-w-[12rem] truncate"
+                            title={grant.org_name ?? "Organization"}
+                          >
+                            Org: {grant.org_name ?? "Organization"}
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-0.5">
                         <span>
                           {grant.requester_label ?? grant.requester_type}
                         </span>
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="text-11 text-muted-foreground">
                           {grant.requester_type}
                         </span>
                       </div>
@@ -161,6 +248,7 @@ export function ApprovalGrantsPage() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
+                        aria-label={`Revoke grant for ${grant.service_name}`}
                         onClick={() => setRevokeGrantId(grant.id)}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />
@@ -175,7 +263,7 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -189,7 +277,7 @@ export function ApprovalGrantsPage() {
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-[11px] text-text-tertiary">
+                <span className="text-11 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

@@ -1,11 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, apiClient } from "@/lib/api-client";
+import { mutationCreditsDenial } from "@/lib/credits-denial";
 import type {
   ChannelConversationListResponse,
   ChannelConversationItem,
   CreateChannelConversationRequest,
   CreateDeviceConversationRequest,
   UpdateChannelConversationRequest,
+  SendChannelMessageRequest,
+  SendChannelMessageResponse,
 } from "@/types/channels";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +39,9 @@ interface UseChannelConversationsParams {
   readonly orgId?: string | null;
 }
 
-export function useChannelConversations(params: UseChannelConversationsParams = {}) {
+export function useChannelConversations(
+  params: UseChannelConversationsParams = {},
+) {
   const orgId = params.orgId ?? null;
   const botId = params.botId ?? null;
   return useQuery({
@@ -66,10 +71,7 @@ export function useCreateChannelConversation() {
     mutationFn: async (
       data: CreateChannelConversationRequest,
     ): Promise<ChannelConversationItem> => {
-      return api.post<ChannelConversationItem>(
-        "/channel-conversations",
-        data,
-      );
+      return api.post<ChannelConversationItem>("/channel-conversations", data);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
@@ -112,7 +114,9 @@ export function useUpdateChannelConversation() {
     mutationFn: async ({
       id,
       ...data
-    }: { readonly id: string } & UpdateChannelConversationRequest): Promise<ChannelConversationItem> => {
+    }: {
+      readonly id: string;
+    } & UpdateChannelConversationRequest): Promise<ChannelConversationItem> => {
       return api.put<ChannelConversationItem>(
         `/channel-conversations/${id}`,
         data,
@@ -138,6 +142,52 @@ export function useDeleteChannelConversation() {
         queryKey: CHANNEL_CONVERSATIONS_ROOT,
       });
       void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
+    },
+  });
+}
+
+export function useChannelConversation(id: string) {
+  return useQuery({
+    queryKey: [...CHANNEL_CONVERSATIONS_ROOT, "detail", id],
+    queryFn: () =>
+      api.get<ChannelConversationItem>(
+        `/channel-conversations/${encodeURIComponent(id)}`,
+      ),
+    enabled: Boolean(id),
+  });
+}
+
+/**
+ * `creditsOwnerId` is the bot owner whose credits a send spends. Sends are
+ * refused until it is known, so a denial is never attributed to the wrong
+ * wallet.
+ */
+export function useSendChannelMessage({
+  creditsOwnerId,
+}: { readonly creditsOwnerId: string | undefined }) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: SendChannelMessageRequest) => {
+      if (!creditsOwnerId) {
+        throw new Error("Bot details are still loading. Try again shortly.");
+      }
+      return apiClient<SendChannelMessageResponse>("/channel-relay/send", {
+        method: "POST",
+        body: data,
+        creditsDenial: mutationCreditsDenial(
+          "channel-relay-send",
+          data.conversation_id,
+          creditsOwnerId,
+          // A retry of the same message is the same operation.
+          data.idempotency_key,
+        ),
+      });
+    },
+    retry: false,
+    onSuccess: (_response, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["channel-messages", variables.conversation_id],
+      });
     },
   });
 }

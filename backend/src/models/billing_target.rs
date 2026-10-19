@@ -6,6 +6,8 @@ use utoipa::ToSchema;
 pub enum BillingTargetKind {
     AllUsers,
     SelectedUsers,
+    OrgMembers,
+    Groups,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

@@ -1,5 +1,6 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { Search } from "lucide-react";
+import { useGroups } from "@/hooks/use-rbac";
 import { useAdminUsers } from "@/hooks/use-admin";
 import { resolveServiceBillingMetric } from "@/lib/billing-units";
 import type { AdminUser } from "@/types/admin";
@@ -11,13 +12,9 @@ import { Input } from "@/components/ui/input";
 export function UserPicker({
   selected,
   onChange,
-  onErrorStateChange,
-  onLoadingStateChange,
 }: {
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
-  readonly onErrorStateChange?: (failed: boolean) => void;
-  readonly onLoadingStateChange?: (loading: boolean) => void;
 }) {
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
@@ -54,12 +51,6 @@ export function UserPicker({
       : users;
   }, [search, users]);
   const loading = peopleQuery.isFetching || organizationsQuery.isFetching;
-  const failed = Boolean(peopleQuery.error || organizationsQuery.error);
-  useEffect(() => onErrorStateChange?.(failed), [failed, onErrorStateChange]);
-  useEffect(
-    () => onLoadingStateChange?.(loading),
-    [loading, onLoadingStateChange],
-  );
 
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
@@ -73,6 +64,28 @@ export function UserPicker({
         />
       </div>
       <div className="min-h-0 max-h-48 flex-1 overflow-y-auto overscroll-contain p-1">
+        {selected
+          .filter((id) => !filtered.some((user) => user.id === id))
+          .map((id) => (
+            <label
+              key={id}
+              className="flex items-center gap-3 px-2 py-2 text-xs"
+            >
+              <Checkbox
+                checked
+                onCheckedChange={() =>
+                  onChange(selected.filter((value) => value !== id))
+                }
+              />
+              <span>
+                Selected owner:{" "}
+                {users.find((user) => user.id === id)?.display_name ||
+                  users.find((user) => user.id === id)?.email ||
+                  id}{" "}
+                (outside current results)
+              </span>
+            </label>
+          ))}
         {filtered.map((user) => {
           const checked = selected.includes(user.id);
           return (
@@ -91,43 +104,28 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-medium">
+                <span className="block truncate text-12 font-medium">
                   {user.display_name || user.slug || user.email}
                 </span>
-                <span className="block truncate text-[11px] text-muted-foreground">
+                <span className="block truncate text-11 text-muted-foreground">
                   {user.slug ? `Organization / ${user.slug}` : user.email}
                 </span>
               </span>
             </label>
           );
         })}
-        {failed ? (
-          <div className="space-y-2 px-3 py-6 text-center text-[12px] text-destructive">
-            <p>Owners could not be loaded. No broad issuance will be sent.</p>
-            <button
-              type="button"
-              className="underline underline-offset-2"
-              onClick={() => {
-                void peopleQuery.refetch();
-                void organizationsQuery.refetch();
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        ) : null}
-        {filtered.length === 0 && !loading && !failed ? (
-          <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
+        {filtered.length === 0 && !loading ? (
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
             No owners found.
           </p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-[11px] text-muted-foreground">
+          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
             Searching...
           </p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
         {selected.length} selected
       </div>
     </div>
@@ -139,19 +137,11 @@ export function ServicePicker({
   selected,
   onChange,
   multiple = false,
-  showMetric = true,
-  loading = false,
-  error = false,
-  onRetry,
 }: {
   readonly services: readonly DownstreamService[];
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
   readonly multiple?: boolean;
-  readonly showMetric?: boolean;
-  readonly loading?: boolean;
-  readonly error?: boolean;
-  readonly onRetry?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const filtered = useMemo(() => {
@@ -176,6 +166,26 @@ export function ServicePicker({
         />
       </div>
       <div className="min-h-0 max-h-44 flex-1 overflow-y-auto overscroll-contain p-1">
+        {selected
+          .filter((id) => !filtered.some((service) => service.id === id))
+          .map((id) => (
+            <label
+              key={id}
+              className="flex items-center gap-3 px-2 py-2 text-xs"
+            >
+              <Checkbox
+                checked
+                onCheckedChange={() =>
+                  onChange(selected.filter((value) => value !== id))
+                }
+              />
+              <span>
+                Selected service:{" "}
+                {services.find((service) => service.id === id)?.name ?? id}{" "}
+                (outside current results)
+              </span>
+            </label>
+          ))}
         {filtered.map((service) => {
           const checked = selected.includes(service.id);
           const metric = resolveServiceBillingMetric(service);
@@ -197,41 +207,186 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-medium">
+                <span className="block truncate text-12 font-medium">
                   {service.name}
                 </span>
-                <span className="block truncate text-[11px] text-muted-foreground">
+                <span className="block truncate text-11 text-muted-foreground">
                   {service.slug}
                 </span>
               </span>
-              {showMetric ? <Badge variant="secondary" className="shrink-0">{metric}</Badge> : null}
+              <Badge variant="secondary" className="shrink-0">
+                {metric}
+              </Badge>
             </label>
           );
         })}
-        {error ? (
-          <div className="space-y-2 px-3 py-6 text-center text-[12px] text-destructive">
-            <p>Services could not be loaded. Scoped issuance is blocked.</p>
-            {onRetry ? (
-              <button
-                type="button"
-                className="underline underline-offset-2"
-                onClick={onRetry}
-              >
-                Retry
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-        {loading ? (
-          <p className="px-3 py-3 text-center text-[11px] text-muted-foreground">
-            Loading services...
-          </p>
-        ) : null}
-        {filtered.length === 0 && !loading && !error ? (
-          <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
+        {filtered.length === 0 ? (
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
             No services found.
           </p>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+type MemberPickerProps = {
+  readonly selected: readonly string[];
+  readonly onChange: (ids: string[]) => void;
+};
+
+export function OrgPicker(props: MemberPickerProps) {
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search.trim());
+  const query = useAdminUsers(1, 100, deferredSearch || undefined, "org");
+  const items = (query.data?.users ?? [])
+    .filter((user) => user.is_active)
+    .map((user) => ({
+      id: user.id,
+      name: user.display_name || user.slug || user.email,
+      detail: user.slug ?? user.email,
+    }));
+  return (
+    <MemberPicker
+      {...props}
+      kind="organization"
+      items={items}
+      search={search}
+      onSearch={setSearch}
+      loading={query.isFetching}
+      error={query.isError}
+    />
+  );
+}
+
+export function PersonPicker(props: MemberPickerProps) {
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search.trim());
+  const query = useAdminUsers(1, 100, deferredSearch || undefined, "person");
+  return <MemberPicker {...props} kind="person"
+    items={(query.data?.users ?? []).filter((user) => user.is_active).map((user) => ({
+      id: user.id, name: user.display_name || user.email, detail: user.email,
+    }))}
+    search={search} onSearch={setSearch} loading={query.isFetching} error={query.isError} />;
+}
+
+export function GroupPicker(props: MemberPickerProps) {
+  const [search, setSearch] = useState("");
+  const query = useGroups();
+  const items = (query.data?.groups ?? []).map((group) => ({
+    id: group.id,
+    name: group.name,
+    detail: `${group.slug} · ${String(group.member_count)} members`,
+  }));
+  return (
+    <MemberPicker
+      {...props}
+      kind="group"
+      items={items}
+      search={search}
+      onSearch={setSearch}
+      loading={query.isFetching}
+      error={query.isError}
+    />
+  );
+}
+
+function MemberPicker({
+  selected,
+  onChange,
+  kind,
+  items,
+  search,
+  onSearch,
+  loading,
+  error,
+}: MemberPickerProps & {
+  readonly kind: "organization" | "group" | "person";
+  readonly items: readonly { id: string; name: string; detail: string }[];
+  readonly search: string;
+  readonly onSearch: (value: string) => void;
+  readonly loading: boolean;
+  readonly error: boolean;
+}) {
+  const needle = search.trim().toLowerCase();
+  const filtered = items.filter((item) =>
+    `${item.name} ${item.detail}`.toLowerCase().includes(needle),
+  );
+  return (
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+      <div className="relative shrink-0 border-b border-border">
+        <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={search}
+          onChange={(event) => onSearch(event.target.value)}
+          placeholder={`Search ${kind}s`}
+          className="border-0 pl-9 focus-visible:ring-0"
+        />
+      </div>
+      <div className="min-h-0 max-h-48 flex-1 overflow-y-auto overscroll-contain p-1">
+        {selected
+          .filter((id) => !filtered.some((item) => item.id === id))
+          .map((id) => (
+            <label
+              key={id}
+              className="flex items-center gap-3 px-2 py-2 text-xs"
+            >
+              <Checkbox
+                checked
+                onCheckedChange={() =>
+                  onChange(selected.filter((value) => value !== id))
+                }
+              />
+              <span>
+                Selected {kind}:{" "}
+                {items.find((item) => item.id === id)?.name ?? id} (outside
+                current results)
+              </span>
+            </label>
+          ))}
+        {filtered.map((item) => (
+          <label
+            key={item.id}
+            className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
+          >
+            <Checkbox
+              checked={selected.includes(item.id)}
+              onCheckedChange={(checked) =>
+                onChange(
+                  checked === true
+                    ? [...selected, item.id]
+                    : selected.filter((id) => id !== item.id),
+                )
+              }
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-12 font-medium">
+                {item.name}
+              </span>
+              <span className="block truncate text-11 text-muted-foreground">
+                {item.detail}
+              </span>
+            </span>
+          </label>
+        ))}
+        {error ? (
+          <p role="alert" className="px-3 py-3 text-12 text-destructive">
+            Failed to load {kind}s.
+          </p>
+        ) : null}
+        {!error && !loading && filtered.length === 0 ? (
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+            No {kind}s found.
+          </p>
+        ) : null}
+        {loading ? (
+          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
+            Searching...
+          </p>
+        ) : null}
+      </div>
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
+        {selected.length} selected
       </div>
     </div>
   );

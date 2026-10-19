@@ -7,7 +7,7 @@ import {
 } from "../../lib/env";
 
 const NORMALIZED_USER_CODE_LENGTH = 8;
-const NORMALIZED_USER_CODE_PATTERN = /^[0-9A-HJKMNP-TV-Z]{8}$/;
+const NORMALIZED_USER_CODE_PATTERN = /^(?:2)?[0-9A-HJKMNP-TV-Z]{8}$/;
 const ABSOLUTE_URL_PATTERN =
   /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(\/[^?#]*)?(?:\?([^#]*))?(?:#.*)?$/i;
 
@@ -104,7 +104,6 @@ export function normalizeAuthDeviceUserCode(raw: string): string | null {
     .replace(/U/g, "V");
 
   if (
-    normalized.length !== NORMALIZED_USER_CODE_LENGTH ||
     !NORMALIZED_USER_CODE_PATTERN.test(normalized)
   ) {
     return null;
@@ -117,7 +116,11 @@ export function formatAuthDeviceUserCode(raw: string): string {
   const compact = raw
     .replace(/[- \t]/g, "")
     .toUpperCase()
-    .slice(0, NORMALIZED_USER_CODE_LENGTH);
+    .slice(0, raw.replace(/[- \t]/g, "").startsWith("2") ? 9 : NORMALIZED_USER_CODE_LENGTH);
+
+  if (compact.length === 9 && compact.startsWith("2")) {
+    return `2-${compact.slice(1, 5)}-${compact.slice(5)}`;
+  }
 
   return compact.length > 4
     ? `${compact.slice(0, 4)}-${compact.slice(4)}`
@@ -128,6 +131,14 @@ export function extractAuthDeviceUserCodeFromQr(
   raw: string,
   trustPolicy: AuthDeviceQrTrustPolicy = DEFAULT_QR_TRUST_POLICY
 ): string | null {
+  const result = extractLoginRequestFromQr(raw, trustPolicy);
+  return result?.kind === "device" ? result.userCode : null;
+}
+
+export function extractLoginRequestFromQr(
+  raw: string,
+  trustPolicy: AuthDeviceQrTrustPolicy = DEFAULT_QR_TRUST_POLICY,
+): { kind: "device" | "agent-key"; userCode: string } | null {
   const candidate = raw.trim();
   if (!candidate || /[\u0000-\u001f\u007f\\]/.test(candidate)) return null;
 
@@ -138,17 +149,18 @@ export function extractAuthDeviceUserCodeFromQr(
   const authority = match[2] ?? "";
   const path = match[3] ?? "/";
   const query = match[4];
+  const loginPath = scheme === trustPolicy.appScheme.toLowerCase() && authority.toLowerCase() === "login"
+    ? `/login${path}` : path;
+  const kind = /^\/login\/agent-key\/?$/.test(loginPath) ? "agent-key" : /^\/login\/device\/?$/.test(loginPath) ? "device" : null;
+  const userCode = extractSingleUserCode(query);
+  if (!kind || !userCode) return null;
 
   if (scheme === trustPolicy.appScheme.toLowerCase()) {
-    const isAppLogin =
-      (authority.toLowerCase() === "login" && (path === "/device" || path === "/device/")) ||
-      (authority === "" && (path === "/login/device" || path === "/login/device/"));
-    return isAppLogin ? extractSingleUserCode(query) : null;
+    return authority.toLowerCase() === "login" || authority === "" ? { kind, userCode } : null;
   }
 
   if (scheme !== "https" && scheme !== "http") return null;
   if (scheme === "http" && !trustPolicy.allowHttp) return null;
-  if (path !== "/login/device" && path !== "/login/device/") return null;
 
   const canonicalHost = canonicalAuthority(authority, scheme);
   if (!canonicalHost) return null;
@@ -156,5 +168,5 @@ export function extractAuthDeviceUserCodeFromQr(
   const trusted = trustPolicy.webOrigins.some(
     (origin) => canonicalConfiguredOrigin(origin) === candidateOrigin
   );
-  return trusted ? extractSingleUserCode(query) : null;
+  return trusted ? { kind, userCode } : null;
 }

@@ -30,7 +30,6 @@ const requiredActionIdentitySchema = z
 
 const allowedServiceIdsSchema = z
   .array(requiredActionIdentitySchema)
-  .min(1)
   .max(64)
   .superRefine((values, context) => {
     const seen = new Set<string>();
@@ -81,6 +80,8 @@ const FORBIDDEN_ACTION_KEY =
 
 export const customServiceAuthMethodSchema = z.enum([
   "bearer",
+  "ifttt_webhook",
+  "ifttt_mcp",
   "header",
   "query",
   "path",
@@ -92,6 +93,7 @@ export const customServiceAuthMethodSchema = z.enum([
 export const catalogServiceActionParamsSchema = z
   .object({
     serviceSlug: requiredWireStringSchema,
+    use_platform_key: z.boolean().optional(),
     requestedScopes: z
       .array(z.string().max(256))
       .max(64)
@@ -140,8 +142,15 @@ export const keyCreateActionParamsSchema = z
       .transform((value) => value.trim())
       .pipe(z.string().min(1)),
     allowedServiceIds: allowedServiceIdsSchema,
+    allowAutoConnectedServices: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.allowedServiceIds.length > 0 ||
+      value.allowAutoConnectedServices === true,
+    { message: "Select a service or allow platform services" },
+  );
 
 export const keyRotateActionParamsSchema = z
   .object({
@@ -162,6 +171,8 @@ export const keyUpdateActionParamsSchema = z
     name: optionalUpdateTextSchema,
     platform: optionalUpdateTextSchema,
     description: optionalUpdateTextSchema,
+    allowedServiceIds: allowedServiceIdsSchema.optional(),
+    allowAutoConnectedServices: z.boolean().optional(),
   })
   .strict();
 
@@ -175,8 +186,15 @@ export const keyExtendScopeActionParamsSchema = z
   .object({
     keyId: requiredActionIdentitySchema,
     addServiceIds: allowedServiceIdsSchema,
+    allowAutoConnectedServices: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.addServiceIds.length > 0 ||
+      value.allowAutoConnectedServices === true,
+    { message: "Select a service or allow platform services" },
+  );
 
 export const keyBindCredentialActionParamsSchema = z
   .object({
@@ -289,7 +307,7 @@ export const nodeCredentialActionParamsSchema = z
   .object({
     nodeId: requiredActionIdentitySchema,
     serviceSlug: z.string().trim().min(1).max(64),
-    injectionMethod: z.enum(["header", "query-param", "path-prefix"]),
+    injectionMethod: z.enum(["header", "query-param", "path-prefix", "ifttt-webhook"]),
     fieldName: z.string().trim().min(1).max(128),
     targetUrl: optionalActionTextSchema,
     label: optionalActionTextSchema,
@@ -308,6 +326,7 @@ export const deviceOnboardActionParamsSchema = z
     label: z.string().trim().min(1).max(128),
     targetOrgId: optionalActionIdentitySchema,
     defaultServiceIds: actionIdentityListSchema.optional(),
+    allowAutoConnectedServices: z.boolean().optional(),
   })
   .strict();
 
@@ -569,6 +588,7 @@ export function recoverUnsupportedAssistantActionRequest(
 export type ActionCardParams =
   | {
       readonly variant: "catalog";
+      readonly use_platform_key?: boolean;
       readonly service_slug: string;
       readonly requested_scopes: readonly string[];
       readonly via_node_id: string | null;
@@ -593,6 +613,7 @@ export type ActionCardParams =
       readonly name: string;
       readonly platform: string;
       readonly allowed_service_ids: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_rotate";
@@ -604,6 +625,8 @@ export type ActionCardParams =
       readonly name?: string;
       readonly platform?: string;
       readonly description?: string;
+      readonly allowed_service_ids?: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_delete";
@@ -613,6 +636,7 @@ export type ActionCardParams =
       readonly variant: "key_extend_scope";
       readonly key_id: string;
       readonly add_service_ids: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_bind_credential";
@@ -682,7 +706,7 @@ export type ActionCardParams =
       readonly variant: "node_inject_credential";
       readonly node_id: string;
       readonly service_slug: string;
-      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly injection_method: "header" | "query-param" | "path-prefix" | "ifttt-webhook";
       readonly field_name: string;
       readonly target_url?: string;
       readonly label?: string;
@@ -691,7 +715,7 @@ export type ActionCardParams =
       readonly variant: "pending_credential_push";
       readonly node_id: string;
       readonly service_slug: string;
-      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly injection_method: "header" | "query-param" | "path-prefix" | "ifttt-webhook";
       readonly field_name: string;
       readonly target_url?: string;
       readonly label?: string;
@@ -706,6 +730,7 @@ export type ActionCardParams =
       readonly label: string;
       readonly target_org_id?: string;
       readonly default_service_ids?: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "org_create";

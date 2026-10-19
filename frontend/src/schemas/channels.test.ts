@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
-  createChannelBotSchema,
+  channelTestMessageSchema,
+  buildCreateChannelBotSchema,
   updateChannelBotSchema,
   createChannelConversationSchema,
   createDeviceConversationSchema,
   updateChannelConversationSchema,
   conversationPlatformSchema,
 } from "./channels";
+
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -21,14 +25,36 @@ describe("createChannelBotSchema base validation", () => {
     ).toBe(true);
   });
 
-  it("requires bot_token and label", () => {
+  it("requires bot_token", () => {
     expect(
       createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "", label: "x" })
         .success,
     ).toBe(false);
+  });
+
+  it("lets Telegram leave the label blank but requires it elsewhere", () => {
+    for (const label of ["", "  "]) {
+      expect(
+        createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "t", label })
+          .success,
+      ).toBe(true);
+      const discord = createChannelBotSchema.safeParse({
+        platform: "discord",
+        bot_token: "t",
+        public_key: "k",
+        label,
+      });
+      expect(discord.success).toBe(false);
+      expect(discord.error?.issues.map((issue) => issue.message)).toContain(
+        "Label is required",
+      );
+    }
     expect(
-      createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "t", label: "" })
-        .success,
+      createChannelBotSchema.safeParse({
+        platform: "telegram",
+        bot_token: "t",
+        label: "a".repeat(129),
+      }).success,
     ).toBe(false);
   });
 });
@@ -38,7 +64,6 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
     for (const platform of ["lark", "feishu"] as const) {
       const missing = createChannelBotSchema.safeParse({
         platform,
-        bot_token: "t",
         label: "l",
       });
       expect(missing.success).toBe(false);
@@ -52,13 +77,26 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
       expect(
         createChannelBotSchema.safeParse({
           platform,
-          bot_token: "t",
           label: "l",
           app_id: "cli_x",
           app_secret: "secret",
           verification_token: "vtok",
         }).success,
       ).toBe(true);
+    }
+  });
+
+  it.each(["telegram", "discord", "slack", "whatsapp"])("still requires a bot token for %s", (platform) => {
+    const result = createChannelBotSchema.safeParse({
+      platform,
+      label: "Support",
+      public_key: "public-key",
+      app_secret: "app-secret",
+      phone_number_id: "123456",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.path)).toEqual([["bot_token"]]);
     }
   });
 
@@ -109,11 +147,40 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
 });
 
 describe("updateChannelBotSchema", () => {
+  it("accepts WhatsApp token and app secret rotation", () => {
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "new-app-secret" }).success).toBe(true);
+  });
   it("accepts an empty partial patch and rejects an over-long label", () => {
     expect(updateChannelBotSchema.safeParse({}).success).toBe(true);
     expect(
       updateChannelBotSchema.safeParse({ label: "a".repeat(129) }).success,
     ).toBe(false);
+  });
+});
+
+describe("WhatsApp channel registration", () => {
+  const valid = { platform: "whatsapp", bot_token: "system-user-token", label: "Support", phone_number_id: "123456", app_secret: "meta-secret", waba_id: "654321" };
+
+  it("accepts the Cloud API fields and an optional WABA ID", () => {
+    expect(createChannelBotSchema.safeParse(valid).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...valid, waba_id: undefined }).success).toBe(true);
+    expect(conversationPlatformSchema.safeParse("whatsapp").success).toBe(true);
+  });
+
+  it("requires a Phone Number ID and Meta App Secret independently of App ID", () => {
+    for (const name of ["phone_number_id", "app_secret"] as const) {
+      const result = createChannelBotSchema.safeParse({ ...valid, [name]: " ", app_id: "123456" });
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues.some((issue) => issue.path[0] === name)).toBe(true);
+    }
+  });
+
+  it("rejects display phone numbers and invalid Meta IDs", () => {
+    for (const name of ["phone_number_id", "waba_id"] as const) {
+      for (const value of ["+1 555 1234", "../1234", "a", "1".repeat(33)]) {
+        expect(createChannelBotSchema.safeParse({ ...valid, [name]: value }).success).toBe(false);
+      }
+    }
   });
 });
 
@@ -157,8 +224,54 @@ describe("conversation schemas", () => {
 });
 
 describe("conversationPlatformSchema", () => {
-  it("includes device but not slack (read-back set)", () => {
+  it("includes device and slack (read-back set)", () => {
     expect(conversationPlatformSchema.safeParse("device").success).toBe(true);
-    expect(conversationPlatformSchema.safeParse("slack").success).toBe(false);
+    expect(conversationPlatformSchema.safeParse("slack").success).toBe(true);
+  });
+});
+
+describe("agent-initiated message settings", () => {
+  it("preserves default-off and explicit human opt-in values", () => {
+    expect(
+      createChannelConversationSchema.parse({
+        channel_bot_id: UUID,
+        agent_api_key_id: UUID,
+      }).allow_agent_initiated,
+    ).toBeUndefined();
+    for (const enabled of [false, true]) {
+      expect(
+        updateChannelConversationSchema.parse({
+          allow_agent_initiated: enabled,
+        }).allow_agent_initiated,
+      ).toBe(enabled);
+    }
+    expect(
+      updateChannelConversationSchema.safeParse({
+        allow_agent_initiated: "true",
+      }).success,
+    ).toBe(false);
+  });
+  it("rejects blank test messages", () => {
+    expect(channelTestMessageSchema.safeParse({ text: "   " }).success).toBe(
+      false,
+    );
+    expect(channelTestMessageSchema.parse({ text: " hello " }).text).toBe(
+      "hello",
+    );
+  });
+});
+
+
+describe("Aurinko account-token onboarding", () => {
+  const input = { platform: "aurinko", label: "Mailbox", bot_token: "account-token", app_secret: "signing-secret" };
+  it("requires both account token and distinct signing-secret input", () => {
+    expect(createChannelBotSchema.safeParse(input).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...input, app_secret: "" }).success).toBe(false);
+    expect(createChannelBotSchema.safeParse({ ...input, bot_token: "" }).success).toBe(false);
+  });
+  it("accepts mailbox conversations and credential rotation", () => {
+    expect(conversationPlatformSchema.parse("aurinko")).toBe("aurinko");
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "replacement-secret" }).success).toBe(true);
+    expect(createChannelConversationSchema.safeParse({ channel_bot_id: UUID, agent_api_key_id: UUID, platform_conversation_id: `42:${"a".repeat(64)}` }).success).toBe(true);
   });
 });

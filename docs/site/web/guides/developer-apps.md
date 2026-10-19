@@ -28,7 +28,7 @@ If you only need server-to-server access with no user login, use a service accou
 |---|---|
 | **App name** | Display name shown on the consent screen. |
 | **Redirect URIs** | One or more callback URLs where NyxID will send the authorization code after login. Must be exact matches. |
-| **Allowed scopes** | Space-separated scopes this client can request: `openid`, `profile`, `email`, `roles`, `groups`. |
+| **Allowed scopes** | Select the scopes this client can request: `openid`, `profile`, `email`, `offline_access`, `proxy`, `roles`, and `groups`. Add a scope here before requesting it in an authorization flow. |
 | **Client type** | **Confidential** (server-side app that can keep a secret) or **Public** (SPA, mobile, CLI). |
 
 4. Click **Create**.
@@ -57,7 +57,7 @@ GET https://nyx.chrono-ai.fun/oauth/authorize
   ?response_type=code
   &client_id=YOUR_CLIENT_ID
   &redirect_uri=https://app.example.com/callback
-  &scope=openid profile email
+  &scope=openid profile
   &code_challenge=CODE_CHALLENGE
   &code_challenge_method=S256
   &state=RANDOM_STATE
@@ -88,7 +88,7 @@ Response:
   "id_token": "eyJhbGciOiJSUzI1NiIs...",
   "token_type": "Bearer",
   "expires_in": 900,
-  "scope": "openid profile email"
+  "scope": "openid profile"
 }
 ```
 
@@ -103,6 +103,27 @@ GET https://nyx.chrono-ai.fun/.well-known/jwks.json
 ```
 
 Match the `kid` in the token header to a key in the response, then verify the RS256 signature. Most OIDC libraries do this automatically when you provide the issuer URL.
+
+## Request more access after sign-in
+
+When a signed-in user has already approved your app, start a new Authorization Code + PKCE request to add a scope or a NyxID service. Use the same registered client and redirect URI, with a fresh PKCE challenge and unpredictable `state` for each request. The new scope must be in the app's **Allowed scopes** selection.
+
+```text
+GET https://nyx.chrono-ai.fun/oauth/authorize
+  ?response_type=code
+  &client_id=YOUR_CLIENT_ID
+  &redirect_uri=REGISTERED_CALLBACK
+  &scope=email
+  &code_challenge=NEW_CODE_CHALLENGE
+  &code_challenge_method=S256
+  &state=NEW_RANDOM_STATE
+  &include_granted_scopes=true
+  &requested_service_ids=USER_SERVICE_UUID
+```
+
+Here `email` is an example of a newly needed OAuth scope, and `requested_service_ids` contains an exact UserService UUID for an additional service. Omit `scope` when only adding services; omit `requested_service_ids` when only adding scopes. NyxID retains the existing grant and shows the additions for approval. This flow requires a live prior consent for the user and client. If there is none, use the ordinary authorization flow above.
+
+On return, validate `state` even if the callback contains an OAuth error. Exchange a successful code with its matching PKCE verifier, then read the effective grant before enabling the new capability. A redirect alone does not establish that the user approved it. Keep any unsaved application draft behind the random `state` and restore it after either approval or cancellation. See [incremental service access](/docs/shared/concepts/oauth-oidc#adding-service-access-incrementally) for broker bindings, resource restrictions, and conflict handling.
 
 ## Auto-discovery
 

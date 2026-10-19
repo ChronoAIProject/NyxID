@@ -1,0 +1,185 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Notion",
+    "version": "2022-06-28-nyxid-overlay",
+    "description": "Notion operations for API version 2022-06-28, matching the NyxID default Notion-Version header. Database queries use the pre-2025-09-03 database API. NyxID injects the connected workspace token."
+  },
+  "servers": [{ "url": "https://api.notion.com" }],
+  "paths": {
+    "/v1/search": {
+      "post": {
+        "operationId": "notion_search",
+        "summary": "Search shared pages and databases by title.",
+        "x-aevatar-tool": { "name": "notion_search", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "query": { "type": "string" },
+              "filter": { "type": "object", "properties": { "value": { "type": "string", "enum": ["page", "database"] }, "property": { "type": "string", "enum": ["object"] } }, "required": ["value", "property"] },
+              "sort": { "type": "object", "properties": { "direction": { "type": "string", "enum": ["ascending", "descending"] }, "timestamp": { "type": "string", "enum": ["last_edited_time"] } }, "required": ["direction", "timestamp"] },
+              "start_cursor": { "type": "string" },
+              "page_size": { "type": "integer", "description": "Number of results, 1 to 100." }
+            }
+          } } }
+        },
+        "responses": { "200": { "description": "Paginated pages and databases.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/pages/{page_id}": {
+      "get": {
+        "operationId": "notion_retrieve_page",
+        "summary": "Retrieve page metadata and properties. Use block children for page content.",
+        "x-aevatar-tool": { "name": "notion_retrieve_page", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [{ "name": "page_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Page.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      },
+      "patch": {
+        "operationId": "notion_update_page",
+        "summary": "Update page properties, icon, cover, or archived status.",
+        "x-aevatar-tool": { "name": "notion_update_page", "readOnly": false, "destructive": true, "requiresApproval": true },
+        "parameters": [{ "name": "page_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "properties": {
+            "properties": { "type": "object", "additionalProperties": true },
+            "icon": { "type": "object", "additionalProperties": true },
+            "cover": { "type": "object", "additionalProperties": true },
+            "archived": { "type": "boolean" }
+          }
+        } } } },
+        "responses": { "200": { "description": "Updated page.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/pages": {
+      "post": {
+        "operationId": "notion_create_page",
+        "summary": "Create a page under a shared page or database.",
+        "x-aevatar-tool": { "name": "notion_create_page", "readOnly": false, "destructive": false, "requiresApproval": true },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["parent", "properties"],
+          "properties": {
+            "parent": { "type": "object", "description": "Set page_id or database_id to the shared parent ID.", "properties": { "page_id": { "type": "string" }, "database_id": { "type": "string" } } },
+            "properties": { "type": "object", "additionalProperties": true, "description": "Page properties keyed by name or ID. Page parents accept title; database parents use the database schema." },
+            "children": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+            "icon": { "type": "object", "additionalProperties": true },
+            "cover": { "type": "object", "additionalProperties": true }
+          }
+        } } } },
+        "responses": { "200": { "description": "Created page.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/databases/{database_id}": {
+      "get": {
+        "operationId": "notion_retrieve_database",
+        "summary": "Retrieve a database and its property schema (API 2022-06-28).",
+        "x-aevatar-tool": { "name": "notion_retrieve_database", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [{ "name": "database_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Database.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/databases/{database_id}/query": {
+      "post": {
+        "operationId": "notion_query_database",
+        "summary": "Query pages in a shared database (requires API 2022-06-28).",
+        "x-aevatar-tool": { "name": "notion_query_database", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [{ "name": "database_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "properties": {
+            "filter": { "type": "object", "additionalProperties": true },
+            "sorts": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+            "start_cursor": { "type": "string" },
+            "page_size": { "type": "integer", "description": "Number of results, 1 to 100." }
+          }
+        } } } },
+        "responses": { "200": { "description": "Paginated pages.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/blocks/{block_id}/children": {
+      "get": {
+        "operationId": "notion_list_block_children",
+        "summary": "List direct children of a block or page. Recurse for nested content.",
+        "x-aevatar-tool": { "name": "notion_list_block_children", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [
+          { "name": "block_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "start_cursor", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "page_size", "in": "query", "required": false, "schema": { "type": "integer", "description": "Number of results, 1 to 100." } }
+        ],
+        "responses": { "200": { "description": "Paginated child blocks.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      },
+      "patch": {
+        "operationId": "notion_append_block_children",
+        "summary": "Append up to 100 child blocks to a shared block or page.",
+        "x-aevatar-tool": { "name": "notion_append_block_children", "readOnly": false, "destructive": false, "requiresApproval": true },
+        "parameters": [{ "name": "block_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["children"],
+          "properties": {
+            "children": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+            "after": { "type": "string", "description": "Append after this existing child block ID." }
+          }
+        } } } },
+        "responses": { "200": { "description": "Appended child blocks.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "operationId": "notion_list_users",
+        "summary": "List workspace users visible to the integration.",
+        "x-aevatar-tool": { "name": "notion_list_users", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [
+          { "name": "start_cursor", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "page_size", "in": "query", "required": false, "schema": { "type": "integer", "description": "Number of results, 1 to 100." } }
+        ],
+        "responses": { "200": { "description": "Paginated users.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/users/{user_id}": {
+      "get": {
+        "operationId": "notion_retrieve_user",
+        "summary": "Retrieve a user by ID.",
+        "x-aevatar-tool": { "name": "notion_retrieve_user", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [{ "name": "user_id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "User.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/users/me": {
+      "get": {
+        "operationId": "notion_retrieve_bot_user",
+        "summary": "Retrieve the bot user associated with the connected token.",
+        "x-aevatar-tool": { "name": "notion_retrieve_bot_user", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "responses": { "200": { "description": "Bot user.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    },
+    "/v1/comments": {
+      "get": {
+        "operationId": "notion_list_comments",
+        "summary": "List unresolved comments on a page or block.",
+        "x-aevatar-tool": { "name": "notion_list_comments", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [
+          { "name": "block_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "start_cursor", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "page_size", "in": "query", "required": false, "schema": { "type": "integer", "description": "Number of results, 1 to 100." } }
+        ],
+        "responses": { "200": { "description": "Paginated comments.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      },
+      "post": {
+        "operationId": "notion_create_comment",
+        "summary": "Comment on a shared page or reply to an existing discussion.",
+        "x-aevatar-tool": { "name": "notion_create_comment", "readOnly": false, "destructive": false, "requiresApproval": true },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["rich_text"],
+          "properties": {
+            "parent": { "type": "object", "description": "Set parent.page_id for a new page comment; otherwise supply discussion_id.", "properties": { "page_id": { "type": "string" } }, "required": ["page_id"] },
+            "discussion_id": { "type": "string" },
+            "rich_text": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+          }
+        } } } },
+        "responses": { "200": { "description": "Created comment.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } }
+      }
+    }
+  }
+}

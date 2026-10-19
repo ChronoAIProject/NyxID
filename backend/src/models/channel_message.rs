@@ -3,20 +3,45 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_messages";
 
+/// Provider handles and descriptive metadata only; never media bytes or captions.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StoredAttachment {
+    pub content_type: String,
+    #[serde(default)]
+    pub provider_ref: String,
+    pub platform_message_id: Option<String>,
+    pub file_key: Option<String>,
+    pub image_key: Option<String>,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+impl std::fmt::Debug for StoredAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoredAttachment([REDACTED])")
+    }
+}
+
 /// A metadata-only record of a message flowing through the channel bot
 /// relay pipeline.
 ///
 /// **Per ADR-013 (NyxID Pure Passthrough) this record does not store message
-/// content.** Historical deployments may still have `text`, `attachments`, or
-/// `raw_platform_data` fields on existing documents; a startup migration in
-/// `db::ensure_indexes` unsets them on first run. Serde's default behavior of
-/// ignoring unknown fields keeps old documents readable during the rollout
-/// window.
+/// content.** Inbound attachments retain only provider routing handles and
+/// descriptive metadata so authorized agents can download ephemeral bytes.
+/// The startup migration removes legacy content fields and attachment objects
+/// without provider_ref, while retaining the current metadata shape.
 ///
 /// Message *content* now lives exclusively in the downstream agent (Aevatar
 /// grain state, or wherever the agent persists its conversation history).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Optional normalized thread facts, never an interaction credential.
+    #[serde(default)]
+    pub thread_context: Option<super::channel_thread::ChannelThreadFacts>,
+    #[serde(default)]
+    pub activity: Option<super::channel_activity::ActivityMetadata>,
+    #[serde(default)]
+    pub platform_send: Option<super::channel_delivery::PlatformSendRecord>,
     #[serde(rename = "_id")]
     pub id: String,
     /// The bot that hosts this message's conversation. `None` for messages on
@@ -37,6 +62,11 @@ pub struct ChannelMessage {
     /// Platform-assigned message identifier
     #[serde(default)]
     pub platform_message_id: Option<String>,
+    /// Authenticated provider update/event identity used for relay redelivery
+    /// fencing. Telegram's update ID is distinct from its message ID because
+    /// edited messages retain the latter. This is routing metadata only.
+    #[serde(default)]
+    pub native_event_id: Option<String>,
     /// Platform-native sender identifier
     #[serde(default)]
     pub sender_platform_id: Option<String>,
@@ -45,6 +75,8 @@ pub struct ChannelMessage {
     pub sender_display_name: Option<String>,
     /// Content type: "text", "image", "file", "audio", "video", "unknown"
     pub content_type: String,
+    #[serde(default)]
+    pub attachments: Vec<StoredAttachment>,
     /// Platform-specific routing metadata: Telegram `message_thread_id`,
     /// Discord deferred-interaction token (`interaction:{app}:{token}`),
     /// Lark `thread_id`, etc. **This is routing metadata, not message
@@ -60,16 +92,33 @@ pub struct ChannelMessage {
     /// Callback delivery status: "pending", "delivered", "failed", "timeout"
     #[serde(default)]
     pub callback_status: Option<String>,
+    /// HTTP status the callback URL answered with when delivery failed, if
+    /// it answered at all. A status code only, never the response body.
+    #[serde(default)]
+    pub callback_http_status: Option<u16>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
     /// Platform message ID of the sent reply (set after outbound delivery)
     #[serde(default)]
     pub platform_reply_message_id: Option<String>,
+    /// Inbound only: the platform message ID this message replies to, when
+    /// it is a reply (routing metadata, e.g. to tell replies to the bot).
+    #[serde(default)]
+    pub reply_to_platform_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ChannelMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelMessage")
+            .field("id", &self.id)
+            .field("platform", &self.platform)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +132,10 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            thread_context: None,
+            activity: None,
+            platform_send: None,
+            attachments: vec![],
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
             conversation_id: uuid::Uuid::new_v4().to_string(),
@@ -91,14 +144,17 @@ mod tests {
             direction: "inbound".to_string(),
             platform: "telegram".to_string(),
             platform_message_id: Some("msg_123".to_string()),
+            native_event_id: Some("telegram-update-123".to_string()),
             sender_platform_id: Some("user_456".to_string()),
             sender_display_name: Some("Alice".to_string()),
             content_type: "text".to_string(),
             thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: Utc::now(),
             updated_at: None,
         }
@@ -121,7 +177,7 @@ mod tests {
         let msg = make_message();
         let doc = bson::to_document(&msg).expect("serialize");
         assert!(!doc.contains_key("text"));
-        assert!(!doc.contains_key("attachments"));
+        assert!(doc.get_array("attachments").unwrap().is_empty());
         assert!(!doc.contains_key("raw_platform_data"));
         assert!(!doc.contains_key("body"));
         assert!(!doc.contains_key("content"));
@@ -172,10 +228,12 @@ mod tests {
         doc.remove("reply_to_message_id");
         doc.remove("platform_reply_message_id");
         doc.remove("updated_at");
+        doc.remove("attachments");
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.platform_message_id, None);
         assert_eq!(restored.callback_status, None);
         assert_eq!(restored.updated_at, None);
+        assert!(restored.attachments.is_empty());
     }
 
     #[test]

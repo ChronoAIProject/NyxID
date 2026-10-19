@@ -32,7 +32,7 @@ function schedule(overrides: Partial<CreditSchedule> = {}): CreditSchedule {
 }
 
 describe("SchedulesTable", () => {
-  it("shows current-period progress and exposes pause as a menu item", async () => {
+  it("shows current-period progress and exposes pause as a switch", async () => {
     const onToggle = vi.fn();
     const user = userEvent.setup();
     render(
@@ -45,13 +45,9 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getAllByText("Issuing 412")).not.toHaveLength(0);
-    await user.click(
-      screen.getByRole("button", { name: "Recurring credits actions" }),
-    );
-    await user.click(
-      await screen.findByRole("menuitem", { name: "Pause recurring credits" }),
-    );
+    expect(screen.getByText("Disbursing 412")).toBeInTheDocument();
+    const toggle = screen.getByRole("switch", { name: "Pause schedule" });
+    await user.click(toggle);
     expect(onToggle).toHaveBeenCalledWith(
       expect.objectContaining({
         id: "schedule-1",
@@ -82,7 +78,7 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getAllByText(/Complete.*1,204.*expires/)).not.toHaveLength(0);
+    expect(screen.getByText(/Complete.*1,204.*expires/)).toBeInTheDocument();
   });
 
   it("surfaces periods abandoned before completion", () => {
@@ -96,7 +92,34 @@ describe("SchedulesTable", () => {
       />,
     );
 
-    expect(screen.getAllByText("2 skipped periods")).toHaveLength(2);
-    expect(screen.getAllByText("2 skipped periods")[1]?.closest("article")).toBeInTheDocument();
+    expect(screen.getByText("2 skipped periods")).toBeInTheDocument();
   });
+});
+
+it.each([
+  [
+    "org_members",
+    "3 organizations · members",
+    { target_org_ids: ["a", "b", "c"] },
+  ],
+  ["groups", "2 groups · members", { target_group_ids: ["a", "b"] }],
+] as const)("labels %s schedule recipients", (kind, label, targets) => {
+  render(
+    <SchedulesTable
+      schedules={[
+        schedule({
+          target_kind: kind,
+          target_org_ids:
+            "target_org_ids" in targets ? [...targets.target_org_ids] : [],
+          target_group_ids:
+            "target_group_ids" in targets ? [...targets.target_group_ids] : [],
+        }),
+      ]}
+      canWrite={false}
+      updatePending={false}
+      onEdit={vi.fn()}
+      onToggle={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(label)).toBeInTheDocument();
 });

@@ -28,7 +28,8 @@ const createdRotationResponseSchema = z
     resource: keyResourceSchema,
     replayed: z.literal(false),
     requestedAt: authoritativeTimestampSchema,
-    fullKey: z.string().min(1).max(4_096),
+    // A managed assistant successor stays encrypted on the server.
+    fullKey: z.string().max(4_096),
   })
   .strict();
 const replayedRotationResponseSchema = z
@@ -120,9 +121,10 @@ function KeyRotationResult({
 }) {
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const hasSecret = !result.replayed && Boolean(result.fullKey);
 
   async function copySecret() {
-    if (result.replayed) return;
+    if (result.replayed || !result.fullKey) return;
     try {
       await copyToClipboard(result.fullKey);
       setCopied(true);
@@ -135,12 +137,14 @@ function KeyRotationResult({
 
   return (
     <>
-      {result.replayed ? (
+      {!hasSecret ? (
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-[13px] font-medium">Existing replacement key</p>
-            <p className="break-all font-mono text-[12px] text-muted-foreground">
+            <p className="text-13 font-medium">
+              {result.replayed ? "Existing replacement key" : "Assistant key rotated"}
+            </p>
+            <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -148,8 +152,8 @@ function KeyRotationResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[12px]">
-              {result.fullKey}
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
+              {!result.replayed ? result.fullKey : null}
             </code>
             <Button
               type="button"
@@ -162,7 +166,7 @@ function KeyRotationResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-[12px]">
+          <label className="flex cursor-pointer items-start gap-2 text-12">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
@@ -172,7 +176,7 @@ function KeyRotationResult({
         </div>
       )}
       {verified ? (
-        <p className="text-[11px] text-success">
+        <p className="text-11 text-success">
           Exact rotation lineage verified.
         </p>
       ) : null}
@@ -191,10 +195,10 @@ function KeyRotationResult({
         <Button
           type="button"
           variant="primary"
-          disabled={!verified || (!result.replayed && !saved)}
+          disabled={!verified || (hasSecret && !saved)}
           onClick={() => onFinish(result.resource.keyId)}
         >
-          {result.replayed ? "Report replacement key" : "I have saved it"}
+          {hasSecret ? "I have saved it" : "Report replacement key"}
         </Button>
       </DialogFooter>
     </>
@@ -275,6 +279,9 @@ export function AssistantKeyRotateDialog({
       ) {
         throw new Error("NyxID key rotation did not match this action.");
       }
+      if (!effect.replayed && !effect.fullKey && replacement.platform !== "nyxid-assistant") {
+        throw new Error("NyxID did not return the replacement key.");
+      }
       setVerified(true);
       setError(null);
     } catch (caught) {
@@ -339,13 +346,15 @@ export function AssistantKeyRotateDialog({
             {result
               ? result.replayed
                 ? "The original one-time replacement secret is no longer available."
-                : "This replacement key is shown only once. Copy and store it securely now."
+                : result.fullKey
+                  ? "This replacement key is shown only once. Copy and store it securely now."
+                  : "NyxID has securely stored the replacement key for the assistant."
               : "Confirm the exact predecessor before replacing its credential."}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Predecessor</span>
               <Badge
@@ -355,7 +364,7 @@ export function AssistantKeyRotateDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               NyxID preserves the key's authority and disables this exact
               predecessor atomically.
             </p>
@@ -363,7 +372,7 @@ export function AssistantKeyRotateDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

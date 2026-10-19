@@ -44,6 +44,9 @@ pub struct Claims {
     /// Registered OAuth client that received this access token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Exact consent version approved for Machine access; never inferred by readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     /// User's roles (present when "roles" scope is requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
@@ -66,6 +69,9 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sgen: Option<i64>,
     /// RFC 7800 confirmation claim for sender-constrained access tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Cnf>,
@@ -127,7 +133,6 @@ pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
 const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
 pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
 pub const RELAY_CALLBACK_TOKEN_TYPE: &str = "relay_callback";
-#[cfg(test)]
 const RELAY_CALLBACK_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Dedicated claims for `/api/v1/channel-relay/reply`.
@@ -339,17 +344,38 @@ impl TokenRestrictionClaims {
     }
 
     pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
-        let catalog_authority = auth_user.has_scope(crate::mw::auth::MCP_CATALOG_READ_SCOPE);
+        Self::from_authenticated_scope(
+            &auth_user.scope,
+            auth_user.resource_uris.as_deref(),
+            auth_user.allow_all_services,
+            &auth_user.allowed_service_ids,
+            auth_user.allow_all_nodes,
+            &auth_user.allowed_node_ids,
+        )
+    }
+
+    /// Shared projection for REST AuthUser and the manually authenticated MCP
+    /// transport. Inputs must come from authentication, never tool arguments.
+    pub fn from_authenticated_scope(
+        scope: &str,
+        resources: Option<&[String]>,
+        allow_all_services: bool,
+        allowed_service_ids: &[String],
+        allow_all_nodes: bool,
+        allowed_node_ids: &[String],
+    ) -> Self {
+        let catalog_authority = scope
+            .split_whitespace()
+            .any(|scope| scope == crate::mw::auth::MCP_CATALOG_READ_SCOPE);
         Self {
-            resources: auth_user
-                .resource_uris
-                .clone()
+            resources: resources
+                .map(<[String]>::to_vec)
                 .or_else(|| catalog_authority.then(Vec::new)),
-            allowed_service_ids: (catalog_authority || !auth_user.allow_all_services)
-                .then(|| auth_user.allowed_service_ids.clone()),
-            allow_all_services: Some(auth_user.allow_all_services),
-            allowed_node_ids: Some(auth_user.allowed_node_ids.clone()),
-            allow_all_nodes: Some(auth_user.allow_all_nodes),
+            allowed_service_ids: (catalog_authority || !allow_all_services)
+                .then(|| allowed_service_ids.to_vec()),
+            allow_all_services: Some(allow_all_services),
+            allowed_node_ids: Some(allowed_node_ids.to_vec()),
+            allow_all_nodes: Some(allow_all_nodes),
         }
     }
 }
@@ -380,12 +406,14 @@ pub fn generate_access_token(
         mtls_x5t_s256,
         restrictions,
         None,
+        None,
     )
 }
 
 /// Generate an access token bound to the registered OAuth client that
 /// completed the authorization-code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn generate_oauth_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -409,6 +437,36 @@ pub fn generate_oauth_access_token(
         mtls_x5t_s256,
         restrictions,
         Some(client_id),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_oauth_access_token_with_consent(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
+    client_id: &str,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> Result<String, AppError> {
+    generate_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        ttl_override_secs,
+        dpop_jkt,
+        mtls_x5t_s256,
+        restrictions,
+        Some(client_id),
+        protected_consent,
     )
 }
 
@@ -424,6 +482,7 @@ fn generate_access_token_for_client(
     mtls_x5t_s256: Option<&str>,
     restrictions: Option<AccessTokenRestrictions<'_>>,
     client_id: Option<&str>,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -452,6 +511,7 @@ fn generate_access_token_for_client(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf,
         relay: None,
         relay_api_key_id: None,
@@ -479,6 +539,7 @@ fn generate_access_token_for_client(
             .as_ref()
             .map(|restriction| restriction.allow_all_nodes)
             .or_else(|| client_id.map(|_| true)),
+        protected_consent: protected_consent.cloned(),
         assistant_forward: None,
     };
 
@@ -536,6 +597,7 @@ pub fn generate_assistant_forward_access_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -549,6 +611,7 @@ pub fn generate_assistant_forward_access_token(
         allow_all_services: Some(false),
         allowed_node_ids: Some(Vec::new()),
         allow_all_nodes: Some(false),
+        protected_consent: None,
         assistant_forward: Some(true),
     };
 
@@ -605,6 +668,7 @@ pub fn generate_relay_access_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
@@ -618,6 +682,7 @@ pub fn generate_relay_access_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -717,6 +782,7 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -730,6 +796,7 @@ pub fn generate_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -771,6 +838,7 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -784,6 +852,7 @@ pub fn reissue_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -867,6 +936,7 @@ pub fn generate_delegated_access_token_for_client(
         }),
         delegated: Some(true),
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -880,6 +950,7 @@ pub fn generate_delegated_access_token_for_client(
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
         allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
         allow_all_nodes: restrictions.and_then(|r| r.allow_all_nodes),
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -992,6 +1063,7 @@ pub fn generate_service_account_token(
     service_account_id: &str,
     scope: &str,
     ttl_secs: i64,
+    credential_generation: i64,
 ) -> Result<(String, String), AppError> {
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
@@ -1013,6 +1085,7 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        sgen: Some(credential_generation),
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -1026,6 +1099,7 @@ pub fn generate_service_account_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -1116,10 +1190,9 @@ pub fn validate_relay_reply_token(
 
 /// Verify and decode a relay callback token.
 ///
-/// NyxID itself never validates these tokens in production — downstream
-/// consumers (e.g. Aevatar) do so via the public JWKS. This helper exists
-/// for round-trip tests, so it is compiled only under `cfg(test)`.
-#[cfg(test)]
+/// Downstream consumers (e.g. Aevatar, the Agent Event Gateway) verify these
+/// via the public JWKS. NyxID verifies them itself only where it is the
+/// callback receiver: NyxBot's direct channel relay endpoint.
 pub fn validate_relay_callback_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -1245,6 +1318,7 @@ mod tests {
 
         let config = AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -1281,12 +1355,14 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1297,8 +1373,10 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
+            agent_key_login_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
             connection_expiry_notifications: true,
@@ -1354,10 +1432,14 @@ mod tests {
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: 20 * 1024 * 1024,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,
@@ -1381,7 +1463,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         };
@@ -1657,6 +1738,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -1670,6 +1752,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
 
@@ -1775,6 +1858,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -1788,6 +1872,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
@@ -1888,6 +1973,12 @@ mod tests {
         ]);
         let allowed_service_ids = vec!["svc-1".to_string()];
         let auth_user = crate::mw::auth::AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "llm:proxy".to_string(),
@@ -1903,6 +1994,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_credential_id: None,
             api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -1984,7 +2076,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
         let (token, jti) =
-            generate_service_account_token(&keys, &config, &sa_id, "proxy:* llm:proxy", 3600)
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:* llm:proxy", 3600, 0)
                 .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
@@ -2005,7 +2097,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
         let (token, _) =
-            generate_service_account_token(&keys, &config, &sa_id, "proxy:*", 120).unwrap();
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:*", 120, 0).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         let ttl = claims.exp - claims.iat;

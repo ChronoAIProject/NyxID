@@ -11,14 +11,23 @@ pub mod encryption;
 pub mod error;
 #[path = "node/keychain.rs"]
 mod keychain;
+#[path = "node/machine/runtime.rs"]
+pub mod machine;
+#[path = "node/managed_config.rs"]
+pub mod managed_config;
+#[path = "node/managed_deadline.rs"]
+pub mod managed_deadline;
 #[path = "node/metrics.rs"]
 mod metrics;
 #[path = "node/proxy_executor.rs"]
 pub mod proxy_executor;
+#[path = "node/proxy_upload.rs"]
+pub mod proxy_upload;
 #[path = "node/secret_backend.rs"]
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+pub mod tls;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
@@ -32,12 +41,38 @@ pub use metrics::NodeMetrics;
 pub use signing::ReplayGuard;
 
 pub fn no_auth_credentials(service_slug: &str, target_url: &str) -> error::Result<CredentialStore> {
+    test_credentials(service_slug, target_url, None)
+}
+
+pub fn bearer_credentials(
+    service_slug: &str,
+    target_url: &str,
+    token: &str,
+) -> error::Result<CredentialStore> {
+    test_credentials(service_slug, target_url, Some(token))
+}
+
+fn test_credentials(
+    service_slug: &str,
+    target_url: &str,
+    token: Option<&str>,
+) -> error::Result<CredentialStore> {
     let config_dir = tempfile::tempdir()?;
     let backend = secret_backend::SecretBackend::new("file", "test-node", config_dir.path())?;
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert(
         service_slug.to_string(),
-        config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
+        match token {
+            Some(token) => config::CredentialConfig::new_header(
+                "Authorization".into(),
+                Some(
+                    encryption::LocalEncryption::load_or_generate(config_dir.path())?
+                        .encrypt(&format!("Bearer {token}"))?,
+                ),
+                Some(target_url.into()),
+            ),
+            None => config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
+        },
     );
     let config = config::NodeConfig {
         server: config::ServerConfig {
@@ -48,8 +83,11 @@ pub fn no_auth_credentials(service_slug: &str, target_url: &str) -> error::Resul
             id: "test-node".to_string(),
             auth_token_encrypted: String::new(),
         },
+        managed_runtime: None,
+        managed_capabilities: None,
         signing: config::SigningConfig::default(),
         ssh: config::SshConfig::default(),
+        machine: Default::default(),
         storage_backend: "file".to_string(),
         credentials,
         ssh_keys: Vec::new(),
@@ -66,7 +104,6 @@ mod test_support {
     }
 }
 
-#[cfg(test)]
-mod node {
-    pub use crate::config;
+pub mod node {
+    pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

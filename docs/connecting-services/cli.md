@@ -98,3 +98,7 @@ nyxid service rotate-credential <id> --credential-env <NEW_VAR>
 
 - **Wire your AI agent to NyxID's MCP endpoint:** see [ai-driven.md](ai-driven.md).
 - **Same flow without the CLI dependency** (n8n, Zapier, CI/CD): see [direct-api.md](direct-api.md).
+
+## Aurinko mailbox
+
+Use the supported account-token flow: `nyxid service add api-aurinko --credential-env AURINKO_ACCOUNT_TOKEN`. The independently configured email channel uses `nyxid channel-bot register --platform aurinko --label Mailbox --token-env AURINKO_ACCOUNT_TOKEN --app-secret-env AURINKO_SIGNING_SECRET` and an agent route. Aurinko bot deletion in JSON mode returns both `ok` and `webhook_cleanup`; `failed` means the local bot is deleted but its subscription needs cleanup. See [Aurinko integration](../AURINKO_INTEGRATION.md) for complete commands, scopes, lifecycle, and message-bound reply behavior. Managed Aurinko OAuth is not exposed.

@@ -24,8 +24,173 @@ pub fn token_exchange_client() -> &'static reqwest::Client {
     &TOKEN_EXCHANGE_CLIENT
 }
 
+/// Validate only the opt-in hosted authorization nonce contract. Legacy URLs
+/// and parameter names keep their existing behavior while the flag is off.
+pub fn validate_authorization_nonce_config(
+    required: bool,
+    authorization_url: Option<&str>,
+    client_id_param_name: Option<&str>,
+) -> AppResult<()> {
+    if !required {
+        return Ok(());
+    }
+    if client_id_param_name.is_some_and(|name| name.trim() == "nonce") {
+        return Err(AppError::ValidationError(
+            "client_id_param_name cannot be nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    let url = authorization_url
+        .and_then(|value| url::Url::parse(value).ok())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "A valid authorization URL is required for authorization_nonce_required"
+                    .to_string(),
+            )
+        })?;
+    if url.fragment().is_some() {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain a fragment when authorization_nonce_required is enabled".to_string(),
+        ));
+    }
+    if url.query_pairs().any(|(key, _)| key == "nonce") {
+        return Err(AppError::ValidationError(
+            "authorization_url cannot contain nonce when authorization_nonce_required is enabled"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request.header(reqwest::header::ACCEPT, "application/json")
+}
+
+pub fn token_request_encoding(provider: &ProviderConfig) -> &str {
+    provider
+        .token_request_encoding
+        .as_deref()
+        .unwrap_or_else(|| {
+            // Stored rows predating the encoding field must keep their wire format.
+            if matches!(provider.slug.as_str(), "lark" | "feishu")
+                || provider.token_url.as_deref().is_some_and(|url| {
+                    url.contains("/open-apis/authen/v2/oauth/token")
+                        && (url.contains("open.larksuite.com") || url.contains("open.feishu.cn"))
+                })
+            {
+                "json"
+            } else {
+                "form"
+            }
+        })
+}
+
+pub fn encode_oauth_request(
+    mut request: reqwest::RequestBuilder,
+    provider: &ProviderConfig,
+    encoding: &str,
+    params: &[(String, String)],
+) -> AppResult<reqwest::RequestBuilder> {
+    // Writes and model deserialization enforce the public-header contract.
+    // Fail closed for in-memory configs too, without propagating a validator's
+    // provider-derived result into request errors that callers may log.
+    if provider.oauth_request_headers.len() > 20
+        || provider.oauth_request_headers.iter().any(|(name, value)| {
+            !crate::models::provider_config::is_public_oauth_header(name, value)
+        })
+    {
+        return Err(AppError::ValidationError(
+            "Invalid OAuth request headers".to_string(),
+        ));
+    }
+    for (name, value) in &provider.oauth_request_headers {
+        request = request.header(name, value);
+    }
+    match encoding {
+        "json" => Ok(request.json(
+            &params
+                .iter()
+                .map(|(key, value)| (key, value))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )),
+        "form" => Ok(request.form(&params)),
+        _ => Err(AppError::ValidationError(
+            "OAuth request encoding must be one of: form, json".to_string(),
+        )),
+    }
+}
+
+pub fn is_stripe_apps(provider: &ProviderConfig) -> bool {
+    provider.slug == "stripe"
+        && provider.authorization_url.as_deref().is_some_and(|url| {
+            reqwest::Url::parse(url).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str() == Some("marketplace.stripe.com")
+                    && url.path() == "/oauth/v2/authorize"
+            })
+        })
+}
+
+pub fn token_request(
+    provider: &ProviderConfig,
+    token_url: &str,
+    params: &[(String, String)],
+) -> AppResult<reqwest::RequestBuilder> {
+    let mut params = params.to_vec();
+    apply_token_resource(provider, &mut params);
+    if is_stripe_apps(provider) {
+        params.retain(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "redirect_uri" | "client_id" | "client_secret" | "code_verifier"
+            )
+        });
+    }
+    encode_oauth_request(
+        expect_json_response(token_exchange_client().post(token_url)),
+        provider,
+        token_request_encoding(provider),
+        &params,
+    )
+}
+
+/// Stripe Apps authenticates token requests with the developer API key as
+/// the Basic username, rather than the OAuth client ID.
+pub fn token_basic_auth_credentials<'a>(
+    provider: &ProviderConfig,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+) -> AppResult<(&'a str, Option<&'a str>)> {
+    if is_stripe_apps(provider) {
+        let secret = client_secret
+            .filter(|secret| !secret.is_empty())
+            .ok_or_else(|| {
+                AppError::ValidationError(
+                    "Stripe OAuth requires the app developer secret API key".into(),
+                )
+            })?;
+        Ok((secret, Some("")))
+    } else {
+        Ok((client_id, client_secret))
+    }
+}
+
+/// Stripe Apps documents a one-hour lifetime but omits expires_in in its
+/// example responses. Preserve explicit lifetimes from every provider.
+pub fn token_expires_in(provider: &ProviderConfig, payload: &serde_json::Value) -> Option<i64> {
+    payload["expires_in"]
+        .as_i64()
+        .or_else(|| is_stripe_apps(provider).then_some(3600))
+}
+
+fn apply_token_resource(provider: &ProviderConfig, params: &mut Vec<(String, String)>) {
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG {
+        params.retain(|(name, _)| name != "resource");
+        params.push((
+            "resource".into(),
+            nyxid_service_adapters::ifttt_mcp::BASE_URL.into(),
+        ));
+    }
 }
 
 pub fn client_id_param_name(provider: &ProviderConfig) -> &str {
@@ -139,14 +304,24 @@ pub async fn refresh_oauth_token(
         }
     }
 
-    let mut request = expect_json_response(token_exchange_client().post(token_url)).form(&params);
+    // This store always refreshed with form encoding before the explicit field
+    // existed, including Lark-like providers. Only an operator opt-in changes it.
+    apply_token_resource(&provider, &mut params);
+    let mut request = encode_oauth_request(
+        expect_json_response(token_exchange_client().post(token_url)),
+        &provider,
+        provider.token_request_encoding.as_deref().unwrap_or("form"),
+        &params,
+    )?;
     if use_basic_auth {
-        request = request.basic_auth(&client_id, client_secret.as_deref());
+        let (username, password) =
+            token_basic_auth_credentials(&provider, &client_id, client_secret.as_deref())?;
+        request = request.basic_auth(username, password);
     }
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let now = Utc::now();
@@ -193,7 +368,7 @@ pub async fn refresh_oauth_token(
     })?;
 
     let new_refresh_token = token_data["refresh_token"].as_str();
-    let expires_in = token_data["expires_in"].as_i64();
+    let expires_in = token_expires_in(&provider, &token_data);
     let now = Utc::now();
 
     let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
@@ -278,14 +453,172 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "test".to_string(),
             revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn stripe_token_request_uses_developer_key_and_only_grant_parameters() {
+        let mut provider = test_provider();
+        provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+        provider.token_endpoint_auth_method = "client_secret_basic".into();
+        let params = vec![
+            ("grant_type".into(), "authorization_code".into()),
+            ("code".into(), "ac_fixture".into()),
+            ("redirect_uri".into(), "https://nyx.example/callback".into()),
+            ("client_id".into(), "ca_fixture".into()),
+            ("client_secret".into(), "sk_fixture".into()),
+        ];
+        for grant in ["authorization_code", "refresh_token"] {
+            let mut params = params.clone();
+            params[0].1 = grant.into();
+            if grant == "refresh_token" {
+                params[1] = ("refresh_token".into(), "rt_fixture".into());
+            }
+            let (username, password) =
+                token_basic_auth_credentials(&provider, "ca_fixture", Some("sk_fixture")).unwrap();
+            let request =
+                token_request(&provider, "https://api.stripe.com/v1/oauth/token", &params)
+                    .unwrap()
+                    .basic_auth(username, password)
+                    .build()
+                    .unwrap();
+            use base64::Engine;
+            assert_eq!(
+                request.headers()[reqwest::header::AUTHORIZATION],
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("sk_fixture:")
+                )
+            );
+            let body = String::from_utf8_lossy(request.body().unwrap().as_bytes().unwrap());
+            assert!(body.contains(grant));
+            assert!(!body.contains("client_id"));
+            assert!(!body.contains("client_secret"));
+            assert!(!body.contains("redirect_uri"));
+        }
+        assert!(token_basic_auth_credentials(&provider, "ca_fixture", None).is_err());
+    }
+
+    #[test]
+    fn stripe_expiry_defaults_to_one_hour_and_respects_explicit_expiry() {
+        let mut provider = test_provider();
+        assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
+        provider.slug = "stripe".into();
+        provider.authorization_url =
+            Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({})),
+            Some(3600)
+        );
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+    }
+
+    #[test]
+    fn existing_stripe_connect_preserves_generic_oauth_contract() {
+        let mut provider = test_provider();
+        provider.slug = "stripe".into();
+        provider.authorization_url = Some("https://connect.stripe.com/oauth/authorize".into());
+        assert!(!is_stripe_apps(&provider));
+        let params = vec![
+            ("redirect_uri".into(), "https://nyx.example/callback".into()),
+            ("client_id".into(), "client".into()),
+            ("code_verifier".into(), "verifier".into()),
+        ];
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = token_request(&provider, "https://example.com/token", &params)
+            .unwrap()
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic Y2xpZW50OnNlY3JldA=="
+        );
+        let body = String::from_utf8_lossy(request.body().unwrap().as_bytes().unwrap());
+        for field in ["redirect_uri", "client_id", "code_verifier"] {
+            assert!(body.contains(field));
+        }
+        assert_eq!(token_expires_in(&provider, &serde_json::json!({})), None);
+        assert_eq!(
+            token_expires_in(&provider, &serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+    }
+
+    #[test]
+    fn basic_auth_for_other_providers_preserves_client_credentials() {
+        let provider = test_provider();
+        let (username, password) =
+            token_basic_auth_credentials(&provider, "client", Some("secret")).unwrap();
+        let request = reqwest::Client::new()
+            .post("https://example.com")
+            .basic_auth(username, password)
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic Y2xpZW50OnNlY3JldA=="
+        );
+    }
+
+    #[test]
+    fn ifttt_resource_is_pinned_for_tokens_but_not_revocation() {
+        let mut provider = test_provider();
+        provider.slug = "ifttt-mcp".into();
+        for encoding in ["form", "json"] {
+            provider.token_request_encoding = Some(encoding.into());
+            let request = token_request(
+                &provider,
+                "https://ifttt.com/oauth/token",
+                &[
+                    ("grant_type".into(), "authorization_code".into()),
+                    ("resource".into(), "https://wrong.example".into()),
+                ],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let bytes = request.body().unwrap().as_bytes().unwrap();
+            let fields: std::collections::HashMap<String, String> = if encoding == "json" {
+                serde_json::from_slice(bytes).unwrap()
+            } else {
+                url::form_urlencoded::parse(bytes).into_owned().collect()
+            };
+            assert_eq!(
+                fields["resource"],
+                nyxid_service_adapters::ifttt_mcp::BASE_URL
+            );
+            let revoke = encode_oauth_request(
+                reqwest::Client::new().post("https://ifttt.com/oauth/revoke"),
+                &provider,
+                encoding,
+                &[("token".into(), "fixture".into())],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert!(
+                !String::from_utf8_lossy(revoke.body().unwrap().as_bytes().unwrap())
+                    .contains("resource")
+            );
         }
     }
 
@@ -303,6 +636,47 @@ mod tests {
                 .expect("accept header should be set"),
             "application/json"
         );
+    }
+
+    #[test]
+    fn explicit_encoding_overrides_legacy_provider_detection() {
+        let mut provider = test_provider();
+        provider.slug = "lark".into();
+        assert_eq!(token_request_encoding(&provider), "json");
+        provider.token_request_encoding = Some("form".into());
+        assert_eq!(token_request_encoding(&provider), "form");
+        provider.slug = "custom-json-provider".into();
+        provider.token_request_encoding = Some("json".into());
+        assert_eq!(token_request_encoding(&provider), "json");
+        provider.token_request_encoding = Some("unsupported".into());
+        assert!(token_request(&provider, "https://example.com/token", &[]).is_err());
+    }
+
+    #[test]
+    fn invalid_request_options_fail_with_fixed_errors() {
+        for (name, value) in [
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+        ] {
+            let mut provider = test_provider();
+            provider
+                .oauth_request_headers
+                .insert(name.into(), value.into());
+            let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+            let AppError::ValidationError(message) = &error else {
+                panic!("expected validation failure");
+            };
+            assert_eq!(message, "Invalid OAuth request headers");
+            assert!(!format!("{error:?}").contains(value));
+        }
+        let mut provider = test_provider();
+        provider.token_request_encoding = Some("credential-sentinel".into());
+        let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+        let AppError::ValidationError(message) = &error else {
+            panic!("expected validation failure");
+        };
+        assert_eq!(message, "OAuth request encoding must be one of: form, json");
+        assert!(!format!("{error:?}").contains("credential-sentinel"));
     }
 
     #[test]

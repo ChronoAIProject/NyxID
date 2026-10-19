@@ -159,6 +159,16 @@ pub async fn create_session(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<IssuedSession> {
+    create_session_with_transaction(db, user_id, ip_address, user_agent, None).await
+}
+
+pub(crate) async fn create_session_with_transaction(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<IssuedSession> {
     Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
@@ -180,9 +190,13 @@ pub async fn create_session(
         last_active_at: now,
     };
 
-    db.collection::<Session>(SESSIONS)
-        .insert_one(&new_session)
-        .await?;
+    let collection = db.collection::<Session>(SESSIONS);
+    let insert = collection.insert_one(&new_session);
+    if let Some(transaction) = transaction {
+        insert.session(transaction).await?;
+    } else {
+        insert.await?;
+    }
 
     Ok(IssuedSession {
         session_token,
@@ -199,16 +213,85 @@ pub async fn create_session_and_issue_tokens(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<IssuedTokens> {
+    issue_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn issue_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<IssuedTokens> {
+    let prepared =
+        prepare_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent).await?;
+    if let Some(transaction) = transaction {
+        insert_prepared_session(db, &prepared, transaction).await?;
+    } else {
+        db.collection::<Session>(SESSIONS)
+            .insert_one(&prepared.session)
+            .await?;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&prepared.refresh)
+            .await?;
+    }
+    Ok(prepared.tokens)
+}
+
+pub struct PreparedSessionTokens {
+    pub tokens: IssuedTokens,
+    session: Session,
+    refresh: RefreshToken,
+}
+
+pub async fn insert_prepared_session(
+    db: &mongodb::Database,
+    prepared: &PreparedSessionTokens,
+    transaction: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<Session>(SESSIONS)
+        .insert_one(&prepared.session)
+        .session(&mut *transaction)
+        .await?;
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .insert_one(&prepared.refresh)
+        .session(&mut *transaction)
+        .await?;
+    Ok(())
+}
+
+pub async fn prepare_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<PreparedSessionTokens> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
-    let session = create_session(db, user_id, ip_address, user_agent).await?;
     let now = Utc::now();
+    let session = Session {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_owned(),
+        token_hash: hash_token(&generate_random_token()),
+        ip_address: ip_address.map(str::to_owned),
+        user_agent: user_agent.map(str::to_owned),
+        expires_at: now + Duration::seconds(SESSION_TTL_SECS),
+        revoked: false,
+        created_at: now,
+        last_active_at: now,
+    };
 
     // Resolve RBAC data and inject into the access token based on scope
     let scope = FIRST_PARTY_ACCESS_SCOPES;
-    let rbac_data =
+    let mut rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
+    rbac_data.sid = Some(session.id.clone());
     let access_token = jwt::generate_access_token(
         jwt_keys,
         config,
@@ -230,11 +313,12 @@ pub async fn create_session_and_issue_tokens(
 
     // Persist refresh token metadata
     let new_refresh = RefreshToken {
+        protected_consent: None,
         id: refresh_id,
         jti: refresh_jti,
         client_id: Uuid::nil().to_string(), // first-party client
         user_id: user_id.to_string(),
-        session_id: Some(session.session_id.clone()),
+        session_id: Some(session.id.clone()),
         scope: None,
         expires_at: refresh_expires,
         revoked: false,
@@ -246,16 +330,17 @@ pub async fn create_session_and_issue_tokens(
         created_at: now,
     };
 
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&new_refresh)
-        .await?;
-
-    Ok(IssuedTokens {
+    let tokens = IssuedTokens {
         access_token,
         refresh_token: refresh_token_jwt,
-        session_id: session.session_id,
+        session_id: session.id.clone(),
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: Vec::new(),
+    };
+    Ok(PreparedSessionTokens {
+        tokens,
+        session,
+        refresh: new_refresh,
     })
 }
 
@@ -300,7 +385,7 @@ pub async fn create_mfa_pending_session(
 /// Does NOT generate a new session token (reuses the existing session).
 ///
 /// When `mcp_sessions` is provided, session revocations also cascade
-/// to MCP sessions for the affected user.
+/// to the affected user's bearer-less (session-fallback) MCP sessions.
 pub async fn refresh_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -322,6 +407,21 @@ pub async fn refresh_tokens(
         .find_one(doc! { "jti": &claims.jti })
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
+
+    if stored.client_id == Uuid::nil().to_string()
+        && let Some(id) = stored.session_id.as_deref()
+    {
+        let live = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! {
+                "_id": id, "user_id": &stored.user_id, "revoked": false,
+                "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
+            })
+            .await?;
+        if live.is_none() {
+            return Err(AppError::Unauthorized("Session expired or revoked".into()));
+        }
+    }
 
     // Re-validate the issuing OAuth client. First-party login flows
     // (`auth_service::login_with_password`, `refresh_session_with_token`)
@@ -358,12 +458,16 @@ pub async fn refresh_tokens(
                     }},
                 )
                 .await?;
-            return Err(AppError::Unauthorized(
+            // A distinct variant so `/oauth/token` keeps reporting this as
+            // `invalid_client` (the client must re-register) while every
+            // other refresh failure becomes `invalid_grant`. Same HTTP 401.
+            return Err(AppError::AuthenticationFailed(
                 "Issuing OAuth client is no longer active".to_string(),
             ));
         }
     }
 
+    let original_protected_consent = stored.protected_consent.clone();
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.
     //
@@ -450,6 +554,20 @@ pub async fn refresh_tokens(
         RefreshTokenDisposition::Rotate(token) => (token, false),
         RefreshTokenDisposition::Reuse(token) => (token, true),
     };
+    if active_token.protected_consent != original_protected_consent {
+        return Err(super::consent_service::grant_changed());
+    }
+    super::consent_service::validate_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        active_token
+            .scope
+            .as_deref()
+            .unwrap_or(FIRST_PARTY_ACCESS_SCOPES),
+        active_token.protected_consent.as_ref(),
+    )
+    .await?;
     let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
@@ -474,8 +592,11 @@ pub async fn refresh_tokens(
             active_token.allow_all_services,
         )
         .await?;
-    let rbac_data =
+    let mut rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
+    if active_token.client_id == Uuid::nil().to_string() {
+        rbac_data.sid = session_id.clone();
+    }
     let restrictions =
         (!token_resource_scope.allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &token_resource_scope.resource_uris,
@@ -496,7 +617,7 @@ pub async fn refresh_tokens(
             restrictions,
         )?
     } else {
-        jwt::generate_oauth_access_token(
+        jwt::generate_oauth_access_token_with_consent(
             jwt_keys,
             config,
             &user_id,
@@ -507,10 +628,19 @@ pub async fn refresh_tokens(
             None,
             restrictions,
             &active_token.client_id,
+            active_token.protected_consent.as_ref(),
         )?
     };
 
     if reuse_existing_refresh_token {
+        super::consent_service::fence_protected_reference(
+            db,
+            &active_token.user_id,
+            &active_token.client_id,
+            scope,
+            active_token.protected_consent.as_ref(),
+        )
+        .await?;
         touch_session_last_active(db, session_id.as_deref(), now).await?;
         return build_reused_refresh_response(
             jwt_keys,
@@ -567,6 +697,17 @@ pub async fn refresh_tokens(
                 replacement_id = %recovered.id,
                 "Concurrent refresh rotation resolved to active replacement token"
             );
+            if recovered.protected_consent != active_token.protected_consent {
+                return Err(super::consent_service::grant_changed());
+            }
+            super::consent_service::fence_protected_reference(
+                db,
+                &active_token.user_id,
+                &active_token.client_id,
+                scope,
+                active_token.protected_consent.as_ref(),
+            )
+            .await?;
             touch_session_last_active(db, session_id.as_deref(), now).await?;
             return build_reused_refresh_response(
                 jwt_keys,
@@ -585,6 +726,7 @@ pub async fn refresh_tokens(
 
     // Persist new refresh token
     let new_refresh = RefreshToken {
+        protected_consent: active_token.protected_consent.clone(),
         id: new_refresh_id,
         jti: new_jti,
         client_id: active_token.client_id.clone(),
@@ -605,6 +747,18 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        scope,
+        active_token.protected_consent.as_ref(),
+    )
+    .await
+    {
+        super::oauth_service::revoke_issued_refresh(db, &new_refresh.jti).await?;
+        return Err(error);
+    }
     touch_session_last_active(db, session_id.as_deref(), now).await?;
 
     // Reuse the existing session token rather than generating a new orphan token.
@@ -650,9 +804,10 @@ pub async fn revoke_session(
         )
         .await?;
 
-    // Cascade: remove MCP sessions for the affected user
+    // Cascade: end the user's MCP sessions that authenticate without a bearer
     if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
-        mcp.remove_by_user_id(&session.user_id).await?;
+        mcp.remove_fallback_sessions_by_user_id(&session.user_id)
+            .await?;
     }
 
     tracing::info!(session_id = %session_id, "Session revoked");
@@ -877,6 +1032,7 @@ mod tests {
         let allowed_service_ids = vec!["svc-1".to_string()];
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: None,
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),
@@ -1052,6 +1208,7 @@ mod tests {
             crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: None,
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),

@@ -9,6 +9,28 @@ const NON_DIALOG_WIRING = {
 } as const;
 
 describe("assistant action registry", () => {
+  it.each([true, false])(
+    "summarizes and forwards the device platform grant (%s)",
+    (flag) => {
+      const descriptor = ACTION_REGISTRY["device.onboard"]!;
+      const params = descriptor.normalize({
+        label: "Camera",
+        allowAutoConnectedServices: flag,
+      })!;
+      expect(descriptor.summary(params)).toContainEqual({
+        label: "Platform services",
+        value: flag
+          ? "All auto-connected, including future additions"
+          : "Only explicitly selected services",
+      });
+      if (params.variant !== "device_onboard")
+        throw new Error("Expected device onboarding params");
+      expect(ACTION_DIALOGS.device_onboard.toProps(params)).toMatchObject({
+        params: { label: "Camera", allowAutoConnectedServices: flag },
+      });
+    },
+  );
+
   it("registry_covers_every_manifest_verb", () => {
     // Falsifier exercised: deleting the `openclaw.connect` registry row makes
     // this closure check fail instead of silently leaving the verb uncovered.

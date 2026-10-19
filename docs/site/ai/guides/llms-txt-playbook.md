@@ -5,8 +5,8 @@ description: How NyxID's /llms.txt and /llms-full.txt endpoints work, what they 
 
 NyxID serves two machine-readable context files at the top level of every deployment:
 
-- `/llms.txt` — a short summary optimized for context-window efficiency
-- `/llms-full.txt` — the full AI Agent Playbook with all commands, API routes, and configuration examples
+- `/llms.txt` — the full AI Agent Playbook with deployment-specific URLs
+- `/llms-full.txt` — an alias serving the same playbook
 
 These files follow the emerging [`llms.txt` convention](https://llmstxt.org/) for helping AI agents understand a site or service without requiring the agent to crawl HTML pages.
 
@@ -14,17 +14,14 @@ Both endpoints require no authentication. Any agent can fetch them at startup to
 
 ## What the files contain
 
-### `/llms.txt` — the short version
+Both endpoints serve `docs/AI_AGENT_PLAYBOOK.md`, embedded when the backend is
+built. It covers CLI commands, API examples, service setup, human-approved agent
+login links, node proxies, approvals, SSH services, channel bots and troubleshooting.
+They are aliases; fetching both does not add context.
 
-A concise summary of what NyxID is, how to authenticate, and the most commonly used CLI commands and API routes. Intended to fit in the early portion of a context window without crowding out working context.
-
-A typical agent use case: include the content of `/llms.txt` in a system prompt or task preamble so the agent knows the base URL, how to authenticate, and how to call `nyxid service add` before the conversation begins.
-
-### `/llms-full.txt` — the full playbook
-
-The complete AI Agent Playbook: every CLI subcommand, every API route, all configuration examples, node proxy setup, approval workflows, SSH services, channel bots, and troubleshooting guides.
-
-Critically, `/llms-full.txt` replaces placeholder URLs with the **live deployment URLs**. When the server serves this file, it substitutes the actual backend API URL and frontend dashboard URL into every code example. An agent that fetches `/llms-full.txt` gets runnable commands, not examples with `http://localhost:3001` that need manual substitution.
+Both replace placeholder URLs with the live deployment's backend API and frontend
+URLs. Publishing a source edit requires a new backend build and deployment before
+it appears at these endpoints.
 
 ```bash
 # Fetch the full playbook and pipe to a pager or save locally
@@ -42,7 +39,7 @@ Before beginning any NyxID-related task, an agent can fetch `/llms.txt` to learn
 - The base URL for all API calls
 - How to install and authenticate the CLI
 - How to add a service and make a proxy request
-- Where to find the full playbook
+- How to construct a human approval link with suggested Agent Key permissions
 
 ```bash
 # From a shell
@@ -53,7 +50,7 @@ In an agentic framework that supports system prompt injection, the content of `/
 
 ### Full task context
 
-When the user asks for something non-trivial — setting up a node proxy, configuring approvals, wrapping a REST API as MCP tools — the agent can fetch `/llms-full.txt` to get exact, runnable instructions for that specific deployment.
+Fetch either endpoint once, then select the sections relevant to the task. For login links, start with “Human-approved agent login links”; it points to the canonical device-login protocol for parameter bounds and consent rules.
 
 ### Claude Code + `nyxid ai-setup`
 
@@ -72,20 +69,17 @@ nyxid ai-setup update --tool claude-code # update a specific tool
 nyxid ai-setup status                    # check what's installed and version
 ```
 
-Under the hood, `ai-setup install` fetches `/llms-full.txt` and writes it to the relevant AI tool's config directory, scoped to the current project or user.
+Under the hood, `ai-setup install` fetches `/llms.txt` and writes it to the relevant AI tool's config directory, scoped to the current project or user.
 
-## URL substitution in `/llms-full.txt`
+## URL substitution in both endpoints
 
-The playbook source uses two placeholder URLs:
+The playbook source uses these placeholder URLs:
 
 - `http://localhost:3001` — backend API
 - `http://localhost:3000` — frontend dashboard
+- `ws://localhost:3001` — WebSocket API, replaced with the deployment's `ws` or `wss` URL
 
-When the server serves `/llms-full.txt`, these placeholders are replaced with the live deployment URLs. The result is a fully runnable playbook with no manual URL editing required.
-
-:::note
-`/llms.txt` does not perform URL substitution — it is a static short summary. Only `/llms-full.txt` has live URL injection.
-:::
+When the server serves either endpoint, these placeholders are replaced with the live deployment URLs. The result is a fully runnable playbook with no manual URL editing required.
 
 ## Integrating into your own agent framework
 
@@ -104,7 +98,7 @@ def get_nyxid_context() -> str:
 system_prompt = get_nyxid_context() + "\n\n" + YOUR_SYSTEM_PROMPT
 ```
 
-For tasks that involve complex NyxID configuration, fetch `/llms-full.txt` instead and include only the relevant sections (search for the section heading and extract the surrounding text).
+For tasks that involve complex NyxID configuration, include only the relevant sections from the fetched playbook (search for the section heading and extract the surrounding text). `/llms-full.txt` returns the same content.
 
 ## OpenClaw integration
 
@@ -122,7 +116,7 @@ The NyxID skill uses the `nyxid` CLI for all operations and relies on `~/.nyxid/
 
 | Path | Auth required | Description |
 |---|---|---|
-| `GET /llms.txt` | No | Short NyxID summary for agents |
+| `GET /llms.txt` | No | Full playbook with live URL substitution |
 | `GET /llms-full.txt` | No | Full playbook with live URL substitution |
 | `nyxid ai-setup install --tool <tool>` | CLI session | Install skill + playbook for a specific AI tool |
 | `nyxid ai-setup update` | CLI session | Update installed skills to the current playbook |

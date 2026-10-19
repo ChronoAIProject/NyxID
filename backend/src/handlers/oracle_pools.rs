@@ -15,7 +15,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::{OraclePool, OraclePoolVisibility};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, oracle_pool_service, org_service};
+use crate::services::oracle_task_service::WORKER_RECENT_SECS;
+use crate::services::{audit_service, oracle_pool_service, oracle_worker_service, org_service};
 
 #[derive(Deserialize)]
 pub struct CreateOraclePoolRequest {
@@ -31,6 +32,7 @@ pub struct CreateOraclePoolRequest {
     #[serde(default)]
     pub default_model_label: Option<String>,
     #[serde(default)]
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     #[serde(default)]
     pub max_workers: Option<u32>,
@@ -58,6 +60,7 @@ pub struct UpdateOraclePoolRequest {
     #[serde(default)]
     pub default_model_label: Option<String>,
     #[serde(default)]
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     #[serde(default)]
     pub max_workers: Option<u32>,
@@ -71,7 +74,7 @@ pub struct UpdateOraclePoolRequest {
     pub is_active: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct OraclePoolInfo {
     pub id: String,
     pub slug: String,
@@ -82,12 +85,16 @@ pub struct OraclePoolInfo {
     pub owner_user_id: String,
     /// True when the caller may manage this pool.
     pub can_manage: bool,
+    pub can_enroll: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chatgpt_project_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model_label: Option<String>,
+    pub require_model_match: bool,
     pub allow_extract: bool,
     pub max_workers: u32,
+    /// Workers whose heartbeat is within the pool-status recency window.
+    pub online_workers: u32,
     pub max_queue_length: u32,
     pub per_user_max_inflight: u32,
     pub task_timeout_secs: u64,
@@ -128,7 +135,12 @@ fn parse_visibility(value: &str) -> AppResult<OraclePoolVisibility> {
     }
 }
 
-fn pool_info(pool: &OraclePool, can_manage: bool) -> OraclePoolInfo {
+fn pool_info(
+    pool: &OraclePool,
+    can_manage: bool,
+    can_enroll: bool,
+    online_workers: u32,
+) -> OraclePoolInfo {
     OraclePoolInfo {
         id: pool.id.clone(),
         slug: pool.slug.clone(),
@@ -137,10 +149,13 @@ fn pool_info(pool: &OraclePool, can_manage: bool) -> OraclePoolInfo {
         visibility: pool.visibility.as_str().to_string(),
         owner_user_id: pool.user_id.clone(),
         can_manage,
+        can_enroll,
         chatgpt_project_url: pool.chatgpt_project_url.clone(),
         default_model_label: pool.default_model_label.clone(),
+        require_model_match: pool.require_model_match,
         allow_extract: pool.allow_extract,
         max_workers: pool.max_workers,
+        online_workers,
         max_queue_length: pool.max_queue_length,
         per_user_max_inflight: pool.per_user_max_inflight,
         task_timeout_secs: pool.task_timeout_secs,
@@ -180,8 +195,9 @@ pub async fn create_pool(
         .as_deref()
         .map(parse_visibility)
         .transpose()?;
-    let (pool, worker_token) = oracle_pool_service::create_pool(
+    let (pool, worker_token) = oracle_pool_service::create_pool_for_manager(
         &state.db,
+        &actor,
         &owner,
         oracle_pool_service::CreatePoolInput {
             slug: body.slug,
@@ -190,6 +206,7 @@ pub async fn create_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            require_model_match: body.require_model_match,
             allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
@@ -211,7 +228,14 @@ pub async fn create_pool(
         })),
     );
 
-    let info = pool_info(&pool, true);
+    let info = pool_info(
+        &pool,
+        true,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    );
     Ok((
         StatusCode::CREATED,
         Json(CreateOraclePoolResponse {
@@ -227,10 +251,23 @@ pub async fn list_pools(
 ) -> AppResult<Json<ListOraclePoolsResponse>> {
     let actor = auth_user.user_id.to_string();
     let pools = oracle_pool_service::list_visible_pools(&state.db, &actor).await?;
+    let pool_ids: Vec<String> = pools.iter().map(|pool| pool.id.clone()).collect();
+    let online = oracle_worker_service::count_online_workers_by_pool(
+        &state.db,
+        &pool_ids,
+        WORKER_RECENT_SECS,
+    )
+    .await?;
     let mut infos = Vec::with_capacity(pools.len());
     for pool in &pools {
         let manage = can_manage(&state, &actor, pool).await;
-        infos.push(pool_info(pool, manage));
+        infos.push(pool_info(
+            pool,
+            manage,
+            crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, pool)
+                .await,
+            online.get(&pool.id).copied().unwrap_or(0),
+        ));
     }
     Ok(Json(ListOraclePoolsResponse { pools: infos }))
 }
@@ -244,7 +281,14 @@ pub async fn get_pool(
     let pool = oracle_pool_service::get_pool(&state.db, &id_or_slug).await?;
     oracle_pool_service::ensure_can_view(&state.db, &actor, &pool).await?;
     let manage = can_manage(&state, &actor, &pool).await;
-    Ok(Json(pool_info(&pool, manage)))
+    Ok(Json(pool_info(
+        &pool,
+        manage,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    )))
 }
 
 pub async fn update_pool(
@@ -269,6 +313,7 @@ pub async fn update_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            require_model_match: body.require_model_match,
             allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
@@ -291,7 +336,14 @@ pub async fn update_pool(
         })),
     );
 
-    Ok(Json(pool_info(&pool, true)))
+    Ok(Json(pool_info(
+        &pool,
+        true,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    )))
 }
 
 pub async fn rotate_token(
@@ -317,6 +369,109 @@ pub async fn rotate_token(
         id: pool.id,
         slug: pool.slug,
         worker_token,
+    }))
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferOraclePoolRequest {
+    pub owner_user_id: String,
+    #[serde(default)]
+    pub rotate_worker_token: bool,
+    pub visibility: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferOraclePoolResponse {
+    pub pool: OraclePoolInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_token: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DeleteOraclePoolResponse {
+    pub id: String,
+    pub slug: String,
+    pub status: &'static str,
+    pub cleanup: &'static str,
+    pub deleted_at: String,
+}
+
+/// Transfer an Oracle pool between owners without replacing its identity.
+/// Available in the first tagged release containing #1527/#1542. The body is
+/// limited to 4096 bytes; every response uses Cache-Control: no-store.
+#[utoipa::path(post, path = "/api/v1/oracle/pools/{id_or_slug}/transfer",
+    params(("id_or_slug" = String, Path)), request_body = TransferOraclePoolRequest,
+    responses((status = 200, body = TransferOraclePoolResponse, description = "Updated pool and optional one-time replacement worker token; Cache-Control: no-store"),
+        (status = 400, description = "Invalid owner UUID or incompatible visibility"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Active source and destination management required"),
+        (status = 404, description = "Pool not found"),
+        (status = 409, description = "Destination pool limit reached"),
+        (status = 413, description = "Body exceeds 4096 bytes")),
+    security(("bearer_auth" = [])), tag = "Oracle")]
+pub async fn transfer_pool(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(pool): Path<String>,
+    Json(body): Json<TransferOraclePoolRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let visibility = body
+        .visibility
+        .as_deref()
+        .map(parse_visibility)
+        .transpose()?;
+    let outcome = oracle_pool_service::transfer_pool(
+        &state.db,
+        &actor,
+        &pool,
+        oracle_pool_service::TransferPoolInput {
+            owner_user_id: body.owner_user_id,
+            rotate_worker_token: body.rotate_worker_token,
+            visibility,
+        },
+    )
+    .await?;
+    let info = pool_info(
+        &outcome.pool,
+        true,
+        outcome.can_enroll,
+        outcome.online_workers,
+    );
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(TransferOraclePoolResponse {
+            pool: info,
+            worker_token: outcome.worker_token.map(|value| value.to_string()),
+        }),
+    ))
+}
+
+/// Logically delete an idle pool and schedule durable bounded physical cleanup.
+/// Authorized retries return the same acknowledgement; cleanup: asynchronous
+/// describes the policy and does not assert that physical cleanup has finished.
+#[utoipa::path(delete, path = "/api/v1/oracle/pools/{id_or_slug}",
+    params(("id_or_slug" = String, Path)),
+    responses((status = 200, body = DeleteOraclePoolResponse),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Active pool management required"),
+        (status = 404, description = "Pool not found"),
+        (status = 409, description = "oracle_pool_active_work: queued/dispatched tasks or queued/delivered commands")),
+    security(("bearer_auth" = [])), tag = "Oracle")]
+pub async fn delete_pool(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(pool): Path<String>,
+) -> AppResult<Json<DeleteOraclePoolResponse>> {
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let result = oracle_pool_service::delete_pool(&state.db, &actor, &pool).await?;
+    Ok(Json(DeleteOraclePoolResponse {
+        id: result.id,
+        slug: result.slug,
+        status: "deleted",
+        cleanup: "asynchronous",
+        deleted_at: result.deleted_at.to_rfc3339(),
     }))
 }
 
@@ -349,6 +504,11 @@ mod tests {
         // rotate response.
         let now = chrono::Utc::now();
         let pool = OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
+            require_model_match: true,
             id: "p1".to_string(),
             user_id: "u1".to_string(),
             slug: "s".to_string(),
@@ -367,7 +527,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let json = serde_json::to_string(&pool_info(&pool, false)).unwrap();
+        let json = serde_json::to_string(&pool_info(&pool, false, false, 0)).unwrap();
         assert!(!json.contains("secret-hash"));
         assert!(!json.contains("worker_token"));
         assert!(json.contains("\"can_manage\":false"));

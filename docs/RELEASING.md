@@ -2,6 +2,18 @@
 
 This document covers the release path for the `nyxid` CLI binaries produced by CI.
 
+## Codex Onboarding Rollout
+
+Ship the Codex recommendation only with a release that provides
+`nyxid provider connect-codex --help` and canonical `~/.agents/skills` installation.
+Release `v0.16.0` introduces these capabilities; the original published `v0.15.0`
+predates them. Do not infer availability from version text
+or replace an existing published tag. Deploy the compatible provider-connection
+backend routes before the landing prompt; verify installer -> skill registration
+-> optional consent -> saved connection verification using isolated fixtures.
+Older releases must offer upgrade or separate provider authorization, never
+manual credential inspection. Installation must remain successful when skipped.
+
 ## Release Trigger
 
 Releases are tag-driven. From an up-to-date `main` checkout:
@@ -68,7 +80,7 @@ https://github.com/ChronoAIProject/NyxID/.github/workflows/release.yml@refs/tags
 6. Extracts `nyxid` or `nyxid.exe`.
 7. On Unix, installs the binary into the versioned install root and atomically retargets the active symlink.
 8. On Windows, keeps the legacy `self-replace` in-place swap because native symlinks require Developer Mode or elevated privileges.
-9. Re-execs the newly-installed versioned binary with `nyxid update --skills-only` so the new binary owns skill updates.
+9. Runs the newly-installed binary with `nyxid ai-setup update` as a bounded child process while retaining the update lock.
 
 If no compatible prebuilt asset exists for the host target, the updater clearly falls back to:
 
@@ -100,11 +112,63 @@ The install root is resolved as:
 
 The active symlink defaults to `$HOME/.local/bin/nyxid`. `NYXID_ACTIVE_SYMLINK` can override it. When the currently-running binary is already in a directory on `PATH` and is not inside the versioned install root, the updater prefers that path. This preserves source-built installs at locations such as `~/.cargo/bin/nyxid` until the first prebuilt update migrates them.
 
+The skill's `skills/nyxid/scripts/install.sh` wrapper uses this same layout for
+both prebuilt and source installs. It downloads the real cargo-dist 0.30.0
+installer into private staging and sets `NYXID_CLI_UNMANAGED_INSTALL=<staging>`
+(flat layout, no receipt, no RC modifications) and `NYXID_CLI_NO_MODIFY_PATH=1`.
+It clears `NYXID_CLI_INSTALL_DIR` and `CARGO_DIST_FORCE_INSTALL_DIR` for that child:
+those controls take precedence over unmanaged staging in 0.30.0. The wrapper
+validates the staged `--version`, installs mode 0755, atomically replaces the active
+symlink, configures its actual parent directory in the RC file, and verifies the
+active executable. Re-runs support symlinks, legacy files and the same version.
+Only unsupported targets or installer download/run failure trigger source fallback;
+a missing, non-executable, unversioned binary or relocation failure is fatal.
+Temporary staging is removed on exit.
+
+Neither the updater nor doctor reads cargo-dist receipts; both use the versioned
+root/active path contract above. `scripts/uninstall.sh` removes the self-hosted
+Docker deployment and configuration, not the CLI, and does not consume receipts.
+
+CLI HTTPS/WSS trust and daemon CA environment persistence are documented in
+[Network, proxies and TLS](site/cli/guides/network.md). All directly constructed
+reqwest clients and WSS connectors share `cli/src/tls.rs`. `self_update` is used
+only for local archive extraction (`Extract`), not its HTTP/download APIs.
+The node IFTTT adapter accepts a builder; the CLI supplies the shared TLS builder
+instead of calling the adapter crate's default-client singleton.
+Sigstore 0.13's `SigstoreTrustRoot::new` constructs a private tough HTTP client
+and exposes no injection hook. The CLI instead builds a separate client with shared TLS roots and tough's
+original timeouts/default headers (never GitHub Authorization), retry budget/backoff,
+and range recovery. It supplies the client through
+`tough::Transport` in `commands/update_attestation/trust.rs`, authenticates the TUF
+target, then calls Sigstore's parsing-only constructor. The bootstrap signing
+root in `cli/resources/sigstore-root.json` is copied byte-for-byte from
+sigstore 0.13.0's `trust_root/prod/root.json` (upstream sigstore-rs, Apache-2.0).
+When upgrading Sigstore, review this bootstrap root alongside that dependency;
+normal TUF root rotation remains signature-verified. TLS CA configuration never
+bypasses TUF/attestation verification.
+
 On every successful Unix prebuilt update, the updater:
 
 - Writes the new binary to `{install-root}/{tag}/nyxid` with mode `0755`.
 - Creates a temporary symlink in the active binary's directory and renames it over the active path, so retargeting is atomic on POSIX systems.
-- Keeps the active version plus the two most recent previous version directories, for three retained versions total.
+- Keeps the active version plus the two most recent previous version directories,
+  plus additional versions pinned by installed node service definitions.
+
+Archive extraction is staged before publication and always publishes the flat
+`{tag}/nyxid` layout. Retention and rollback also recognize older nested
+`{tag}/nyxid-cli-{target}/nyxid` installations. Reinstalling an active tag replaces
+the directory entry atomically instead of truncating the running executable.
+
+Opt-in automatic upgrades use the same verifier, activation and retention paths.
+Enabling the scheduler validates explicit TLS configuration and persists only
+`NYXID_CA_CERT`, `SSL_CERT_FILE` and `SSL_CERT_DIR` as absolute, escaped paths in
+launchd/systemd, using the same helper as node daemon installation. Proxy variables
+are never persisted. Re-run `nyxid update auto enable` with the intended interval
+to update the CA paths; omitted or empty variables remove previous entries.
+Native OS roots are lazy fallback roots, loaded only after eager verification
+fails (or explicitly by doctor); scheduled updates use the same full trust union.
+See [automatic upgrade operations](site/cli/getting-started/install.md#automatic-upgrades)
+for scheduling, holds, controller recovery, skills, and deferred node adoption.
 
 Legacy single-file installs migrate automatically. If the active path is a regular file, the first successful prebuilt update writes the versioned binary and replaces that regular file with the symlink. The updater does not try to reconstruct old versions that it did not install itself.
 

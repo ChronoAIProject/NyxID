@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Plus, RefreshCw, Search } from "lucide-react";
+import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,23 +9,34 @@ import { ManageConnectionModal } from "@/components/assistant/manage-connection-
 import { ServiceIcon } from "@/components/service-icon";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
 import {
+  useAgentSkills,
+  useAttachLatestSkill,
+  useSetAgentSkills,
+  useSkillSearch,
+} from "@/hooks/use-agent-skills";
+import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { agentTitle } from "@/lib/assistant/nyxbot-labels";
+import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
+import {
   deriveConnectorItems,
   matchesPluginQuery,
   type ConnectorCardItem,
   type PluginKind,
 } from "@/lib/assistant/plugins";
-import {
-  addSkill,
-  listAddedSkillIds,
-  SKILL_CATALOG,
-  type SkillCatalogItem,
-} from "@/lib/assistant/skills";
 
 interface PluginCardShape {
   readonly id: string;
   readonly name: string;
   readonly initial: string;
   readonly iconSlug?: string | null;
+  readonly iconUrl?: string | null;
   readonly category: string;
   readonly description: string;
   readonly meta: string;
@@ -49,7 +60,7 @@ function PluginTile({
   readonly children: React.ReactNode;
 }) {
   return (
-    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-[13px] font-semibold text-muted-foreground">
+    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-13 font-semibold text-muted-foreground">
       {children}
     </div>
   );
@@ -73,7 +84,7 @@ function PluginCard({
   onActivate,
 }: {
   readonly item: PluginCardShape;
-  readonly addedBadge: "Connected" | "Installed";
+  readonly addedBadge: "Connected" | "Installed" | "Attached";
   /** Extra mono note next to the added badge (e.g. "2 connections"). */
   readonly addedMeta?: string;
   readonly actionLabel: string;
@@ -107,17 +118,17 @@ function PluginCard({
     >
       <div className="flex items-start gap-2.5">
         <PluginTile>
-          {item.iconSlug ? (
-            <ServiceIcon slug={item.iconSlug} size="md" />
+          {item.iconSlug || item.iconUrl ? (
+            <ServiceIcon slug={item.iconSlug} iconUrl={item.iconUrl} size="md" />
           ) : (
             item.initial
           )}
         </PluginTile>
         <div className="min-w-0">
-          <p className="truncate text-[13px] font-medium text-foreground">
+          <p className="truncate text-13 font-medium text-foreground">
             {item.name}
           </p>
-          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
+          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
             {item.category}
           </p>
         </div>
@@ -126,7 +137,7 @@ function PluginCard({
           the bottom; the clamp lives on the text itself, or `flex-1` would
           stretch the box past three lines and clip a fourth mid-glyph. */}
       <div className="min-h-0 flex-1">
-        <p className="break-words text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
+        <p className="break-words text-12 leading-[17px] text-muted-foreground line-clamp-3">
           {item.description}
         </p>
       </div>
@@ -143,19 +154,19 @@ function PluginCard({
               <Badge variant="success">{addedBadge}</Badge>
             )}
             {addedMeta && (
-              <span className="truncate font-mono text-[10px] text-text-tertiary">
+              <span className="truncate font-mono text-10 text-text-tertiary">
                 {addedMeta}
               </span>
             )}
           </span>
         ) : (
-          <span className="font-mono text-[10px] text-text-tertiary">
+          <span className="font-mono text-10 text-text-tertiary">
             {item.meta}
           </span>
         )}
         <span
           aria-hidden
-          className={`flex shrink-0 items-center gap-1 text-[12px] transition-colors ${
+          className={`flex shrink-0 items-center gap-1 text-12 transition-colors ${
             interactive
               ? "text-muted-foreground group-hover:text-foreground"
               : "text-text-tertiary"
@@ -169,43 +180,9 @@ function PluginCard({
   );
 }
 
-function AddYourOwnSkillCard() {
-  return (
-    <div
-      className={`flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-dashed border-border p-4`}
-    >
-      <div className="flex items-start gap-2.5">
-        <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <Plus className="h-3.5 w-3.5" />
-        </div>
-        <div className="min-w-0">
-          <p className="text-[13px] font-medium text-foreground">
-            Add your own skill
-          </p>
-          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
-            Skill
-          </p>
-        </div>
-      </div>
-      <p className="flex-1 text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
-        Register a skill from a Git repo or paste a SKILL.md - your assistant
-        loads it on demand in every chat.
-      </p>
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        <span className="font-mono text-[10px] text-text-tertiary">
-          git url or upload
-        </span>
-        <Button type="button" variant="outline" size="sm" disabled>
-          Add skill
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 function SectionHeading({ children }: { readonly children: React.ReactNode }) {
   return (
-    <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+    <p className="mb-2.5 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
       {children}
     </p>
   );
@@ -272,6 +249,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     readonly keyId: string;
     readonly name: string;
     readonly iconSlug: string | null;
+    readonly iconUrl: string | null;
   } | null>(null);
 
   const items = useMemo(
@@ -306,7 +284,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 
   if (searching && added.length === 0 && available.length === 0) {
     return (
-      <p className="py-14 text-center text-[11px] text-text-tertiary">
+      <p className="py-14 text-center text-11 text-text-tertiary">
         No plugins match this search.
       </p>
     );
@@ -316,7 +294,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     <>
       {loadFailed ? (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Some plugins may be missing until the catalog loads.
           </p>
           <Button
@@ -350,7 +328,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
               </CardGrid>
             </div>
           ) : (
-            <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-[12px] text-muted-foreground">
+            <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-12 text-muted-foreground">
               {loadFailed
                 ? "Connected services could not be loaded right now."
                 : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
@@ -380,6 +358,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           keyIds={manageItem.manageKeyIds ?? []}
           serviceName={manageItem.name}
           iconSlug={manageItem.iconSlug}
+          iconUrl={manageItem.iconUrl}
           onClose={() => setManageCardId(null)}
         />
       )}
@@ -408,6 +387,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
                 keyId,
                 name: connecting?.name ?? connectSlug,
                 iconSlug: connecting?.iconSlug ?? connectSlug,
+                iconUrl: connecting?.iconUrl ?? null,
               });
             }, 0);
             return true;
@@ -423,6 +403,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           keyIds={[popupResult.keyId]}
           serviceName={popupResult.name}
           iconSlug={popupResult.iconSlug}
+          iconUrl={popupResult.iconUrl}
           onClose={() => setPopupResult(null)}
         />
       )}
@@ -430,93 +411,197 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   );
 }
 
-function SkillsTab({ query }: { readonly query: string }) {
-  const [addedIds, setAddedIds] = useState<ReadonlySet<string>>(() =>
-    listAddedSkillIds(),
+/** The agent whose skills the tab manages: NyxBot unless the owner picks another. */
+function SkillAgentPicker({
+  agents,
+  value,
+  onChange,
+}: {
+  readonly agents: readonly AssistantAgent[];
+  readonly value: string;
+  readonly onChange: (id: string) => void;
+}) {
+  return (
+    <label className="flex max-w-[300px] flex-col gap-1 text-11 text-text-tertiary">
+      Agent
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label="Agent for skills">
+          <SelectValue placeholder="Choose an agent" />
+        </SelectTrigger>
+        <SelectContent>
+          {agents.map((agent) => (
+            <SelectItem key={agent.id} value={agent.id}>
+              {agentTitle(agent)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
   );
+}
 
-  const items = SKILL_CATALOG.map((skill) => toSkillCard(skill, addedIds)).filter(
-    (item) => matchesPluginQuery(item, query),
+function SkillsTab({
+  query,
+  agentId: initialAgentId,
+}: {
+  readonly query: string;
+  readonly agentId?: string;
+}) {
+  const agents = useNyxBotAgents();
+  // Destroyed agents and agents the owner cannot maintain keep their skills.
+  const manageable = (agents.data?.agents ?? []).filter(
+    (agent) => agent.status !== "destroyed" && agent.can_maintain !== false,
   );
-  const added = items.filter((item) => item.added);
-  const available = items.filter((item) => !item.added);
-  const searching = Boolean(query.trim());
-  const showOwnSkillCard = !searching;
-
-  if (searching && items.length === 0) {
-    return (
-      <p className="py-14 text-center text-[11px] text-text-tertiary">
-        No plugins match this search.
-      </p>
-    );
-  }
+  const [chosen, setChosen] = useState(initialAgentId ?? "");
+  const agent =
+    manageable.find((item) => item.id === chosen) ??
+    manageable.find((item) => item.kind === "nyxbot") ??
+    manageable[0];
+  const agentId = agent?.id ?? "";
+  const search = useSkillSearch(query.trim() || null, 1);
+  const attached = useAgentSkills(agentId);
+  const detach = useSetAgentSkills(agentId);
+  const attach = useAttachLatestSkill(agentId);
+  const pins = attached.data?.skills ?? [];
+  const busy = !attached.data || detach.isPending || attach.isPending;
+  const full = pins.length >= 16;
+  const items: PluginCardShape[] = (search.data?.items ?? []).map((skill) => ({
+    id: skill.id,
+    name: skill.name,
+    initial: skill.name.slice(0, 2).toUpperCase(),
+    category: "Skill",
+    description: skill.description,
+    meta: "Ornn catalog",
+    added: pins.some((pin) => pin.skill_id === skill.id),
+  }));
+  const errors = [
+    agents.error,
+    attached.error,
+    search.error,
+    attach.error,
+    detach.error,
+  ].filter((error): error is Error => Boolean(error));
 
   function card(item: PluginCardShape) {
     return (
       <PluginCard
         key={item.id}
         item={item}
-        addedBadge="Installed"
-        actionLabel={item.added ? "Manage" : "Install"}
-        // Skill management isn't built yet, so an installed skill's card is
-        // inert rather than offering an action that does nothing.
+        addedBadge="Attached"
+        actionLabel={item.added ? "Attached" : "Attach"}
         onActivate={
-          item.added ? undefined : () => setAddedIds(addSkill(item.id))
+          item.added
+            ? undefined
+            : () => {
+                if (busy || !attached.data) return;
+                if (full) {
+                  toast.info(
+                    "This agent already has 16 skills. Detach one first.",
+                  );
+                  return;
+                }
+                attach.mutate({ skillId: item.id, current: attached.data });
+              }
         }
       />
     );
   }
 
   return (
-    <>
-      {added.length > 0 && (
-        <>
-          <SectionHeading>Added</SectionHeading>
-          <div className="mb-7">
-            <CardGrid>{added.map(card)}</CardGrid>
-          </div>
-        </>
+    <div className="space-y-5">
+      {agents.isPending ? (
+        <Skeleton className="h-8 w-[300px]" />
+      ) : manageable.length === 0 && !agents.error ? (
+        <p className="text-12 text-muted-foreground">
+          No agent you can maintain is available.
+        </p>
+      ) : agent ? (
+        <SkillAgentPicker
+          agents={manageable}
+          value={agent.id}
+          onChange={setChosen}
+        />
+      ) : null}
+      {errors.map((error, index) => (
+        <p key={index} role="alert" className="text-12 text-destructive">
+          {error.message}
+        </p>
+      ))}
+      {agent && attached.data ? (
+        <section aria-label="Attached skills" className="space-y-2">
+          <SectionHeading>
+            {`Attached to ${agentTitle(agent)} · ${pins.length}/16`}
+          </SectionHeading>
+          {pins.length === 0 ? (
+            <p className="text-12 text-muted-foreground">
+              No skills attached. Search the catalog to attach one.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {pins.map((pin) => (
+                <li
+                  key={pin.skill_id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-border/50 px-3 py-2"
+                >
+                  <span className="min-w-0 text-12">
+                    <span className="font-medium">{pin.name}</span>{" "}
+                    <span className="font-mono text-text-tertiary">
+                      {pin.version}
+                    </span>
+                    {pin.disabled ? (
+                      <span className="text-text-tertiary"> · Disabled</span>
+                    ) : null}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() =>
+                      detach.mutate({
+                        expected_revision: attached.data.revision,
+                        skills: pins.filter(
+                          (item) => item.skill_id !== pin.skill_id,
+                        ),
+                      })
+                    }
+                  >
+                    {`Detach ${pin.name}`}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-11 text-text-tertiary">
+            Versions, tests and edits live in the agent&apos;s settings.
+          </p>
+        </section>
+      ) : null}
+      {query.trim() && items.length === 0 && search.data ? (
+        <p className="py-14 text-center text-11 text-text-tertiary">
+          No plugins match this search.
+        </p>
+      ) : null}
+      {items.length > 0 && (
+        <div>
+          <SectionHeading>Ornn catalog</SectionHeading>
+          <CardGrid>{items.map(card)}</CardGrid>
+        </div>
       )}
-
-      {(available.length > 0 || showOwnSkillCard) && (
-        <>
-          <SectionHeading>Available to add</SectionHeading>
-          <CardGrid>
-            {available.map(card)}
-            {showOwnSkillCard && <AddYourOwnSkillCard />}
-          </CardGrid>
-        </>
-      )}
-    </>
+    </div>
   );
 }
 
-function toSkillCard(
-  skill: SkillCatalogItem,
-  addedIds: ReadonlySet<string>,
-): PluginCardShape {
-  return {
-    id: skill.id,
-    name: skill.name,
-    initial: skill.initial,
-    category: "Skill",
-    description: skill.description,
-    meta: `${skill.author} · ${skill.version}`,
-    added: addedIds.has(skill.id),
-  };
-}
-
-export function PluginsView() {
+export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-[22px] font-bold tracking-[-0.03em] sm:text-[28px]">
+        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
           Plugins
         </h1>
-        <p className="mt-1 max-w-2xl text-[12px] text-muted-foreground">
+        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
           Plugins are connectors to services, MCP servers, and data sources;
           skills teach your assistant new workflows. Installing provisions the
           endpoint, credential, and proxy route in one step.
@@ -528,7 +613,7 @@ export function PluginsView() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search the catalog..."
-              className="min-w-0 flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-text-tertiary"
+              className="min-w-0 flex-1 bg-transparent text-12 text-foreground outline-none placeholder:text-text-tertiary"
             />
           </label>
           <div className="flex h-8" role="tablist" aria-label="Plugin type">
@@ -544,7 +629,7 @@ export function PluginsView() {
                 role="tab"
                 aria-selected={tab === value}
                 onClick={() => setTab(value)}
-                className={`border-b-2 px-3 text-[12px] transition-colors ${
+                className={`border-b-2 px-3 text-12 transition-colors ${
                   tab === value
                     ? "border-primary font-medium text-foreground"
                     : "border-transparent text-text-tertiary hover:text-foreground"
@@ -561,7 +646,7 @@ export function PluginsView() {
         {tab === "connector" ? (
           <ConnectorsTab query={query} />
         ) : (
-          <SkillsTab query={query} />
+          <SkillsTab query={query} agentId={agentId} />
         )}
       </div>
     </div>

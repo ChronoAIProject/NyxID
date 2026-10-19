@@ -29,7 +29,7 @@ export function DetailRow({
   mono = false,
 }: DetailRowProps) {
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
+    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-12">
       <span className="shrink-0 text-muted-foreground">{label}</span>
       <div className="flex min-w-0 items-center gap-1.5">
         {badge ? (
@@ -38,7 +38,7 @@ export function DetailRow({
           <span
             className={
               mono
-                ? "min-w-0 break-words text-right font-mono text-[11px] text-foreground"
+                ? "min-w-0 break-words text-right font-mono text-11 text-foreground"
                 : "min-w-0 break-words text-right font-medium text-foreground"
             }
           >

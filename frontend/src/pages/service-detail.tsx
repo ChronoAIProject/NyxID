@@ -1,4 +1,14 @@
-import { useEffect, useState } from "react";
+import { useAuthStore } from "@/stores/auth-store";
+import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
+import { canWriteTool } from "@/types/api";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
+import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -30,6 +40,7 @@ import { buildStandaloneCredentialAcceptUrl } from "@/lib/credential-accept-url"
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { DetailRow } from "@/components/shared/detail-row";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
@@ -40,7 +51,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
-import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -108,9 +119,13 @@ const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function ServiceDetailPage() {
+  const user = useAuthStore((state) => state.user);
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  const { data: provider } = useProvider(
+    service?.offering_kind !== "tool" ? (service?.provider_config_id ?? "") : "",
+  );
   const deleteMutation = useDeleteService();
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
@@ -183,12 +198,36 @@ export function ServiceDetailPage() {
     sshAuthMode !== "proxy_only" &&
     service.ssh_config.allowed_principals.length > 0;
 
+  if (service.offering_kind === "tool" && !user?.is_admin) {
+    return canWriteTool(user, service) ? (
+      <ToolManagerEditor service={service} />
+    ) : (
+      <div className="space-y-6">
+        <PageHeader
+          title={service.name}
+          description={service.description ?? undefined}
+        />
+        <EndpointList
+          serviceId={service.id}
+          service={service}
+          canWrite={false}
+          hasApiSpecUrl={!!service.openapi_spec_url}
+        />
+      </div>
+    );
+  }
   return (
     <div className="space-y-8">
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
-        leading={<ServiceIcon slug={service.slug} size="md" />}
+        leading={
+          <ServiceIcon
+            slug={service.slug}
+            iconUrl={service.icon_url || provider?.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             {terminalSupported && (
@@ -271,7 +310,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Developer App Scoping
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -399,7 +438,7 @@ export function ServiceDetailPage() {
                 )}
               </>
             ) : (
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 SSH configuration is missing for this service.
               </p>
             )}
@@ -437,6 +476,7 @@ export function ServiceDetailPage() {
               <Separator />
               <DetailSection title="API Endpoints">
                 <EndpointList
+                  service={service}
                   serviceId={service.id}
                   hasApiSpecUrl={
                     (service.openapi_spec_url ?? service.api_spec_url) !==
@@ -601,7 +641,7 @@ export function ServiceDetailPage() {
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       Capabilities
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -645,14 +685,14 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
                 No default headers configured for this service.
               </div>
             )}
           </DetailSection>
 
           <Separator />
-          <AnonymousEndpointsSection serviceId={service.id} />
+          <AnonymousEndpointsSection key={service.id} serviceId={service.id} />
 
           <Separator />
           <DetailSection title="Provider Requirements">
@@ -664,6 +704,18 @@ export function ServiceDetailPage() {
             />
           </DetailSection>
         </>
+      )}
+      {service.is_active && (
+        <OwnershipTransferCard
+          kind="service"
+          resource={{
+            id: service.id,
+            name: service.name,
+            owner_user_id: service.owner_user_id ?? service.created_by,
+            slug: service.slug,
+            platform: null,
+          }}
+        />
       )}
     </div>
   );
@@ -678,6 +730,7 @@ function injectionMethodForService(
   if (service.auth_method === "query" || service.auth_type === "query") {
     return "query-param";
   }
+  if (service.auth_method === "ifttt_webhook") return "ifttt-webhook";
   if (
     service.auth_method === "path" ||
     service.auth_method === "path-prefix" ||
@@ -692,6 +745,7 @@ function defaultFieldName(
   method: NodePendingCredentialInjectionMethod,
   authKeyName: string | null | undefined,
 ): string {
+  if (method === "ifttt-webhook") return "key";
   if (authKeyName?.trim()) return authKeyName;
   if (method === "query-param") return "api_key";
   if (method === "path-prefix") return "api";
@@ -751,7 +805,7 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Create pending metadata for the node, then encrypt the secret in the
             browser on the accept page.
           </p>
@@ -774,6 +828,7 @@ function ServiceCredentialPushSection({
                       const currentFieldName = form.getValues("field_name");
                       field.onChange(method);
                       if (
+                        method === "ifttt-webhook" ||
                         currentFieldName.trim() === "" ||
                         currentFieldName === previousDefault
                       ) {
@@ -793,6 +848,9 @@ function ServiceCredentialPushSection({
                       <SelectItem value="header">Header</SelectItem>
                       <SelectItem value="query-param">Query param</SelectItem>
                       <SelectItem value="path-prefix">Path prefix</SelectItem>
+                      <SelectItem value="ifttt-webhook">
+                        IFTTT Webhooks
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -806,7 +864,12 @@ function ServiceCredentialPushSection({
                 <FormItem>
                   <FormLabel>Field name</FormLabel>
                   <FormControl>
-                    <Input {...field} />
+                    <Input
+                      readOnly={
+                        form.watch("injection_method") === "ifttt-webhook"
+                      }
+                      {...field}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -905,19 +968,22 @@ function AnonymousEndpointsSection({
     }
   }
 
-  async function handleRuleUpdate(
-    rule: AnonymousEndpointRule,
-    data: Partial<AnonymousEndpointRuleFormData>,
-  ) {
+  async function handleRuleUpdate(variables: {
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }) {
     try {
-      await updateMutation.mutateAsync({ ruleId: rule.id, data });
+      const saved = await updateMutation.mutateAsync(variables);
       toast.success("Anonymous endpoint updated");
+      return saved;
     } catch (err) {
       toast.error(
         err instanceof ApiError
           ? err.message
           : "Failed to update anonymous endpoint",
       );
+      throw err;
     }
   }
 
@@ -931,6 +997,7 @@ function AnonymousEndpointsSection({
           ? err.message
           : "Failed to delete anonymous endpoint",
       );
+      throw err;
     }
   }
 
@@ -938,8 +1005,8 @@ function AnonymousEndpointsSection({
     <DetailSection title="Anonymous endpoints">
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
-          <Globe2 className="h-4 w-4 text-primary" />
-          <span className="text-[13px] font-medium">Public proxy rules</span>
+          <Globe2 className="h-4 w-4 text-primary-text" />
+          <span className="text-13 font-medium">Public proxy rules</span>
         </div>
 
         <Form {...form}>
@@ -1030,16 +1097,17 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
               No anonymous endpoints configured.
             </div>
           )}
           {endpoints?.map((rule) => (
             <AnonymousEndpointRow
-              key={rule.id}
+              key={`${serviceId}:${rule.id}`}
+              serviceId={serviceId}
               rule={rule}
               onUpdate={handleRuleUpdate}
-              onDelete={(ruleId) => void handleDelete(ruleId)}
+              onDelete={handleDelete}
               isUpdating={updateMutation.isPending}
               isDeleting={deleteMutation.isPending}
             />
@@ -1068,7 +1136,7 @@ const PUBLIC_METHODS = [
  */
 function WideOpenAnonymousWarning() {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-[12px] text-warning">
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
@@ -1083,120 +1151,185 @@ function WideOpenAnonymousWarning() {
 }
 
 function AnonymousEndpointRow({
+  serviceId,
   rule,
   onUpdate,
   onDelete,
   isUpdating,
   isDeleting,
 }: {
+  readonly serviceId: string;
   readonly rule: AnonymousEndpointRule;
-  readonly onUpdate: (
-    rule: AnonymousEndpointRule,
-    data: Partial<AnonymousEndpointRuleFormData>,
-  ) => Promise<void>;
-  readonly onDelete: (ruleId: string) => void;
+  readonly onUpdate: (variables: {
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }) => Promise<AnonymousEndpointRule>;
+  readonly onDelete: (ruleId: string) => Promise<void>;
   readonly isUpdating: boolean;
   readonly isDeleting: boolean;
 }) {
+  const projection = (value: AnonymousEndpointRule) => ({
+    enabled: value.enabled,
+    method: value.method,
+    path_pattern: value.path_pattern,
+    daily_quota: value.daily_quota,
+  });
+  const [baseline, setBaseline] = useState(projection(rule));
+  const [enabled, setEnabled] = useState(rule.enabled);
   const [method, setMethod] = useState(rule.method);
   const [pathPattern, setPathPattern] = useState(rule.path_pattern);
   const [dailyQuota, setDailyQuota] = useState(String(rule.daily_quota));
-
-  useEffect(() => {
-    setMethod(rule.method);
-    setPathPattern(rule.path_pattern);
-    setDailyQuota(String(rule.daily_quota));
-  }, [rule]);
-
-  const dirty =
-    method !== rule.method ||
-    pathPattern !== rule.path_pattern ||
-    Number(dailyQuota) !== rule.daily_quota;
-
-  // Advisory only: surface the wide-open warning for an enabled rule whose
-  // (possibly edited) pattern is the root wildcard. Never blocks save.
+  const next = {
+    enabled,
+    method,
+    path_pattern: pathPattern,
+    daily_quota: Number(dailyQuota),
+  };
+  const patch = changedFields(baseline, next);
+  const dirty = Object.keys(patch).length > 0;
+  const conflicting = (data: Partial<AnonymousEndpointRuleFormData>) =>
+    hasFieldConflicts(baseline, projection(rule), {
+      ...data,
+      ...("enabled" in data || "method" in data || "path_pattern" in data
+        ? { enabled: true, method: true, path_pattern: true }
+        : {}),
+    });
+  const stale = conflicting(patch);
+  function reset(value: AnonymousEndpointRule) {
+    setBaseline(projection(value));
+    setEnabled(value.enabled);
+    setMethod(value.method);
+    setPathPattern(value.path_pattern);
+    setDailyQuota(String(value.daily_quota));
+  }
+  const review = useChangeReview<{
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }>(
+    async (variables) => {
+      const saved = await onUpdate(variables);
+      reset(saved);
+    },
+    (variables) => conflicting(variables.data),
+    `${serviceId}:${rule.id}`,
+  );
+  const deletion = useChangeReview<{ serviceId: string; ruleId: string }>(
+    async (variables) => onDelete(variables.ruleId),
+    false,
+    `${serviceId}:${rule.id}`,
+  );
   const showWideOpenWarning =
-    rule.enabled && isWideOpenAnonymousPattern(pathPattern);
+    enabled && isWideOpenAnonymousPattern(pathPattern);
 
   return (
     <div className="space-y-2">
-    <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
-      <div className="flex items-center gap-2">
-        <Switch
-          checked={rule.enabled}
-          onCheckedChange={(enabled) =>
-            void onUpdate(rule, { enabled: Boolean(enabled) })
-          }
-          disabled={isUpdating}
+      {review.dialog}
+      {deletion.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            reset(rule);
+            review.cancel();
+          }}
         />
-        <Badge variant={rule.enabled ? "success" : "secondary"}>
-          {rule.enabled ? "Enabled" : "Draft"}
-        </Badge>
-      </div>
-      <Select
-        value={method}
-        onValueChange={(value) =>
-          setMethod(value as AnonymousEndpointRule["method"])
-        }
-      >
-        <SelectTrigger>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {PUBLIC_METHODS.map((item) => (
-            <SelectItem key={item} value={item}>
-              {item}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Input
-        value={pathPattern}
-        onChange={(e) => setPathPattern(e.target.value)}
-      />
-      <Input
-        type="number"
-        min={1}
-        value={dailyQuota}
-        onChange={(e) => setDailyQuota(e.target.value)}
-      />
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={!dirty || isUpdating}
-        isLoading={isUpdating}
-        onClick={() => {
-          // Row edits must pass the same rules as creation — the backend
-          // rejects quota 0 / bad patterns with a bare 400 otherwise.
-          const parsed = anonymousEndpointUpdateSchema.safeParse({
-            method,
-            path_pattern: pathPattern,
-            daily_quota: dailyQuota,
-          });
-          if (!parsed.success) {
-            toast.error(
-              parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
-            );
-            return;
+      )}
+      <div className="grid gap-3 rounded-lg border border-hairline bg-overlay p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={enabled}
+            onCheckedChange={setEnabled}
+            disabled={isUpdating || review.saving}
+          />
+          <Badge variant={rule.enabled ? "success" : "secondary"}>
+            {rule.enabled ? "Enabled" : "Draft"}
+          </Badge>
+        </div>
+        <Select
+          disabled={isUpdating || review.saving}
+          value={method}
+          onValueChange={(value) =>
+            setMethod(value as AnonymousEndpointRule["method"])
           }
-          void onUpdate(rule, parsed.data);
-        }}
-      >
-        Save
-      </Button>
-      <Button
-        size="sm"
-        variant="destructive"
-        disabled={isDeleting}
-        isLoading={isDeleting}
-        onClick={() => onDelete(rule.id)}
-      >
-        <ButtonIcon variant="destructive">
-          <Trash2 className="h-3 w-3 text-destructive" />
-        </ButtonIcon>
-        Delete
-      </Button>
-    </div>
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {PUBLIC_METHODS.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          disabled={isUpdating || review.saving}
+          value={pathPattern}
+          onChange={(e) => setPathPattern(e.target.value)}
+        />
+        <Input
+          disabled={isUpdating || review.saving}
+          type="number"
+          min={1}
+          value={dailyQuota}
+          onChange={(e) => setDailyQuota(e.target.value)}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!dirty || isUpdating || stale}
+          isLoading={isUpdating}
+          onClick={() => {
+            // Row edits must pass the same rules as creation — the backend
+            // rejects quota 0 / bad patterns with a bare 400 otherwise.
+            const parsed = anonymousEndpointUpdateSchema.safeParse({
+              enabled,
+              method,
+              path_pattern: pathPattern,
+              daily_quota: dailyQuota,
+            });
+            if (!parsed.success) {
+              toast.error(
+                parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
+              );
+              return;
+            }
+            const data = changedFields(baseline, parsed.data);
+            review.review({ serviceId, ruleId: rule.id, data }, [
+              {
+                field: "Public proxy rule",
+                before: `${baseline.method} ${baseline.path_pattern}`,
+                after: `${method} ${pathPattern}${showWideOpenWarning ? " — exposes every downstream path without authentication" : ""}`,
+              },
+              ...describeChanges(baseline, data),
+            ]);
+          }}
+        >
+          Save
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          disabled={isDeleting || isUpdating || review.saving}
+          isLoading={isDeleting}
+          onClick={() =>
+            deletion.review({ serviceId, ruleId: rule.id }, [
+              {
+                field: "Delete public proxy rule",
+                before: `${rule.method} ${rule.path_pattern}`,
+                after: "Deleted",
+              },
+            ])
+          }
+        >
+          <ButtonIcon variant="destructive">
+            <Trash2 className="h-3 w-3 text-destructive" />
+          </ButtonIcon>
+          Delete
+        </Button>
+      </div>
       {showWideOpenWarning && <WideOpenAnonymousWarning />}
     </div>
   );
@@ -1247,8 +1380,8 @@ function YourRoutingSection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Router className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Your Routing</CardTitle>
+            <Router className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">Your Routing</CardTitle>
           </div>
           <Button
             variant="outline"

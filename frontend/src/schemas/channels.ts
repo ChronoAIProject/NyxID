@@ -1,12 +1,8 @@
 import { z } from "zod";
+import type { ChannelPlatformDescriptor } from "@/types/channels";
+import type { ChannelCredentialField } from "@/lib/channel-platforms";
 
-const channelPlatformSchema = z.enum([
-  "telegram",
-  "discord",
-  "lark",
-  "feishu",
-  "slack",
-]);
+const channelPlatformSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "Invalid platform");
 
 /**
  * Platform values accepted when reading a conversation back from the API.
@@ -15,9 +11,14 @@ const channelPlatformSchema = z.enum([
  */
 export const conversationPlatformSchema = z.enum([
   "telegram",
+  "telegram-new",
   "discord",
   "lark",
   "feishu",
+  "slack",
+  "whatsapp",
+  "x",
+  "aurinko",
   "device",
 ]);
 
@@ -35,77 +36,53 @@ export const createChannelBotSchema = z
     platform: channelPlatformSchema,
     bot_token: z
       .string()
-      .min(1, "Bot token is required")
       .max(512, "Bot token is too long")
-      .refine((v) => v.trim().length > 0, "Bot token must not be blank"),
-    label: z
-      .string()
-      .min(1, "Label is required")
-      .max(128, "Label must be at most 128 characters")
-      .refine((v) => v.trim().length > 0, "Label must not be blank"),
+      .optional(),
+    // Blank is allowed only for Telegram bot tokens; see buildCreateChannelBotSchema.
+    label: z.string().max(128, "Label must be at most 128 characters"),
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
     verification_token: z.string().max(512).optional(),
     encrypt_key: z.string().max(512).optional(),
     public_key: z.string().max(256).optional(),
+    phone_number_id: z.string().max(32).regex(/^[0-9]*$/, "Use a numeric identifier").optional(),
+    waba_id: z.string().max(32).regex(/^[0-9]*$/, "Use a numeric identifier").optional(),
     /** When set, create this bot under the given org (caller must be admin). */
     target_org_id: z.string().optional(),
-  })
-  .superRefine((data, ctx) => {
-    const appId = data.app_id?.trim();
-    const appSecret = data.app_secret?.trim();
-    const verificationToken = data.verification_token?.trim();
-    const publicKey = data.public_key?.trim();
+  }).catchall(z.string().optional());
 
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !appId
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "App ID is required for Lark/Feishu",
-        path: ["app_id"],
-      });
+/** A blank Telegram bot-token label is filled with the bot's Telegram name. */
+export function labelIsOptional(platform: string): boolean {
+  return platform === "telegram";
+}
+
+export function buildCreateChannelBotSchema(platforms: readonly ChannelPlatformDescriptor[]) {
+  return createChannelBotSchema.superRefine((data, ctx) => {
+    if (!data.label.trim() && !labelIsOptional(data.platform)) {
+      ctx.addIssue({ code: "custom", message: "Label is required", path: ["label"] });
     }
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !appSecret
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "App Secret is required for Lark/Feishu",
-        path: ["app_secret"],
-      });
+    const descriptor = platforms.find((p) => p.platform === data.platform && p.enabled);
+    if (!descriptor) {
+      ctx.addIssue({ code: "custom", message: "Choose an enabled platform", path: ["platform"] });
+      return;
     }
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !verificationToken
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Verification Token is required for Lark/Feishu",
-        path: ["verification_token"],
-      });
-    }
-    if (data.platform === "discord" && !publicKey) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Public Key is required for Discord",
-        path: ["public_key"],
-      });
-    }
-    if (data.platform === "slack" && !appSecret) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Signing Secret is required for Slack",
-        path: ["app_secret"],
-      });
+    if (descriptor.managed_only) return;
+    for (const field of descriptor.registration.fields) {
+      const value = data[field.name as ChannelCredentialField]?.trim();
+      if (field.required && !value) {
+        ctx.addIssue({ code: "custom", message: `${field.label} is required`, path: [field.name] });
+      }
+      if (value && value.length > (field.secret ? 512 : 256)) {
+        ctx.addIssue({ code: "custom", message: `${field.label} is too long`, path: [field.name] });
+      }
     }
   });
+}
 
 export type CreateChannelBotFormData = z.infer<typeof createChannelBotSchema>;
 
 export const updateChannelBotSchema = z.object({
+  bot_token: z.string().max(512).optional(),
   label: z
     .string()
     .min(1, "Label is required")
@@ -116,9 +93,18 @@ export const updateChannelBotSchema = z.object({
   encrypt_key: z.string().max(512).optional(),
   app_id: z.string().max(256).optional(),
   app_secret: z.string().max(512).optional(),
-});
+}).catchall(z.string().optional());
 
 export type UpdateChannelBotFormData = z.infer<typeof updateChannelBotSchema>;
+
+export const xChannelEventsSchema = z.object({
+  events: z.array(z.enum(["dm", "chat", "mentions", "replies", "posts"]))
+    .min(1, "Select at least one event type")
+    .max(5)
+    .refine((events) => new Set(events).size === events.length, "Select each event only once"),
+});
+
+export type XChannelEventsFormData = z.infer<typeof xChannelEventsSchema>;
 
 export const createChannelConversationSchema = z.object({
   channel_bot_id: z.string().uuid("Invalid bot ID"),
@@ -127,6 +113,7 @@ export const createChannelConversationSchema = z.object({
   platform_conversation_type: conversationTypeSchema.optional(),
   platform_sender_id: z.string().max(256).optional(),
   default_agent: z.boolean().optional(),
+  allow_agent_initiated: z.boolean().optional(),
   /** When set, create this conversation under the given org (caller must be admin). */
   target_org_id: z.string().optional(),
 });
@@ -157,9 +144,25 @@ export type CreateDeviceConversationFormData = z.infer<
 export const updateChannelConversationSchema = z.object({
   agent_api_key_id: z.string().uuid("Invalid API key ID").optional(),
   default_agent: z.boolean().optional(),
+  allow_agent_initiated: z.boolean().optional(),
   is_active: z.boolean().optional(),
 });
 
 export type UpdateChannelConversationFormData = z.infer<
   typeof updateChannelConversationSchema
+>;
+
+export const channelInitiatedSettingsSchema = z.object({
+  allow_agent_initiated: z.boolean(),
+});
+
+export const channelTestMessageSchema = z.object({
+  text: z.string().trim().min(1, "Enter a message"),
+});
+
+export type ChannelInitiatedSettingsFormData = z.infer<
+  typeof channelInitiatedSettingsSchema
+>;
+export type ChannelTestMessageFormData = z.infer<
+  typeof channelTestMessageSchema
 >;

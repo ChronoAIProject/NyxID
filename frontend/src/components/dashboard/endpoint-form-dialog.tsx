@@ -1,3 +1,13 @@
+import {
+  formToPayload,
+  type CreateEndpointPayload,
+} from "@/lib/endpoint-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -40,7 +50,12 @@ interface EndpointFormDialogProps {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly endpoint?: ServiceEndpoint | null;
-  readonly onSubmit: (data: CreateEndpointFormData) => Promise<void>;
+  readonly serviceId?: string;
+  readonly currentEndpoint?: ServiceEndpoint | null;
+  readonly onSubmit: (
+    data: CreateEndpointFormData,
+    patch?: Partial<CreateEndpointPayload>,
+  ) => Promise<void>;
   readonly isPending: boolean;
 }
 
@@ -82,12 +97,23 @@ function buildEndpointFormSchema(existingDescription?: string | null) {
   });
 }
 
-export function EndpointFormDialog({
+export function EndpointFormDialog(props: EndpointFormDialogProps) {
+  return (
+    <EndpointFormEditor
+      key={`${props.serviceId ?? props.endpoint?.service_id ?? ""}:${props.endpoint?.id ?? "new"}`}
+      {...props}
+    />
+  );
+}
+
+function EndpointFormEditor({
   open,
   onOpenChange,
   endpoint,
   onSubmit,
   isPending,
+  serviceId,
+  currentEndpoint,
 }: EndpointFormDialogProps) {
   const isEditing = endpoint !== null && endpoint !== undefined;
   const formSchema = buildEndpointFormSchema(
@@ -97,6 +123,9 @@ export function EndpointFormDialog({
   const form = useAppForm<CreateEndpointFormData>({
     resolver: zodResolver(formSchema),
     defaultValues: {
+      data_scope: null,
+      cost_class: null,
+      execution: "http_operation",
       name: "",
       description: "",
       method: "GET",
@@ -111,6 +140,9 @@ export function EndpointFormDialog({
     if (open) {
       if (isEditing && endpoint) {
         form.reset({
+          data_scope: endpoint.data_scope ?? null,
+          cost_class: endpoint.cost_class ?? null,
+          execution: endpoint.execution ?? "http_operation",
           name: endpoint.name,
           description: endpoint.description ?? "",
           method: endpoint.method as CreateEndpointFormData["method"],
@@ -121,6 +153,9 @@ export function EndpointFormDialog({
         });
       } else {
         form.reset({
+          data_scope: null,
+          cost_class: null,
+          execution: "http_operation",
           name: "",
           description: "",
           method: "GET",
@@ -132,11 +167,49 @@ export function EndpointFormDialog({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, endpoint]);
+  }, [open, endpoint?.id]);
 
-  async function handleSubmit(data: CreateEndpointFormData) {
+  type EndpointReview = {
+    serviceId?: string;
+    endpointId: string;
+    data: CreateEndpointFormData;
+    patch: Partial<CreateEndpointPayload>;
+    before: CreateEndpointPayload;
+  };
+  const review = useChangeReview<EndpointReview>(
+    async (pending) => {
+      if (
+        pending.serviceId !== serviceId ||
+        pending.endpointId !== endpoint?.id
+      )
+        return;
+      await save(pending.data, pending.patch);
+    },
+    (pending) => {
+      const live = currentEndpoint === undefined ? endpoint : currentEndpoint;
+      return !live || hasFieldConflicts(pending.before, live, pending.patch);
+    },
+    `${serviceId ?? endpoint?.service_id ?? ""}:${endpoint?.id ?? "new"}`,
+  );
+
+  function handleSubmit(data: CreateEndpointFormData) {
+    if (!isEditing || !endpoint) return save(data);
+    const before = formToPayload(
+      form.formState.defaultValues as CreateEndpointFormData,
+    );
+    const patch = changedFields(before, formToPayload(data));
+    review.review(
+      { serviceId, endpointId: endpoint.id, data, before, patch },
+      describeChanges(before, patch),
+    );
+  }
+
+  async function save(
+    data: CreateEndpointFormData,
+    patch?: Partial<CreateEndpointPayload>,
+  ) {
     try {
-      await onSubmit(data);
+      await onSubmit(data, patch);
       onOpenChange(false);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -146,11 +219,13 @@ export function EndpointFormDialog({
           isEditing ? "Failed to update endpoint" : "Failed to create endpoint",
         );
       }
+      if (isEditing) throw error;
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {review.dialog}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -169,7 +244,7 @@ export function EndpointFormDialog({
             className="space-y-4"
           >
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -196,7 +271,7 @@ export function EndpointFormDialog({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description of this endpoint"
                       {...field}
                     />
@@ -255,7 +330,7 @@ export function EndpointFormDialog({
                   <FormLabel>Parameters (JSON)</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder='[{"name": "id", "in": "path", "required": true}]'
                       {...field}
                     />
@@ -273,7 +348,7 @@ export function EndpointFormDialog({
                   <FormLabel>Request Body Schema (JSON)</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder='{"type": "object", "properties": {...}}'
                       {...field}
                     />
@@ -300,6 +375,54 @@ export function EndpointFormDialog({
               )}
             />
 
+            <div className="grid grid-cols-3 gap-3">
+              {(
+                [
+                  {
+                    name: "data_scope",
+                    label: "Data scope",
+                    values: ["public", "account", "owned_resource"],
+                  },
+                  {
+                    name: "cost_class",
+                    label: "Cost class",
+                    values: ["free", "metered", "resource_backed"],
+                  },
+                  {
+                    name: "execution",
+                    label: "Execution",
+                    values: ["http_operation", "job_start", "job_poll"],
+                  },
+                ] as const
+              ).map((field) => (
+                <label key={field.name} className="text-12">
+                  {field.label}
+                  <Select
+                    value={form.watch(field.name) ?? "unspecified"}
+                    onValueChange={(value) =>
+                      form.setValue(
+                        field.name,
+                        (value === "unspecified" ? null : value) as never,
+                      )
+                    }
+                  >
+                    <SelectTrigger aria-label={field.label}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {field.name !== "execution" && (
+                        <SelectItem value="unspecified">Unspecified</SelectItem>
+                      )}
+                      {field.values.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value.replaceAll("_", " ")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
+              ))}
+            </div>
             <DialogFooter>
               <Button
                 type="button"
@@ -308,7 +431,12 @@ export function EndpointFormDialog({
               >
                 Cancel
               </Button>
-              <Button variant="primary" type="submit" isLoading={isPending} disabled={!form.formState.isValid || isPending}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={isPending}
+                disabled={!form.formState.isValid || isPending}
+              >
                 {isEditing ? "Save Changes" : "Create Endpoint"}
               </Button>
             </DialogFooter>

@@ -110,6 +110,18 @@ fn provider_supports_requirements(provider_type: &str) -> bool {
     matches!(provider_type, "oauth2" | "api_key" | "device_code")
 }
 
+fn requirement_authority(
+    state: &AppState,
+    auth: &AuthUser,
+) -> crate::services::catalog_mutation_service::Authority {
+    crate::services::catalog_mutation_service::Authority {
+        catalog_base_url: state.config.base_url.clone(),
+        actor: audit_service::AuditActor::from_auth_user(auth),
+        first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),
+        admin_required: true,
+    }
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/services/{service_id}/requirements
@@ -192,7 +204,7 @@ pub async fn add_requirement(
     require_admin(&state, &auth_user).await?;
 
     // Verify service exists
-    let _service = fetch_service(&state, &service_id).await?;
+    let service = fetch_service(&state, &service_id).await?;
 
     // Verify provider exists
     let provider = state
@@ -274,11 +286,13 @@ pub async fn add_requirement(
         updated_at: now,
     };
 
-    state
-        .db
-        .collection::<ServiceProviderRequirement>(COLLECTION_NAME)
-        .insert_one(&requirement)
-        .await?;
+    crate::services::provider_link_service::add_requirement_with_authority(
+        &state.db,
+        &requirement,
+        &service,
+        &requirement_authority(&state, &auth_user),
+    )
+    .await?;
 
     tracing::info!(
         requirement_id = %id,
@@ -320,15 +334,14 @@ pub async fn remove_requirement(
 ) -> AppResult<Json<DeleteRequirementResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let result = state
-        .db
-        .collection::<ServiceProviderRequirement>(COLLECTION_NAME)
-        .delete_one(doc! { "_id": &requirement_id, "service_id": &service_id })
-        .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound("Requirement not found".to_string()));
-    }
+    let service = fetch_service(&state, &service_id).await?;
+    crate::services::provider_link_service::remove_requirement_with_authority(
+        &state.db,
+        &requirement_id,
+        &service,
+        &requirement_authority(&state, &auth_user),
+    )
+    .await?;
 
     tracing::info!(
         requirement_id = %requirement_id,

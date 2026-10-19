@@ -149,6 +149,39 @@ pub async fn find_org_by_key(db: &mongodb::Database, key: &str) -> AppResult<Use
         .ok_or_else(|| AppError::OrgNotFound(key.to_string()))
 }
 
+/// Resolve the read role for an already-loaded org using the actor's
+/// polymorphic owner identity.
+/// Direct ownership projects to Admin for reads without creating or requiring
+/// a membership. Other actors need an active membership; service scope does
+/// not restrict org metadata. Write handlers keep their membership-only ACLs.
+pub async fn read_role_for_org(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org: &User,
+) -> AppResult<OrgRole> {
+    let role = if actor_user_id == org.id {
+        OrgRole::Admin
+    } else {
+        get_active_membership(db, &org.id, actor_user_id)
+            .await?
+            .ok_or(AppError::OrgMembershipRequired)?
+            .role
+    };
+    Ok(role)
+}
+
+/// Load an org and resolve the actor's read role. Resolve the org first to
+/// preserve OrgNotFound versus OrgMembershipRequired.
+pub async fn get_org_for_read(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org_user_id: &str,
+) -> AppResult<(User, OrgRole)> {
+    let org = get_org_user(db, org_user_id).await?;
+    let role = read_role_for_org(db, actor_user_id, &org).await?;
+    Ok((org, role))
+}
+
 /// Suffix used for the synthetic placeholder email generated when an org is
 /// created without an explicit contact email. Kept as a const so UI/API
 /// normalizers can hide it behind a single check.
@@ -424,7 +457,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             // built-in `require_admin_or_creator` cleanup gate fails
             // for everyone except a global admin. Force the admin to
             // call `DELETE /services/{id}` first.
-            doc! { "created_by": org_user_id, "is_active": true },
+            doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": true }] },
             "custom catalog services",
         ),
     ];
@@ -472,9 +505,12 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // about-to-be-deleted org user_id. Leaving them behind would
     // accumulate dangling rows in MongoDB; the API can never reach
     // them after the org user is gone.
-    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
-        .await?;
+    crate::services::service_history::collection::<bson::Document>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+    .await?;
     db.collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
@@ -567,45 +603,40 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::user_provider_token::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    // Developer OAuth clients: snapshot owned client ids BEFORE deleting
-    // the client tombstones so we can clean up `refresh_tokens` whose
-    // `client_id` references them. Without this, refresh tokens minted
-    // by an org-owned developer app would linger forever -- the live
-    // validation in `token_service::refresh_tokens` already rejects
-    // them on the next refresh attempt, so this is belt-and-suspenders
-    // cleanup that keeps the collection from accumulating dead rows.
-    let owned_oauth_client_ids: Vec<String> = db
-        .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
-        .distinct("_id", doc! { "created_by": org_user_id })
-        .await?
-        .into_iter()
-        .filter_map(|value| match value {
-            bson::Bson::String(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-    db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
-        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
-        .await?;
-    if !owned_oauth_client_ids.is_empty() {
-        let oauth_client_id_array: Vec<bson::Bson> = owned_oauth_client_ids
-            .iter()
-            .cloned()
-            .map(bson::Bson::String)
-            .collect();
-        db.collection::<bson::Document>(crate::models::refresh_token::COLLECTION_NAME)
-            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
+    // Retire inactive developer clients through the same source epoch/outbox
+    // transaction as their deletion. An inactive-only CAS preserves the active
+    // client blocker if an administrator re-enabled one after preflight.
+    loop {
+        let clients: Vec<bson::Document> = db
+            .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .find(doc! {"created_by":org_user_id,"is_active":false})
+            .projection(doc! {"_id":1})
+            .sort(doc! {"_id":1})
+            .limit(100)
+            .max_time(Duration::from_secs(3))
+            .await?
+            .try_collect()
             .await?;
-        // Consent grants users gave to the org's developer apps. Hard-
-        // deleted, no DELETE handler that targets them by client, and
-        // they remain enumerable via `/consents` and the admin
-        // listing after the org is gone (see `handlers/consent.rs`
-        // and `handlers/admin.rs`). Cascade by client_id so deleted
-        // org apps disappear from every user's "Authorized Apps"
-        // surface.
-        db.collection::<bson::Document>(crate::models::consent::COLLECTION_NAME)
-            .delete_many(doc! { "client_id": { "$in": &oauth_client_id_array } })
-            .await?;
+        if clients.is_empty() {
+            break;
+        }
+        for client in clients {
+            let client_id = client
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("OAuth client identity invalid".into()))?;
+            delete_inactive_org_oauth_client(db, org_user_id, client_id).await?;
+            for collection in [
+                crate::models::refresh_token::COLLECTION_NAME,
+                crate::models::consent::COLLECTION_NAME,
+            ] {
+                db.collection::<bson::Document>(collection)
+                    .delete_many(doc! {"client_id":client_id})
+                    .await?;
+            }
+            db.collection::<bson::Document>(crate::models::authorization_code::COLLECTION_NAME)
+                .delete_many(doc! {"client_id":client_id,"used":false})
+                .await?;
+        }
     }
     // Credential nodes. Active nodes are blocked above so what remains
     // here is soft-deleted node tombstones plus their associated
@@ -657,7 +688,10 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // `service_account_tokens` patterns above.
     let owned_service_ids: Vec<String> = db
         .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .distinct("_id", doc! { "created_by": org_user_id })
+        .distinct(
+            "_id",
+            super::ownership_transfer_service::catalog_owner_filter(org_user_id),
+        )
         .await?
         .into_iter()
         .filter_map(|value| match value {
@@ -666,7 +700,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         })
         .collect();
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .delete_many(doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": false }] })
         .await?;
     if !owned_service_ids.is_empty() {
         let svc_id_array: Vec<bson::Bson> = owned_service_ids
@@ -708,6 +742,23 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             conv_ids.iter().cloned().map(bson::Bson::String).collect();
         db.collection::<bson::Document>(crate::models::channel_event_log::COLLECTION_NAME)
             .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
+            .await?;
+    }
+    for collection in [
+        crate::models::saved_login::COLLECTION_NAME,
+        crate::models::machine_setup::COLLECTION_NAME,
+        crate::models::machine_job::COLLECTION_NAME,
+        crate::models::machine_desktop::COLLECTION_NAME,
+        crate::models::machine_update::COLLECTION_NAME,
+        crate::models::machine_update::ATTEMPTS_COLLECTION_NAME,
+        crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! { "user_id": org_user_id })
             .await?;
     }
     db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
@@ -758,6 +809,76 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
 
     tracing::info!(org_user_id = %org_user_id, "Org user deleted");
     Ok(())
+}
+
+/// The public grant hook is session-aware. Calling the broader client-delete
+/// wrapper here would lose the inactive-only CAS and could disable a client
+/// reactivated after the organization's blocker check. Epoch, exact cancellation
+/// receipts and source removal therefore commit together. The bounded source
+/// sweep rejects a missing source for grants beyond the inline batch; no
+/// inactive source tombstone is required for that fail-closed path.
+async fn delete_inactive_org_oauth_client(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    client_id: &str,
+) -> AppResult<()> {
+    let db = db.clone();
+    let owner = org_user_id.to_owned();
+    let client_id = client_id.to_owned();
+    db.client()
+        .start_session()
+        .await?
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                let clients =
+                    db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME);
+                let changed = clients
+                    .update_one(
+                        doc! {"_id":&client_id,"created_by":&owner,"is_active":false},
+                        doc! {"$inc":{"machine_external_security_revision":1_i64},
+                        "$set":{"updated_at":bson::DateTime::now()}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if changed.matched_count == 0 {
+                    if clients
+                        .find_one(doc! {"_id":&client_id,"created_by":&owner})
+                        .session(&mut *session)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(AppError::Conflict(
+                            "Organization OAuth client became active during deletion".into(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                super::machine_external_grant_service::invalidate_client_in_session(
+                    &db,
+                    &client_id,
+                    "oauth_client_deleted",
+                    100,
+                    session,
+                )
+                .await?;
+                let deleted = clients
+                    .delete_one(doc! {"_id":&client_id,"created_by":&owner,"is_active":false})
+                    .session(&mut *session)
+                    .await?;
+                if deleted.deleted_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Organization OAuth client changed during deletion".into(),
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -818,16 +939,17 @@ pub async fn create_membership(
             ));
         }
 
-        // Reactivate revoked row in-place.
-        let now = Utc::now();
+        // BSON stores milliseconds; every rejoin must have a distinct authority epoch.
+        let now = Utc::now().max(row.created_at + chrono::Duration::milliseconds(1));
         let now_bson = bson::DateTime::from_chrono(now);
         let allowed = match &allowed_service_ids {
             None => bson::Bson::Null,
             Some(ids) => bson::to_bson(ids).map_err(|e| AppError::Internal(e.to_string()))?,
         };
-        collection
+        let changed = collection
             .update_one(
-                doc! { "_id": &row.id },
+                doc! { "_id": &row.id, "revoked_at": row.revoked_at.map(bson::DateTime::from_chrono),
+                    "created_at": bson::DateTime::from_chrono(row.created_at) },
                 doc! { "$set": {
                     "role": role.as_str(),
                     "scope_source": scope_source.as_str(),
@@ -837,6 +959,11 @@ pub async fn create_membership(
                 }},
             )
             .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Membership changed; retry the invitation".into(),
+            ));
+        }
         return Ok(OrgMembership {
             id: row.id,
             org_user_id: org_user_id.to_string(),
@@ -1313,6 +1440,150 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn org_client_cascade_fences_existing_machine_grants_and_sweeps_overflow() {
+        use crate::models::machine_external_grant::{
+            COLLECTION_NAME as GRANTS, ExternalGrantBinding, GrantStatus, MachineExternalGrant,
+        };
+        let db = crate::test_utils::connect_transaction_test_database("org_machine_cascade").await;
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        let client = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&client,"created_by":&org,"is_active":false,
+            "machine_external_security_revision":0_i64})
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut users = Vec::new();
+        let mut grants = Vec::new();
+        // More than the inline source-hook bound proves that source removal
+        // remains fail-closed and the existing bounded sweeper can finish.
+        for _ in 0..101 {
+            let user = Uuid::new_v4().to_string();
+            users.push(crate::test_utils::test_user(&user, UserType::Person));
+            grants.push(MachineExternalGrant {
+                id: Uuid::new_v4().to_string(),
+                user_id: user,
+                binding: ExternalGrantBinding::OAuth {
+                    oauth_client_id: client.clone(),
+                    consent_id: Uuid::new_v4().to_string(),
+                    consent_revision: Uuid::new_v4().to_string(),
+                },
+                policy: Default::default(),
+                restrictions: Default::default(),
+                revision: 1,
+                status: GrantStatus::Active,
+                admission_fence: 0,
+                user_security_revision: 0,
+                client_security_revision: Some(0),
+                expires_at: now + chrono::Duration::days(30),
+                created_at: now,
+                updated_at: now,
+                revoked_at: None,
+                revoked_reason: None,
+            });
+        }
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .unwrap();
+        db.collection::<MachineExternalGrant>(GRANTS)
+            .insert_many(grants)
+            .await
+            .unwrap();
+        for collection in [
+            crate::models::consent::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+            crate::models::authorization_code::COLLECTION_NAME,
+        ] {
+            db.collection::<bson::Document>(collection)
+                .insert_one(
+                    doc! {"_id":Uuid::new_v4().to_string(),"client_id":&client,"used":false},
+                )
+                .await
+                .unwrap();
+        }
+        delete_org_user(&db, &org).await.unwrap();
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&org})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+                .find_one(doc! {"_id":&client})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(GRANTS)
+                .count_documents(doc! {"status":"revoked"})
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::machine_access::OUTBOX)
+                .count_documents(doc! {"kind":"external","reason":"oauth_client_deleted"})
+                .await
+                .unwrap(),
+            100
+        );
+        let batch =
+            crate::services::machine_external_grant_service::sweep_invalid_sources(&db, None, 100)
+                .await
+                .unwrap();
+        assert_eq!(batch.examined, 1);
+        assert_eq!(batch.invalidated, 1);
+        assert_eq!(
+            db.collection::<bson::Document>(GRANTS)
+                .count_documents(doc! {"status":"active"})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in [
+            crate::models::consent::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+            crate::models::authorization_code::COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {"client_id":&client})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        // The join cannot broaden cleanup to a client reactivated after the
+        // earlier org blocker check: the session mutation retains its CAS.
+        let active = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&active,"created_by":&org,"is_active":true})
+            .await
+            .unwrap();
+        assert!(
+            delete_inactive_org_oauth_client(&db, &org, &active)
+                .await
+                .is_err()
+        );
+        assert!(
+            db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+                .find_one(doc! {"_id":&active,"is_active":true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn fallback_timeout_constant_is_500ms() {

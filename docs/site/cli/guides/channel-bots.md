@@ -5,6 +5,8 @@ description: Register a Telegram, Discord, Lark/Feishu, or Slack bot from the te
 
 A channel bot bridges a messaging platform to an AI agent: inbound messages are relayed to an agent's callback URL, and the agent replies back through NyxID. The CLI registers the bot, wires up webhook verification, and maps conversations to the agent key that should answer them. For the dashboard equivalent and platform-console screenshots, see the [web channel-bots guide](/docs/web/guides/channel-bots).
 
+To send the human a setup link and receive a signed completion notification, use [channel-bot connect-link](/docs/cli/reference/others#channel-bot-connect-link). The [callback guide](/docs/web/guides/channel-bots#receive-a-completion-callback) covers signature verification and recovery.
+
 This assumes you are [logged in](/docs/cli/getting-started/authenticate). Pass secrets via `--*-env` flags so they never land in shell history.
 
 ## 1. Register the bot
@@ -19,11 +21,27 @@ nyxid channel-bot register \
 
 `--platform` is one of `telegram`, `discord`, `lark`, `feishu`, `slack`. Some platforms need extra material at registration:
 
-- **Lark / Feishu** — `--app-id`, `--app-secret-env`, and `--verification-token` (used to verify inbound webhooks). `--encrypt-key` is optional, matching the Event Subscriptions console.
+- **Lark / Feishu** — `--app-id`, `--app-secret-env`, and `--verification-token` (used to verify inbound webhooks). NyxID obtains a tenant access token from the app credentials; no `--token-env` or bot token is needed. `--encrypt-key` is optional, matching the Event Subscriptions console.
 - **Discord** — `--public-key` for signature verification.
 - **Slack** — pass the `xoxb-` bot token via `--token-env` and the app **signing secret** via `--app-secret-env`.
 
 Add `--org <id|slug|name>` to register an org-owned bot.
+
+For a bot already configured as NyxID's Telegram bot-creation manager, use the same token-registration command. NyxID preserves its manager webhook and reports `credential_source: "telegram_manager"` in `channel-bot show`. Configure the manager in Admin → Platform Credentials before registration. Verify checks the existing webhook; deleting the channel leaves bot creation available.
+
+A manager may use a default route for public help. Its callbacks include a reply token but omit the owner's `X-NyxID-User-Token`, including on exact routes. Use a dedicated public agent and scope any credentials held by that agent separately. `/start`, `/recover`, and button callbacks remain reserved for setup. The manager channel currently allows 32 simultaneous background deliveries per backend process; excess messages are dropped, and delivery has no durable replay or ordering guarantee.
+
+For Lark, set `LARK_APP_SECRET` and `NYXID_LARK_VERIFICATION_TOKEN` in your environment, then register with:
+
+```bash
+nyxid channel-bot register \
+  --platform lark \
+  --label support \
+  --app-id cli_your_app_id \
+  --app-secret-env LARK_APP_SECRET
+```
+
+Use `--platform feishu` for Feishu.
 
 ## 2. Create the agent that will answer
 

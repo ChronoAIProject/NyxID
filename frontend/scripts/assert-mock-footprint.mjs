@@ -5,7 +5,7 @@ import path from "node:path";
 const frontendRoot = fileURLToPath(new URL("../", import.meta.url));
 const distRoot = path.join(frontendRoot, "dist");
 const credentialAcceptRoot = path.join(distRoot, "credential-accept");
-const forbiddenSymbols = ["mockchat-", "scenario-engine", "mockscenarios"];
+const forbiddenSymbols = ["mockchat-", "scenario-engine", "mockscenarios", "design-review-", "Platform Engineering"];
 
 async function filesBelow(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

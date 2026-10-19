@@ -90,8 +90,8 @@ const WAVE_3_4_ACTIONS = [
     action: "org.update",
     params: {
       orgId: "org-1",
-      displayName: "Platform Ops",
-      slug: "platform-ops",
+      displayName: "Shared Service",
+      slug: "shared-service",
     },
     variant: "org_update",
   },
@@ -1142,5 +1142,20 @@ describe("wave-2 typed resource variants", () => {
     expect(JSON.stringify(asKey.data)).not.toEqual(
       JSON.stringify(asExternal.data),
     );
+  });
+});
+
+
+describe("platform service action grants", () => {
+  it.each([
+    ["key.create", { name: "Agent", platform: "codex", allowedServiceIds: [], allowAutoConnectedServices: true }, "key_create"],
+    ["key.update", { keyId: "key-1", allowAutoConnectedServices: false }, "key_update"],
+    ["key.extend_scope", { keyId: "key-1", addServiceIds: [], allowAutoConnectedServices: true }, "key_extend_scope"],
+    ["device.onboard", { label: "Camera", defaultServiceIds: [], allowAutoConnectedServices: true }, "device_onboard"],
+    ["device.onboard", { label: "Camera", allowAutoConnectedServices: false }, "device_onboard"],
+  ] as const)("normalizes %s without expanding the durable grant into ids", (action, params, variant) => {
+    const result = resolveAssistantAction(assistantActionRequestSchema.parse({ ...BASE_REQUEST, action, params }));
+    expect(result).not.toBeNull();
+    expect(result?.params).toMatchObject({ variant, allow_auto_connected_services: params.allowAutoConnectedServices });
   });
 });

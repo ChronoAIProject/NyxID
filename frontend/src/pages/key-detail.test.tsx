@@ -1,9 +1,13 @@
 import type { ReactNode } from "react";
+import { useSyncExternalStore } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import type { KeyInfo } from "@/types/keys";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
+import type { OwnershipResource } from "@/types/ownership-transfers";
 
 const {
   hooks,
@@ -13,6 +17,8 @@ const {
   mockToastSuccess,
   routerState,
 } = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  let search: Record<string, unknown> = {};
   // The page-level fixtures/mocks are reassigned per-test in beforeEach.
   const hooks = {
     key: {
@@ -21,6 +27,8 @@ const {
       error: null as unknown,
       refetch: vi.fn(),
     },
+    canTransfer: false,
+    transferResource: null as OwnershipResource | null,
     updateKey: vi.fn(),
     deleteKey: vi.fn(),
     updateEndpoint: vi.fn(),
@@ -35,7 +43,18 @@ const {
     mockNavigate: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
-    routerState: { search: {} as Record<string, unknown> },
+    routerState: {
+      get search() { return search; },
+      set search(next: Record<string, unknown>) {
+        search = next;
+        listeners.forEach((listener) => listener());
+      },
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      keyId: "key-1",
+    },
   };
 });
 
@@ -53,8 +72,8 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
   useNavigate: () => mockNavigate,
-  useParams: () => ({ keyId: "key-1" }),
-  useSearch: () => routerState.search,
+  useParams: () => ({ keyId: routerState.keyId }),
+  useSearch: () => useSyncExternalStore(routerState.subscribe, () => routerState.search),
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -71,6 +90,21 @@ vi.mock("@/hooks/use-keys", () => ({
     isPending: false,
   }),
   useCatalogEntry: () => ({ data: hooks.catalogEntry }),
+}));
+
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({
+    data: { can_transfer: hooks.canTransfer, resource: hooks.transferResource },
+  }),
+}));
+
+vi.mock("@/components/shared/ownership-transfer-dialog", () => ({
+  OwnershipTransferDialog: ({ resource }: { readonly resource: OwnershipResource }) => (
+    <div role="dialog" aria-label="Transfer ownership">
+      <span>{resource.id}</span>
+      <span>{resource.owner_user_id}</span>
+    </div>
+  ),
 }));
 
 vi.mock("@/hooks/use-nodes", () => ({
@@ -140,6 +174,8 @@ vi.mock("@/lib/utils", async () => {
   return { ...actual, copyToClipboard: mockCopyToClipboard };
 });
 
+vi.mock("@/components/dashboard/service-history", async () => ({ ...(await vi.importActual<typeof import("@/components/dashboard/service-history")>("@/components/dashboard/service-history")), ServiceHistory: ({ serviceId }: { serviceId: string }) => <div data-testid="history">{serviceId}</div> }));
+
 import { KeyDetailPage } from "./key-detail";
 
 /** A fully-populated, user-managed, non-SSH HTTP key. */
@@ -186,7 +222,20 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 }
 
 beforeEach(() => {
+  hooks.canTransfer = false;
+  hooks.transferResource = {
+    id: "cat-1",
+    name: "OpenAI",
+    owner_user_id: "catalog-owner",
+    slug: "openai",
+    platform: null,
+  };
+  useAuthStore.setState({ user: { id: "owner-1" } as User });
+  routerState.keyId = "key-1";
   vi.clearAllMocks();
+  mockNavigate.mockImplementation((options: { search?: Record<string, unknown> }) => {
+    if (options.search) routerState.search = options.search;
+  });
   routerState.search = {};
   hooks.key = {
     data: makeKey(),
@@ -199,7 +248,117 @@ beforeEach(() => {
   mockCopyToClipboard.mockResolvedValue(undefined);
 });
 
+it("opens a linked credential subsection and updates the URL when switching tabs", async () => {
+  routerState.search = { tab: "advanced" };
+  render(<KeyDetailPage />);
+  expect(screen.getByRole("tab", { name: "Advanced" })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("tab", { name: "Overview" }));
+  expect(mockNavigate).toHaveBeenLastCalledWith({
+    to: "/keys/$keyId", params: { keyId: "key-1" }, search: { tab: "overview" }, replace: true,
+  });
+  expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+});
+
+describe("KeyDetailPage — Google permissions", () => {
+  it("shows the reported partial Workspace grant and refreshes saved evidence", async () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-workspace",
+      granted_scopes: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
+      last_authorized_at: "2026-09-30T09:00:00Z",
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Drive, Docs, Sheets, Slides").parentElement!).getByText("Not granted")).toBeVisible();
+    expect(within(screen.getByText("Calendar").parentElement!).getByText("Read only")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Not granted")).toBeVisible();
+    await userEvent.setup().click(screen.getByText("Reported OAuth scopes"));
+    expect(screen.getByText("https://www.googleapis.com/auth/calendar.readonly")).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Refresh saved permissions" }));
+    expect(hooks.key.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows unknown permissions when Google did not report scopes", () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-gmail",
+      granted_scopes: null,
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Gmail read").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(screen.queryByText("Reported OAuth scopes")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["api-google-calendar", "Calendar", "https://www.googleapis.com/auth/calendar.readonly", "Read only"],
+    ["api-google-drive", "Drive, Docs, Sheets, Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-docs", "Docs", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-sheets", "Sheets", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-slides", "Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+  ])("shows the relevant grant for %s", (slug, label, scope, access) => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: slug,
+      granted_scopes: [scope],
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText(label).parentElement!).getByText(access)).toBeVisible();
+    expect(screen.queryByText("Gmail send")).not.toBeInTheDocument();
+  });
+});
+
 describe("KeyDetailPage — load states", () => {
+  it.each([
+    new TypeError("Failed to fetch"),
+    new ApiError(503, { error: "unavailable", error_code: -1, message: "Temporarily unavailable" }),
+  ])("preserves an endpoint draft through a transient refresh failure: %s", async (error) => {
+    const user = userEvent.setup();
+    const view = render(<KeyDetailPage />);
+    const pencil = screen.getByText("https://api.openai.com/v1").parentElement!.querySelector("button")!;
+    await user.click(pencil);
+    const input = screen.getByDisplayValue("https://api.openai.com/v1");
+    await user.clear(input);
+    await user.type(input, "https://draft.example.com/v1");
+
+    hooks.key.error = error;
+    view.rerender(<KeyDetailPage />);
+    expect(screen.getByDisplayValue("https://draft.example.com/v1")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(hooks.key.refetch).toHaveBeenCalledTimes(1);
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+
+    hooks.key.error = null;
+    hooks.key.data = makeKey({ endpoint_url: "https://updated.example.com/v1" });
+    view.rerender(<KeyDetailPage />);
+    expect(screen.getByDisplayValue("https://draft.example.com/v1")).toBeVisible();
+  });
+
+  it.each(["service", "identity"])("discards drafts and destructive confirmation on a %s switch", async (switchKind) => {
+    const user = userEvent.setup();
+    const view = render(<KeyDetailPage />);
+    await user.click(screen.getByText("https://api.openai.com/v1").parentElement!.querySelector("button")!);
+    const input = screen.getByDisplayValue("https://api.openai.com/v1");
+    await user.clear(input);
+    await user.type(input, "https://old-draft.example.com/v1");
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    if (switchKind === "service") {
+      routerState.keyId = "key-2";
+      hooks.key.data = makeKey({ id: "key-2", label: "Other service", endpoint_id: "ep-2" });
+    } else {
+      act(() => useAuthStore.setState({ user: { id: "owner-2" } as User }));
+    }
+    view.rerender(<KeyDetailPage />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("https://old-draft.example.com/v1")).not.toBeInTheDocument();
+    expect(hooks.deleteKey).not.toHaveBeenCalled();
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+  });
+
   it("renders skeletons while the key query is loading", () => {
     hooks.key = {
       data: undefined,
@@ -231,7 +390,7 @@ describe("KeyDetailPage — load states", () => {
     render(<KeyDetailPage />);
 
     expect(
-      screen.getByRole("heading", { name: "Key Not Found" }),
+      screen.getByRole("heading", { name: "Service details unavailable" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Key does not exist")).toBeInTheDocument();
 
@@ -315,6 +474,15 @@ describe("KeyDetailPage — core rendering", () => {
       "data-reconnect",
       "key-1",
     );
+  });
+
+  it.each([true, false])("gates permission editing on supports_oauth_scopes=%s", (supported) => {
+    hooks.key.data = makeKey({ status: "active", credential_type: "oauth2" });
+    hooks.catalogEntry = { slug: "api-notion", provider_type: "oauth2", supports_oauth_scopes: supported };
+    render(<KeyDetailPage />);
+    const manage = screen.queryByRole("button", { name: /Manage permissions/i });
+    if (supported) expect(manage).toBeInTheDocument();
+    else expect(manage).not.toBeInTheDocument();
   });
 
   it("uses continue authentication copy for pending OAuth-backed services", async () => {
@@ -625,8 +793,11 @@ describe("KeyDetailPage — delete flow", () => {
     });
     expect(mockToastSuccess).toHaveBeenCalledWith(
       "Removed from NyxID. Upstream revocation scheduled.",
+      expect.objectContaining({ action: expect.objectContaining({ label: "View history" }), duration: 15000 }),
     );
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys", search: {} });
+    act(() => mockToastSuccess.mock.calls.at(-1)![1].action.onClick());
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: "/keys/$keyId", params: { keyId: "key-1" } });
   });
 
   it("renders the 11500 payload and retries with token scope", async () => {
@@ -748,10 +919,26 @@ describe("KeyDetailPage — org read-only branch", () => {
     // Label heading still shown but with no inline edit pencil.
     const heading = screen.getByText("My OpenAI");
     expect(heading.parentElement?.querySelector("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Change service icon" })).not.toBeInTheDocument();
   });
 });
 
 describe("KeyDetailPage — auto-connected branch", () => {
+  it("lets the owner set an icon for an auto-connected service", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({ auto_connected: true, icon_url: null });
+    render(<KeyDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: "Change service icon" }));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/service.svg");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(hooks.updateKey).toHaveBeenCalledWith(
+      { keyId: "key-1", icon_url: "https://example.com/service.svg" },
+      expect.any(Object),
+    );
+  });
+
   it("renders the platform-managed service details card instead of editors", () => {
     hooks.key.data = makeKey({
       endpoint_url: "https://platform.internal.example/v1",
@@ -961,4 +1148,77 @@ describe("KeyDetailPage — Lark permission setup", () => {
     expect(screen.getByText("im:message")).toBeInTheDocument();
     expect(screen.getByText("contact:user.id:readonly")).toBeInTheDocument();
   });
+});
+
+
+describe("explicit platform connection cosmetics", () => {
+  it("offers cosmetic editors while keeping routing and auth platform managed", async () => {
+    hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: false, api_key_id: null });
+    render(<KeyDetailPage />);
+    expect(screen.getByText("Recommended Skills")).toBeInTheDocument();
+    expect(screen.getByText("User-Agent override")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+    const notSet = screen.getByText("Not set");
+    await userEvent.click(notSet.parentElement!.querySelector("button")!);
+    const input = screen.getByPlaceholderText("nyxid-service-skill-authoring, my-service-skill");
+    await userEvent.type(input, "read-docs");
+    const buttons = within(input.closest("div")!).getAllByRole("button");
+    await userEvent.click(buttons[buttons.length - 1]!);
+    expect(hooks.updateKey).toHaveBeenCalledWith({ keyId: "key-1", recommended_skills: ["read-docs"] }, expect.anything());
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+  });
+});
+
+
+it("lets retained UUID history own expected missing details state", () => {
+  routerState.keyId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  hooks.key = { data: undefined, isLoading: false, error: new ApiError(404, { error: "not_found", error_code: 1404, message: "Key does not exist" }), refetch: vi.fn() };
+  render(<KeyDetailPage />);
+  expect(screen.getByRole("heading", { name: "Service history" })).toBeInTheDocument();
+  expect(screen.queryByText("Key does not exist")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+});
+
+it("shows the ownership card in Advanced only when the backend authorizes the catalog owner", async () => {
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(within(screen.getByRole("tabpanel", { name: "Advanced" })).getByText("Ownership transfer")).toBeVisible();
+  hooks.transferResource = null;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+});
+
+it("opens ownership review in Advanced using the catalog resource and owner", async () => {
+  hooks.canTransfer = true;
+  const user = userEvent.setup();
+  render(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  mockNavigate.mockClear();
+  expect(screen.getByText("Transfer the catalog definition for OpenAI to another person or organization.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Transfer ownership" }));
+  const dialog = screen.getByRole("dialog", { name: "Transfer ownership" });
+  expect(within(dialog).getByText("cat-1")).toBeVisible();
+  expect(within(dialog).getByText("catalog-owner")).toBeVisible();
+  expect(mockNavigate).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("offers Advanced to an authorized catalog owner for a platform connection (auto-connected: %s)", async (autoConnected) => {
+  hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: autoConnected, api_key_id: null });
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeVisible();
+  hooks.canTransfer = false;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
 });

@@ -26,6 +26,10 @@ pub fn current_bundle() -> WorkerBundle {
     }
 }
 
+pub fn bundle_outdated(version: Option<&str>) -> bool {
+    version != Some(current_bundle().version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

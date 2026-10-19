@@ -1,0 +1,3220 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Chrono Sandbox API",
+    "description": "REST API for executing scripts in isolated sandbox environments via OpenSandbox. Supports synchronous, streaming, and asynchronous execution plus persistent sessions.",
+    "license": {
+      "name": ""
+    },
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/execute": {
+      "post": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Execute a script in an isolated sandbox environment.",
+        "operationId": "execute_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Request body for script execution.",
+                "required": [
+                  "script",
+                  "language"
+                ],
+                "properties": {
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Dependencies to install before execution (pip/npm/go packages)."
+                  },
+                  "env": {
+                    "type": "object",
+                    "description": "Environment variables to inject into the sandbox.",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "image": {
+                    "type": "string",
+                    "description": "Custom sandbox image (must be in allowed_images if configured)."
+                  },
+                  "input_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "A file to inject into the sandbox before execution.",
+                      "required": [
+                        "path",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string",
+                          "description": "Base64-encoded file content."
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "Target path relative to /workspace (e.g. \"data/input.csv\")."
+                        }
+                      }
+                    },
+                    "description": "Files to inject into the sandbox before execution."
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "Execution language. Supported: python, javascript, typescript, bash, go, java."
+                  },
+                  "network_enabled": {
+                    "type": "boolean",
+                    "description": "Whether the sandbox has network access (default: true)."
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "description": "Output type: \"text\" for stdout-only, \"file\" for file retrieval."
+                  },
+                  "resources": {
+                    "type": "object",
+                    "description": "Resource limits for the sandbox container.",
+                    "properties": {
+                      "cpu": {
+                        "type": "string",
+                        "description": "CPU limit (e.g. \"1\", \"2\", \"500m\")."
+                      },
+                      "memory": {
+                        "type": "string",
+                        "description": "Memory limit (e.g. \"512Mi\", \"1Gi\", \"2Gi\")."
+                      }
+                    }
+                  },
+                  "retrieve_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "File paths or glob patterns to retrieve after execution."
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "The script content to execute."
+                  },
+                  "timeout_secs": {
+                    "type": "integer",
+                    "description": "Script execution timeout in seconds (clamped to execution_timeout_max_secs)."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Script executed (check success field for result)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (empty script or unsupported language)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid execution credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential lacks sandbox execution permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "OpenSandbox server unreachable or sandbox creation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Sandbox creation or execution timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "execute_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "description": "Execute a quick script synchronously. For longer work, prefer submit_execution_handler (POST /executions): assistant chat keys receive an automatic result wake-up and should end the turn instead of polling."
+      }
+    },
+    "/execute/stream": {
+      "post": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Execute a script with Server-Sent Events (SSE) streaming output.",
+        "description": "The `200 OK` + headers are flushed **immediately** \u2014 before the sandbox is\ncreated \u2014 so intermediary time-to-first-byte caps (e.g. Cloudflare's ~100s)\nnever trip during slow sandbox creation. A `progress` heartbeat is emitted at\nonce and then every [`STREAM_HEARTBEAT_SECS`] until the script's stdout/stderr\nand terminal `complete` event are streamed. A post-open failure is delivered\nas an `error` event (the status is already `200`).",
+        "operationId": "execute_stream_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Request body for script execution.",
+                "required": [
+                  "script",
+                  "language"
+                ],
+                "properties": {
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Dependencies to install before execution (pip/npm/go packages)."
+                  },
+                  "env": {
+                    "type": "object",
+                    "description": "Environment variables to inject into the sandbox.",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "image": {
+                    "type": "string",
+                    "description": "Custom sandbox image (must be in allowed_images if configured)."
+                  },
+                  "input_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "A file to inject into the sandbox before execution.",
+                      "required": [
+                        "path",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string",
+                          "description": "Base64-encoded file content."
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "Target path relative to /workspace (e.g. \"data/input.csv\")."
+                        }
+                      }
+                    },
+                    "description": "Files to inject into the sandbox before execution."
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "Execution language. Supported: python, javascript, typescript, bash, go, java."
+                  },
+                  "network_enabled": {
+                    "type": "boolean",
+                    "description": "Whether the sandbox has network access (default: true)."
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "description": "Output type: \"text\" for stdout-only, \"file\" for file retrieval."
+                  },
+                  "resources": {
+                    "type": "object",
+                    "description": "Resource limits for the sandbox container.",
+                    "properties": {
+                      "cpu": {
+                        "type": "string",
+                        "description": "CPU limit (e.g. \"1\", \"2\", \"500m\")."
+                      },
+                      "memory": {
+                        "type": "string",
+                        "description": "Memory limit (e.g. \"512Mi\", \"1Gi\", \"2Gi\")."
+                      }
+                    }
+                  },
+                  "retrieve_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "File paths or glob patterns to retrieve after execution."
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "The script content to execute."
+                  },
+                  "timeout_secs": {
+                    "type": "integer",
+                    "description": "Script execution timeout in seconds (clamped to execution_timeout_max_secs)."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of execution events"
+          },
+          "400": {
+            "description": "Invalid request"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "execute_stream_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/executions": {
+      "post": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Accept a one-shot execution in the selected backend and return before work begins.",
+        "operationId": "submit_execution_handler",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Opaque key that makes submission replay-safe",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "traceparent",
+            "in": "header",
+            "description": "Optional W3C trace context",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Request-ID",
+            "in": "header",
+            "description": "Optional bounded correlation identifier",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Request body for script execution.",
+                "required": [
+                  "script",
+                  "language"
+                ],
+                "properties": {
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Dependencies to install before execution (pip/npm/go packages)."
+                  },
+                  "env": {
+                    "type": "object",
+                    "description": "Environment variables to inject into the sandbox.",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "image": {
+                    "type": "string",
+                    "description": "Custom sandbox image (must be in allowed_images if configured)."
+                  },
+                  "input_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "A file to inject into the sandbox before execution.",
+                      "required": [
+                        "path",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string",
+                          "description": "Base64-encoded file content."
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "Target path relative to /workspace (e.g. \"data/input.csv\")."
+                        }
+                      }
+                    },
+                    "description": "Files to inject into the sandbox before execution."
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "Execution language. Supported: python, javascript, typescript, bash, go, java."
+                  },
+                  "network_enabled": {
+                    "type": "boolean",
+                    "description": "Whether the sandbox has network access (default: true)."
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "description": "Output type: \"text\" for stdout-only, \"file\" for file retrieval."
+                  },
+                  "resources": {
+                    "type": "object",
+                    "description": "Resource limits for the sandbox container.",
+                    "properties": {
+                      "cpu": {
+                        "type": "string",
+                        "description": "CPU limit (e.g. \"1\", \"2\", \"500m\")."
+                      },
+                      "memory": {
+                        "type": "string",
+                        "description": "Memory limit (e.g. \"512Mi\", \"1Gi\", \"2Gi\")."
+                      }
+                    }
+                  },
+                  "retrieve_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "File paths or glob patterns to retrieve after execution."
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "The script content to execute."
+                  },
+                  "timeout_secs": {
+                    "type": "integer",
+                    "description": "Script execution timeout in seconds (clamped to execution_timeout_max_secs)."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Asynchronous execution accepted",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authenticated execution metadata is not cacheable"
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Relative operation status URL"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Suggested polling interval in seconds"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Short response returned after an asynchronous execution is accepted.",
+                  "required": [
+                    "operation_id",
+                    "status",
+                    "status_url",
+                    "result_url",
+                    "cancel_url",
+                    "created_at",
+                    "expires_at"
+                  ],
+                  "properties": {
+                    "cancel_url": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "result_url": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Execution state exposed by the additive `/executions` API.\n`succeeded` means the script produced a known result; callers must still\ninspect `ExecuteResponse.success` because a non-zero exit is a known result,\nnot an infrastructure failure.",
+                      "enum": [
+                        "queued",
+                        "provisioning",
+                        "preparing",
+                        "running",
+                        "collecting",
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "outcome_uncertain"
+                      ]
+                    },
+                    "status_url": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or idempotency key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid execution credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential lacks sandbox execution permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key was reused with a different request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The prior operation for this key has expired",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Expired operation metadata is not cacheable"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A retained idempotency tombstone whose result is no longer available.\nReturning the prior opaque identifier lets a caller distinguish expiration\nfrom a missing operation without permitting the old key to execute again.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id",
+                    "operation_id",
+                    "expired_at"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "expired_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp at which the retained result expired."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Asynchronous request payload is too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Asynchronous execution capacity is exhausted",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before a submission retry"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Asynchronous execution admission is busy, disabled, or unavailable",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before a retry"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nyxIdDelegationToken": []
+          }
+        ],
+        "x-aevatar-tool": {
+          "name": "submit_execution_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "x-nyxid-async-operation": {
+          "status_operation": "get_execution_handler",
+          "result_operation": "get_execution_result_handler",
+          "cancel_operation": "cancel_execution_handler",
+          "id_field": "/operation_id",
+          "id_parameter": "operation_id",
+          "status_field": "/status",
+          "success_states": [
+            "succeeded"
+          ],
+          "failure_states": [
+            "failed",
+            "cancelled",
+            "outcome_uncertain"
+          ],
+          "error_field": "/failure"
+        },
+        "description": "Prefer this asynchronous submit for anything beyond a quick run. For assistant chat keys, NyxID watches the operation and wakes this exact thread with its result. End the turn or do other work; do not busy-poll. Supply a fresh Idempotency-Key for each distinct execution."
+      }
+    },
+    "/executions/{operation_id}": {
+      "get": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Read the current owner-scoped operation snapshot.",
+        "operationId": "get_execution_handler",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "description": "Opaque operation identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "Previously observed operation ETag",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation snapshot",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authenticated operation state is not cacheable"
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Versioned operation entity tag"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Suggested polling interval for non-terminal work"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Pollable, versioned operation snapshot.",
+                  "required": [
+                    "operation_id",
+                    "status",
+                    "phase",
+                    "cleanup_status",
+                    "version",
+                    "cancel_requested",
+                    "result_available",
+                    "created_at",
+                    "updated_at",
+                    "first_event_at",
+                    "last_event_at",
+                    "expires_at",
+                    "timings"
+                  ],
+                  "properties": {
+                    "cancel_requested": {
+                      "type": "boolean"
+                    },
+                    "cleanup_status": {
+                      "type": "string",
+                      "description": "Cleanup is tracked separately so an unconfirmed cleanup cannot be hidden by\na terminal execution result. `retry` means another confirmation is required;\ndurable mode schedules it, while ephemeral mode relies only on remote expiry.",
+                      "enum": [
+                        "not_started",
+                        "pending",
+                        "running",
+                        "retry",
+                        "complete"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "failure": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "first_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the first recorded lifecycle event."
+                    },
+                    "last_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the latest recorded lifecycle event."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "phase": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "sandbox_create",
+                        "sandbox_ready",
+                        "input_write",
+                        "dependency_install",
+                        "execute",
+                        "collect",
+                        "cleaning_up",
+                        "complete"
+                      ]
+                    },
+                    "result_available": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Execution state exposed by the additive `/executions` API.\n`succeeded` means the script produced a known result; callers must still\ninspect `ExecuteResponse.success` because a non-zero exit is a known result,\nnot an infrastructure failure.",
+                      "enum": [
+                        "queued",
+                        "provisioning",
+                        "preparing",
+                        "running",
+                        "collecting",
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "outcome_uncertain"
+                      ]
+                    },
+                    "terminal_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp, present for terminal operations."
+                    },
+                    "timings": {
+                      "type": "object",
+                      "description": "Bounded phase durations. Missing values indicate phases that have not run or\nwere not reached; no raw sandbox diagnostics are exposed here.",
+                      "properties": {
+                        "accept_ms": {
+                          "type": "integer"
+                        },
+                        "cleanup_ms": {
+                          "type": "integer"
+                        },
+                        "collect_ms": {
+                          "type": "integer"
+                        },
+                        "dependency_install_ms": {
+                          "type": "integer"
+                        },
+                        "execute_ms": {
+                          "type": "integer"
+                        },
+                        "input_write_ms": {
+                          "type": "integer"
+                        },
+                        "queue_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_create_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_ready_ms": {
+                          "type": "integer"
+                        },
+                        "total_ms": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Operation has not changed",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authenticated operation state is not cacheable"
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current operation entity tag"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Suggested polling interval for non-terminal work"
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid execution credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential lacks sandbox execution permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Operation is missing or belongs to another owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Asynchronous execution is disabled, unavailable, or exceeded its API deadline",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before a retry"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nyxIdDelegationToken": []
+          }
+        ],
+        "x-aevatar-tool": {
+          "name": "get_execution_handler",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/executions/{operation_id}/cancel": {
+      "post": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Request cancellation without conflating the request with confirmed teardown.",
+        "operationId": "cancel_execution_handler",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "description": "Opaque operation identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation was already terminal, queued cancellation completed, or completion won the race",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authenticated operation state is not cacheable"
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Versioned operation entity tag"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Pollable, versioned operation snapshot.",
+                  "required": [
+                    "operation_id",
+                    "status",
+                    "phase",
+                    "cleanup_status",
+                    "version",
+                    "cancel_requested",
+                    "result_available",
+                    "created_at",
+                    "updated_at",
+                    "first_event_at",
+                    "last_event_at",
+                    "expires_at",
+                    "timings"
+                  ],
+                  "properties": {
+                    "cancel_requested": {
+                      "type": "boolean"
+                    },
+                    "cleanup_status": {
+                      "type": "string",
+                      "description": "Cleanup is tracked separately so an unconfirmed cleanup cannot be hidden by\na terminal execution result. `retry` means another confirmation is required;\ndurable mode schedules it, while ephemeral mode relies only on remote expiry.",
+                      "enum": [
+                        "not_started",
+                        "pending",
+                        "running",
+                        "retry",
+                        "complete"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "failure": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "first_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the first recorded lifecycle event."
+                    },
+                    "last_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the latest recorded lifecycle event."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "phase": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "sandbox_create",
+                        "sandbox_ready",
+                        "input_write",
+                        "dependency_install",
+                        "execute",
+                        "collect",
+                        "cleaning_up",
+                        "complete"
+                      ]
+                    },
+                    "result_available": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Execution state exposed by the additive `/executions` API.\n`succeeded` means the script produced a known result; callers must still\ninspect `ExecuteResponse.success` because a non-zero exit is a known result,\nnot an infrastructure failure.",
+                      "enum": [
+                        "queued",
+                        "provisioning",
+                        "preparing",
+                        "running",
+                        "collecting",
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "outcome_uncertain"
+                      ]
+                    },
+                    "terminal_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp, present for terminal operations."
+                    },
+                    "timings": {
+                      "type": "object",
+                      "description": "Bounded phase durations. Missing values indicate phases that have not run or\nwere not reached; no raw sandbox diagnostics are exposed here.",
+                      "properties": {
+                        "accept_ms": {
+                          "type": "integer"
+                        },
+                        "cleanup_ms": {
+                          "type": "integer"
+                        },
+                        "collect_ms": {
+                          "type": "integer"
+                        },
+                        "dependency_install_ms": {
+                          "type": "integer"
+                        },
+                        "execute_ms": {
+                          "type": "integer"
+                        },
+                        "input_write_ms": {
+                          "type": "integer"
+                        },
+                        "queue_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_create_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_ready_ms": {
+                          "type": "integer"
+                        },
+                        "total_ms": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Cancellation requested",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Authenticated operation state is not cacheable"
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Versioned operation entity tag"
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Relative operation status URL"
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Suggested polling interval in seconds"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Pollable, versioned operation snapshot.",
+                  "required": [
+                    "operation_id",
+                    "status",
+                    "phase",
+                    "cleanup_status",
+                    "version",
+                    "cancel_requested",
+                    "result_available",
+                    "created_at",
+                    "updated_at",
+                    "first_event_at",
+                    "last_event_at",
+                    "expires_at",
+                    "timings"
+                  ],
+                  "properties": {
+                    "cancel_requested": {
+                      "type": "boolean"
+                    },
+                    "cleanup_status": {
+                      "type": "string",
+                      "description": "Cleanup is tracked separately so an unconfirmed cleanup cannot be hidden by\na terminal execution result. `retry` means another confirmation is required;\ndurable mode schedules it, while ephemeral mode relies only on remote expiry.",
+                      "enum": [
+                        "not_started",
+                        "pending",
+                        "running",
+                        "retry",
+                        "complete"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "failure": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "first_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the first recorded lifecycle event."
+                    },
+                    "last_event_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp for the latest recorded lifecycle event."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "phase": {
+                      "type": "string",
+                      "enum": [
+                        "queued",
+                        "sandbox_create",
+                        "sandbox_ready",
+                        "input_write",
+                        "dependency_install",
+                        "execute",
+                        "collect",
+                        "cleaning_up",
+                        "complete"
+                      ]
+                    },
+                    "result_available": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Execution state exposed by the additive `/executions` API.\n`succeeded` means the script produced a known result; callers must still\ninspect `ExecuteResponse.success` because a non-zero exit is a known result,\nnot an infrastructure failure.",
+                      "enum": [
+                        "queued",
+                        "provisioning",
+                        "preparing",
+                        "running",
+                        "collecting",
+                        "succeeded",
+                        "failed",
+                        "cancelled",
+                        "outcome_uncertain"
+                      ]
+                    },
+                    "terminal_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp, present for terminal operations."
+                    },
+                    "timings": {
+                      "type": "object",
+                      "description": "Bounded phase durations. Missing values indicate phases that have not run or\nwere not reached; no raw sandbox diagnostics are exposed here.",
+                      "properties": {
+                        "accept_ms": {
+                          "type": "integer"
+                        },
+                        "cleanup_ms": {
+                          "type": "integer"
+                        },
+                        "collect_ms": {
+                          "type": "integer"
+                        },
+                        "dependency_install_ms": {
+                          "type": "integer"
+                        },
+                        "execute_ms": {
+                          "type": "integer"
+                        },
+                        "input_write_ms": {
+                          "type": "integer"
+                        },
+                        "queue_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_create_ms": {
+                          "type": "integer"
+                        },
+                        "sandbox_ready_ms": {
+                          "type": "integer"
+                        },
+                        "total_ms": {
+                          "type": "integer"
+                        }
+                      }
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp."
+                    },
+                    "version": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid execution credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential lacks sandbox execution permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Operation is missing or belongs to another owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Asynchronous execution is disabled, unavailable, or exceeded its API deadline",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before a retry"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nyxIdDelegationToken": []
+          }
+        ],
+        "x-aevatar-tool": {
+          "name": "cancel_execution_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/executions/{operation_id}/result": {
+      "get": {
+        "tags": [
+          "execution"
+        ],
+        "summary": "Return the immutable execution result after the operation becomes terminal.",
+        "operationId": "get_execution_result_handler",
+        "parameters": [
+          {
+            "name": "operation_id",
+            "in": "path",
+            "description": "Opaque operation identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Terminal execution result",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Execution results are not cacheable"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid execution credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Credential lacks sandbox execution permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Operation is missing or belongs to another owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operation is not terminal",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Suggested polling interval in seconds"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Operation result retention has expired",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Expired operation metadata is not cacheable"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "A retained idempotency tombstone whose result is no longer available.\nReturning the prior opaque identifier lets a caller distinguish expiration\nfrom a missing operation without permitting the old key to execute again.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id",
+                    "operation_id",
+                    "expired_at"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "expired_at": {
+                      "type": "string",
+                      "description": "RFC 3339 timestamp at which the retained result expired."
+                    },
+                    "operation_id": {
+                      "type": "string"
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Asynchronous execution is disabled, unavailable, or exceeded its API deadline",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before a retry"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Schema for typed HTTP failures. Runtime error responses retain the existing\ntop-level `success`, `error`, and opaque `diagnostic_id` contract.",
+                  "required": [
+                    "success",
+                    "error",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nyxIdDelegationToken": []
+          }
+        ],
+        "x-aevatar-tool": {
+          "name": "get_execution_result_handler",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/sessions/{session_id}/execute": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Execute a script in an existing session.",
+        "operationId": "session_execute_handler",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Request body for executing within an existing session.",
+                "required": [
+                  "script",
+                  "language"
+                ],
+                "properties": {
+                  "env": {
+                    "type": "object",
+                    "description": "Additional environment variables for this execution.",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "input_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "A file to inject into the sandbox before execution.",
+                      "required": [
+                        "path",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string",
+                          "description": "Base64-encoded file content."
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "Target path relative to /workspace (e.g. \"data/input.csv\")."
+                        }
+                      }
+                    },
+                    "description": "Additional files to inject before this execution."
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "Execution language."
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "description": "Output type."
+                  },
+                  "retrieve_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Files to retrieve after execution."
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "The script content to execute."
+                  },
+                  "timeout_secs": {
+                    "type": "integer",
+                    "description": "Script execution timeout in seconds."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Script executed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Response from the POST /execute endpoint.",
+                  "required": [
+                    "success",
+                    "diagnostic_id"
+                  ],
+                  "properties": {
+                    "diagnostic_id": {
+                      "type": "string",
+                      "description": "Opaque identifier that correlates the response with service logs."
+                    },
+                    "error": {
+                      "type": "object",
+                      "description": "Machine-readable error information.",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                        },
+                        "message": {
+                          "type": "string",
+                          "description": "Human-readable error message."
+                        }
+                      }
+                    },
+                    "output": {
+                      "type": "object",
+                      "description": "Output captured from script execution (plain text: stdout/stderr/exit code).",
+                      "required": [
+                        "stdout",
+                        "stderr",
+                        "exit_code",
+                        "execution_time_ms"
+                      ],
+                      "properties": {
+                        "execution_time_ms": {
+                          "type": "integer",
+                          "description": "Script execution duration in milliseconds."
+                        },
+                        "exit_code": {
+                          "type": "integer",
+                          "description": "Process exit code (0 = success)."
+                        },
+                        "files": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "description": "A file retrieved from the sandbox after execution.",
+                            "required": [
+                              "path"
+                            ],
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Base64-encoded file content (if retrieval succeeded)."
+                              },
+                              "error": {
+                                "type": "string",
+                                "description": "Error message if the file could not be retrieved."
+                              },
+                              "path": {
+                                "type": "string",
+                                "description": "File path within the sandbox."
+                              },
+                              "size": {
+                                "type": "integer",
+                                "description": "File size in bytes."
+                              }
+                            }
+                          },
+                          "description": "Files retrieved from the sandbox after execution."
+                        },
+                        "stderr": {
+                          "type": "string",
+                          "description": "Standard error from the script."
+                        },
+                        "stdout": {
+                          "type": "string",
+                          "description": "Standard output from the script."
+                        }
+                      }
+                    },
+                    "success": {
+                      "type": "boolean",
+                      "description": "Whether the script executed successfully (exit code 0)."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Machine-readable error information.",
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "description": "Machine-readable error code (e.g. EXECUTION_FAILED)."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable error message."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "session_execute_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/sessions/{session_id}/execute/stream": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Execute a script in an existing session with SSE streaming output.",
+        "operationId": "session_execute_stream_handler",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "Request body for executing within an existing session.",
+                "required": [
+                  "script",
+                  "language"
+                ],
+                "properties": {
+                  "env": {
+                    "type": "object",
+                    "description": "Additional environment variables for this execution.",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "input_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "description": "A file to inject into the sandbox before execution.",
+                      "required": [
+                        "path",
+                        "content"
+                      ],
+                      "properties": {
+                        "content": {
+                          "type": "string",
+                          "description": "Base64-encoded file content."
+                        },
+                        "path": {
+                          "type": "string",
+                          "description": "Target path relative to /workspace (e.g. \"data/input.csv\")."
+                        }
+                      }
+                    },
+                    "description": "Additional files to inject before this execution."
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "Execution language."
+                  },
+                  "output_type": {
+                    "type": "string",
+                    "description": "Output type."
+                  },
+                  "retrieve_files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Files to retrieve after execution."
+                  },
+                  "script": {
+                    "type": "string",
+                    "description": "The script content to execute."
+                  },
+                  "timeout_secs": {
+                    "type": "integer",
+                    "description": "Script execution timeout in seconds."
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of execution events"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "session_execute_stream_handler",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://sandbox.chrono-ai.fun"
+    }
+  ]
+}

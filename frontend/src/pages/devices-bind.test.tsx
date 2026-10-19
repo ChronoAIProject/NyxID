@@ -229,3 +229,39 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
     ...overrides,
   };
 }
+
+it("submits platform scope and clears it when switching owners", async () => {
+  const user = userEvent.setup();
+  state.search = { user_code: "ABCD-EFGH-JKLM" };
+  state.orgs = [makeOrg({ id: "org-1", display_name: "Acme Org" })];
+  state.services = [
+    makeKey({ id: "platform", label: "Platform Search", auto_connected: true }),
+  ];
+  renderWithClient(<DevicesBindPage />);
+  const toggle = () =>
+    screen.getByRole("checkbox", { name: /includes ones added later/ });
+  await user.click(toggle());
+  expect(
+    screen.getByRole("checkbox", { name: "Platform Search" }),
+  ).toBeDisabled();
+  await user.click(screen.getByRole("combobox"));
+  await user.click(await screen.findByRole("option", { name: "Acme Org" }));
+  expect(
+    screen.queryByRole("checkbox", { name: /includes ones added later/ }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("combobox"));
+  await user.click(
+    await screen.findByRole("option", { name: /Personal account/i }),
+  );
+  expect(toggle()).not.toBeChecked();
+  await user.click(toggle());
+  await user.click(screen.getByRole("button", { name: /approve device/i }));
+  await waitFor(() =>
+    expect(mockApproveMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        default_services: [],
+        allow_auto_connected_services: true,
+      }),
+    ),
+  );
+});

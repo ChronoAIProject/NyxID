@@ -1,14 +1,21 @@
 pub mod admin;
 pub mod admin_anonymous_endpoints;
+pub mod admin_billing;
+#[cfg(test)]
+mod admin_billing_tests;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
-pub mod admin_platform_ops;
+pub mod admin_ownership;
+pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
 pub mod admin_service_accounts;
+pub mod admin_upload_retention;
+pub mod admin_usage;
 pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;
@@ -21,23 +28,32 @@ pub mod assistant_action_effects_org;
 pub mod assistant_action_effects_providers;
 pub mod assistant_action_effects_services;
 pub mod assistant_actions;
+pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_readiness;
 pub mod auth;
+pub mod auth_agent_key;
 pub mod auth_device;
 pub mod billing;
 pub mod billing_credit_schedules;
-pub mod billing_credit_summary;
 pub mod billing_credits;
 pub(crate) mod body_limit;
+pub mod brand_icons;
 pub mod broker_bindings;
 pub mod catalog;
+pub(crate) mod catalog_authority;
 pub mod channel_bots;
+pub mod channel_connect_links;
 pub mod channel_conversations;
 pub mod channel_events;
+pub mod channel_managed;
+#[cfg(test)]
+mod channel_managed_tests;
 pub mod channel_relay;
+pub mod channel_relay_request;
 pub mod channel_webhooks;
 pub mod cli_pairings;
+pub mod codex_connection;
 pub mod connect_links;
 pub mod connections;
 pub mod consent;
@@ -52,9 +68,14 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;
+pub mod login_approval;
+pub(crate) mod login_client_context;
+pub mod login_code;
+pub(crate) mod managed_executions;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
@@ -65,6 +86,7 @@ pub mod notifications;
 pub mod oauth;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
+pub mod oracle_login_profiles;
 pub mod oracle_pools;
 pub mod oracle_tasks;
 pub mod oracle_worker;
@@ -72,13 +94,26 @@ pub mod oracle_worker_bundle;
 pub mod oracle_workers;
 pub mod org_role_scopes;
 pub mod orgs;
-pub mod platform_ops;
+pub mod platform_binding;
+pub mod platform_bots;
+pub mod platform_personal_bindings;
+pub mod platform_public_model;
+pub mod platform_setups;
 pub mod providers;
 pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod service_account_key_reads;
+#[cfg(test)]
+mod service_account_key_reads_tests;
+#[cfg(test)]
+mod service_pool_ai_tests;
+#[cfg(test)]
+mod service_pool_proxy_tests;
 pub mod service_pools_handler;
+#[cfg(test)]
+mod service_pools_tests;
 pub mod service_requirements;
 pub mod services;
 pub(crate) mod services_helpers;
@@ -87,6 +122,7 @@ pub mod social_auth;
 pub mod ssh_exec;
 pub mod ssh_tunnel;
 pub mod ssh_web_terminal;
+pub mod telegram_new;
 pub mod trigger_webhooks;
 pub mod triggers;
 pub mod user_api_keys_external;
@@ -96,3 +132,78 @@ pub mod user_services_handler;
 pub mod user_tokens;
 pub mod users;
 pub mod webhooks;
+
+pub mod catalog_curation;
+#[cfg(test)]
+mod catalog_editor_tests;
+#[cfg(test)]
+mod tools_tests;
+
+pub mod admin_assistant;
+pub mod assistant_feedback;
+#[cfg(test)]
+mod assistant_feedback_tests;
+pub mod assistant_group;
+pub mod assistant_nyxagent;
+pub mod assistant_team;
+pub mod channel_platforms;
+#[cfg(test)]
+mod curation_tests;
+pub mod nyxbot;
+pub mod options;
+pub(crate) mod org_group;
+
+pub mod service_history;
+pub mod service_insights;
+#[cfg(test)]
+mod service_insights_tests;
+
+pub mod channel_activities;
+pub mod machine_activity;
+pub mod machine_cancel;
+pub mod machine_tools;
+pub mod machine_update;
+pub mod saved_logins;
+
+pub mod machine_desktop;
+pub mod machine_gateway;
+
+pub mod machine_setup;
+
+pub mod trigger_scheduler;
+
+pub mod assistant_schedules;
+
+pub(crate) mod trigger_schedule_dto;
+
+pub mod agent_skills;
+pub mod assistant_uploads;
+pub mod permission_keys;
+
+mod assistant_titles;
+pub mod assistant_voice;
+
+pub mod machine_access;
+pub mod machine_external_execution;
+pub mod remote_machine;
+pub mod remote_machine_bootstrap;
+pub mod remote_machine_usage;
+
+pub mod admin_utility_inference;
+
+pub mod service_preference;
+pub mod tools;
+
+pub mod service_concurrency;
+#[cfg(test)]
+mod service_preference_tests;
+
+pub mod catalog_icons;
+
+pub mod machine_external_grant;
+
+pub mod admin_remote_machine_platform;
+#[cfg(test)]
+mod tools_manager_tests;
+
+pub mod call_adapters;

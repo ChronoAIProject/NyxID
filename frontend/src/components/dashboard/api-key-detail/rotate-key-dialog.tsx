@@ -32,6 +32,12 @@ export function RotateKeyDialog({
   async function handleRotate() {
     try {
       const result = await rotateMutation.mutateAsync(keyId);
+      if (!result.full_key) {
+        toast.success("Assistant key rotated");
+        onOpenChange(false);
+        void navigate({ to: "/keys/api-key/$keyId", params: { keyId: result.id } });
+        return;
+      }
       setNewKeyValue(result.full_key);
       setNewKeyId(result.id);
     } catch {
@@ -78,7 +84,7 @@ export function RotateKeyDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all select-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all select-all">
                 {newKeyValue}
               </code>
               <Button

@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
 
+pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -195,6 +197,8 @@ pub struct AppConfig {
     pub base_url: String,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
+    /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
+    pub auth_device_eight_char_codes: bool,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -296,6 +300,9 @@ pub struct AppConfig {
     /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
     /// Empty (the default) means no peer can produce verified attribution.
     pub trusted_proxy_ips: Vec<TrustedProxyRange>,
+    /// Client IP/CIDR allowlist exempt from general per-IP and global limits only.
+    /// Always resolved through the strict trusted-proxy boundary.
+    pub rate_limit_exempt_ips: Vec<TrustedProxyRange>,
 
     /// Optional reverse-proxy-forwarded client certificate header used for
     /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
@@ -330,6 +337,8 @@ pub struct AppConfig {
     /// hash chaining. Same derivation fallback as the audit chain, with a
     /// distinct `billing-ledger` domain label.
     pub billing_ledger_hmac_key: Option<String>,
+    /// One-time operator acknowledgement that pre-v2 billing writers drained.
+    pub billing_exact_cutover_drained: bool,
 
     /// Interval for the automatic hash-chain verification sweep (audit log
     /// and billing ledger, rolling chunks). 0 disables. Default: 3600.
@@ -365,12 +374,21 @@ pub struct AppConfig {
     /// Telegram bot username (without @) for link instructions.
     pub telegram_bot_username: Option<String>,
 
+    /// OpenAI plugin-portal domain verification token served verbatim at
+    /// `/.well-known/openai-apps-challenge`. Unset = route returns 404.
+    pub openai_apps_challenge_token: Option<String>,
+
     /// Interval in seconds between approval expiry sweeps (default: 5).
     pub approval_expiry_interval_secs: u64,
 
     /// Interval in seconds between abandoned app connect-link expiry sweeps
     /// (default: 60). Set to 0 to disable the sweep.
     pub connect_link_expiry_sweep_interval_secs: u64,
+
+    /// Interval in seconds between expired Agent Key login cleanup sweeps,
+    /// revoking undelivered credentials (default: 60). Set to 0 to disable
+    /// the background sweep; poll and preview still clean up expired exchanges.
+    pub agent_key_login_sweep_interval_secs: u64,
 
     /// Interval in seconds between proactive OAuth token-refresh sweeps
     /// (default: 600 = 10 min). Set to 0 to disable the sweep entirely
@@ -496,13 +514,20 @@ pub struct AppConfig {
     /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
     pub channel_relay_callback_timeout_secs: u32,
     /// Maximum number of channel bots a single user can register (default: 5)
+    pub channel_poll_interval_secs: u64,
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+    pub channel_media_max_bytes: u64,
     /// Per-message edit rate limit for channel relay replies (default: 10/s).
     pub channel_relay_edit_rate_limit_per_second: u32,
     /// Burst capacity for per-message edit rate limiting (default: 20).
     pub channel_relay_edit_rate_limit_burst: u32,
+
+    /// Per-conversation unsolicited message rate (default: 1/s).
+    pub channel_relay_initiate_rate_limit_per_second: u32,
+    /// Unsolicited message burst capacity (default: 5).
+    pub channel_relay_initiate_rate_limit_burst: u32,
 
     // HTTP Event Gateway (NyxID#221 / ADR-013)
     /// Per-channel event rate limit (events per second, default 100).
@@ -567,13 +592,6 @@ pub struct AppConfig {
     /// Enables the dormant catalog resale layer. Default false keeps NyxID
     /// platform-only even if legacy catalog records carry resale metadata.
     pub billing_resale_enabled: bool,
-
-    // Registration gate
-    /// When `true` (default), new-user registration requires a valid invite
-    /// code and first-time social sign-ups are rejected. Set
-    /// `INVITE_CODE_REQUIRED=false` to open public registration — used once
-    /// the product launches publicly. See issue #179.
-    pub invite_code_required: bool,
 
     /// When `true`, email/password auth UI is shown on `/login` and
     /// `/register`, and `POST /api/v1/auth/register` accepts new accounts.
@@ -663,6 +681,7 @@ impl std::fmt::Debug for AppConfig {
                 &self.platform_service_rate_limit_burst,
             )
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field("rate_limit_exempt_ips", &self.rate_limit_exempt_ips)
             .field("mtls_client_cert_header", &self.mtls_client_cert_header)
             .field(
                 "broker_require_sender_constraint",
@@ -702,6 +721,10 @@ impl std::fmt::Debug for AppConfig {
             .field("telegram_webhook_secret", &"[REDACTED]")
             .field("telegram_webhook_url", &self.telegram_webhook_url)
             .field("telegram_bot_username", &self.telegram_bot_username)
+            .field(
+                "openai_apps_challenge_token",
+                &self.openai_apps_challenge_token,
+            )
             .field(
                 "approval_expiry_interval_secs",
                 &self.approval_expiry_interval_secs,
@@ -856,6 +879,7 @@ impl std::fmt::Debug for AppConfig {
                 "channel_relay_max_bots_per_user",
                 &self.channel_relay_max_bots_per_user,
             )
+            .field("channel_media_max_bytes", &self.channel_media_max_bytes)
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
@@ -867,6 +891,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_edit_rate_limit_burst",
                 &self.channel_relay_edit_rate_limit_burst,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_per_second",
+                &self.channel_relay_initiate_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_burst",
+                &self.channel_relay_initiate_rate_limit_burst,
             )
             .field(
                 "channel_event_rate_limit_per_second",
@@ -958,6 +990,10 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 /// still succeeds because direct-exposure deployments are the common
 /// case and don't need this set.
 fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
+    parse_ip_ranges("TRUSTED_PROXY_IPS", raw)
+}
+
+fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -966,27 +1002,14 @@ fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
         match entry.parse::<TrustedProxyRange>() {
             Ok(ip) => ips.push(ip),
             Err(err) => tracing::warn!(
+                setting,
                 entry = %entry,
                 error = %err,
-                "TRUSTED_PROXY_IPS entry is not a valid IP address or CIDR range; dropping",
+                "IP allowlist entry is not a valid IP address or CIDR range; dropping",
             ),
         }
     }
     ips
-}
-
-/// Parse the `INVITE_CODE_REQUIRED` env var.
-///
-/// Defaults to `true` (invite codes required) when the variable is unset or
-/// empty. Accepts the usual boolean-ish spellings case-insensitively.
-fn parse_invite_code_required(raw: Option<String>) -> bool {
-    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => true,
-        Some(v) => !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "false" | "0" | "no" | "off"
-        ),
-    }
 }
 
 impl AppConfig {
@@ -1011,6 +1034,9 @@ impl AppConfig {
         );
 
         Self {
+            auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
+                .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
+                .unwrap_or(true),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1123,6 +1149,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            rate_limit_exempt_ips: parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                env::var("RATE_LIMIT_EXEMPT_IPS").ok(),
+            ),
             mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1144,6 +1174,7 @@ impl AppConfig {
             billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            billing_exact_cutover_drained: env::var("BILLING_EXACT_CUTOVER_DRAINED").is_ok_and(|v| v == "true"),
             chain_verify_interval_secs: env::var("CHAIN_VERIFY_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1177,6 +1208,10 @@ impl AppConfig {
             telegram_bot_username: env::var("TELEGRAM_BOT_USERNAME")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            openai_apps_challenge_token: env::var("OPENAI_APPS_CHALLENGE_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
 
             approval_expiry_interval_secs: env::var("APPROVAL_EXPIRY_INTERVAL_SECS")
                 .ok()
@@ -1189,6 +1224,9 @@ impl AppConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60),
+
+            agent_key_login_sweep_interval_secs: env::var("AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(60),
 
             oauth_refresh_sweep_interval_secs: env::var("OAUTH_REFRESH_SWEEP_INTERVAL_SECS")
                 .ok()
@@ -1371,10 +1409,15 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            channel_poll_interval_secs: env::var("CHANNEL_POLL_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
             channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            channel_media_max_bytes: env::var("CHANNEL_MEDIA_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CHANNEL_MEDIA_MAX_BYTES),
             channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1389,6 +1432,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20),
+            channel_relay_initiate_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+            channel_relay_initiate_rate_limit_burst: env::var("CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1476,7 +1529,6 @@ impl AppConfig {
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
             billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
 
-            invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
             auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
@@ -1849,6 +1901,7 @@ mod tests {
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: true,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
@@ -1887,12 +1940,14 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 3600,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1903,8 +1958,10 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
+            agent_key_login_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
             connection_expiry_notifications: true,
@@ -1958,10 +2015,14 @@ mod tests {
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,
@@ -1987,7 +2048,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }
@@ -2172,6 +2232,25 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_exempt_ips_parse_client_cidrs_and_fail_closed_on_invalid_entries() {
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", None).is_empty());
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", Some("  ".to_string())).is_empty());
+        assert_eq!(
+            parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                Some(
+                    "192.0.2.0/24, ::ffff:198.51.100.7, 2001:db8::/32, bad, 0.0.0.0/33".to_string()
+                )
+            ),
+            vec![
+                "192.0.2.0/24".parse().unwrap(),
+                "198.51.100.7".parse().unwrap(),
+                "2001:db8::/32".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
     fn trusted_proxy_ips_unset_defaults_to_empty() {
         assert!(parse_trusted_proxy_ips(None).is_empty());
         assert!(parse_trusted_proxy_ips(Some(String::new())).is_empty());
@@ -2262,33 +2341,6 @@ mod tests {
                 .to_string(),
         ));
         assert_eq!(parsed, vec!["10.0.0.0/8".parse().unwrap()]);
-    }
-
-    #[test]
-    fn invite_code_required_defaults_to_true_when_unset() {
-        assert!(parse_invite_code_required(None));
-        assert!(parse_invite_code_required(Some(String::new())));
-        assert!(parse_invite_code_required(Some("   ".to_string())));
-    }
-
-    #[test]
-    fn invite_code_required_false_for_falsy_values() {
-        for v in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF"] {
-            assert!(
-                !parse_invite_code_required(Some(v.to_string())),
-                "{v} should disable the gate"
-            );
-        }
-    }
-
-    #[test]
-    fn invite_code_required_true_for_truthy_values() {
-        for v in ["true", "TRUE", "1", "yes", "on", "anything-else"] {
-            assert!(
-                parse_invite_code_required(Some(v.to_string())),
-                "{v} should leave the gate enabled"
-            );
-        }
     }
 
     #[test]

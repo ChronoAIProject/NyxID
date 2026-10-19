@@ -7,6 +7,8 @@ pub enum BillingIngress {
     SshExec,
     SshTunnel,
     SshWebTerminal,
+    ChannelInbound,
+    ChannelOutbound,
 }
 
 impl BillingIngress {
@@ -19,6 +21,8 @@ impl BillingIngress {
             Self::SshExec => "ssh_exec",
             Self::SshTunnel => "ssh_tunnel",
             Self::SshWebTerminal => "ssh_web_terminal",
+            Self::ChannelInbound => "channel_inbound",
+            Self::ChannelOutbound => "channel_outbound",
         }
     }
 }
@@ -32,6 +36,8 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
     BillingIngress::SshExec,
     BillingIngress::SshTunnel,
     BillingIngress::SshWebTerminal,
+    BillingIngress::ChannelInbound,
+    BillingIngress::ChannelOutbound,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -42,11 +48,27 @@ pub enum BillingRoutePolicy {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BillingEgressPermit {
-    _private: (),
+    managed: Option<super::super::telnyx_platform_service::ManagedEgressProof>,
+}
+
+impl BillingEgressPermit {
+    pub(crate) fn managed_proof(
+        &self,
+    ) -> Option<&super::super::telnyx_platform_service::ManagedEgressProof> {
+        self.managed.as_ref()
+    }
+}
+
+pub(crate) fn managed_execution_permit(
+    proof: super::super::telnyx_platform_service::ManagedEgressProof,
+) -> BillingEgressPermit {
+    BillingEgressPermit {
+        managed: Some(proof),
+    }
 }
 
 pub(crate) fn internal_node_dispatch_permit() -> BillingEgressPermit {
-    BillingEgressPermit { _private: () }
+    BillingEgressPermit { managed: None }
 }
 
 pub(crate) fn enforce_billing_egress_classification(
@@ -55,7 +77,7 @@ pub(crate) fn enforce_billing_egress_classification(
 ) -> crate::errors::AppResult<BillingEgressPermit> {
     match policy {
         Some(BillingRoutePolicy::Metered(actual)) if actual == expected => {
-            Ok(BillingEgressPermit { _private: () })
+            Ok(BillingEgressPermit { managed: None })
         }
         Some(BillingRoutePolicy::Metered(actual)) => {
             Err(crate::errors::AppError::Internal(format!(
@@ -77,7 +99,7 @@ pub(crate) fn enforce_billing_exempt_egress_classification(
     policy: Option<BillingRoutePolicy>,
 ) -> crate::errors::AppResult<BillingEgressPermit> {
     match policy {
-        Some(BillingRoutePolicy::Exempt(_)) => Ok(BillingEgressPermit { _private: () }),
+        Some(BillingRoutePolicy::Exempt(_)) => Ok(BillingEgressPermit { managed: None }),
         Some(BillingRoutePolicy::Metered(actual)) => {
             Err(crate::errors::AppError::Internal(format!(
                 "metered billing route {} attempted exempt downstream forwarding",
@@ -103,6 +125,26 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::platform_public_model::dispatch",
+        route: "/api/v1/public-nyxbot/models/{service_id}/{*path}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::permission_keys::rest",
+        route: "/api/v1/permission-execution/rest/{*path}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::permission_keys::mcp",
+        route: "/api/v1/permission-execution/mcp",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::codex_connection::verify",
+        route: "/api/v1/providers/codex-connection/verify",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::gateway_request",
         route: "/api/v1/llm/gateway/v1/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmGateway),
@@ -111,6 +153,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         handler: "handlers::llm_gateway::llm_proxy_request",
         route: "/api/v1/llm/{provider_slug}/v1/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmProvider),
+    },
+    BillingRouteSpec {
+        handler: "handlers::llm_gateway::pool_aliases",
+        route: "/api/v1/llm/pools",
+        policy: BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request"),
     },
     BillingRouteSpec {
         handler: "handlers::llm_gateway::llm_status",
@@ -141,6 +188,31 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         handler: "handlers::proxy::list_proxy_services",
         route: "/api/v1/proxy/services",
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::turns",
+        route: "/api/v1/assistant/nyxagent/turns",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::steer",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}/steer",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::capabilities",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::models",
+        route: "/api/v1/assistant/nyxagent/models",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::delete",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
         handler: "handlers::assistant_direct::completions",

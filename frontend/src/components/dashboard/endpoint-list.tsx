@@ -1,3 +1,7 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { PublicationOperations } from "@/components/services/tool-publication";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import type { CreateEndpointPayload } from "@/lib/endpoint-changes";
 import { useState } from "react";
 import type { ServiceEndpoint } from "@/types/api";
 import type { CreateEndpointFormData } from "@/schemas/endpoints";
@@ -19,6 +23,8 @@ import { toast } from "sonner";
 
 interface EndpointListProps {
   readonly serviceId: string;
+  readonly service?: import("@/types/api").DownstreamService;
+  readonly canWrite?: boolean;
   readonly hasApiSpecUrl: boolean;
 }
 
@@ -36,7 +42,17 @@ function getMethodColor(method: string): string {
   );
 }
 
-export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
+export function EndpointList(props: EndpointListProps) {
+  return <EndpointListEditor key={props.serviceId} {...props} />;
+}
+
+function EndpointListEditor({
+  serviceId,
+  hasApiSpecUrl,
+  service,
+  canWrite = true,
+}: EndpointListProps) {
+  const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: endpoints, isLoading } = useEndpoints(serviceId);
   const createMutation = useCreateEndpoint();
   const updateMutation = useUpdateEndpoint();
@@ -58,23 +74,38 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
     setFormOpen(true);
   }
 
-  async function handleDelete(endpointId: string) {
+  async function handleDelete({
+    serviceId: targetServiceId,
+    endpointId,
+  }: {
+    serviceId: string;
+    endpointId: string;
+  }) {
     setDeletingId(endpointId);
     try {
-      await deleteMutation.mutateAsync({ serviceId, endpointId });
+      await deleteMutation.mutateAsync({
+        serviceId: targetServiceId,
+        endpointId,
+      });
       toast.success("Endpoint deleted");
     } catch {
       toast.error("Failed to delete endpoint");
+      throw new Error("Failed to delete endpoint");
     } finally {
       setDeletingId(null);
     }
   }
 
-  async function handleFormSubmit(data: CreateEndpointFormData) {
+  async function handleFormSubmit(
+    data: CreateEndpointFormData,
+    patch?: Partial<CreateEndpointPayload>,
+  ) {
     if (editingEndpoint) {
       await updateMutation.mutateAsync({
         serviceId,
         endpointId: editingEndpoint.id,
+        before: editingEndpoint,
+        patch,
         data,
       });
       toast.success("Endpoint updated");
@@ -93,7 +124,9 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
     }
   }
 
-  if (isLoading) {
+  const deletion = useChangeReview(handleDelete, false, serviceId);
+
+  if (isLoading && !endpoints) {
     return (
       <div className="space-y-2">
         <Skeleton className="h-8 w-full" />
@@ -104,15 +137,18 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
 
   return (
     <div className="space-y-3">
+      {deletion.dialog}
       <div className="flex items-center gap-2">
-        <AddCtaButton label="Add Endpoint" onClick={handleAdd} />
-        {hasApiSpecUrl && (
+        {canWrite && <AddCtaButton label="Add Endpoint" onClick={handleAdd} />}
+        {canWrite && hasApiSpecUrl && (
           <Button
             variant="outline"
             onClick={() => void handleDiscover()}
             isLoading={discoverMutation.isPending}
           >
-            <ButtonIcon><Wand2 className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Wand2 className="h-3 w-3" />
+            </ButtonIcon>
             Auto-discover from OpenAPI
           </Button>
         )}
@@ -121,7 +157,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
       {!endpoints || endpoints.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8">
           <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
-          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
             No endpoints configured.{" "}
             {hasApiSpecUrl
               ? "Use auto-discover or add one manually."
@@ -130,7 +166,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         </div>
       ) : (
         <div className="rounded-lg border">
-          <table className="w-full text-[12px]">
+          <table className="w-full text-12">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">
@@ -153,8 +189,17 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs">{ep.name}</span>
+                      <Badge
+                        variant={
+                          (ep.publication ?? "published") === "published"
+                            ? "success"
+                            : "secondary"
+                        }
+                      >
+                        {ep.publication ?? "published"}
+                      </Badge>
                       {!ep.is_active && (
-                        <Badge variant="secondary" className="text-[10px]">
+                        <Badge variant="secondary" className="text-10">
                           Inactive
                         </Badge>
                       )}
@@ -163,7 +208,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   <td className="px-3 py-2">
                     <Badge
                       variant="secondary"
-                      className={`text-[10px] ${getMethodColor(ep.method)}`}
+                      className={`text-10 ${getMethodColor(ep.method)}`}
                     >
                       {ep.method}
                     </Badge>
@@ -179,21 +224,33 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7"
+                        disabled={!canWrite}
                         onClick={() => handleEdit(ep)}
                       >
                         <Pencil className="h-3 w-3" />
                         <span className="sr-only">Edit endpoint</span>
                       </Button>
+                      {canWrite &&
+                        (service?.offering_kind !== "tool" || admin) && (
                       <Button
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                        onClick={() => void handleDelete(ep.id)}
+                        onClick={() =>
+                          deletion.review({ serviceId, endpointId: ep.id }, [
+                            {
+                              field: "Delete endpoint",
+                              before: `${ep.method} ${ep.path} (${ep.name})`,
+                              after: "Deleted",
+                            },
+                          ])
+                        }
                         disabled={deletingId === ep.id}
                       >
                         <Trash2 className="h-3 w-3 text-destructive" />
                         <span className="sr-only">Delete endpoint</span>
                       </Button>
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -203,7 +260,17 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         </div>
       )}
 
+      {service?.offering_kind === "tool" && (
+        <PublicationOperations tool={service} disabled={!canWrite} />
+      )}
       <EndpointFormDialog
+        serviceId={serviceId}
+        currentEndpoint={
+          endpoints
+            ? (endpoints.find((item) => item.id === editingEndpoint?.id) ??
+              null)
+            : undefined
+        }
         open={formOpen}
         onOpenChange={setFormOpen}
         endpoint={editingEndpoint}

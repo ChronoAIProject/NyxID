@@ -64,13 +64,13 @@ describe("MfaVerifyForm", () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });
 
-  it("redirects to a same-origin returnTo URL instead of /dashboard on success", async () => {
+  it("preserves the approval code query in a same-origin returnTo after MFA", async () => {
     const user = userEvent.setup();
     mockVerifyMutateAsync.mockResolvedValue(undefined);
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => undefined);
-    const returnTo = `${window.location.origin}/settings`;
+    const returnTo = `${window.location.origin}/login/agent-key?user_code=ABCDEFGH`;
 
     render(<MfaVerifyForm returnTo={returnTo} />);
 

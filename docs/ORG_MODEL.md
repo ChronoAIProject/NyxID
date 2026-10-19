@@ -62,6 +62,8 @@ graph LR
 | **Member** | No | Yes | Yes |
 | **Viewer** | No | No (`allowed: false`, 403 on proxy) | Yes (read-only) |
 
+API-key callers omit Viewer rows (a Viewer cannot call the service, matching the proxy).
+
 ### Scope: role defaults + per-member overrides
 
 Service scope has two layers: org-wide **role defaults** (`org_role_scopes`, one row per `(org_user_id, role)`) and **per-membership overrides** on `OrgMembership`. Each membership carries a `scope_source` discriminator:
@@ -440,13 +442,38 @@ Personal-routed calls record `routed_via: "personal"` and omit the org fields. A
 
 All routes are under `/api/v1`. Org-aware mutation handlers gate on the `org_service::resolve_owner_access(actor, target_owner_id)` helper, which returns one of `Direct | AsOrgAdmin | AsOrgMember | Forbidden` and carries the membership's **effective** `allowed_service_ids` (role scope merged with any per-member override, resolved live via `org_role_scope_service::effective_scope_for_membership`) so per-resource scope checks compose with role checks.
 
+### Authentication classes
+
+General API keys, including Agent Key login credentials, can call these six GET routes: `/orgs`, `/orgs/{key}`, `/orgs/{key}/authorization` (UUID or slug), `/orgs/{org_id}/members`, `/orgs/{org_id}/members/{member_id}/authorization`, and `/orgs/{org_id}/role-scopes`. No additional scope or service allowlist is required; membership controls reads, and role scopes require admin access. Scheduled-invocation keys remain restricted to durable proxy execution.
+
+The actor is `AuthUser.user_id`, the key's polymorphic owner. Person-owned keys read that person's active memberships. An org-owned key lists only its owning org and has Direct read access to that org's profile, authorization metadata, roster, member authorization metadata, and role scopes. `your_role: "admin"` is the read-side projection of `OwnerAccess::Direct`, not a membership row; `is_primary` is false, while pending invite counts and enabled features use the ordinary helpers with the org actor and Admin role. Other orgs still require active membership.
+
+All org writes, all invite routes (including GET, which exposes redeemable bearer nonces), and `PATCH /users/me/primary-org` remain human-only for API keys. Service-account and relay tokens remain rejected. Delegated tokens retain exactly their existing parity: ordinary non-WebSocket GET reads require the exact `account:read` scope, while invites and mutations remain denied.
+
+General API keys can also call the nine AI-service inventory GETs listed below. These reads skip auto-provisioning and lazy pending-OAuth reconciliation; restricted keys see only their effective service allowlist and its backing endpoints/credentials. Personal keys list personal and org-shared services through active Member/Admin memberships and effective role scopes; Viewer-only org services are excluded. Org-owned keys act directly as the org, so its own services retain `credential_source.type: "personal"`. `/keys` alone includes disabled services, still subject to key filtering. `/endpoints?org_id=` requires Direct or admin access. Inventory writes and the entire NyxID `/api-keys` management router stay human-only for API keys; delegated `account:read`, service-account, relay, and scheduled-invocation behavior is unchanged.
+
+### AI-service inventory
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/keys` | human, delegated `account:read`, or API key within service scope | Personal and org-shared inventory, including disabled rows |
+| `GET` | `/keys/{id_or_slug}` | same authentication, owner/member ACL and key scope | Service detail |
+| `GET` | `/keys/{id_or_slug}/authorization` | same as service detail | Service authorization evidence |
+| `GET` | `/user-services` | same as inventory listing | Active service inventory |
+| `GET` | `/endpoints` | human, delegated `account:read`, or API key; Direct/admin for `org_id` | Owner endpoints, filtered to allowed backing services for restricted keys |
+| `GET` | `/endpoints/{id}/authorization` | owner/member ACL and API-key backing-service scope | Endpoint authorization evidence |
+| `GET` | `/endpoints/{id}/openapi-endpoints` | same as endpoint evidence | Endpoint operations |
+| `GET` | `/api-keys/external` | human, delegated `account:read`, or API key within backing-service scope | Owner credential metadata |
+| `GET` | `/api-keys/external/{id}/authorization` | owner/member ACL and API-key backing-service scope | Credential authorization evidence |
+| `POST`, `PUT`, `PATCH`, `DELETE` | Inventory mutation routes | human only, with existing owner/admin ACLs | Create, update, or delete inventory |
+
 ### Org CRUD
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/orgs` | session | Create an org (caller becomes the first Admin) |
-| `GET` | `/orgs` | session | List orgs the caller belongs to |
-| `GET` | `/orgs/{id}` | org member | Org detail |
+| `GET` | `/orgs` | person or Direct org actor | List orgs the caller belongs to |
+| `GET` | `/orgs/{id}` | org member or Direct | Org detail |
 | `PATCH` | `/orgs/{id}` | org admin | Update display name, avatar, or contact email |
 | `DELETE` | `/orgs/{id}` | org admin | Delete org (see [Org Deletion](#org-deletion)) |
 
@@ -456,7 +483,7 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the `org_ser
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/orgs/{id}/members` | org member | List members (response includes `scope_source` and `effective_allowed_service_ids`) |
+| `GET` | `/orgs/{id}/members` | org member or Direct | List members (response includes `scope_source` and `effective_allowed_service_ids`) |
 | `POST` | `/orgs/{id}/members` | org admin | Add member by user_id (admin add path). Accepts optional `scope_source` and `allowed_service_ids` |
 | `PATCH` | `/orgs/{id}/members/{member_user_id}` | org admin | Change role, `scope_source`, or `allowed_service_ids` |
 | `DELETE` | `/orgs/{id}/members/{member_user_id}` | org admin | Revoke membership |
@@ -470,13 +497,13 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the `org_ser
 
 **Last-admin guard.** `PATCH` and `DELETE` on a member refuse to remove the last active admin. An admin who tries to demote or revoke themselves while they are the only admin gets `409 Conflict` with the message "cannot remove or demote the last active admin". The intent is to keep the org recoverable: `DELETE /orgs/{id}` also requires a current admin and would otherwise leave any owned services / keys / policies stranded. Admins who actually want to dissolve the org must `DELETE /orgs/{id}` instead, which cascades memberships once the live blockers are clear.
 
-`POST /orgs` rejects org-owned actors with `OrgCannotAuthenticate` (an org-owned API key cannot create an org), and rolls back the org user insert if the membership-create step fails for any other reason — no matter what, no zero-admin org row is ever left behind.
+`POST /orgs` rejects API keys at the human-only router. Its handler also rejects org-owned actors with `OrgCannotAuthenticate` as defense in depth, and rolls back the org user insert if the membership-create step fails for any other reason — no matter what, no zero-admin org row is ever left behind.
 
 ### Invites
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/orgs/{id}/invite` | org admin | Create a one-time invite (returns `nonce`) |
+| `POST` | `/orgs/{id}/invites` | org admin | Create a one-time invite (returns `nonce`) |
 | `GET` | `/orgs/{id}/invites` | org admin | List pending invites |
 | `DELETE` | `/orgs/{id}/invites/{invite_id}` | org admin | Cancel a pending invite |
 | `POST` | `/orgs/join/{nonce}` | session | Redeem an invite — caller joins the org |
@@ -489,7 +516,7 @@ Invites carry their own `role`, `scope_source`, and optional `allowed_service_id
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/orgs/{id}/role-scopes` | org admin | List the default scope for every role. Always returns three entries (Admin / Member / Viewer); unconfigured roles come back with `is_default = true` and `allowed_service_ids = null`. |
+| `GET` | `/orgs/{id}/role-scopes` | org admin or Direct | List the default scope for every role. Always returns three entries (Admin / Member / Viewer); unconfigured roles come back with `is_default = true` and `allowed_service_ids = null`. |
 | `PUT` | `/orgs/{id}/role-scopes/{role}` | org admin | Upsert the scope. Body: `{"allowed_service_ids": [<UserService.id>...] \| null}` (null = full access). Rejects phantom service ids with `400 BadRequest`. Emits `org_role_scope_set` audit event. |
 | `DELETE` | `/orgs/{id}/role-scopes/{role}` | org admin | Remove the row; the role falls back to the default (full access). Equivalent to `PUT` with `null`, except the row is deleted rather than stored. Emits `org_role_scope_cleared`. |
 
@@ -758,11 +785,11 @@ Each blocker filter uses the same live-state semantics as the corresponding API 
 - *active* custom catalog services  ({ created_by, is_active: true })
 ```
 
-Legacy `user_service_connections` rows are still treated as live credentials by `proxy_service::user_has_legacy_personal_connection` during the migration window (they outrank org-shared credentials so a personal pre-migration connection never gets silently retargeted by joining an org). An org-owned API key can hit `POST /connections/{id}` because that route sits in the shared router (`api_v1_shared`) which only blocks delegated tokens, so they're a real org-deletion concern. The admin must call `DELETE /connections/{service_id}` first, which soft-deletes the row and clears the credential before the org can be deleted.
+Legacy `user_service_connections` rows are still treated as live credentials by `proxy_service::user_has_legacy_personal_connection` during the migration window (they outrank org-shared credentials so a personal pre-migration connection never gets silently retargeted by joining an org). An org-owned API key can hit `POST /connections/{id}` because that route sits in the shared router (`api_v1_shared`), which accepts general API keys with management write scope and blocks relay tokens and delegated writes, so they're a real org-deletion concern. The admin must call `DELETE /connections/{service_id}` first, which soft-deletes the row and clears the credential before the org can be deleted.
 
 If any of these counts is non-zero, the API returns `409 Conflict` with a list (`"Cannot delete org while it still owns 3 user services, 1 NyxID API key, …"`) and the admin must clean them up first. Without this guard the org user record could disappear while orphaned resources continue to point at it, and `resolve_owner_access` would deny every read/write so nobody could clean them up.
 
-The channel-bot block is especially important. Org-owned NyxID API keys can register bots via `POST /channel-bots` (the human-only router still allows API-key auth on those routes), and the inbound-webhook handler accepts any active bot row by id without a live owner check. If we let the org disappear while a bot was still active, the platform-side webhook would keep firing forever with no way to deregister it. The blocker forces the admin to call `DELETE /channel-bots/{id}` first, which deregisters the webhook on the platform side and soft-deletes the bot + its conversations.
+The channel-bot blocker protects existing org-owned bots, including rows created before the June 2026 human-only router hardening. `POST /channel-bots` now rejects API keys, including org-owned keys, through `reject_api_key_tokens`. Existing bots still need cleanup: the inbound-webhook handler accepts an active bot row by id without a live owner check, so deleting its org could leave platform webhooks firing with no owner able to deregister them. The blocker requires cleanup through `DELETE /channel-bots/{id}`, which deregisters the platform webhook and soft-deletes the bot and its conversations.
 
 Credential nodes are blocked for the same reason. `node_service::authenticate_node` consults the active node row on every WS reconnect, so a dangling org-owned node would keep accepting agent connections and proxying traffic on behalf of a non-existent org. The admin must call `DELETE /nodes/{id}` first; the node agent fails on its next heartbeat. The cascade also clears outstanding `node_registration_tokens` for the org so the WS registration path cannot mint a fresh node row out from under the about-to-be-deleted org. Bindings owned by the org are cleaned up regardless of which physical node they reference — org-shared services routed through a *personal* node create a `NodeServiceBinding` with `user_id = org_user_id` (so proxy resolution finds it under the effective owner), and those rows would otherwise leak after the org is gone.
 
@@ -829,7 +856,7 @@ The audit log lives in its own collection and survives deletion intact.
 
 `openclaw_channel_mappings` is intentionally **cascade-only**, not a blocker. NyxID never registers anything with OpenClaw — the user manually pastes the per-mapping webhook secret into their OpenClaw plugin, and the inbound webhook handler resolves the mapping by `(channel, channel_user_id)` plus an HMAC check against the stored secret hash. After cascade-delete, the next inbound webhook fails the lookup (or the HMAC) and the user re-creates the mapping if they still want it. There is no `DELETE /integrations/openclaw/mappings` endpoint either, so promoting this to a blocker would render any org with a mapping permanently undeletable.
 
-`notification_channels` is also **cascade-only**. An org-owned API key can call any `/notifications/*` endpoint and trip `get_or_create_channel`, which inserts a row keyed by `auth_user.user_id` (the org user_id). The row is dead state from creation: an org cannot meaningfully receive a notification because the approval fan-out targets *person* admin user_ids, not the org itself, so any embedded Telegram link / push device token attached to an org user record never gets read. The cascade clears it on delete; there is no platform-side cleanup beyond letting FCM/APNs garbage-collect dormant subscriptions, which they do automatically.
+`notification_channels` is also **cascade-only**. `/notifications/*` now rejects API keys through the human-only router's `reject_api_key_tokens` layer. Legacy org-owned rows can remain from before the June 2026 hardening, when an org-owned key could trigger `get_or_create_channel` under the org user ID. These rows are unused: approval notification fan-out targets person admin IDs, not the org itself. The cascade clears that legacy state on deletion; dormant FCM/APNs subscriptions need no additional platform-side cleanup.
 
 `user_provider_credentials` is **cascade-only** by `user_id`. The collection holds per-user OAuth client overrides (encrypted client_id + client_secret) for providers that allow user-supplied app credentials. There is no DELETE handler today, so blocking would render any org with a credential row permanently undeletable, and the encrypted blobs are useless without the org user.
 
@@ -878,7 +905,7 @@ The following are intentionally **not** in this feature and are tracked separate
 - **Credential rotation notifications** — when a shared OAuth token expires or is rotated, members are not notified.
 - **Org usage dashboard** — aggregate request counts, latency, error rates per org.
 - **Org billing / quota** — per-org rate limits and spend caps.
-- **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start.
+- **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start. NyxID platform admins can separately transfer custom catalog definitions and supported channel bots through [Administrative ownership transfers](ADMIN_OWNERSHIP_TRANSFERS.md); this does not move connected-service bundles.
 - **Nested orgs / sub-orgs** — flat membership only.
 - **SSO for orgs (SAML / OIDC auto-membership)** — future RFC.
 - **Optional org-owned nodes** — see below.

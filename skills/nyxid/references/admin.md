@@ -37,6 +37,25 @@ To restrict an app's service access, have the user re-consent with `prompt=conse
 
 ## Admin Operations
 
+### Platform credentials
+
+Platform admins configure NyxID-owned integration apps at `/admin/platform-credentials`. This secret-delivering GET is **admin-only**, including for reads; operators cannot read it. The inventory, field definitions, setup checklist and backing come from registered channel adapters (Meta and X today). Future providers need an adapter descriptor, with no provider branch in this page, API or CLI.
+
+```bash
+nyxid admin platform-credentials show meta
+nyxid admin platform-credentials show x
+nyxid admin platform-credentials set x --field-env client_id=X_CLIENT_ID --field-env client_secret=X_CLIENT_SECRET
+nyxid admin platform-credentials set meta --app-id 123456 --embedded-signup-config-id 789012 --app-secret-env META_APP_SECRET
+nyxid admin platform-credentials set meta --field app_id=123456 --field-env app_secret=META_APP_SECRET
+nyxid admin platform-credentials set meta --regenerate-verify-token
+nyxid admin platform-credentials clear meta --field app_secret
+nyxid admin platform-credentials clear meta
+```
+
+Set secrets through environment-variable flags, never literal command arguments. Show returns configured badges and public values, plus the admin-readable generated platform Verify Token when applicable and the callback URL; secrets are never returned. Clear with `--field` removes selected fields; without it, clears that provider's credentials. The API is `GET /api/v1/admin/platform-credentials`, `PUT/PATCH/DELETE /api/v1/admin/platform-credentials/{provider}`; null clears a field. Follow each descriptor's checklist and `docs/CHANNEL_BOT_RELAY.md`.
+
+`Stored` backing (Meta) stores encrypted fields in `platform_credentials`. App-secret rotation preserves its Verify Token unless regeneration is requested; then update Meta's dashboard. `ProviderOAuth` backing (X) shares the `twitter` provider's encrypted Client ID and Client Secret, with callback `{BASE_URL}/api/v1/providers/callback`. There is no duplicate credential store. Clearing either X credential retains the provider record but stops all of the `twitter` provider's OAuth connections and logins until restored. Provider-wide and per-field clears show the same confirmation in the admin page. CLI clears require `--confirm-shared-provider`, for example `nyxid admin platform-credentials clear x --field client_secret --confirm-shared-provider`. Audits record `shared_provider_slug`. No webhook Verify Token exists for X. Enable `tweet.read users.read dm.read dm.write offline.access` and fund the app's paid usage credits; current pricing supersedes Basic/Pro subscriptions and all customer DM traffic consumes NyxID's app budget. Existing connections need renewed DM consent. Required-credential removal disables managed onboarding; affected bots surface connection failures. Other providers continue independently.
+
 ### Platform roles
 
 NyxID has three platform-level roles, ordered low-to-high:
@@ -92,7 +111,7 @@ Notes for admins helping new users:
 - `list` shows `used_count/max_uses`, active state, and the per-redemption `usages` array (who used it, when).
 - Deactivation is immediate and cannot be undone -- create a new code if the user needs another attempt.
 - Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
-- **Turning the gate off entirely:** set `INVITE_CODE_REQUIRED=false` in the backend environment and restart the server. Public registration then works without a code and first-time social sign-ups succeed normally. Set it back to `true` (or unset it) to re-enable the gate.
+- **Turning the gate off entirely:** disable the global `auth:invitation-code` flag in Admin > Feature Flags. Public registration then works without a code and first-time social sign-ups succeed normally. Enable the flag again to require codes. The change takes effect without a server restart.
 
 ## MCP Configuration
 

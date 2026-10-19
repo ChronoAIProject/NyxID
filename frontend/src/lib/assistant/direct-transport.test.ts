@@ -653,3 +653,77 @@ describe("DirectAssistantTransport identity isolation", () => {
     );
   });
 });
+
+describe("DirectAssistantTransport credits denial", () => {
+  it("detects HTTP 402 insufficient_credits before the http_402 rewrite", async () => {
+    const { useCreditsDenialStore } = await import(
+      "@/stores/credits-denial-store"
+    );
+    useCreditsDenialStore.getState().reset();
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "insufficient_credits",
+              error_code: 11300,
+              message: "Insufficient credits",
+            }),
+            { status: 402, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
+
+    expect(events.at(-1)).toMatchObject({ error: { code: "http_402" } });
+    expect(useCreditsDenialStore.getState().current).toMatchObject({
+      payer: "unknown",
+      key: expect.stringMatching(
+        new RegExp(`^assistant:direct:${conversationId}:`),
+      ),
+    });
+  });
+
+  it("detects an insufficient_credits stream error chunk", async () => {
+    const { useCreditsDenialStore } = await import(
+      "@/stores/credits-denial-store"
+    );
+    useCreditsDenialStore.getState().reset();
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(async () =>
+        sseResponse(
+          'data: {"error":{"code":"insufficient_credits","message":"No credits"}}\n\n',
+        ),
+      ),
+    });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
+    expect(useCreditsDenialStore.getState().current?.key).toMatch(
+      /^assistant:direct:/,
+    );
+  });
+
+  it("never classifies generic failures as credits", async () => {
+    const { useCreditsDenialStore } = await import(
+      "@/stores/credits-denial-store"
+    );
+    useCreditsDenialStore.getState().reset();
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(async () =>
+        sseResponse(
+          'data: {"error":{"code":"nyxid_error","message":"Failed"}}\n\n',
+        ),
+      ),
+    });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
+    expect(useCreditsDenialStore.getState().current).toBeNull();
+  });
+});

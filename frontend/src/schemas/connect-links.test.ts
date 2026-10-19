@@ -13,6 +13,7 @@ describe("connect link schemas", () => {
     const parsed = connectLinkPreviewSchema.parse({
       service_name: "GitHub",
       service_slug: "github",
+      scopes: ["public_repo", "read:org"],
       label: "Coding agent",
       requested_by: "codex",
       created_at: "2026-08-05T10:00:00Z",
@@ -25,10 +26,13 @@ describe("connect link schemas", () => {
       requires_gateway_url: false,
       api_key_url: null,
       api_key_instructions: null,
+      endpoint_url: "https://gateway.example.test",
       callback_url:
         "desktop-app://connect/return?status=cancelled&connect_link_id=65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
     });
     expect(parsed.service_slug).toBe("github");
+    expect(parsed.scopes).toEqual(["public_repo", "read:org"]);
+    expect(parsed.endpoint_url).toBe("https://gateway.example.test");
     expect(parsed).not.toHaveProperty("token");
     expect(parsed.callback_url).toContain("status=cancelled");
   });
@@ -51,6 +55,7 @@ describe("connect link schemas", () => {
       api_key_instructions: null,
     });
     expect(parsed.auth_key_name).toBe("");
+    expect(parsed.scopes).toEqual([]);
 
     const status = connectLinkStatusResponseSchema.parse({
       id: "65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
@@ -62,6 +67,7 @@ describe("connect link schemas", () => {
       last_error_at: "2026-08-06T01:18:04+00:00",
     });
     expect(status.status).toBe("completed");
+    expect(status.scopes).toEqual([]);
   });
 
   it("validates BYO OAuth and gateway fields independently", () => {
@@ -71,7 +77,9 @@ describe("connect link schemas", () => {
       oauth_client_secret: "",
     });
     expect(validateConnectOAuthForm(empty, false, false)).toBeNull();
-    expect(validateConnectOAuthForm(empty, true, false)).toMatch(/Endpoint URL/);
+    expect(validateConnectOAuthForm(empty, true, false)).toMatch(
+      /Endpoint URL/,
+    );
     expect(validateConnectOAuthForm(empty, false, true)).toMatch(
       /ID and secret are required/,
     );
@@ -92,11 +100,13 @@ describe("connect link schemas", () => {
       service_slug: "github",
       expires_at: "2026-08-05T10:15:00Z",
       requesting_app_id: "desktop-client",
+      scopes: ["public_repo"],
       requesting_app_name: "Desktop App",
       last_error: "provider_access_denied",
       last_error_at: "2026-08-05T10:04:12Z",
     });
     expect(parsed.last_error).toBe("provider_access_denied");
+    expect(parsed.scopes).toEqual(["public_repo"]);
     expect(parsed.requesting_app_name).toBe("Desktop App");
   });
 
@@ -118,6 +128,8 @@ describe("connect link schemas", () => {
       oauth_client_id: "client-id",
       oauth_client_secret: "",
     });
-    expect(validateConnectCredentialForm(values, true)).toMatch(/supplied together/);
+    expect(validateConnectCredentialForm(values, true)).toMatch(
+      /supplied together/,
+    );
   });
 });

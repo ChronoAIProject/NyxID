@@ -29,6 +29,21 @@
 //! | `platform_bot_id`           | Bot user id from `auth.test`          |
 //! | `platform_bot_username`     | Bot handle from `auth.test`           |
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "channel_not_found",
+    "not_in_channel",
+    "is_archived",
+    "message_not_found",
+    "cant_update_message",
+    "edit_window_closed",
+];
+
+#[path = "slack_thread.rs"]
+mod thread;
+
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
+
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -36,7 +51,7 @@ use subtle::ConstantTimeEq;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundAttachment, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundAttachment, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
     PlatformVerifySecrets,
 };
 
@@ -53,11 +68,15 @@ const MAX_TIMESTAMP_SKEW_SECS: i64 = 60 * 5;
 ///
 /// Stateless — all per-bot state (signing secret, bot token, team id) lives
 /// on the [`ChannelBot`] document.
-pub struct SlackAdapter;
+pub struct SlackAdapter {
+    base_url: String,
+}
 
 impl SlackAdapter {
     pub fn new() -> Self {
-        Self
+        Self {
+            base_url: SLACK_API_BASE.to_string(),
+        }
     }
 }
 
@@ -257,10 +276,185 @@ fn parse_event(event: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serde_json::Value {
+    let text = reply.text.as_deref().unwrap_or("");
+
+    let mut body = serde_json::json!({
+        "channel": conversation_id,
+        "text": text,
+    });
+
+    let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
+    if let Some(ts) = thread_ts {
+        body["thread_ts"] = serde_json::json!(ts);
+    }
+
+    // Optional Block Kit passthrough — agents that want richer payloads
+    // can set `metadata.blocks`. The array is forwarded as-is; Slack
+    // validates server-side.
+    if let Some(metadata) = reply.metadata.as_ref()
+        && let Some(blocks) = metadata.get("blocks")
+    {
+        body["blocks"] = blocks.clone();
+    }
+
+    body
+}
+
+fn build_update_message_body(
+    conversation_id: &str,
+    platform_message_id: &str,
+    edit: &OutboundEdit,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "channel": conversation_id,
+        "ts": platform_message_id,
+        "text": edit.text.as_deref().unwrap_or(""),
+    });
+    if let Some(blocks) = edit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("blocks"))
+    {
+        body["blocks"] = blocks.clone();
+    }
+    body
+}
+
+#[cfg(test)]
+impl SlackAdapter {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
+        Self {
+            base_url: base.into(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for SlackAdapter {
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        _ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(self.resolve_native_thread(facts))
+    }
+
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+
+    async fn thread_history(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        self.history_in_thread(http, credentials, target, before)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::slack(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            thread_history: true,
+            ..Default::default()
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        "Slack"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
+    /// Thread metadata: thread_ts.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: true,
+            thread: true,
+            edit: true,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "slack"
+    }
+
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        use super::super::channel_registration::{
+            BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
+        };
+        RegistrationDescriptor {
+            documentation_url: Some("https://api.slack.com/apis/events-api"),
+            required_suffix: " for Slack",
+            setup_instructions: &[
+                "In Slack app settings > Event Subscriptions, enable Events and set Request URL to the Callback URL shown here. Slack verifies the URL automatically.",
+                "Subscribe to the bot message events for the conversations you want to receive, grant the matching OAuth scopes and permission to send replies, then save and reinstall the app if Slack requests it.",
+                "Invite the bot to the channels it should handle. Assign an agent in NyxID and send a test message.",
+            ],
+            unsupported_patch_message: Some(
+                "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
+            ),
+            fields: &[
+                BOT_TOKEN_FIELD,
+                RegistrationField {
+                    name: "app_secret",
+                    label: "Signing Secret",
+                    storage: "app_secret_encrypted",
+                    secret: true,
+                    required: true,
+                    patchable: true,
+                    clearable: false,
+                    webhook_secret: true,
+                    hint: Some("Basic Information > App Credentials in Slack app settings."),
+                    platform_fallback: None,
+                },
+            ],
+            ..RegistrationDescriptor::default()
+        }
+    }
+
+    fn webhook_policy(&self, body: &[u8]) -> super::super::channel_platform::WebhookPolicy {
+        use super::super::channel_platform::WebhookPolicy;
+        match self.handle_challenge(body) {
+            Some(challenge) => WebhookPolicy::Challenge(challenge),
+            None => WebhookPolicy::Immediate(None),
+        }
+    }
+
+    fn reply_context(
+        &self,
+        thread_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        if super::discord::apply_interaction_context(thread_id, created_at, metadata) {
+            return;
+        }
+        if let Some(thread_id) = thread_id {
+            super::super::channel_platform::insert_reply_context(metadata, "thread_ts", thread_id);
+        }
     }
 
     async fn verify_webhook(
@@ -303,7 +497,7 @@ impl PlatformAdapter for SlackAdapter {
         }
 
         let signing_secret = secrets
-            .and_then(|s| s.slack_signing_secret.as_deref())
+            .and_then(|s| s.get("app_secret"))
             .unwrap_or_default();
         if signing_secret.is_empty() {
             return Err(AppError::ChannelWebhookVerificationFailed(
@@ -359,47 +553,163 @@ impl PlatformAdapter for SlackAdapter {
         }
     }
 
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        media::download(
+            &attachment.url,
+            &["files.slack.com", "*.slack.com"],
+            Some(&self.base_url),
+            Some(credentials.token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
-        let text = reply.text.as_deref().unwrap_or("");
-
-        let mut body = serde_json::json!({
-            "channel": conversation_id,
-            "text": text,
-        });
-
-        // Thread the reply correctly. Slack expects `thread_ts` to be the
-        // ROOT message's `ts`. The relay layer surfaces the inbound event's
-        // root in `metadata.thread_ts`, so prefer that. Fall back to
-        // `reply_to_platform_message_id` only when the agent is explicitly
-        // replying to a specific message (Slack will auto-resolve to the
-        // parent thread, but the explicit root anchor is more reliable).
-        let thread_ts = reply
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("thread_ts"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| reply.reply_to_platform_message_id.clone());
-        if let Some(ts) = thread_ts {
-            body["thread_ts"] = serde_json::json!(ts);
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty()) {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let mut last = None;
+            let context = build_post_message_body(reply, conversation_id);
+            for attachment in &reply.attachments {
+                let upload = media::platform_json(
+                    http.post(format!("{}/files.getUploadURLExternal", self.base_url))
+                        .bearer_auth(credentials.token)
+                        .form(&[
+                            (
+                                "filename",
+                                media::safe_filename(attachment.filename.as_deref()),
+                            ),
+                            ("length", attachment.bytes.len().to_string()),
+                        ]),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
+                )
+                .await?;
+                match upload["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                upload["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
+                }
+                let url = upload["upload_url"]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
+                let id = upload["file_id"]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
+                let client = media::media_client(
+                    url,
+                    Some(&["files.slack.com", "*.slack.com"]),
+                    Some(&self.base_url),
+                )
+                .await?;
+                crate::services::channel_platform::mark_provider_attempt();
+                let response = client
+                    .put(url)
+                    .body(attachment.bytes.clone())
+                    .send()
+                    .await
+                    .map_err(|_| media::upload_failed())?;
+                if !response.status().is_success() {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            "Slack",
+                            &format!("HTTP {}: upload refused", response.status()),
+                            &[],
+                        ),
+                    );
+                }
+                let mut body =
+                    serde_json::json!({"files": [{"id": id}], "channel_id": conversation_id});
+                if let Some(caption) = &attachment.caption {
+                    body["initial_comment"] = serde_json::json!(caption);
+                }
+                if let Some(thread) = context.get("thread_ts") {
+                    body["thread_ts"] = thread.clone();
+                }
+                let completed = media::platform_json(
+                    http.post(format!("{}/files.completeUploadExternal", self.base_url))
+                        .bearer_auth(credentials.token)
+                        .json(&body),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
+                )
+                .await?;
+                match completed["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                completed["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
+                }
+                // Completion returns file IDs, not chat message timestamps. Resolve
+                // the share receipt so subsequent /reply/update uses a real ts.
+                let info = media::platform_json(
+                    http.get(format!("{}/files.info", self.base_url))
+                        .bearer_auth(credentials.token)
+                        .query(&[("file", id)]),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
+                )
+                .await?;
+                match info["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                info["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
+                }
+                last = ["public", "private"].iter().find_map(|scope| {
+                    info["file"]["shares"][scope][conversation_id]
+                        .as_array()?
+                        .last()?["ts"]
+                        .as_str()
+                        .map(str::to_string)
+                });
+            }
+            return Ok(last);
         }
+        let bot_token = credentials.token;
+        let body = build_post_message_body(reply, conversation_id);
 
-        // Optional Block Kit passthrough — agents that want richer payloads
-        // can set `metadata.blocks`. The array is forwarded as-is; Slack
-        // validates server-side.
-        if let Some(metadata) = reply.metadata.as_ref()
-            && let Some(blocks) = metadata.get("blocks")
-        {
-            body["blocks"] = blocks.clone();
-        }
-
-        let url = format!("{SLACK_API_BASE}/chat.postMessage");
+        let url = format!("{}/chat.postMessage", self.base_url);
+        crate::services::channel_platform::mark_provider_attempt();
         let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
@@ -408,7 +718,8 @@ impl PlatformAdapter for SlackAdapter {
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "Slack chat.postMessage request failed: {e}"
+                    "Slack chat.postMessage request failed: {}",
+                    e.without_url()
                 ))
             })?;
 
@@ -421,7 +732,8 @@ impl PlatformAdapter for SlackAdapter {
 
         let resp: serde_json::Value = response.json().await.map_err(|e| {
             AppError::ChannelPlatformError(format!(
-                "Slack chat.postMessage response parse failed: {e}"
+                "Slack chat.postMessage response parse failed: {}",
+                e.without_url()
             ))
         })?;
 
@@ -438,13 +750,67 @@ impl PlatformAdapter for SlackAdapter {
                 return Err(slack_rate_limited(error, None));
             }
 
-            return Err(AppError::ChannelPlatformError(format!(
-                "Slack chat.postMessage failed: {error}"
-            )));
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Slack",
+                    error,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
 
         let message_id = resp.get("ts").and_then(|v| v.as_str()).map(String::from);
         Ok(message_id)
+    }
+
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        let body = build_update_message_body(conversation_id, platform_message_id, edit);
+        let response = http
+            .post(format!("{}/chat.update", self.base_url))
+            .header("Authorization", format!("Bearer {}", credentials.token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::ChannelPlatformError(format!(
+                    "Slack chat.update request failed: {}",
+                    e.without_url()
+                ))
+            })?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = parse_retry_after(response.headers().get("retry-after"));
+            return Err(slack_rate_limited("HTTP 429", retry_after));
+        }
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Slack chat.update response parse failed: {}",
+                e.without_url()
+            ))
+        })?;
+        if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let error = resp
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            if error == "ratelimited" || error == "rate_limited" {
+                return Err(slack_rate_limited(error, None));
+            }
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Slack",
+                    error,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
+        }
+        Ok(())
     }
 
     async fn register_webhook(
@@ -464,9 +830,10 @@ impl PlatformAdapter for SlackAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
-        let url = format!("{SLACK_API_BASE}/auth.test");
+        let bot_token = credentials.token;
+        let url = format!("{}/auth.test", self.base_url);
         let resp: serde_json::Value = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
@@ -512,6 +879,7 @@ impl PlatformAdapter for SlackAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: bot_id.to_string(),
+            display_name: None,
             platform_bot_username: username.to_string(),
         })
     }
@@ -534,12 +902,138 @@ impl PlatformAdapter for SlackAdapter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn update_message_body_preserves_blocks_and_omits_threading() {
+        let mut edit = OutboundEdit {
+            text: Some("updated".into()),
+            metadata: None,
+        };
+        assert_eq!(
+            build_update_message_body("C123", "123.456", &edit),
+            serde_json::json!({
+                "channel": "C123", "ts": "123.456", "text": "updated"
+            })
+        );
+        let blocks = serde_json::json!([{ "type": "section", "text": { "type": "mrkdwn", "text": "*updated*" } }]);
+        edit.metadata = Some(serde_json::json!({"blocks": blocks, "thread_ts": "ignored"}));
+        assert_eq!(
+            build_update_message_body("C123", "123.456", &edit),
+            serde_json::json!({
+                "channel": "C123", "ts": "123.456", "text": "updated", "blocks": blocks
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn native_edit_success_and_classified_refusals() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header, method, path},
+        };
+        let mut responses = vec![(serde_json::json!({"ok": true, "ts": "123.456"}), None)];
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            responses.push((
+                serde_json::json!({"ok": false, "error": marker}),
+                Some(*marker),
+            ));
+        }
+        for (response, refusal) in responses {
+            let server = MockServer::start().await;
+            let blocks = serde_json::json!([]);
+            Mock::given(method("POST"))
+                .and(path("/chat.update"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(body_json(serde_json::json!({"channel": "C123", "ts": "123.456", "text": "updated", "blocks": blocks})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1).mount(&server).await;
+            let adapter = SlackAdapter {
+                base_url: server.uri(),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "C123",
+                    "123.456",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: Some(serde_json::json!({"blocks": blocks})),
+                    },
+                )
+                .await;
+            if let Some(marker) = refusal {
+                assert!(
+                    matches!(result, Err(AppError::ChannelConversationNotReachable(reason)) if reason == format!("Slack: {marker}"))
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_edit_preserves_http_and_body_rate_limits() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for response in [
+            ResponseTemplate::new(429).insert_header("Retry-After", "30"),
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"ok": false, "error": "ratelimited"})),
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"ok": false, "error": "rate_limited"})),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat.update"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = SlackAdapter {
+                base_url: server.uri(),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "C123",
+                    "123.456",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: None,
+                    },
+                )
+                .await;
+            assert!(
+                matches!(result, Err(AppError::ChannelPlatformError(reason)) if reason.contains("rate limit"))
+            );
+        }
+    }
+
     fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
+            x_events: None,
+            last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "slack".to_string(),
             label: "Test Slack Bot".to_string(),
+            credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "B12345".to_string(),
             platform_bot_username: "testbot".to_string(),
@@ -614,10 +1108,7 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot(secret);
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some(secret.to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", secret)]);
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());
@@ -635,10 +1126,7 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot("real_secret");
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some("real_secret".to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", "real_secret")]);
 
         let mut headers = axum::http::HeaderMap::new();
         // Sign with a different secret -> mismatch.
@@ -664,10 +1152,7 @@ mod tests {
         let err = adapter
             .verify_webhook(
                 &bot,
-                Some(&PlatformVerifySecrets {
-                    slack_signing_secret: Some("secret".to_string()),
-                    ..PlatformVerifySecrets::default()
-                }),
+                Some(&PlatformVerifySecrets::from([("app_secret", "secret")])),
                 &headers,
                 b"{}",
             )
@@ -685,10 +1170,7 @@ mod tests {
         let err = adapter
             .verify_webhook(
                 &bot,
-                Some(&PlatformVerifySecrets {
-                    slack_signing_secret: Some("secret".to_string()),
-                    ..PlatformVerifySecrets::default()
-                }),
+                Some(&PlatformVerifySecrets::from([("app_secret", "secret")])),
                 &headers,
                 b"{}",
             )
@@ -705,10 +1187,7 @@ mod tests {
         // 10 minutes in the past, beyond the 5-minute replay window.
         let ts = chrono::Utc::now().timestamp() - 600;
         let bot = make_test_bot(secret);
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some(secret.to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", secret)]);
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());
@@ -1057,39 +1536,14 @@ mod tests {
     // `metadata.thread_ts`, so it must win over `reply_to_platform_message_id`
     // (which can carry a child reply's `ts`, not the thread root).
 
-    /// Build the same JSON body that `send_reply` sends to chat.postMessage,
-    /// without going over the network. Mirrors the priority logic exactly so
-    /// regressions in the helper show up here.
-    fn build_post_message_body(reply: &OutboundReply, channel: &str) -> serde_json::Value {
-        let text = reply.text.as_deref().unwrap_or("");
-        let mut body = serde_json::json!({ "channel": channel, "text": text });
-
-        let thread_ts = reply
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("thread_ts"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| reply.reply_to_platform_message_id.clone());
-        if let Some(ts) = thread_ts {
-            body["thread_ts"] = serde_json::json!(ts);
-        }
-
-        if let Some(metadata) = reply.metadata.as_ref()
-            && let Some(blocks) = metadata.get("blocks")
-        {
-            body["blocks"] = blocks.clone();
-        }
-
-        body
-    }
-
+    // Exercise the production payload builder without a network request.
     #[test]
     fn send_reply_prefers_metadata_thread_ts_over_message_id() {
         // Inbound was a reply *inside* a thread: the relay sets
         // `metadata.thread_ts` to the root and `reply_to_platform_message_id`
         // to the child's `ts`. Slack must thread off the root, not the child.
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("answer".to_string()),
             reply_to_platform_message_id: Some("1700000010.000400".to_string()),
             metadata: Some(serde_json::json!({ "thread_ts": "1700000005.000300" })),
@@ -1104,6 +1558,7 @@ mod tests {
         // explicit reply target so Slack at least attaches the reply to the
         // same parent thread.
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("answer".to_string()),
             reply_to_platform_message_id: Some("1700000010.000400".to_string()),
             metadata: None,
@@ -1115,6 +1570,7 @@ mod tests {
     #[test]
     fn send_reply_omits_thread_ts_for_top_level_reply() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hi".to_string()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1127,6 +1583,7 @@ mod tests {
     fn send_reply_passes_through_blocks_metadata() {
         let blocks = serde_json::json!([{ "type": "section", "text": { "type": "mrkdwn", "text": "*hi*" } }]);
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("fallback".to_string()),
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "blocks": blocks.clone() })),
@@ -1191,6 +1648,32 @@ mod tests {
                 assert!(msg.contains("ratelimited"));
             }
             other => panic!("expected ChannelPlatformError, got {other:?}"),
+        }
+    }
+    #[test]
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            let description = format!("{marker}: private message content");
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "slack",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            assert!(matches!(
+                error,
+                AppError::ChannelConversationNotReachable(_)
+            ));
+            assert!(!error.to_string().contains("private message content"));
+        }
+        for description in ["invalid_blocks".to_string(), "界".repeat(201)] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "slack",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("slack send failed: {expected}")));
         }
     }
 }

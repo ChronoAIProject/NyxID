@@ -35,11 +35,16 @@ pub enum CredentialInjection {
     /// even looks at `base_url`, breaking the downstream call
     /// (thirty-third-round Codex P1).
     NoAuth,
+    IftttWebhook {
+        key: Zeroizing<String>,
+    },
     /// AWS SigV4 — the encrypted blob is the JSON credential consumed by
     /// `nyxid_cloud_auth::aws_sigv4`: `{access_key_id, secret_access_key,
     /// region, service}`. The node agent signs the outgoing request
     /// locally so the access key never crosses NyxID. NyxID#716.
-    AwsSigv4 { credential_json: Zeroizing<String> },
+    AwsSigv4 {
+        credential_json: Zeroizing<String>,
+    },
 }
 
 /// A single service's decrypted credential.
@@ -60,6 +65,7 @@ impl ServiceCredential {
             CredentialInjection::PathPrefix { .. } => "path_prefix",
             CredentialInjection::AwsSigv4 { .. } => "aws_sigv4",
             CredentialInjection::NoAuth => "none",
+            CredentialInjection::IftttWebhook { .. } => "ifttt_webhook",
         }
     }
 
@@ -71,6 +77,14 @@ impl ServiceCredential {
             CredentialInjection::PathPrefix { prefix, .. } => prefix,
             CredentialInjection::AwsSigv4 { .. } => "(AWS SigV4)",
             CredentialInjection::NoAuth => "(no auth)",
+            CredentialInjection::IftttWebhook { .. } => "IFTTT Webhooks",
+        }
+    }
+
+    pub fn ifttt_key(&self) -> Option<&str> {
+        match &self.injection {
+            CredentialInjection::IftttWebhook { key } => Some(key),
+            _ => None,
         }
     }
 
@@ -111,7 +125,7 @@ impl ServiceCredential {
             // the underlying secret material verbatim. Return `None` so
             // the WS frame injector skips substitution for this auth method.
             CredentialInjection::AwsSigv4 { .. } => None,
-            CredentialInjection::NoAuth => None,
+            CredentialInjection::NoAuth | CredentialInjection::IftttWebhook { .. } => None,
         }
     }
 
@@ -144,6 +158,25 @@ impl CredentialStore {
 
         for (slug, cred_config) in &config.credentials {
             match cred_config.injection_method.as_str() {
+                "ifttt_webhook" => {
+                    let key = enc.decrypt(
+                        cred_config
+                            .header_value_encrypted
+                            .as_deref()
+                            .ok_or_else(|| Error::Config("IFTTT key missing".into()))?,
+                    )?;
+                    nyxid_service_adapters::ifttt::validate_credential(&key)
+                        .map_err(|error| Error::Config(error.to_string()))?;
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::IftttWebhook {
+                                key: Zeroizing::new(key),
+                            },
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
                 "header" => {
                     let header_name = cred_config
                         .header_name
@@ -261,6 +294,23 @@ impl CredentialStore {
 
         for (slug, cred_config) in &config.credentials {
             match cred_config.injection_method.as_str() {
+                "ifttt_webhook" => {
+                    let key = backend.load_credential_value(
+                        slug,
+                        cred_config.header_value_encrypted.as_deref(),
+                    )?;
+                    nyxid_service_adapters::ifttt::validate_credential(&key)
+                        .map_err(|error| Error::Config(error.to_string()))?;
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::IftttWebhook {
+                                key: Zeroizing::new(key),
+                            },
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
                 "header" => {
                     let header_name = cred_config
                         .header_name

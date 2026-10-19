@@ -10,6 +10,8 @@ import type { Root } from "mdast";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
+import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
 import { splitStableMarkdown } from "@/lib/assistant/markdown-stream";
 
@@ -67,10 +69,7 @@ const SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    input: [
-      ...(defaultSchema.attributes?.input ?? []),
-      "checked",
-    ],
+    input: [...(defaultSchema.attributes?.input ?? []), "checked"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
     td: [...(defaultSchema.attributes?.td ?? []), "align"],
   },
@@ -78,6 +77,8 @@ const SANITIZE_SCHEMA = {
     ...defaultSchema.protocols,
     href: [
       ...protocolCaseVariants("https"),
+      // The renderer below admits HTTP only for this origin's hosted connect links.
+      ...protocolCaseVariants("http"),
       ...protocolCaseVariants("mailto"),
     ],
   },
@@ -90,6 +91,10 @@ const BLOCK = "mt-2 first:mt-0";
 function allowedHref(href: string | undefined): string | null {
   if (!href) return null;
   const normalized = href.trim().toLowerCase();
+  if (typeof window !== "undefined") {
+    const modalTarget = assistantModalLinkTarget(href, window.location.origin);
+    if (modalTarget) return modalTarget.href;
+  }
   return normalized.startsWith("https:") ||
     normalized.startsWith("mailto:") ||
     normalized.startsWith("#")
@@ -160,7 +165,7 @@ function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
   return insideFootnotes ? (
     <h2 className="sr-only">{children}</h2>
   ) : (
-    <h2 className={`${BLOCK} text-[14px] font-semibold text-foreground`}>
+    <h2 className={`${BLOCK} text-14 font-semibold text-foreground`}>
       {children}
     </h2>
   );
@@ -182,28 +187,28 @@ const COMPONENTS: Components = {
     <del className="text-muted-foreground line-through">{children}</del>
   ),
   h1: ({ children }) => (
-    <h1 className={`${BLOCK} text-[15px] font-semibold text-foreground`}>
+    <h1 className={`${BLOCK} text-15 font-semibold text-foreground`}>
       {children}
     </h1>
   ),
   h2: MarkdownHeadingTwo,
   h3: ({ children }) => (
-    <h3 className={`${BLOCK} text-[13.5px] font-semibold text-foreground`}>
+    <h3 className={`${BLOCK} text-[0.84375rem] font-semibold text-foreground`}>
       {children}
     </h3>
   ),
   h4: ({ children }) => (
-    <h4 className={`${BLOCK} text-[13px] font-medium text-foreground`}>
+    <h4 className={`${BLOCK} text-13 font-medium text-foreground`}>
       {children}
     </h4>
   ),
   h5: ({ children }) => (
-    <h5 className={`${BLOCK} text-[12.5px] font-semibold text-foreground`}>
+    <h5 className={`${BLOCK} text-[0.78125rem] font-semibold text-foreground`}>
       {children}
     </h5>
   ),
   h6: ({ children }) => (
-    <h6 className={`${BLOCK} text-[12px] font-medium text-foreground`}>
+    <h6 className={`${BLOCK} text-12 font-medium text-foreground`}>
       {children}
     </h6>
   ),
@@ -238,7 +243,7 @@ const COMPONENTS: Components = {
   hr: () => <hr className={`${BLOCK} border-hairline`} />,
   pre: ({ children }) => (
     <pre
-      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground`}
+      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-11 leading-relaxed text-foreground`}
     >
       {children}
     </pre>
@@ -249,7 +254,7 @@ const COMPONENTS: Components = {
       return <code className={className}>{children}</code>;
     }
     return (
-      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-11 text-foreground">
         {children}
       </code>
     );
@@ -258,13 +263,13 @@ const COMPONENTS: Components = {
     <div
       className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline`}
     >
-      <table className="w-full border-collapse text-left text-[12px] text-foreground/90">
+      <table className="w-full border-collapse text-left text-12 text-foreground/90">
         {children}
       </table>
     </div>
   ),
   thead: ({ children }) => (
-    <thead className="border-b border-hairline bg-overlay text-[10px] font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <thead className="border-b border-hairline bg-overlay text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
       {children}
     </thead>
   ),
@@ -282,7 +287,7 @@ const COMPONENTS: Components = {
   ),
   td: ({ children, style, align }) => (
     <td
-      className="px-3 py-2 align-top text-[12px]"
+      className="px-3 py-2 align-top text-12"
       style={tableCellStyle(style, align)}
     >
       {children}
@@ -298,15 +303,15 @@ const COMPONENTS: Components = {
     />
   ),
   sup: ({ children }) => (
-    <sup className="text-[10px] leading-none text-nyx-secondary-400">
+    <sup className="text-10 leading-none text-nyx-secondary-400">
       {children}
     </sup>
   ),
   section: ({ children }) => (
     <section
-      className={`${BLOCK} border-t border-hairline pt-2 text-[11px] text-foreground/90`}
+      className={`${BLOCK} border-t border-hairline pt-2 text-11 text-foreground/90`}
     >
-      <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+      <div className="mb-1 text-10 font-medium text-muted-foreground">
         Footnotes
       </div>
       <InsideFootnoteSectionContext.Provider value>
@@ -319,16 +324,7 @@ const COMPONENTS: Components = {
     if (!safeHref) {
       return <span className="text-muted-foreground">{children}</span>;
     }
-    return (
-      <a
-        href={safeHref}
-        target={isHttpsHref(safeHref) ? "_blank" : undefined}
-        rel="noopener noreferrer"
-        className="text-nyx-secondary-400 underline decoration-nyx-secondary-400/40 underline-offset-2 hover:decoration-nyx-secondary-400"
-      >
-        {children}
-      </a>
-    );
+    return <AssistantLink href={safeHref}>{children}</AssistantLink>;
   },
   // Remote model-provided images stay links to prevent tracking/exfiltration.
   img: ({ src, alt }) => {
@@ -417,7 +413,7 @@ export const TextBlock = memo(function TextBlock({
 
   return (
     <div
-      className={`text-[12px] ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
+      className={`text-12 ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
     >
       {prefix ? (
         <>

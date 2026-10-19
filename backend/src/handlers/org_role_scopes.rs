@@ -15,7 +15,7 @@ use crate::handlers::orgs::{OrgRoleWire, require_org_admin};
 use crate::models::org_membership::OrgRole;
 use crate::models::org_role_scope::OrgRoleScope;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, org_role_scope_service, user_service_service};
+use crate::services::{audit_service, org_role_scope_service, org_service, user_service_service};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RoleScopeResponse {
@@ -59,13 +59,25 @@ fn stored_scope_to_response(scope: OrgRoleScope) -> RoleScopeResponse {
 }
 
 /// GET /api/v1/orgs/{org_id}/role-scopes
+///
+/// API-key readable by org admins. An org-owned key can read its own role
+/// scopes through Direct access, projected as Admin without a membership.
 pub async fn list_role_scopes(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(org_id): Path<String>,
 ) -> AppResult<Json<RoleScopeListResponse>> {
     let actor = auth_user.user_id.to_string();
-    require_org_admin(&state.db, &actor, &org_id).await?;
+    let access = org_service::get_org_for_read(&state.db, &actor, &org_id).await;
+    match access {
+        Ok((_, OrgRole::Admin)) => {}
+        Ok(_) | Err(AppError::OrgMembershipRequired) => {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin role required for this operation".to_string(),
+            ));
+        }
+        Err(error) => return Err(error),
+    }
 
     let scopes = org_role_scope_service::list_scopes(&state.db, &org_id).await?;
     Ok(Json(RoleScopeListResponse {

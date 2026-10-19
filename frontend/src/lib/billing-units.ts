@@ -1,3 +1,4 @@
+import { metricLabel } from "@/schemas/billing-metrics";
 import type { BillingMetric } from "@/schemas/billing";
 import type { AllowanceForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -21,19 +22,13 @@ export function resolveServiceBillingMetric(
   return service.effective_platform_metric;
 }
 
-export function billingMetricLabel(
-  metric: BillingMetric,
-  quantity?: number,
-): string {
-  if (quantity === 1) {
-    return metric === "bytes" ? "byte" : metric.slice(0, -1);
-  }
-  return metric;
+export function billingMetricLabel(metric: string, quantity?: number): string {
+  return metricLabel(metric, quantity);
 }
 
 export function formatAllowancePreview(
   quantity: number,
-  metric: BillingMetric,
+  metric: string,
   recurrence: AllowanceRecurrence,
   locale?: string,
 ): string | null {
@@ -47,4 +42,18 @@ export function formatAllowancePreview(
   const compactSuffix = compact === formatted ? "" : ` (${compact})`;
 
   return `${formatted} ${billingMetricLabel(metric, quantity)}${compactSuffix} free ${RECURRENCE_PHRASES[recurrence]}`;
+}
+
+/** Credential labels for platform-wide reporting; preserve future classes. */
+const CREDENTIAL_CLASS_LABELS: Readonly<Record<string, string>> = {
+  nyxid_managed_master: "NyxID platform key",
+  user_owned: "User's own key (BYOK)",
+  agent_override_user_owned: "Own key · agent override",
+  node_managed: "Own key · node-managed",
+  nyxid_platform_oauth_app: "Shared OAuth app",
+  no_auth: "No authentication",
+};
+
+export function credentialClassLabel(credentialClass: string): string {
+  return CREDENTIAL_CLASS_LABELS[credentialClass] ?? credentialClass;
 }

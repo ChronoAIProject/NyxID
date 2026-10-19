@@ -10,17 +10,19 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::api::{
-    AuthDevicePollBody, AuthDevicePollOutcome, AuthDeviceRequestBody, AuthDeviceRequestOutcome,
-    CLI_USER_AGENT, build_cli_http_client, device_login_user_agent,
-};
+use crate::api::{CLI_USER_AGENT, build_cli_http_client, build_credential_http_client_for_url};
 use crate::cli::{AuthArgs, LoginArgs};
+
+pub mod agent_key;
+pub mod login_exchange;
+pub mod login_hints;
+mod login_input;
 
 /// Default NyxID base URL used when prompting for re-login on a session that
 /// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`
 /// clap default in `cli.rs`; kept in sync so the prompt path and the explicit
 /// `nyxid login` command target the same server by default.
-const DEFAULT_LOGIN_BASE_URL: &str = "https://nyx-api.chrono-ai.fun";
+pub(crate) const DEFAULT_LOGIN_BASE_URL: &str = "https://nyx-api.chrono-ai.fun";
 
 /// Clock-skew cushion: an access token is treated as still usable only if it
 /// has more than this many seconds of validity left. Small on purpose -- the
@@ -39,13 +41,6 @@ const REFRESH_LOCK_FILE_NAME: &str = ".refresh.lock";
 const BASE_URL_FILE_NAME: &str = "base_url";
 const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
-
-const AUTH_DEVICE_CODE_EXPIRED: i64 = 11201;
-const AUTH_DEVICE_CODE_PENDING: i64 = 11202;
-const AUTH_DEVICE_CODE_SLOW_DOWN: i64 = 11203;
-const AUTH_DEVICE_CODE_DENIED: i64 = 11204;
-const AUTH_DEVICE_CODE_ALREADY_DELIVERED: i64 = 11205;
-const AUTH_DEVICE_CODE_RATE_LIMITED: i64 = 11206;
 
 /// Extract the `sub` claim (NyxID user UUID) from a JWT access token.
 /// Decodes the payload section only; does not verify the signature, since
@@ -124,7 +119,13 @@ fn user_id_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
 }
 
 pub fn read_saved_token_for(profile: Option<&str>) -> Option<String> {
-    let path = token_file_path_for(profile).ok()?;
+    let path = if agent_key::is_agent_key_profile(profile) {
+        token_dir_for_profile(profile)
+            .ok()?
+            .join(agent_key::TOKEN_FILE)
+    } else {
+        token_file_path_for(profile).ok()?
+    };
     std::fs::read_to_string(path)
         .ok()
         .map(|t| t.trim().to_string())
@@ -136,6 +137,9 @@ pub fn read_saved_token() -> Option<String> {
 }
 
 pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
+    if agent_key::is_agent_key_profile(profile) {
+        return None;
+    }
     let path = refresh_token_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
         .ok()
@@ -163,6 +167,9 @@ pub fn read_saved_base_url_for(profile: Option<&str>) -> Option<String> {
 /// it when deriving from the current token fails.
 #[allow(dead_code)]
 pub fn read_saved_user_id_for(profile: Option<&str>) -> Option<String> {
+    if agent_key::is_agent_key_profile(profile) {
+        return None;
+    }
     if let Some(access_token) = read_saved_token_for(profile)
         && let Some(user_id) = jwt_sub_from_token(&access_token)
     {
@@ -181,10 +188,62 @@ pub fn read_saved_base_url() -> Option<String> {
 
 fn save_base_url_for(profile: Option<&str>, url: &str) -> Result<()> {
     let path = base_url_file_path_for(profile)?;
-    let dir = path.parent().context("Invalid token directory")?;
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(&path, url)?;
+    write_token_file(&path, url)
+}
+
+fn replace_login_files(profile: Option<&str>, write: impl FnOnce() -> Result<()>) -> Result<()> {
+    let _lock = acquire_refresh_lock(profile)?;
+    clear_login_credentials(profile)?;
+    write_token_file(
+        &token_dir_for_profile(profile)?.join("login_generation"),
+        &uuid::Uuid::new_v4().to_string(),
+    )?;
+    let result = write();
+    if result.is_err() {
+        let _ = clear_login_credentials(profile);
+    }
+    result
+}
+
+pub(crate) fn login_generation(profile: Option<&str>) -> Option<String> {
+    std::fs::read_to_string(
+        token_dir_for_profile(profile)
+            .ok()?
+            .join("login_generation"),
+    )
+    .ok()
+}
+
+pub(crate) fn validate_profile_destination(profile: Option<&str>, destination: &str) -> Result<()> {
+    if let Some(saved) = read_saved_base_url_for(profile)
+        && login_exchange::normalized_destination(&saved)?
+            != login_exchange::normalized_destination(destination)?
+    {
+        bail!(
+            "Profile destination changed or differs from --base-url. Re-run the command with the intended profile."
+        );
+    }
     Ok(())
+}
+
+fn clear_login_credentials(profile: Option<&str>) -> Result<()> {
+    let dir = token_dir_for_profile(profile)?;
+    let mut failure = None;
+    for name in [
+        "token",
+        TOKEN_FILE_NAME,
+        REFRESH_TOKEN_FILE_NAME,
+        USER_ID_FILE_NAME,
+        "agent_key.json",
+        "auth_kind",
+    ] {
+        if let Err(error) = std::fs::remove_file(dir.join(name))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            failure = Some(error);
+        }
+    }
+    failure.map_or(Ok(()), |error| Err(error.into()))
 }
 
 fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
@@ -199,8 +258,18 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "token".to_string());
-    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    std::fs::write(&temp, token)
+    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .with_context(|| format!("Failed to create {}", temp.display()))?;
+    file.write_all(token.as_bytes())
         .with_context(|| format!("Failed to write token to {}", temp.display()))?;
     #[cfg(unix)]
     {
@@ -238,6 +307,7 @@ pub fn save_tokens_for(
             }
         }
     }
+    agent_key::clear_agent_files(profile)?;
     Ok(())
 }
 
@@ -248,6 +318,7 @@ pub fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<()
 }
 
 fn clear_token_for(profile: Option<&str>) -> Result<()> {
+    agent_key::clear_agent_files(profile)?;
     let path = token_file_path_for(profile)?;
     if path.exists() {
         std::fs::remove_file(&path)
@@ -276,6 +347,7 @@ pub(crate) enum AccessTokenSource {
     Explicit,
     Environment,
     SavedSession,
+    SavedAgentKey,
 }
 
 impl AccessTokenSource {
@@ -293,7 +365,7 @@ fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|token| !token.is_empty())
 }
 
-fn resolve_access_token_override(auth: &AuthArgs) -> Option<ResolvedAccessToken> {
+pub(crate) fn resolve_access_token_override(auth: &AuthArgs) -> Option<ResolvedAccessToken> {
     if let Some(token) = &auth.access_token {
         return Some(ResolvedAccessToken {
             token: token.clone(),
@@ -331,10 +403,21 @@ pub(crate) fn resolve_access_token_with_source(auth: &AuthArgs) -> Result<Resolv
     if let Some(token) = read_saved_token_for(auth.profile.as_deref()) {
         return Ok(ResolvedAccessToken {
             token,
-            source: AccessTokenSource::SavedSession,
+            source: if agent_key::is_agent_key_profile(auth.profile.as_deref()) {
+                AccessTokenSource::SavedAgentKey
+            } else {
+                AccessTokenSource::SavedSession
+            },
         });
     }
 
+    if agent_key::is_agent_key_profile(auth.profile.as_deref()) {
+        let login = match auth.profile.as_deref() {
+            Some(name) => format!("nyxid login --agent-key --profile {name}"),
+            None => "nyxid login --agent-key".to_string(),
+        };
+        bail!("This profile's Agent Key credential is missing. Run `{login}` to authorize again.");
+    }
     if auth.access_token_env == DEFAULT_ACCESS_TOKEN_ENV {
         bail!(
             "No access token found. Run `nyxid login --base-url <URL>`, \
@@ -415,6 +498,10 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
     }
 
     let profile = auth.profile.as_deref();
+
+    if agent_key::is_agent_key_profile(profile) {
+        return Ok(());
+    }
 
     let Some(access_token) = read_saved_token_for(profile) else {
         return handle_dead_session(auth, DeadSessionReason::NoToken).await;
@@ -645,7 +732,20 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
     // first rotates; everyone else finds the fresh access token already on
     // disk and never presents the now-stale refresh token to the server,
     // which would otherwise trip reuse detection and revoke the session.
-    let _lock = acquire_refresh_lock(profile).ok();
+    let _lock = match acquire_refresh_lock(profile) {
+        Ok(lock) => lock,
+        Err(error) => return SessionRefresh::Network(error),
+    };
+    let base_url = match auth.resolved_base_url().and_then(|base| {
+        validate_profile_destination(profile, &base)?;
+        Ok(base)
+    }) {
+        Ok(base) => base,
+        Err(error) => return SessionRefresh::Network(error),
+    };
+    if agent_key::is_agent_key_profile(profile) {
+        return SessionRefresh::Refreshed;
+    }
     if let Some(access_token) = fresh_access_token_on_disk(profile) {
         let _ = access_token;
         return SessionRefresh::Refreshed;
@@ -670,11 +770,7 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
         ));
     }
 
-    let base_url = match auth.resolved_base_url() {
-        Ok(url) => url,
-        Err(e) => return SessionRefresh::Network(e),
-    };
-    let client = match build_cli_http_client(profile) {
+    let client = match build_credential_http_client_for_url(profile, &base_url) {
         Ok(c) => c,
         Err(e) => return SessionRefresh::Network(e),
     };
@@ -700,7 +796,14 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
 /// branch on the exit code: `ReauthRequired` (3) vs `RefreshUnavailable` (4).
 pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     let profile = auth.profile.as_deref();
-    let _lock = acquire_refresh_lock(profile).ok();
+    let _lock = acquire_refresh_lock(profile)
+        .map_err(|_| RefreshUnavailable("Cannot lock this profile; retry later".into()))?;
+    if agent_key::is_agent_key_profile(profile) {
+        return Err(anyhow::Error::new(ReauthRequired {
+            code: "agent_key_does_not_refresh",
+            message: "Agent Key sessions do not refresh. Run `nyxid login --agent-key` to authorize again.".into(),
+        }));
+    }
     let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
         return Err(anyhow::Error::new(ReauthRequired {
             code: "refresh_token_not_found",
@@ -718,7 +821,8 @@ pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
         }));
     }
     let base_url = auth.resolved_base_url()?;
-    let client = build_cli_http_client(profile)?;
+    validate_profile_destination(profile, &base_url)?;
+    let client = build_credential_http_client_for_url(profile, &base_url)?;
     match exchange_refresh_token(&client, &base_url, &refresh_token).await {
         RefreshExchange::Renewed {
             access_token,
@@ -816,13 +920,21 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
     let base_url = auth
         .resolved_base_url()
         .unwrap_or_else(|_| DEFAULT_LOGIN_BASE_URL.to_string());
-    run_login(LoginArgs {
-        base_url,
-        password: false,
-        device: false,
-        email: None,
-        profile: auth.profile.clone(),
-    })
+    // Session recovery only offers browser/device login. Keep it separate from
+    // the explicit password mode used by `nyxid login --password`.
+    let strategies = RealLoginStrategies;
+    run_interactive_login_with_strategies(
+        LoginArgs {
+            base_url: Some(base_url),
+            password: false,
+            device: false,
+            agent_key: false,
+            email: None,
+            profile: auth.profile.clone(),
+            ..Default::default()
+        },
+        &strategies,
+    )
     .await?;
 
     // Deliberately do NOT resume the original command: the user re-runs it with
@@ -836,6 +948,25 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    args.hints.validate_mode(&args)?;
+    if args.callback
+        && (matches!(args.output, crate::cli::OutputFormat::Json) || args.command.is_some())
+    {
+        bail!("--callback cannot be combined with --output json or login resume.");
+    }
+    if args.password && args.command.is_some() {
+        return Err(login_exchange::LoginError::DestinationMismatch.into());
+    }
+    if !args.password
+        && (args.no_wait
+            || !args.hints.is_empty()
+            || args.agent_key
+            || args.code.is_some()
+            || args.command.is_some()
+            || matches!(args.output, crate::cli::OutputFormat::Json))
+    {
+        return login_exchange::run(args).await;
+    }
     let strategies = RealLoginStrategies;
     run_login_with_strategies(args, &strategies).await
 }
@@ -850,8 +981,7 @@ trait LoginStrategies {
 
     fn run_device_code_login<'a>(
         &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
+        args: LoginArgs,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     fn run_browser_login<'a>(
@@ -875,10 +1005,9 @@ impl LoginStrategies for RealLoginStrategies {
 
     fn run_device_code_login<'a>(
         &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
+        args: LoginArgs,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(run_device_code_login(base_url, profile))
+        Box::pin(login_exchange::run(args))
     }
 
     fn run_browser_login<'a>(
@@ -894,19 +1023,31 @@ async fn run_login_with_strategies(
     args: LoginArgs,
     strategies: &impl LoginStrategies,
 ) -> Result<()> {
-    let profile = args.profile.as_deref();
     if args.password {
+        let profile = args.profile.as_deref();
+        let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
         return strategies
-            .run_password_login(&args.base_url, args.email.as_deref(), profile)
+            .run_password_login(base_url, args.email.as_deref(), profile)
             .await;
     }
+    run_interactive_login_with_strategies(args, strategies).await
+}
+
+/// Browser/device login shared by explicit login and dead-session recovery.
+async fn run_interactive_login_with_strategies(
+    mut args: LoginArgs,
+    strategies: &impl LoginStrategies,
+) -> Result<()> {
+    let profile = args.profile.as_deref();
+    let base_url = args.base_url.as_deref().unwrap_or(DEFAULT_LOGIN_BASE_URL);
     if args.device {
-        return strategies
-            .run_device_code_login(&args.base_url, profile)
-            .await;
+        return strategies.run_device_code_login(args).await;
     }
 
-    if std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_none() {
+    // The environment variable is the legacy spelling of --callback. Explicit
+    // device mode above keeps precedence over it.
+    args.callback |= std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_some();
+    if !args.callback {
         if is_ci_environment() {
             bail!(
                 "Detected CI environment (CI / GITHUB_ACTIONS / BUILDKITE / CIRCLECI / \
@@ -915,19 +1056,18 @@ async fn run_login_with_strategies(
             );
         }
         if !crate::wizard::is_wizard_eligible() && stderr_is_tty() {
-            return strategies
-                .run_device_code_login(&args.base_url, profile)
-                .await;
+            args.device = true;
         }
+        return strategies.run_device_code_login(args).await;
     }
 
-    match strategies.run_browser_login(&args.base_url, profile).await {
+    match strategies.run_browser_login(base_url, profile).await {
         Ok(()) => Ok(()),
         Err(BrowserLoginError::CannotOpenBrowser(_)) => {
             eprintln!("Couldn't open a browser. Falling back to device-code login.");
-            strategies
-                .run_device_code_login(&args.base_url, profile)
-                .await
+            args.callback = false;
+            args.device = true;
+            strategies.run_device_code_login(args).await
         }
         Err(e) => Err(e.into()),
     }
@@ -936,19 +1076,44 @@ async fn run_login_with_strategies(
 // ---- Logout ----
 
 pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
+    let (generation, token, restricted) = {
+        let _lock = acquire_refresh_lock(profile)?;
+        validate_profile_destination(profile, base_url)?;
+        (
+            login_generation(profile),
+            read_saved_token_for(profile).map(zeroize::Zeroizing::new),
+            agent_key::is_agent_key_profile(profile),
+        )
+    };
     let base_url = base_url.trim_end_matches('/');
-
-    // Best-effort server-side logout
-    if let Some(token) = read_saved_token_for(profile) {
-        let client = build_cli_http_client(profile)?;
-
-        let _ = client
-            .post(format!("{base_url}/api/v1/auth/logout"))
-            .bearer_auth(&token)
+    // Remote revocation is best effort. An unsafe destination or client setup
+    // failure must never send the credential or prevent guarded local cleanup.
+    let revoked = if let Some(token) = &token
+        && let Ok(client) = build_credential_http_client_for_url(profile, base_url)
+    {
+        let request = if restricted {
+            client.delete(format!("{base_url}/api/v1/auth/agent-key/self"))
+        } else {
+            client.post(format!("{base_url}/api/v1/auth/logout"))
+        };
+        request
+            .bearer_auth(token.as_str())
+            .timeout(std::time::Duration::from_secs(5))
             .send()
-            .await;
+            .await
+            .is_ok_and(|response| response.status().is_success())
+    } else {
+        false
+    };
+    let _lock = acquire_refresh_lock(profile)?;
+    if login_generation(profile) != generation
+        || (generation.is_none()
+            && read_saved_token_for(profile).as_deref()
+                != token.as_ref().map(|token| token.as_str()))
+    {
+        eprintln!("Logout finished for the previous login. The newer saved login was preserved.");
+        return Ok(());
     }
-
     clear_token_for(profile)?;
 
     // Telemetry: drop the anon id so the next command on this machine
@@ -958,7 +1123,13 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
         client.reset();
     }
 
-    eprintln!("Logged out. Token cleared.");
+    if revoked {
+        eprintln!("Logged out. Credential revoked on the server and cleared locally.");
+    } else {
+        eprintln!(
+            "Logged out. Local credential cleared; server-side revocation could not be confirmed."
+        );
+    }
     Ok(())
 }
 
@@ -1036,13 +1207,15 @@ async fn run_browser_login(
     }
 
     let callback = wait_for_callback(listener, &state).await?;
-    save_tokens_for(
-        profile,
-        &callback.access_token,
-        callback.refresh_token.as_deref(),
-    )
+    replace_login_files(profile, || {
+        save_base_url_for(profile, base_url)?;
+        save_tokens_for(
+            profile,
+            &callback.access_token,
+            callback.refresh_token.as_deref(),
+        )
+    })
     .map_err(BrowserLoginError::Other)?;
-    save_base_url_for(profile, base_url).map_err(BrowserLoginError::Other)?;
 
     // Telemetry: identify the now-authenticated user. `save_tokens_for`
     // above derived + persisted `user_id` from the JWT; we read it
@@ -1204,196 +1377,6 @@ pub async fn fetch_frontend_url(base_url: &str, profile: Option<&str>) -> Result
     Ok(config.frontend_url.trim_end_matches('/').to_string())
 }
 
-// ---- Device-code login ----
-
-trait AuthDeviceApi {
-    fn request<'a>(
-        &'a self,
-        base_url: &'a str,
-        body: &'a AuthDeviceRequestBody,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>>;
-
-    fn poll<'a>(
-        &'a self,
-        base_url: &'a str,
-        body: &'a AuthDevicePollBody,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>>;
-}
-
-struct RealAuthDeviceApi;
-
-impl AuthDeviceApi for RealAuthDeviceApi {
-    fn request<'a>(
-        &'a self,
-        base_url: &'a str,
-        body: &'a AuthDeviceRequestBody,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>> {
-        Box::pin(crate::api::auth_device_request(base_url, body, profile))
-    }
-
-    fn poll<'a>(
-        &'a self,
-        base_url: &'a str,
-        body: &'a AuthDevicePollBody,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>> {
-        Box::pin(crate::api::auth_device_poll(base_url, body, profile))
-    }
-}
-
-trait LoginSleeper {
-    fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-}
-
-struct TokioLoginSleeper;
-
-impl LoginSleeper for TokioLoginSleeper {
-    fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(tokio::time::sleep(std::time::Duration::from_secs(seconds)))
-    }
-}
-
-trait DeviceBrowserFallback {
-    fn run_browser_login<'a>(
-        &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>;
-}
-
-struct RealDeviceBrowserFallback;
-
-impl DeviceBrowserFallback for RealDeviceBrowserFallback {
-    fn run_browser_login<'a>(
-        &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>> {
-        Box::pin(run_browser_login(base_url, profile))
-    }
-}
-
-async fn run_device_code_login(base_url: &str, profile: Option<&str>) -> Result<()> {
-    let api = RealAuthDeviceApi;
-    let sleeper = TokioLoginSleeper;
-    let browser = RealDeviceBrowserFallback;
-    run_device_code_login_with_api(base_url, profile, &api, &sleeper, &browser).await
-}
-
-async fn run_device_code_login_with_api(
-    base_url: &str,
-    profile: Option<&str>,
-    api: &impl AuthDeviceApi,
-    sleeper: &impl LoginSleeper,
-    browser: &impl DeviceBrowserFallback,
-) -> Result<()> {
-    let base_url = base_url.trim_end_matches('/');
-    let request = AuthDeviceRequestBody {
-        client_label: client_label(),
-        client_user_agent: Some(device_login_user_agent()),
-    };
-
-    let challenge = match api.request(base_url, &request, profile).await? {
-        AuthDeviceRequestOutcome::Created(challenge) => challenge,
-        AuthDeviceRequestOutcome::NotSupported => {
-            eprintln!(
-                "This NyxID backend doesn't support device-code login. Falling back to browser login."
-            );
-            return browser
-                .run_browser_login(base_url, profile)
-                .await
-                .map_err(Into::into);
-        }
-    };
-
-    eprintln!("! First copy your one-time code: {}", challenge.user_code);
-    eprintln!();
-    eprintln!(
-        "Then open {} and enter the code above.",
-        challenge.verification_uri
-    );
-
-    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stderr());
-    if interactive {
-        eprint!("\nOpen in your browser? [Y/n] ");
-        std::io::stderr().flush().ok();
-        let mut answer = String::new();
-        if std::io::stdin().read_line(&mut answer).is_ok() {
-            let a = answer.trim().to_ascii_lowercase();
-            if (a.is_empty() || a == "y" || a == "yes")
-                && let Err(e) = crate::browser::open_browser(&challenge.verification_uri)
-            {
-                eprintln!("Could not open browser: {e}. Paste the URL above manually.");
-            }
-        }
-    }
-
-    poll_device_code_login(
-        base_url,
-        profile,
-        api,
-        sleeper,
-        challenge.device_code,
-        challenge.interval,
-    )
-    .await
-}
-
-async fn poll_device_code_login(
-    base_url: &str,
-    profile: Option<&str>,
-    api: &impl AuthDeviceApi,
-    sleeper: &impl LoginSleeper,
-    device_code: String,
-    initial_interval: u64,
-) -> Result<()> {
-    let mut interval = initial_interval.max(1);
-
-    loop {
-        sleeper.sleep(interval).await;
-        let body = AuthDevicePollBody {
-            device_code: device_code.clone(),
-        };
-
-        match api.poll(base_url, &body, profile).await? {
-            AuthDevicePollOutcome::Delivered(tokens) => {
-                save_tokens_for(profile, &tokens.access_token, Some(&tokens.refresh_token))?;
-                save_base_url_for(profile, base_url)?;
-
-                if let Some(user_id) = read_saved_user_id_for(profile)
-                    && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
-                {
-                    client.identify(&user_id).await;
-                }
-
-                eprintln!("Signed in.");
-                return Ok(());
-            }
-            AuthDevicePollOutcome::Error(error) => {
-                interval = handle_device_poll_error(error.error_code, &error.message, interval)?;
-            }
-        }
-    }
-}
-
-fn handle_device_poll_error(error_code: i64, message: &str, interval: u64) -> Result<u64> {
-    match error_code {
-        AUTH_DEVICE_CODE_PENDING => Ok(interval),
-        AUTH_DEVICE_CODE_SLOW_DOWN => Ok(interval + 5),
-        AUTH_DEVICE_CODE_EXPIRED => bail!("Login timed out - run `nyxid login --device` again."),
-        AUTH_DEVICE_CODE_DENIED => bail!("Login was denied."),
-        AUTH_DEVICE_CODE_ALREADY_DELIVERED => {
-            bail!("This code was already used. Run `nyxid login --device` again.")
-        }
-        AUTH_DEVICE_CODE_RATE_LIMITED => bail!("Too many attempts. Try again in a few minutes."),
-        _ => bail!("{message}"),
-    }
-}
-
 fn client_label() -> Option<String> {
     hostname_from_env()
         .or_else(hostname_from_command)
@@ -1461,6 +1444,7 @@ async fn run_password_login(
     email: Option<&str>,
     profile: Option<&str>,
 ) -> Result<()> {
+    let client = build_credential_http_client_for_url(profile, base_url)?;
     let email = match email {
         Some(email) => email.to_string(),
         None => {
@@ -1486,8 +1470,6 @@ async fn run_password_login(
     let base_url = base_url.trim_end_matches('/');
     let login_url = format!("{base_url}/api/v1/auth/login");
 
-    let client = build_cli_http_client(profile)?;
-
     let response = client
         .post(&login_url)
         .json(&serde_json::json!({
@@ -1510,8 +1492,10 @@ async fn run_password_login(
         .await
         .context("Failed to parse login response")?;
 
-    save_tokens_for(profile, &login.access_token, login.refresh_token.as_deref())?;
-    save_base_url_for(profile, base_url)?;
+    replace_login_files(profile, || {
+        save_base_url_for(profile, base_url)?;
+        save_tokens_for(profile, &login.access_token, login.refresh_token.as_deref())
+    })?;
 
     // Telemetry: identify after token persistence (see notes in
     // `run_browser_login`).
@@ -1530,23 +1514,17 @@ async fn run_password_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_DEVICE_CODE_ALREADY_DELIVERED, AUTH_DEVICE_CODE_DENIED, AUTH_DEVICE_CODE_EXPIRED,
-        AUTH_DEVICE_CODE_PENDING, AUTH_DEVICE_CODE_RATE_LIMITED, AUTH_DEVICE_CODE_SLOW_DOWN,
-        AuthDeviceApi, BrowserLoginError, DeviceBrowserFallback, LoginSleeper, LoginStrategies,
-        build_cli_auth_url, callback_success_html, handle_device_poll_error, is_ci_environment,
-        jwt_sub_from_token, parse_callback_request, poll_device_code_login,
-        refresh_token_file_path_for, run_login_with_strategies, sanitize_client_label,
-        token_dir_for_profile, token_file_path_for, validate_profile_name,
+        BrowserLoginError, LoginStrategies, build_cli_auth_url, callback_success_html,
+        is_ci_environment, jwt_sub_from_token, parse_callback_request, refresh_token_file_path_for,
+        run_login_with_strategies, sanitize_client_label, token_dir_for_profile,
+        token_file_path_for, validate_profile_name,
     };
-    use crate::api::{
-        AuthDevicePollBody, AuthDevicePollOutcome, AuthDevicePollResponse, AuthDeviceRequestBody,
-        AuthDeviceRequestOutcome, CLI_USER_AGENT, ErrorEnvelope,
-    };
-    use anyhow::{Result, bail};
+    use crate::api::CLI_USER_AGENT;
+    use anyhow::Result;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     // ---- Profile validation ----
 
@@ -1685,46 +1663,6 @@ mod tests {
         assert_eq!(label.chars().count(), 64);
         assert!(!label.chars().any(char::is_control));
         assert!(label.starts_with("host"));
-    }
-
-    #[test]
-    fn device_poll_error_mapping_matches_contract() {
-        assert_eq!(
-            handle_device_poll_error(AUTH_DEVICE_CODE_PENDING, "pending", 5).expect("pending"),
-            5
-        );
-        assert_eq!(
-            handle_device_poll_error(AUTH_DEVICE_CODE_SLOW_DOWN, "slow", 5).expect("slow"),
-            10
-        );
-
-        let expired = handle_device_poll_error(AUTH_DEVICE_CODE_EXPIRED, "expired", 5).unwrap_err();
-        assert!(
-            expired.to_string().contains("Login timed out"),
-            "unexpected: {expired}"
-        );
-        let denied = handle_device_poll_error(AUTH_DEVICE_CODE_DENIED, "denied", 5).unwrap_err();
-        assert_eq!(denied.to_string(), "Login was denied.");
-        let used =
-            handle_device_poll_error(AUTH_DEVICE_CODE_ALREADY_DELIVERED, "used", 5).unwrap_err();
-        assert!(
-            used.to_string().contains("already used"),
-            "unexpected: {used}"
-        );
-        let limited =
-            handle_device_poll_error(AUTH_DEVICE_CODE_RATE_LIMITED, "limited", 5).unwrap_err();
-        assert!(
-            limited.to_string().contains("Too many attempts"),
-            "unexpected: {limited}"
-        );
-        let not_found =
-            handle_device_poll_error(11200, "device code not found from server", 5).unwrap_err();
-        assert_eq!(not_found.to_string(), "device code not found from server");
-        let invalid =
-            handle_device_poll_error(11207, "user code invalid from server", 5).unwrap_err();
-        assert_eq!(invalid.to_string(), "user code invalid from server");
-        let unknown = handle_device_poll_error(11999, "server message", 5).unwrap_err();
-        assert_eq!(unknown.to_string(), "server message");
     }
 
     #[test]
@@ -2019,6 +1957,28 @@ mod tests {
             .expect("explicit token is honored");
     }
 
+    #[test]
+    fn missing_agent_credential_identifies_profile_and_reauthorization_command() {
+        let _home = PreflightHome::set();
+        let mut auth = preflight_auth_args();
+        for profile in [Some("ensure-session-test"), None] {
+            auth.profile = profile.map(str::to_owned);
+            let dir = token_dir_for_profile(profile).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth_kind"), "agent_key").unwrap();
+            let error = super::resolve_access_token_with_source(&auth)
+                .err()
+                .expect("missing credential must fail")
+                .to_string();
+            let expected = if profile.is_some() {
+                "This profile's Agent Key credential is missing. Run `nyxid login --agent-key --profile ensure-session-test` to authorize again."
+            } else {
+                "This profile's Agent Key credential is missing. Run `nyxid login --agent-key` to authorize again."
+            };
+            assert_eq!(error, expected);
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // serializes HOME/env mutations across tests
     async fn ensure_session_ok_for_unexpired_saved_token() {
@@ -2034,6 +1994,80 @@ mod tests {
         super::ensure_session(&auth)
             .await
             .expect("unexpired token needs no network and is accepted");
+    }
+
+    #[tokio::test]
+    async fn password_login_rejects_remote_cleartext_before_prompting() {
+        let error = super::run_password_login(
+            "http://cleartext-fixture.invalid",
+            Some("fixture@example.test"),
+            None,
+        )
+        .await
+        .expect_err("remote HTTP must fail before reading a password");
+        assert!(error.to_string().contains("requires HTTPS"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
+    async fn session_refresh_rejects_remote_cleartext_before_sending() {
+        let _home = PreflightHome::set();
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some("http://cleartext-fixture.invalid".to_string());
+        let expired = build_jwt(&serde_json::json!({"exp": 1_000_000_000i64}));
+        let refresh = uuid::Uuid::new_v4().to_string();
+        super::save_tokens_for(auth.profile.as_deref(), &expired, Some(&refresh)).unwrap();
+        let error = super::ensure_session(&auth)
+            .await
+            .expect_err("preflight must reject HTTP");
+        assert!(error.to_string().contains("requires HTTPS"));
+        let error = super::force_refresh_session(&auth)
+            .await
+            .expect_err("explicit refresh must reject HTTP");
+        assert!(error.to_string().contains("requires HTTPS"));
+        assert!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
+                == Some(refresh.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes temporary credential storage
+    async fn session_refresh_does_not_follow_body_preserving_redirects() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let _home = PreflightHome::set();
+        let origin = MockServer::start().await;
+        let target = MockServer::start().await;
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some(origin.uri());
+        let expired = build_jwt(&serde_json::json!({"exp": 1_000_000_000i64}));
+        let refresh = uuid::Uuid::new_v4().to_string();
+        super::save_tokens_for(auth.profile.as_deref(), &expired, Some(&refresh)).unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(307).insert_header("Location", target.uri()))
+            .expect(2)
+            .mount(&origin)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": uuid::Uuid::new_v4().to_string(),
+                "refresh_token": uuid::Uuid::new_v4().to_string(),
+            })))
+            .expect(0)
+            .mount(&target)
+            .await;
+        assert!(super::ensure_session(&auth).await.is_err());
+        assert!(super::force_refresh_session(&auth).await.is_err());
+        assert!(
+            super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref()
+                == Some(refresh.as_str())
+        );
+        origin.verify().await;
+        target.verify().await;
     }
 
     #[tokio::test]
@@ -2188,204 +2222,13 @@ mod tests {
         assert!(msg.contains("nyxid login"), "should point at login: {msg}");
     }
 
-    #[derive(Clone)]
-    struct MockDeviceApi {
-        request: AuthDeviceRequestOutcome,
-        polls: Arc<Mutex<Vec<AuthDevicePollOutcome>>>,
-    }
-
-    impl MockDeviceApi {
-        fn with_polls(polls: Vec<AuthDevicePollOutcome>) -> Self {
-            Self {
-                request: AuthDeviceRequestOutcome::Created(crate::api::AuthDeviceRequestResponse {
-                    device_code: "nyx_adc_test".to_string(),
-                    user_code: "ADCB-EFGH".to_string(),
-                    verification_uri: "https://nyx.example/login/device".to_string(),
-                    verification_uri_complete:
-                        "https://nyx.example/login/device?user_code=ADCB-EFGH".to_string(),
-                    expires_in: 600,
-                    interval: 5,
-                }),
-                polls: Arc::new(Mutex::new(polls)),
-            }
-        }
-    }
-
-    impl AuthDeviceApi for MockDeviceApi {
-        fn request<'a>(
-            &'a self,
-            _base_url: &'a str,
-            _body: &'a AuthDeviceRequestBody,
-            _profile: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = Result<AuthDeviceRequestOutcome>> + Send + 'a>> {
-            let outcome = self.request.clone();
-            Box::pin(async move { Ok(outcome) })
-        }
-
-        fn poll<'a>(
-            &'a self,
-            _base_url: &'a str,
-            _body: &'a AuthDevicePollBody,
-            _profile: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = Result<AuthDevicePollOutcome>> + Send + 'a>> {
-            let polls = self.polls.clone();
-            Box::pin(async move {
-                let mut polls = polls.lock().unwrap_or_else(|e| e.into_inner());
-                if polls.is_empty() {
-                    bail!("unexpected extra poll")
-                }
-                Ok(polls.remove(0))
-            })
-        }
-    }
-
-    struct RecordingSleeper {
-        intervals: Arc<Mutex<Vec<u64>>>,
-    }
-
-    impl RecordingSleeper {
-        fn new() -> Self {
-            Self {
-                intervals: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn intervals(&self) -> Vec<u64> {
-            self.intervals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-        }
-    }
-
-    impl LoginSleeper for RecordingSleeper {
-        fn sleep<'a>(&'a self, seconds: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            let intervals = self.intervals.clone();
-            Box::pin(async move {
-                intervals
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(seconds);
-            })
-        }
-    }
-
-    fn poll_error(code: i64) -> AuthDevicePollOutcome {
-        AuthDevicePollOutcome::Error(ErrorEnvelope {
-            error: "contract_error".to_string(),
-            error_code: code,
-            message: format!("message for {code}"),
-            details: None,
-        })
-    }
-
-    fn delivered_tokens() -> AuthDevicePollOutcome {
-        AuthDevicePollOutcome::Delivered(AuthDevicePollResponse {
-            access_token: build_jwt(&serde_json::json!({
-                "sub": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-                "exp": 9999999999i64,
-            })),
-            refresh_token: "refresh-token".to_string(),
-            token_type: "Bearer".to_string(),
-            expires_in: 900,
-        })
-    }
-
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn device_poll_loop_handles_pending_slow_down_then_success_and_profile_storage() {
-        let _home = PreflightHome::set();
-        let api = MockDeviceApi::with_polls(vec![
-            poll_error(AUTH_DEVICE_CODE_PENDING),
-            poll_error(AUTH_DEVICE_CODE_SLOW_DOWN),
-            delivered_tokens(),
-        ]);
-        let sleeper = RecordingSleeper::new();
-
-        poll_device_code_login(
-            "https://nyx-api.example",
-            Some("alt"),
-            &api,
-            &sleeper,
-            "nyx_adc_test".to_string(),
-            5,
-        )
-        .await
-        .expect("device login");
-
-        assert_eq!(sleeper.intervals(), vec![5, 5, 10]);
-        assert!(
-            super::token_file_path_for(Some("alt"))
-                .expect("token path")
-                .to_string_lossy()
-                .contains(".nyxid/profiles/alt/access_token")
-        );
-        assert!(super::read_saved_token_for(Some("alt")).is_some());
-        assert_eq!(
-            super::read_saved_refresh_token_for(Some("alt")).as_deref(),
-            Some("refresh-token")
-        );
-        assert_eq!(
-            super::read_saved_base_url_for(Some("alt")).as_deref(),
-            Some("https://nyx-api.example")
-        );
-    }
-
-    struct MockDeviceBrowser {
-        calls: AtomicUsize,
-    }
-
-    impl MockDeviceBrowser {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl DeviceBrowserFallback for MockDeviceBrowser {
-        fn run_browser_login<'a>(
-            &'a self,
-            _base_url: &'a str,
-            _profile: Option<&'a str>,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>>
-        {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn device_request_404_falls_back_to_browser_flow() {
-        let api = MockDeviceApi {
-            request: AuthDeviceRequestOutcome::NotSupported,
-            polls: Arc::new(Mutex::new(Vec::new())),
-        };
-        let sleeper = RecordingSleeper::new();
-        let browser = MockDeviceBrowser::new();
-
-        super::run_device_code_login_with_api(
-            "https://nyx-api.example",
-            None,
-            &api,
-            &sleeper,
-            &browser,
-        )
-        .await
-        .expect("browser fallback");
-
-        assert_eq!(browser.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sleeper.intervals(), Vec::<u64>::new());
-    }
-
     #[derive(Default)]
     struct MockLoginStrategies {
         browser_result: Mutex<Option<std::result::Result<(), BrowserLoginError>>>,
         password_calls: AtomicUsize,
         device_calls: AtomicUsize,
         browser_calls: AtomicUsize,
+        clipboard: std::sync::atomic::AtomicBool,
     }
 
     impl LoginStrategies for MockLoginStrategies {
@@ -2403,11 +2246,11 @@ mod tests {
 
         fn run_device_code_login<'a>(
             &'a self,
-            _base_url: &'a str,
-            _profile: Option<&'a str>,
+            args: crate::cli::LoginArgs,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
                 self.device_calls.fetch_add(1, Ordering::SeqCst);
+                self.clipboard.store(args.clipboard, Ordering::SeqCst);
                 Ok(())
             })
         }
@@ -2431,88 +2274,190 @@ mod tests {
 
     fn login_args() -> crate::cli::LoginArgs {
         crate::cli::LoginArgs {
-            base_url: "https://nyx-api.example".to_string(),
+            base_url: Some("https://nyx-api.example".to_string()),
             password: false,
             device: false,
+            agent_key: false,
             email: None,
             profile: None,
+            ..Default::default()
         }
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn browser_open_failure_falls_back_to_device_flow() {
-        // Must clear CI env vars so the dispatcher reaches the browser branch
-        // — on GitHub Actions runners CI=true is preset.
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let ci_keys = [
-            "CI",
-            "GITHUB_ACTIONS",
-            "BUILDKITE",
-            "CIRCLECI",
-            "JENKINS_URL",
-            "GITLAB_CI",
-            "NYXID_LOGIN_NO_DEVICE_FALLBACK",
-        ];
-        let prev: Vec<_> = ci_keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        unsafe {
-            for k in &ci_keys {
-                std::env::remove_var(k);
+    struct LoginEnvironment {
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl LoginEnvironment {
+        fn set(callback: bool, ci: bool) -> Self {
+            let guard = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let keys = [
+                "CI",
+                "GITHUB_ACTIONS",
+                "BUILDKITE",
+                "CIRCLECI",
+                "JENKINS_URL",
+                "GITLAB_CI",
+                "NYXID_LOGIN_NO_DEVICE_FALLBACK",
+            ];
+            let previous = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            unsafe {
+                for key in keys {
+                    std::env::remove_var(key);
+                }
+                if callback {
+                    std::env::set_var("NYXID_LOGIN_NO_DEVICE_FALLBACK", "1");
+                }
+                if ci {
+                    std::env::set_var("CI", "1");
+                }
+            }
+            Self {
+                previous,
+                _guard: guard,
             }
         }
+    }
 
-        let strategies = MockLoginStrategies {
-            browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
-            )))),
-            ..Default::default()
-        };
-
-        let result = run_login_with_strategies(login_args(), &strategies).await;
-
-        unsafe {
-            for (k, v) in &prev {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
+    impl Drop for LoginEnvironment {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }
-
-        result.expect("fallback succeeds");
-        assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn explicit_device_flag_skips_browser_flow() {
+    async fn session_recovery_login_uses_only_browser_or_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            super::run_interactive_login_with_strategies(login_args(), &strategies)
+                .await
+                .expect("session recovery login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 0);
+            assert_eq!(
+                strategies.browser_calls.load(Ordering::SeqCst),
+                usize::from(environment_alias)
+            );
+            assert_eq!(
+                strategies.device_calls.load(Ordering::SeqCst),
+                usize::from(!environment_alias)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_password_login_skips_browser_and_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, true);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.password = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("explicit password login");
+            assert!(strategies.password_calls.load(Ordering::SeqCst) == 1);
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_login_defaults_to_selectable_device_flow_and_preserves_clipboard() {
+        let _env = LoginEnvironment::set(false, false);
         let strategies = MockLoginStrategies::default();
         let mut args = login_args();
-        args.device = true;
-
+        args.clipboard = true;
         run_login_with_strategies(args, &strategies)
             .await
             .expect("device login");
-
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+        assert!(strategies.clipboard.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn ci_short_circuit_fires_before_network_or_browser() {
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev_ci = std::env::var_os("CI");
-        let prev_disable = std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK");
-        unsafe {
-            std::env::set_var("CI", "1");
-            std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK");
+    async fn callback_flag_and_environment_alias_use_browser_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.callback = !environment_alias;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("callback login");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
         }
+    }
 
+    #[tokio::test]
+    async fn browser_open_failure_falls_back_to_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies {
+                browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
+                )))),
+                ..Default::default()
+            };
+            let mut args = login_args();
+            args.callback = !environment_alias;
+            args.clipboard = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("fallback succeeds");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+            assert!(strategies.clipboard.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn other_browser_errors_do_not_fall_back() {
+        let _env = LoginEnvironment::set(false, false);
+        let strategies = MockLoginStrategies {
+            browser_result: Mutex::new(Some(Err(BrowserLoginError::Other(anyhow::anyhow!(
+                "callback failed"
+            ))))),
+            ..Default::default()
+        };
+        let mut args = login_args();
+        args.callback = true;
+        assert!(run_login_with_strategies(args, &strategies).await.is_err());
+        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_device_flag_skips_browser_flow_even_with_environment_alias() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.device = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("device login");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_short_circuit_fires_before_network_or_browser() {
+        let _env = LoginEnvironment::set(false, true);
         let strategies = MockLoginStrategies::default();
         let err = run_login_with_strategies(login_args(), &strategies)
             .await
@@ -2525,16 +2470,5 @@ mod tests {
         );
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
-
-        unsafe {
-            match prev_ci {
-                Some(value) => std::env::set_var("CI", value),
-                None => std::env::remove_var("CI"),
-            }
-            match prev_disable {
-                Some(value) => std::env::set_var("NYXID_LOGIN_NO_DEVICE_FALLBACK", value),
-                None => std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK"),
-            }
-        }
     }
 }

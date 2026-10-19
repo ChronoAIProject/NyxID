@@ -206,12 +206,12 @@ export function OAuthCompletePage() {
           : (errorCopy?.[1] ?? "Return to NyxID and try again.")}
       </p>
       {!success && retryable && expectedProviderOrigin === null ? (
-        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
+        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">
           Return to your NyxID tab and start the connection again there.
         </div>
       ) : null}
       {manualReturn ? (
-        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
+        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">
           Return to your NyxID tab to continue. You can close this window.
         </div>
       ) : (
@@ -275,8 +275,8 @@ function OAuthResultShell({
             <AlertCircle className="h-5 w-5 text-destructive" />
           ) : null}
         </div>
-        <h1 className="mt-5 text-[17px] font-semibold">{title}</h1>
-        <div className="mt-2 text-[12px] leading-5 text-muted-foreground">
+        <h1 className="mt-5 text-17 font-semibold">{title}</h1>
+        <div className="mt-2 text-12 leading-5 text-muted-foreground">
           {children}
         </div>
       </section>

@@ -141,7 +141,7 @@ export function AdminRolesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">Failed to load roles</p>
+            <p className="text-12 font-medium text-muted-foreground">Failed to load roles</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -149,7 +149,7 @@ export function AdminRolesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No roles found</p>
+            <p className="text-12 font-medium text-muted-foreground">No roles found</p>
             <p className="text-xs text-muted-foreground">There are no roles to display.</p>
           </div>
         </div>
@@ -160,7 +160,7 @@ export function AdminRolesPage() {
           {roles.map((r) => (
             <div
               key={r.id}
-              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
               tabIndex={0}
               role="link"
               onClick={() =>

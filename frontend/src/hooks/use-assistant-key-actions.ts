@@ -22,6 +22,7 @@ export interface ApiKeyAuthorizationEvidence {
   readonly is_active: boolean;
   readonly allowed_service_ids: readonly string[];
   readonly allow_all_services: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allowed_node_ids: readonly string[];
   readonly allow_all_nodes: boolean;
   readonly created_at: string;

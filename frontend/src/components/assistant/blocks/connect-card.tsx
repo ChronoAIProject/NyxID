@@ -259,11 +259,15 @@ export function ConnectCard({
     <section className="rounded-xl border border-border/70 bg-card">
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
-          <ServiceIcon slug={block.catalog_slug} size="sm" />
+          <ServiceIcon
+            slug={block.catalog_slug}
+            iconUrl={catalogEntry?.icon_url}
+            size="sm"
+          />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <p className="truncate text-[13px] font-semibold text-foreground">
+            <p className="truncate text-13 font-semibold text-foreground">
               {serviceName}
             </p>
             <Badge
@@ -279,7 +283,7 @@ export function ConnectCard({
             </Badge>
           </div>
           <p
-            className="flex items-center gap-1.5 truncate text-[11px] text-muted-foreground"
+            className="flex items-center gap-1.5 truncate text-11 text-muted-foreground"
             role={authorizing ? "status" : undefined}
             aria-live={authorizing ? "polite" : undefined}
           >
@@ -323,7 +327,7 @@ export function ConnectCard({
       </div>
 
       {hasDetail && (
-        <div className="space-y-2 border-t border-border/50 px-4 py-2.5 text-[11px] text-muted-foreground">
+        <div className="space-y-2 border-t border-border/50 px-4 py-2.5 text-11 text-muted-foreground">
           {showDeviceCode && (
             <div className="space-y-1">
               {block.device_user_code && (
@@ -413,11 +417,9 @@ export function ConnectCard({
           });
           void queryClient.invalidateQueries({
             queryKey: ["keys"],
-            exact: true,
           });
           void queryClient.invalidateQueries({
             queryKey: ["keys", current.keyId],
-            exact: true,
           });
         }}
       />

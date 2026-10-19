@@ -21,6 +21,8 @@ pub struct SshSessionManager {
 
 #[derive(Debug)]
 pub struct ResolvedSshAuthContext {
+    pub approval_bypass: Option<super::assistant_acknowledgement_service::AutoAllowed>,
+    pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     pub mode: SshAuthMode,
     pub service_slug: String,
     pub owner_user_id: String,
@@ -91,6 +93,8 @@ pub async fn resolve_ssh_auth_context_for_owner(
     .await?
     {
         return Ok(ResolvedSshAuthContext {
+            approval_bypass: None,
+            concurrency_policy: service.concurrency_policy.clone(),
             mode: user_service.ssh_auth_mode,
             service_slug: user_service.slug,
             owner_user_id: user_service.user_id,
@@ -100,6 +104,8 @@ pub async fn resolve_ssh_auth_context_for_owner(
     let ssh = ensure_ssh_service(service)?;
 
     Ok(ResolvedSshAuthContext {
+        approval_bypass: None,
+        concurrency_policy: service.concurrency_policy.clone(),
         mode: ssh.ssh_auth_mode,
         service_slug: service.slug.clone(),
         owner_user_id: owner_user_id.to_string(),
@@ -531,11 +537,19 @@ mod tests {
 
         let billing = BillingOwnerResolver::new(db);
         let personal_payer = billing
-            .resolve_for_resource(&personal_owner_id, &personal_context.owner_user_id)
+            .resolve_for_execution(
+                &personal_owner_id,
+                &personal_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve personal SSH payer");
         let org_payer = billing
-            .resolve_for_resource(&org_member_id, &org_context.owner_user_id)
+            .resolve_for_execution(
+                &org_member_id,
+                &org_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve org SSH payer");
         assert_eq!(personal_payer.owner_id, personal_owner_id);

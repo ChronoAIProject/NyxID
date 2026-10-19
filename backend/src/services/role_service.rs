@@ -6,8 +6,11 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{
-    COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG,
-    PLATFORM_USER_ROLE_SLUG, Role,
+    ADMIN_USAGE_READ_PERMISSION, CATALOG_MANAGER_ROLE_SLUG, CATALOG_SERVICES_WRITE_PERMISSION,
+    COLLECTION_NAME as ROLES, CREDIT_GRANTS_WRITE_PERMISSION, CREDITS_MANAGER_ROLE_SLUG,
+    FEATURE_FLAG_ADMIN_ROLE_SLUG, FEATURE_FLAG_OPERATOR_ROLE_SLUG, FEATURE_FLAGS_ADMIN_PERMISSION,
+    FEATURE_FLAGS_OWN_WRITE_PERMISSION, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG,
+    PLATFORM_USER_ROLE_SLUG, Role, USAGE_VIEWER_ROLE_SLUG,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 
@@ -20,6 +23,17 @@ const PLATFORM_USER_ROLE_DESCRIPTION: &str = "Default user role";
 const PLATFORM_ADMIN_PERMISSIONS: &[&str] = &["*"];
 const PLATFORM_OPERATOR_PERMISSIONS: &[&str] = &["nyxid:admin:read"];
 const PLATFORM_USER_PERMISSIONS: &[&str] = &[];
+const CREDITS_MANAGER_ROLE_NAME: &str = "Credits Manager";
+const CREDITS_MANAGER_ROLE_DESCRIPTION: &str =
+    "Lets an Operator issue and revoke one-off credit grants";
+const CREDITS_MANAGER_PERMISSIONS: &[&str] = &[CREDIT_GRANTS_WRITE_PERMISSION];
+const CATALOG_MANAGER_ROLE_NAME: &str = "Catalog Manager";
+const CATALOG_MANAGER_ROLE_DESCRIPTION: &str =
+    "Lets an Operator create providers and catalog services and set their initial OAuth client";
+const CATALOG_MANAGER_PERMISSIONS: &[&str] = &[CATALOG_SERVICES_WRITE_PERMISSION];
+const USAGE_VIEWER_ROLE_NAME: &str = "Usage Viewer";
+const USAGE_VIEWER_ROLE_DESCRIPTION: &str = "Read-only access to platform-wide admin usage data";
+const USAGE_VIEWER_PERMISSIONS: &[&str] = &[ADMIN_USAGE_READ_PERMISSION];
 
 #[derive(Clone, Debug)]
 pub struct PlatformRoleIds {
@@ -45,6 +59,49 @@ fn permissions_vec(permissions: &[&str]) -> Vec<String> {
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
+    }
+}
+
+/// Seed a system role introduced after deployments could already hold a
+/// custom role with the same (globally unique) slug. Unlike
+/// [`ensure_system_role`], an existing custom or client role is left
+/// untouched and seeding is skipped, so its assignments never gain the
+/// seeded permissions.
+async fn ensure_unclaimed_system_role(
+    db: &mongodb::Database,
+    spec: &SystemRoleSpec,
+) -> AppResult<Option<Role>> {
+    let roles = db.collection::<Role>(ROLES);
+    let now = Utc::now();
+    // The conditional update never converts a concurrently created custom role.
+    if let Some(role) = roles.find_one_and_update(doc! {"slug":spec.slug,"is_system":true,"client_id":null}, doc! {"$set":{
+        "name":spec.name,"description":spec.description,"permissions":permissions_vec(spec.permissions),"is_default":spec.is_default,"updated_at":bson::DateTime::from_chrono(now)
+    }}).return_document(mongodb::options::ReturnDocument::After).await? { return Ok(Some(role)); }
+    if roles.find_one(doc! {"slug":spec.slug}).await?.is_some() {
+        return Ok(None);
+    }
+    let role = Role {
+        id: Uuid::new_v4().to_string(),
+        name: spec.name.into(),
+        slug: spec.slug.into(),
+        description: Some(spec.description.into()),
+        permissions: permissions_vec(spec.permissions),
+        is_default: spec.is_default,
+        is_system: true,
+        client_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    match roles.insert_one(&role).await {
+        Ok(_) => Ok(Some(role)),
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) if e.code == 11000) =>
+        {
+            // A winner's assignments retain their original meaning.
+            Ok(roles
+                .find_one(doc! {"slug":spec.slug,"is_system":true,"client_id":null})
+                .await?)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -138,6 +195,123 @@ pub fn resolve_platform_role_from_ids(user: &User, role_ids: &PlatformRoleIds) -
 pub async fn resolve_platform_role(db: &mongodb::Database, user: &User) -> AppResult<PlatformRole> {
     let role_ids = get_platform_role_ids(db).await?;
     Ok(resolve_platform_role_from_ids(user, &role_ids))
+}
+
+/// Whether the user may issue and revoke one-off credit grants: every Admin,
+/// and an Operator whose direct or group roles carry
+/// [`CREDIT_GRANTS_WRITE_PERMISSION`]. Regular users never qualify, even if
+/// they hold the permission.
+pub async fn can_manage_credit_grants(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    operator_holds(db, user, platform_role, CREDIT_GRANTS_WRITE_PERMISSION).await
+}
+
+/// Admins, and Operators holding the Catalog Manager role, may create
+/// providers and catalog services. Callers must still apply the per-row and
+/// per-field limits that bind a Catalog Manager.
+pub async fn can_manage_catalog(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    operator_holds(db, user, platform_role, CATALOG_SERVICES_WRITE_PERMISSION).await
+}
+
+pub async fn can_manage_tools(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    operator_holds(
+        db,
+        user,
+        platform_role,
+        crate::models::role::TOOLS_WRITE_PERMISSION,
+    )
+    .await
+}
+
+async fn operator_holds(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+    permission: &str,
+) -> AppResult<bool> {
+    match platform_role {
+        PlatformRole::Admin => Ok(true),
+        PlatformRole::User => Ok(false),
+        PlatformRole::Operator => {
+            let rbac = crate::services::rbac_helpers::resolve_rbac_from_ids(
+                db,
+                &user.role_ids,
+                &user.group_ids,
+            )
+            .await?;
+            Ok(rbac.permissions.iter().any(|held| held == permission))
+        }
+    }
+}
+
+/// Whether the user may read platform-wide admin usage: every Admin and
+/// Operator, plus any user whose direct or group roles carry
+/// [`ADMIN_USAGE_READ_PERMISSION`] (for example the seeded Usage Viewer role).
+pub async fn can_read_admin_usage(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    if platform_role.has_admin_read() {
+        return Ok(true);
+    }
+    let rbac =
+        crate::services::rbac_helpers::resolve_rbac_from_ids(db, &user.role_ids, &user.group_ids)
+            .await?;
+    Ok(rbac
+        .permissions
+        .iter()
+        .any(|permission| permission == ADMIN_USAGE_READ_PERMISSION))
+}
+
+/// Feature flag permissions apply to any user, through direct or group roles.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FeatureFlagAccess {
+    pub read_all: bool,
+    pub manage_all: bool,
+    pub manage_own: bool,
+}
+
+pub async fn feature_flag_access(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<FeatureFlagAccess> {
+    if platform_role.is_admin() {
+        return Ok(FeatureFlagAccess {
+            read_all: true,
+            manage_all: true,
+            manage_own: true,
+        });
+    }
+    let rbac =
+        crate::services::rbac_helpers::resolve_rbac_from_ids(db, &user.role_ids, &user.group_ids)
+            .await?;
+    let manage_all = rbac
+        .permissions
+        .iter()
+        .any(|p| p == FEATURE_FLAGS_ADMIN_PERMISSION);
+    let manage_own = manage_all
+        || rbac
+            .permissions
+            .iter()
+            .any(|p| p == FEATURE_FLAGS_OWN_WRITE_PERMISSION);
+    Ok(FeatureFlagAccess {
+        read_all: platform_role.has_admin_read() || manage_all,
+        manage_all,
+        manage_own,
+    })
 }
 
 pub fn add_platform_role_id(
@@ -316,7 +490,14 @@ pub async fn update_role(
         update.insert("slug", s);
     }
     if let Some(d) = description {
-        update.insert("description", d);
+        update.insert(
+            "description",
+            if d.trim().is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(d.trim().to_string())
+            },
+        );
     }
     if let Some(p) = permissions {
         update.insert("permissions", p);
@@ -528,6 +709,62 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
     };
     ensure_system_role(db, &user).await?;
 
+    let credits_manager = SystemRoleSpec {
+        name: CREDITS_MANAGER_ROLE_NAME,
+        slug: CREDITS_MANAGER_ROLE_SLUG,
+        description: CREDITS_MANAGER_ROLE_DESCRIPTION,
+        permissions: CREDITS_MANAGER_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &credits_manager).await?;
+
+    ensure_unclaimed_system_role(
+        db,
+        &SystemRoleSpec {
+            name: "Tools Manager",
+            slug: crate::models::role::TOOLS_MANAGER_ROLE_SLUG,
+            description: "Lets an Operator prepare their own Tools; publication remains Admin-only",
+            permissions: &[crate::models::role::TOOLS_WRITE_PERMISSION],
+            is_default: false,
+        },
+    )
+    .await?;
+
+    let catalog_manager = SystemRoleSpec {
+        name: CATALOG_MANAGER_ROLE_NAME,
+        slug: CATALOG_MANAGER_ROLE_SLUG,
+        description: CATALOG_MANAGER_ROLE_DESCRIPTION,
+        permissions: CATALOG_MANAGER_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &catalog_manager).await?;
+    let usage_viewer = SystemRoleSpec {
+        name: USAGE_VIEWER_ROLE_NAME,
+        slug: USAGE_VIEWER_ROLE_SLUG,
+        description: USAGE_VIEWER_ROLE_DESCRIPTION,
+        permissions: USAGE_VIEWER_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_unclaimed_system_role(db, &usage_viewer).await?;
+    for spec in [
+        SystemRoleSpec {
+            name: "feature-flag-operator",
+            slug: FEATURE_FLAG_OPERATOR_ROLE_SLUG,
+            description: "Create feature flags and manage only flags you created",
+            permissions: &[FEATURE_FLAGS_OWN_WRITE_PERMISSION],
+            is_default: false,
+        },
+        SystemRoleSpec {
+            name: "feature-flag-admin",
+            slug: FEATURE_FLAG_ADMIN_ROLE_SLUG,
+            description: "Full management of all platform feature flags",
+            permissions: &[FEATURE_FLAGS_ADMIN_PERMISSION],
+            is_default: false,
+        },
+    ] {
+        ensure_unclaimed_system_role(db, &spec).await?;
+    }
+
     Ok(())
 }
 
@@ -678,6 +915,174 @@ mod tests {
             operator.permissions,
             permissions_vec(PLATFORM_OPERATOR_PERMISSIONS)
         );
+    }
+
+    #[tokio::test]
+    async fn feature_flag_roles_support_users_groups_and_safe_seeding() {
+        let db = connect_test_database("flag_role_groups")
+            .await
+            .expect("MongoDB required");
+        seed_system_roles(&db).await.unwrap();
+        seed_system_roles(&db).await.unwrap();
+        let plain = make_user_with_role_ids(vec![]);
+        assert!(
+            !feature_flag_access(&db, &plain, PlatformRole::User)
+                .await
+                .unwrap()
+                .manage_own
+        );
+        for (slug, admin) in [
+            (FEATURE_FLAG_OPERATOR_ROLE_SLUG, false),
+            (FEATURE_FLAG_ADMIN_ROLE_SLUG, true),
+        ] {
+            let rows: Vec<Role> = db
+                .collection::<Role>(ROLES)
+                .find(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].is_system && !rows[0].is_default);
+            let direct = make_user_with_role_ids(vec![rows[0].id.clone()]);
+            let access = feature_flag_access(&db, &direct, PlatformRole::User)
+                .await
+                .unwrap();
+            assert!(access.manage_own);
+            assert_eq!(access.manage_all, admin);
+            assert_eq!(access.read_all, admin);
+            let group = Group {
+                id: Uuid::new_v4().to_string(),
+                name: slug.into(),
+                slug: slug.into(),
+                description: None,
+                role_ids: vec![rows[0].id.clone()],
+                parent_group_id: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            db.collection::<Group>(GROUPS)
+                .insert_one(&group)
+                .await
+                .unwrap();
+            let mut member = make_user_with_role_ids(vec![]);
+            member.group_ids.push(group.id.clone());
+            let access = feature_flag_access(&db, &member, PlatformRole::User)
+                .await
+                .unwrap();
+            assert!(access.manage_own);
+            assert_eq!(access.manage_all, admin);
+            db.collection::<Group>(GROUPS)
+                .update_one(
+                    doc! { "_id": &group.id },
+                    doc! { "$set": { "role_ids": [] } },
+                )
+                .await
+                .unwrap();
+            assert!(
+                !feature_flag_access(&db, &member, PlatformRole::User)
+                    .await
+                    .unwrap()
+                    .manage_own
+            );
+        }
+        let collision_db = connect_test_database("flag_role_collision")
+            .await
+            .expect("MongoDB required");
+        for slug in [
+            FEATURE_FLAG_OPERATOR_ROLE_SLUG,
+            FEATURE_FLAG_ADMIN_ROLE_SLUG,
+        ] {
+            create_role(&collision_db, "Custom role", slug, None, &[], false, None)
+                .await
+                .unwrap();
+        }
+        seed_system_roles(&collision_db).await.unwrap();
+        let roles: Vec<Role> = collision_db.collection::<Role>(ROLES).find(doc! { "slug": { "$in": [FEATURE_FLAG_OPERATOR_ROLE_SLUG, FEATURE_FLAG_ADMIN_ROLE_SLUG] } }).await.unwrap().try_collect().await.unwrap();
+        assert!(
+            roles
+                .iter()
+                .all(|role| !role.is_system && role.permissions.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_viewer_role_grants_admin_usage_read_to_regular_users() {
+        let Some(db) = connect_test_database("role_usage_viewer").await else {
+            eprintln!("skipping usage viewer test: no local MongoDB available");
+            return;
+        };
+        seed_system_roles(&db).await.expect("seed roles");
+        let usage_viewer = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": USAGE_VIEWER_ROLE_SLUG })
+            .await
+            .expect("query usage viewer")
+            .expect("usage viewer role seeded");
+        assert_eq!(
+            usage_viewer.permissions,
+            permissions_vec(USAGE_VIEWER_PERMISSIONS)
+        );
+
+        let plain = make_user_with_role_ids(vec![]);
+        assert!(
+            !can_read_admin_usage(&db, &plain, PlatformRole::User)
+                .await
+                .expect("plain user check")
+        );
+        let viewer = make_user_with_role_ids(vec![usage_viewer.id.clone()]);
+        assert!(
+            can_read_admin_usage(&db, &viewer, PlatformRole::User)
+                .await
+                .expect("usage viewer check")
+        );
+        for role in [PlatformRole::Admin, PlatformRole::Operator] {
+            assert!(
+                can_read_admin_usage(&db, &plain, role)
+                    .await
+                    .expect("admin reader check")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_viewer_seed_never_claims_a_custom_role_with_its_slug() {
+        let Some(db) = connect_test_database("role_usage_viewer_collision").await else {
+            eprintln!("skipping usage viewer collision test: no local MongoDB available");
+            return;
+        };
+        let now = Utc::now();
+        let custom = Role {
+            id: Uuid::new_v4().to_string(),
+            name: "Custom viewer".to_string(),
+            slug: USAGE_VIEWER_ROLE_SLUG.to_string(),
+            description: None,
+            permissions: vec!["custom:read".to_string()],
+            is_default: false,
+            is_system: false,
+            client_id: Some("client-1".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<Role>(ROLES)
+            .insert_one(&custom)
+            .await
+            .expect("insert custom role");
+
+        seed_system_roles(&db).await.expect("seed roles");
+
+        let stored = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": USAGE_VIEWER_ROLE_SLUG })
+            .await
+            .expect("query role")
+            .expect("custom role kept");
+        assert_eq!(stored.id, custom.id);
+        assert_eq!(stored.name, custom.name);
+        assert_eq!(stored.permissions, custom.permissions);
+        assert!(!stored.is_system);
+        assert_eq!(stored.client_id.as_deref(), Some("client-1"));
     }
 
     #[tokio::test]
@@ -1004,6 +1409,18 @@ mod tests {
         assert_eq!(updated.description.as_deref(), Some("desc"));
         assert_eq!(updated.permissions, vec!["write".to_string()]);
         assert!(updated.is_default);
+        let cleared = update_role(&db, &role.id, None, None, Some("  "), None, None)
+            .await
+            .expect("clear description");
+        assert_eq!(cleared.description, None);
+        let raw = db
+            .collection::<mongodb::bson::Document>(ROLES)
+            .find_one(doc! { "_id": &role.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.get("description"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(cleared.permissions, updated.permissions);
     }
 
     #[tokio::test]

@@ -20,6 +20,11 @@ use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembe
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::services::org_service::{self, OwnerAccess};
 
+mod lifecycle;
+pub use lifecycle::{
+    TransferPoolInput, cleanup_deleted_pools, delete_pool, ensure_lifecycle_indexes, transfer_pool,
+};
+
 const WORKER_TOKEN_PREFIX: &str = "nyx_owk_";
 
 pub const MAX_POOLS_PER_OWNER: u64 = 10;
@@ -35,7 +40,7 @@ const PER_USER_MAX_INFLIGHT_CAP: u32 = 100;
 const TASK_TIMEOUT_SECS_MIN: u64 = 60;
 const TASK_TIMEOUT_SECS_MAX: u64 = 86_400;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CreatePoolInput {
     pub slug: String,
     pub name: String,
@@ -43,6 +48,7 @@ pub struct CreatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
@@ -51,19 +57,38 @@ pub struct CreatePoolInput {
 }
 
 /// Fields a pool owner may update. `None` = leave unchanged.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct UpdatePoolInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
     pub per_user_max_inflight: Option<u32>,
     pub task_timeout_secs: Option<u64>,
     pub is_active: Option<bool>,
+}
+
+/// Retire only the former seeded default; preserve every custom pool label.
+pub async fn migrate_legacy_default_model_label(
+    db: &mongodb::Database,
+) -> Result<u64, mongodb::error::Error> {
+    let result = db
+        .collection::<OraclePool>(ORACLE_POOLS)
+        .update_many(
+            doc! { "default_model_label": "chatgpt-5.5-pro", "deleted_at": null },
+            doc! { "$set": { "default_model_label": "chatgpt-6-pro" }, "$inc": {"worker_enrollment_epoch":1_i64,"lifecycle_version":1_i64} },
+        )
+        .await?;
+    tracing::info!(
+        pool_count = result.modified_count,
+        "Migrated legacy Oracle default model labels"
+    );
+    Ok(result.modified_count)
 }
 
 fn validate_slug(slug: &str) -> AppResult<()> {
@@ -162,11 +187,42 @@ fn mint_worker_token() -> (String, String) {
 /// admin rights before passing an org owner here).
 ///
 /// Returns the pool and the raw worker token (shown exactly once).
+#[cfg(test)]
 pub async fn create_pool(
     db: &mongodb::Database,
     owner_user_id: &str,
     input: CreatePoolInput,
 ) -> AppResult<(OraclePool, String)> {
+    let transaction_db = db.clone();
+    let transaction_owner_user_id = owner_user_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_owner_user_id, input),
+            |mongo_session, (transaction_db, transaction_owner_user_id, input)| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let owner_user_id = transaction_owner_user_id.as_str();
+                    super::api_key_mutation_service::transaction_result(
+                        create_pool_in_session(db, mongo_session, owner_user_id, input.clone())
+                            .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn create_pool_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    owner_user_id: &str,
+    input: CreatePoolInput,
+) -> AppResult<(OraclePool, String)> {
+    super::oracle_mutation_service::lock_inventory(db, mongo_session, owner_user_id).await?;
     validate_slug(&input.slug)?;
     let visibility = input.visibility.unwrap_or(OraclePoolVisibility::Private);
     let max_workers = input.max_workers.unwrap_or(DEFAULT_MAX_WORKERS);
@@ -193,6 +249,7 @@ pub async fn create_pool(
         let owner = db
             .collection::<User>(USERS)
             .find_one(doc! { "_id": owner_user_id })
+            .session(&mut *mongo_session)
             .await?;
         let is_org = owner.is_some_and(|u| u.user_type == UserType::Org);
         if !is_org {
@@ -204,7 +261,8 @@ pub async fn create_pool(
 
     let pool_count = db
         .collection::<OraclePool>(ORACLE_POOLS)
-        .count_documents(doc! { "user_id": owner_user_id })
+        .count_documents(doc! { "user_id": owner_user_id, "deleted_at": null })
+        .session(&mut *mongo_session)
         .await?;
     if pool_count >= MAX_POOLS_PER_OWNER {
         return Err(AppError::Conflict(format!(
@@ -215,6 +273,7 @@ pub async fn create_pool(
     let existing = db
         .collection::<OraclePool>(ORACLE_POOLS)
         .find_one(doc! { "slug": &input.slug })
+        .session(&mut *mongo_session)
         .await?;
     if existing.is_some() {
         return Err(AppError::OraclePoolSlugTaken(input.slug));
@@ -223,6 +282,11 @@ pub async fn create_pool(
     let (raw_token, token_hash) = mint_worker_token();
     let now = Utc::now();
     let pool = OraclePool {
+        deleted_at: None,
+        lifecycle_version: 0,
+        installation_epoch: 0,
+        deletion_cleanup_pending: false,
+        require_model_match: input.require_model_match.unwrap_or(true),
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner_user_id.to_string(),
         slug: input.slug,
@@ -231,7 +295,12 @@ pub async fn create_pool(
         visibility,
         worker_token_hash: token_hash,
         chatgpt_project_url: input.chatgpt_project_url.filter(|u| !u.is_empty()),
-        default_model_label: input.default_model_label.filter(|m| !m.is_empty()),
+        default_model_label: Some(
+            input
+                .default_model_label
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "chatgpt-6-pro".to_string()),
+        ),
         allow_extract: input.allow_extract.unwrap_or(false),
         max_workers,
         max_queue_length,
@@ -245,6 +314,7 @@ pub async fn create_pool(
     // The unique slug index backstops the pre-check above under races.
     db.collection::<OraclePool>(ORACLE_POOLS)
         .insert_one(&pool)
+        .session(&mut *mongo_session)
         .await
         .map_err(|e| {
             if is_duplicate_key(&e) {
@@ -269,10 +339,22 @@ pub(crate) fn is_duplicate_key(err: &mongodb::error::Error) -> bool {
 
 /// Look up a pool by id or slug.
 pub async fn get_pool(db: &mongodb::Database, id_or_slug: &str) -> AppResult<OraclePool> {
+    let pool = get_pool_for_history(db, id_or_slug).await?;
+    if pool.deleted_at.is_some() {
+        return Err(AppError::OraclePoolNotFound(id_or_slug.into()));
+    }
+    Ok(pool)
+}
+
+/// Only history readers and authorized repeated deletion may use tombstones.
+pub async fn get_pool_for_history(
+    db: &mongodb::Database,
+    id_or_slug: &str,
+) -> AppResult<OraclePool> {
     db.collection::<OraclePool>(ORACLE_POOLS)
-        .find_one(doc! { "$or": [ { "_id": id_or_slug }, { "slug": id_or_slug } ] })
+        .find_one(doc! {"$or": [{"_id": id_or_slug}, {"slug": id_or_slug}]})
         .await?
-        .ok_or_else(|| AppError::OraclePoolNotFound(id_or_slug.to_string()))
+        .ok_or_else(|| AppError::OraclePoolNotFound(id_or_slug.into()))
 }
 
 /// Authenticate a worker request: hash the bearer token and find its pool.
@@ -286,7 +368,7 @@ pub async fn validate_worker_token(
     }
     let token_hash = hash_token(raw_token);
     db.collection::<OraclePool>(ORACLE_POOLS)
-        .find_one(doc! { "worker_token_hash": &token_hash, "is_active": true })
+        .find_one(doc! { "worker_token_hash": &token_hash, "is_active": true, "deleted_at": null })
         .await?
         .ok_or(AppError::OracleWorkerTokenInvalid)
 }
@@ -298,8 +380,50 @@ pub async fn rotate_worker_token(
     actor_user_id: &str,
     id_or_slug: &str,
 ) -> AppResult<(OraclePool, String)> {
-    let pool = get_pool(db, id_or_slug).await?;
-    ensure_can_manage(db, actor_user_id, &pool).await?;
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_id_or_slug = id_or_slug.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_id_or_slug,
+            ),
+            |mongo_session, (transaction_db, transaction_actor_user_id, transaction_id_or_slug)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let id_or_slug = transaction_id_or_slug.as_str();
+                    super::api_key_mutation_service::transaction_result(
+                        rotate_worker_token_in_session(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            id_or_slug,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn rotate_worker_token_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    id_or_slug: &str,
+) -> AppResult<(OraclePool, String)> {
+    let pool =
+        super::oracle_mutation_service::lookup_pool(db, mongo_session, id_or_slug, false).await?;
+    super::oracle_mutation_service::lock_pool(db, mongo_session, &pool.id).await?;
+    super::oracle_mutation_service::lock_manager(db, mongo_session, actor_user_id, &pool.user_id)
+        .await?;
 
     let (raw_token, token_hash) = mint_worker_token();
     db.collection::<OraclePool>(ORACLE_POOLS)
@@ -308,11 +432,13 @@ pub async fn rotate_worker_token(
             doc! { "$set": {
                 "worker_token_hash": &token_hash,
                 "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            } },
+            }, "$inc": {"lifecycle_version": 1_i64} },
         )
+        .session(&mut *mongo_session)
         .await?;
 
-    let updated = get_pool(db, &pool.id).await?;
+    let updated =
+        super::oracle_mutation_service::lookup_pool(db, mongo_session, &pool.id, false).await?;
     Ok((updated, raw_token))
 }
 
@@ -323,8 +449,56 @@ pub async fn update_pool(
     id_or_slug: &str,
     input: UpdatePoolInput,
 ) -> AppResult<OraclePool> {
-    let pool = get_pool(db, id_or_slug).await?;
-    ensure_can_manage(db, actor_user_id, &pool).await?;
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_id_or_slug = id_or_slug.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_id_or_slug,
+                input,
+            ),
+            |mongo_session, context| {
+                let (transaction_db, transaction_actor_user_id, transaction_id_or_slug, input) =
+                    context;
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let id_or_slug = transaction_id_or_slug.as_str();
+                    super::api_key_mutation_service::transaction_result(
+                        update_pool_in_session(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            id_or_slug,
+                            input.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn update_pool_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    id_or_slug: &str,
+    input: UpdatePoolInput,
+) -> AppResult<OraclePool> {
+    let pool =
+        super::oracle_mutation_service::lookup_pool(db, mongo_session, id_or_slug, false).await?;
+    super::oracle_mutation_service::lock_pool(db, mongo_session, &pool.id).await?;
+    super::oracle_mutation_service::lock_manager(db, mongo_session, actor_user_id, &pool.user_id)
+        .await?;
 
     let max_workers = input.max_workers.unwrap_or(pool.max_workers);
     let max_queue_length = input.max_queue_length.unwrap_or(pool.max_queue_length);
@@ -349,6 +523,7 @@ pub async fn update_pool(
         let owner = db
             .collection::<User>(USERS)
             .find_one(doc! { "_id": &pool.user_id })
+            .session(&mut *mongo_session)
             .await?;
         if !owner.is_some_and(|u| u.user_type == UserType::Org) {
             return Err(AppError::ValidationError(
@@ -374,6 +549,9 @@ pub async fn update_pool(
     if let Some(u) = input.chatgpt_project_url {
         set.insert("chatgpt_project_url", u);
     }
+    if let Some(value) = input.require_model_match {
+        set.insert("require_model_match", value);
+    }
     if let Some(m) = input.default_model_label {
         set.insert("default_model_label", m);
     }
@@ -385,10 +563,14 @@ pub async fn update_pool(
     }
 
     db.collection::<OraclePool>(ORACLE_POOLS)
-        .update_one(doc! { "_id": &pool.id }, doc! { "$set": set })
+        .update_one(
+            doc! { "_id": &pool.id },
+            doc! { "$set": set, "$inc": {"lifecycle_version": 1_i64} },
+        )
+        .session(&mut *mongo_session)
         .await?;
 
-    get_pool(db, &pool.id).await
+    super::oracle_mutation_service::lookup_pool(db, mongo_session, &pool.id, false).await
 }
 
 /// Pools the actor can see: platform-visible ones, their own, and pools
@@ -412,7 +594,7 @@ pub async fn list_visible_pools(
 
     let pools = db
         .collection::<OraclePool>(ORACLE_POOLS)
-        .find(doc! { "$or": [
+        .find(doc! { "deleted_at": null, "$or": [
             { "visibility": "platform" },
             { "user_id": { "$in": owner_ids } },
         ] })
@@ -511,6 +693,53 @@ pub async fn ensure_can_manage(
     }
 }
 
+pub async fn create_pool_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    owner_user_id: &str,
+    input: CreatePoolInput,
+) -> AppResult<(OraclePool, String)> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_owner_user_id = owner_user_id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_owner_user_id,
+                input,
+            ),
+            |mongo_session, context| {
+                let (transaction_db, transaction_actor_user_id, transaction_owner_user_id, input) =
+                    context;
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let owner_user_id = transaction_owner_user_id.as_str();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_manager(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            owner_user_id,
+                        )
+                        .await?;
+                        create_pool_in_session(db, mongo_session, owner_user_id, input.clone())
+                            .await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,12 +812,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oracle_legacy_default_migration_is_exact_and_idempotent() {
+        let Some(db) = connect_test_database("oracle_default_migration").await else {
+            return;
+        };
+        let pools = db.collection::<mongodb::bson::Document>(ORACLE_POOLS);
+        for label in [
+            "chatgpt-5.5-pro",
+            "chatgpt-6-pro",
+            "chatgpt-5.5-pro-standard",
+            "GPT-5.5 Pro",
+        ] {
+            pools
+                .insert_one(
+                    doc! {"_id": uuid::Uuid::new_v4().to_string(), "default_model_label": label},
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 1);
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 0);
+        assert_eq!(
+            pools
+                .count_documents(doc! {"default_model_label":"chatgpt-6-pro"})
+                .await
+                .unwrap(),
+            2
+        );
+        for label in ["chatgpt-5.5-pro-standard", "GPT-5.5 Pro"] {
+            assert_eq!(
+                pools
+                    .count_documents(doc! {"default_model_label":label})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn create_get_and_token_validation() {
         let Some(db) = connect_test_database("oracle_pool_create").await else {
             return;
         };
         let owner = uuid::Uuid::new_v4().to_string();
 
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
         let (pool, raw_token) = create_pool(&db, &owner, pool_input("pool-a"))
             .await
             .expect("create pool");

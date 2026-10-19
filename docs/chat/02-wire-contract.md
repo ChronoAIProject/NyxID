@@ -5,7 +5,7 @@ production typed-chat probe (2026-08-11), with NyxID support-contract revision
 `f45febb057a7182dab2495d4c739d2bb8d7026f5`.
 
 This document specifies the browser-to-NyxID contract and the upstream request
-NyxID produces for both implemented assistant engines. It is the canonical API
+NyxID produces for all implemented assistant engines. It is the canonical API
 reference for the assistant chat surface.
 
 ## Conventions
@@ -20,6 +20,7 @@ Conversation prefixes are protocol discriminators:
 | --- | --- | --- |
 | `nyxid-chat-` | durable typed conversation | NyxIdChat actor |
 | `chatc-` | legacy historical conversation | scoped Chat History read/delete only |
+| `nyxa-` | MongoDB conversation and transcript | default-on NyxAgent; upstream context is disposable |
 | `direct-` | memory-only conversation | flag-gated Direct Chrono-LLM frontend transport |
 
 Typed conversation IDs are exactly `nyxid-chat-{32 lowercase hex}`. An unknown,
@@ -40,14 +41,17 @@ a not-found-shaped error after syntactic validation and make no upstream call.
 | `GET /direct/efforts` | curated Direct reasoning-effort metadata | no upstream call |
 | `POST /direct/completions` | stateless Direct text turn | `POST /chat/completions` on `chrono-llm-public` |
 
-With the default-off `experimental:direct-chat-engine` flag disabled, the
-browser sends every new and continuing turn through `POST /chat`. It may list,
-read, and delete a legacy `chatc-...` row, but it has no legacy send, create
-recovery, WebSocket, local-placeholder, or fallback route in the Aevatar
-engine. With the flag enabled for the user, the browser instead creates local
-`direct-...` conversations and sends their turns through
-`POST /direct/completions`. Engine selection is exclusive; neither path is a
-failure fallback for the other.
+New-draft precedence is NyxAgent (default on), Direct (default off), then
+Aevatar. Existing conversation IDs retain their engine. Actor turns use
+`POST /chat`; Direct uses `POST /direct/completions`; NyxAgent uses
+`POST /nyxagent/turns`. None is a fallback after another engine fails.
+
+The normative [NyxAgent contract](08-nyxagent-engine.md) defines
+`GET /nyxagent/conversations`, `GET/PATCH/DELETE /nyxagent/conversations/{id}`,
+`POST /nyxagent/conversations/{id}/stop`, `POST /nyxagent/turns`, and
+`GET /nyxagent/models`. Its turn stream reuses Direct events plus `turn.notice`;
+its server-owned transcript and cancellation semantics differ from Direct.
+The Aevatar sections below remain scoped to actor and legacy IDs.
 
 The current API has no `/assistant/chat-config` endpoint. The typed endpoint
 selector and replacement routes in the

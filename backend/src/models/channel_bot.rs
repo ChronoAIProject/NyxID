@@ -1,36 +1,143 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_error_code<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Code {
+        Text(String),
+        Number(i64),
+    }
+    match Code::deserialize(deserializer)? {
+        Code::Text(value) => Ok(value),
+        Code::Number(value) => Ok(value.to_string()),
+    }
+}
 
 pub const COLLECTION_NAME: &str = "channel_bots";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotError {
+    /// Numeric `AppError` code, kept for compatibility with earlier rows.
+    #[serde(deserialize_with = "deserialize_error_code")]
+    pub code: String,
+    /// Stable failure code (`services::channel_bot_health::codes`).
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotSubscriptionState {
+    pub registered: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub checked_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChannelBotDiagnostics {
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_inbound_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_inbound_source: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_outbound_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_outbound_error: Option<ChannelBotError>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_webhook_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_webhook_error: Option<ChannelBotError>,
+    #[serde(default)]
+    pub subscription_state: Option<ChannelBotSubscriptionState>,
+    #[serde(default)]
+    pub consecutive_errors: u32,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XChannelEvent {
+    Chat,
+    Posts,
+    Dm,
+    Mentions,
+    Replies,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default)]
+    pub diagnostics: ChannelBotDiagnostics,
+    /// Absent on legacy X channels, which receive DMs only.
+    #[serde(default)]
+    pub x_events: Option<Vec<XChannelEvent>>,
+    #[serde(default)]
+    pub last_verification: Option<BotVerification>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
-    /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack"
+    /// Monotonic ownership generation; operational status updates do not change it.
+    #[serde(default)]
+    pub ownership_version: i64,
+    /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"
     pub platform: String,
     pub label: String,
+    #[serde(default = "default_credential_source")]
+    pub credential_source: String,
+    /// The owner's UserApiKey UUID, resolved live for connection-backed bots.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub poll_cursor: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub poll_lease_until: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_polled_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub poll_backoff_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub poll_error_count: u32,
+    /// Most recent locally authored polling notice; retained across successful polls.
+    #[serde(default)]
+    pub last_poll_notice: Option<String>,
+    /// Locally authored operational cause, never upstream error prose.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub registration_pin_encrypted: Option<Vec<u8>>,
+    /// Managed-only copy of the generated verify token for repeatable setup.
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub webhook_secret_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub managed_setup: Option<ManagedBotSetup>,
     /// Encrypted bot token (AES-256 envelope encryption).
     /// For Slack this is the `xoxb-` bot user token.
     #[serde(with = "crate::models::bson_bytes::required")]
     pub bot_token_encrypted: Vec<u8>,
-    /// Platform-assigned bot identifier
+    /// Platform-assigned bot identifier; WhatsApp's Phone Number ID.
     pub platform_bot_id: String,
     /// Platform-assigned bot username or display handle
     pub platform_bot_username: String,
     /// Whether a webhook has been successfully registered with the platform
     pub webhook_registered: bool,
-    /// SHA-256 hash of the webhook verification secret (Telegram); unused for
-    /// platforms that derive the verifier from `app_secret_encrypted` instead
-    /// (Lark/Feishu/Slack).
+    /// SHA-256 hash of the generated webhook secret (Telegram secret header,
+    /// WhatsApp GET subscription Verify Token). Never contains a raw secret.
     pub webhook_secret_hash: String,
-    /// Lark/Feishu only: application ID
+    /// Platform account/application identifier: Lark/Feishu App ID or optional
+    /// WhatsApp Business Account ID (WABA). Not WhatsApp's Phone Number ID.
     #[serde(default)]
     pub app_id: Option<String>,
     /// Encrypted app/signing secret (AES-256 envelope encryption).
-    /// Lark/Feishu use it for HMAC + tenant-token exchange; Slack stores its
-    /// app signing secret here for Events API signature verification.
+    /// Lark/Feishu use it for tenant-token exchange; Slack and WhatsApp store
+    /// their app secrets here for inbound HMAC verification.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub app_secret_encrypted: Option<Vec<u8>>,
     /// Lark/Feishu only: encrypted verification token from the Event
@@ -53,21 +160,192 @@ pub struct ChannelBot {
     pub updated_at: DateTime<Utc>,
 }
 
+fn default_credential_source() -> String {
+    "user".to_string()
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Pending,
+    Incomplete,
+    Verified,
+    Failed,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BotVerification {
+    pub attempt_id: String,
+    pub credential_fingerprint: String,
+    pub status: VerificationStatus,
+    pub message: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub started_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for BotVerification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BotVerification([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ManagedBotSetup {
+    pub subscription: String,
+    pub webhook_override: String,
+    pub registration: String,
+    #[serde(default)]
+    pub business_id: Option<String>,
+    #[serde(default)]
+    pub coexistence: bool,
+    #[serde(default)]
+    pub coexistence_sync: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for ChannelBot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelBot")
+            .field("id", &self.id)
+            .field("platform", &self.platform)
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_timestamps_and_private_debug_are_safe() {
+        let now = bson::DateTime::now().to_chrono();
+        let check = BotVerification {
+            attempt_id: "attempt".into(),
+            credential_fingerprint: "private-fingerprint".into(),
+            status: VerificationStatus::Verified,
+            message: None,
+            started_at: now,
+            completed_at: Some(now),
+        };
+        let encoded = bson::to_document(&check).unwrap();
+        assert_eq!(encoded.get_datetime("started_at").unwrap().to_chrono(), now);
+        assert_eq!(
+            encoded.get_datetime("completed_at").unwrap().to_chrono(),
+            now
+        );
+        assert!(!format!("{check:?}").contains("private-fingerprint"));
+        let dto = crate::handlers::channel_bots::BotVerificationResponse::from(check);
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(!json.contains("credential_fingerprint"));
+        let mut legacy = bson::to_document(&make_channel_bot()).unwrap();
+        legacy.remove("last_verification");
+        assert!(
+            bson::from_document::<ChannelBot>(legacy)
+                .unwrap()
+                .last_verification
+                .is_none()
+        );
+    }
 
     #[test]
     fn collection_name() {
         assert_eq!(COLLECTION_NAME, "channel_bots");
     }
 
+    #[test]
+    fn diagnostics_are_optional_for_legacy_rows() {
+        let mut document = bson::doc! {"_id": "legacy", "user_id": "u", "platform": "twitter", "label": "x", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] }, "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false, "webhook_secret_hash": "h", "status": "active", "is_active": true, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()};
+        let bot: ChannelBot = bson::from_document(document.clone()).unwrap();
+        assert!(bot.diagnostics.last_inbound_at.is_none());
+        document.insert("diagnostics", bson::doc! {"last_inbound_source": "webhook"});
+        let bot: ChannelBot = bson::from_document(document).unwrap();
+        assert_eq!(
+            bot.diagnostics.last_inbound_source.as_deref(),
+            Some("webhook")
+        );
+    }
+
+    #[test]
+    fn diagnostics_accept_legacy_numeric_error_codes() {
+        let doc = bson::doc! {
+            "_id": "legacy-error", "user_id": "u", "platform": "twitter", "label": "x",
+            "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+            "platform_bot_id": "p", "platform_bot_username": "x", "webhook_registered": false,
+            "webhook_secret_hash": "h", "status": "active", "is_active": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            "diagnostics": { "last_outbound_error": { "code": 10004, "at": bson::DateTime::now() } }
+        };
+        let bot: ChannelBot = bson::from_document(doc).unwrap();
+        assert_eq!(bot.diagnostics.last_outbound_error.unwrap().code, "10004");
+    }
+
+    #[test]
+    fn polling_fields_are_bson_datetimes_and_legacy_rows_keep_defaults() {
+        let mut bot = make_channel_bot();
+        let now = bson::DateTime::now().to_chrono();
+        bot.connection_id = Some(uuid::Uuid::new_v4().to_string());
+        bot.poll_cursor = Some("123".into());
+        bot.poll_lease_until = Some(now);
+        bot.last_polled_at = Some(now);
+        bot.poll_backoff_until = Some(now);
+        bot.poll_error_count = 2;
+        bot.last_poll_notice = Some("Older DMs were skipped".into());
+        let mut document = bson::to_document(&bot).unwrap();
+        for field in ["poll_lease_until", "last_polled_at", "poll_backoff_until"] {
+            assert_eq!(document.get_datetime(field).unwrap().to_chrono(), now);
+        }
+        let restored: ChannelBot = bson::from_document(document.clone()).unwrap();
+        assert_eq!(restored.connection_id, bot.connection_id);
+        assert_eq!(restored.poll_cursor, bot.poll_cursor);
+        assert_eq!(restored.poll_error_count, 2);
+        assert_eq!(restored.last_poll_notice, bot.last_poll_notice);
+        for field in [
+            "connection_id",
+            "poll_cursor",
+            "poll_lease_until",
+            "last_polled_at",
+            "poll_backoff_until",
+            "poll_error_count",
+            "last_poll_notice",
+            "error",
+        ] {
+            document.remove(field);
+        }
+        let legacy: ChannelBot = bson::from_document(document).unwrap();
+        assert!(legacy.connection_id.is_none());
+        assert!(legacy.poll_cursor.is_none());
+        assert!(legacy.poll_lease_until.is_none());
+        assert!(legacy.last_polled_at.is_none());
+        assert!(legacy.poll_backoff_until.is_none());
+        assert!(legacy.error.is_none());
+        assert!(legacy.last_poll_notice.is_none());
+        assert_eq!(legacy.poll_error_count, 0);
+    }
+
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
+            x_events: None,
+            last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
             label: "My Bot".to_string(),
+            credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![1, 2, 3, 4],
             platform_bot_id: "123456789".to_string(),
             platform_bot_username: "mybot".to_string(),
@@ -152,5 +430,61 @@ mod tests {
         assert_eq!(restored.lark_verification_token_encrypted, None);
         assert_eq!(restored.lark_encrypt_key_encrypted, None);
         assert_eq!(restored.public_key, None);
+    }
+
+    #[test]
+    fn whatsapp_storage_roundtrip_uses_existing_optional_columns() {
+        let mut bot = make_channel_bot();
+        bot.platform = "whatsapp".to_string();
+        bot.platform_bot_id = "123456".to_string();
+        bot.app_id = Some("654321".to_string());
+        bot.app_secret_encrypted = Some(vec![7, 8, 9]);
+        let document = bson::to_document(&bot).unwrap();
+        assert_eq!(document.get_str("platform_bot_id").unwrap(), "123456");
+        assert_eq!(document.get_str("app_id").unwrap(), "654321");
+        assert_eq!(
+            document.get_binary_generic("app_secret_encrypted").unwrap(),
+            &[7, 8, 9]
+        );
+        let restored: ChannelBot = bson::from_document(document).unwrap();
+        assert_eq!(restored.app_secret_encrypted, bot.app_secret_encrypted);
+        assert_eq!(restored.platform_bot_id, bot.platform_bot_id);
+    }
+
+    #[test]
+    fn managed_fields_are_optional_and_pin_is_bson_binary() {
+        let mut bot = make_channel_bot();
+        let mut old = bson::to_document(&bot).unwrap();
+        for field in [
+            "credential_source",
+            "registration_pin_encrypted",
+            "webhook_secret_encrypted",
+            "managed_setup",
+        ] {
+            old.remove(field);
+        }
+        let legacy: ChannelBot = bson::from_document(old).unwrap();
+        assert_eq!(legacy.credential_source, "user");
+        assert!(legacy.registration_pin_encrypted.is_none());
+        assert!(legacy.webhook_secret_encrypted.is_none());
+        assert!(legacy.managed_setup.is_none());
+        bot.credential_source = "platform".to_string();
+        bot.registration_pin_encrypted = Some(vec![9, 8, 7]);
+        bot.webhook_secret_encrypted = Some(vec![6, 5, 4]);
+        bot.managed_setup = Some(ManagedBotSetup {
+            registration: "registered".to_string(),
+            ..Default::default()
+        });
+        let stored = bson::to_document(&bot).unwrap();
+        assert_eq!(
+            stored
+                .get_binary_generic("registration_pin_encrypted")
+                .unwrap(),
+            &[9, 8, 7]
+        );
+        let restored: ChannelBot = bson::from_document(stored).unwrap();
+        assert_eq!(restored.webhook_secret_encrypted, Some(vec![6, 5, 4]));
+        assert_eq!(restored.managed_setup.unwrap().registration, "registered");
+        assert!(!format!("{bot:?}").contains("9, 8, 7"));
     }
 }

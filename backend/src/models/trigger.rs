@@ -3,6 +3,9 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::trigger_schedule::{
+    DeliverTo, OverlapPolicy, ScheduleSpec, ScheduleState, ThreadPolicy, TriggerSource,
+};
 use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "triggers";
@@ -24,16 +27,36 @@ pub enum TriggerTokenLocation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum TriggerVerification {
-    Token { location: TriggerTokenLocation },
-    HmacSha256 { header_name: String },
+    /// No ingress. Older replicas fail closed on this unknown variant.
+    Schedule,
+    Token {
+        location: TriggerTokenLocation,
+    },
+    HmacSha256 {
+        header_name: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TriggerDelivery {
-    Webhook { url: String },
-    Agent { conversation_id: String },
+    Webhook {
+        url: String,
+    },
+    Agent {
+        conversation_id: String,
+    },
     Notification,
+    Assistant {
+        #[serde(default)]
+        confirmation_policy: super::trigger_schedule::ConfirmationPolicy,
+        agent_id: String,
+        #[serde(default)]
+        thread_policy: Option<ThreadPolicy>,
+        instruction: String,
+        #[serde(default)]
+        deliver_to: DeliverTo,
+    },
 }
 
 impl fmt::Debug for TriggerDelivery {
@@ -48,6 +71,17 @@ impl fmt::Debug for TriggerDelivery {
                 .field("conversation_id", conversation_id)
                 .finish(),
             Self::Notification => f.write_str("Notification"),
+            Self::Assistant {
+                agent_id,
+                thread_policy,
+                instruction,
+                ..
+            } => f
+                .debug_struct("Assistant")
+                .field("agent_id", agent_id)
+                .field("thread_policy", thread_policy)
+                .field("instruction", &RedactedLen(instruction.len()))
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -61,6 +95,19 @@ pub struct Trigger {
     #[serde(default)]
     pub user_service_id: Option<String>,
     pub status: TriggerStatus,
+    #[serde(default)]
+    pub source: TriggerSource,
+    #[serde(default)]
+    pub setup_watch_id: Option<String>,
+    #[serde(default)]
+    pub schedule: Option<ScheduleSpec>,
+    #[serde(default)]
+    pub schedule_state: ScheduleState,
+    #[serde(default)]
+    pub overlap: OverlapPolicy,
+    /// Required for rolling readers. Schedules use `schedule:<uuid>`, which
+    /// cannot equal a SHA-256 hex digest. Ingress rejects schedule rows before
+    /// comparing any inbound token with this field.
     pub secret_hash: String,
     pub verification: TriggerVerification,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -116,6 +163,11 @@ mod tests {
     fn bson_roundtrip_and_debug_redaction() {
         let now = Utc::now();
         let trigger = Trigger {
+            source: Default::default(),
+            setup_watch_id: None,
+            schedule: None,
+            schedule_state: Default::default(),
+            overlap: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "Build completed".to_string(),
@@ -149,5 +201,63 @@ mod tests {
         let debug = format!("{delivery:?}");
         assert!(!debug.contains("receiver.example.test"));
         assert!(debug.contains("redacted"));
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[derive(Deserialize)]
+    #[serde(tag = "mode", rename_all = "snake_case")]
+    enum OldVerification {
+        Token {
+            #[serde(rename = "location")]
+            _location: TriggerTokenLocation,
+        },
+        HmacSha256 {
+            #[serde(rename = "header_name")]
+            _header_name: String,
+        },
+    }
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OldDelivery {
+        Webhook {
+            #[serde(rename = "url")]
+            _url: String,
+        },
+        Agent {
+            #[serde(rename = "conversation_id")]
+            _conversation_id: String,
+        },
+        Notification,
+    }
+    #[test]
+    fn old_documents_default_to_webhook_and_old_replicas_fail_closed() {
+        let now = bson::DateTime::now();
+        let row = bson::doc! {"_id":"legacy","user_id":"owner","label":"Legacy event","status":"active","secret_hash":"test","verification":{"mode":"token","location":"bearer"},"delivery":{"type":"notification"},"created_at":now,"updated_at":now};
+        let trigger: Trigger = bson::from_document(row).unwrap();
+        assert_eq!(trigger.source, TriggerSource::Webhook);
+        assert!(trigger.schedule.is_none());
+        assert_eq!(trigger.overlap, OverlapPolicy::Skip);
+        assert!(
+            bson::from_bson::<OldVerification>(
+                bson::to_bson(&TriggerVerification::Schedule).unwrap()
+            )
+            .is_err()
+        );
+        assert!(
+            bson::from_bson::<OldVerification>(bson::to_bson(&trigger.verification).unwrap())
+                .is_ok()
+        );
+        let assistant = TriggerDelivery::Assistant {
+            confirmation_policy: Default::default(),
+            agent_id: "agent".into(),
+            thread_policy: None,
+            instruction: "Private instruction".into(),
+            deliver_to: DeliverTo::Thread,
+        };
+        assert!(bson::from_bson::<OldDelivery>(bson::to_bson(&assistant).unwrap()).is_err());
+        assert!(!format!("{assistant:?}").contains("Private instruction"));
     }
 }

@@ -41,6 +41,8 @@ This is the canonical NyxID connection prompt. Paste it verbatim:
 
 The agent walks you through everything: discover → ask → connect → search → call. The final `nyx__call_tool` is the verification — if it returns a real downstream response, the chain is working end-to-end.
 
+For hosted OAuth setup, call `nyx__connect_service` without `credential` and optionally pass `scopes: ["public_repo"]` to request extra permissions.
+
 ## If the agent only calls `nyx__discover_services` and stops
 
 It doesn't have a tool problem, it has an instruction problem. Re-paste the prompt and tell it explicitly to keep going through all five steps.

@@ -23,14 +23,13 @@ use crate::test_utils::{connect_test_database, test_user};
 
 fn schedule_input() -> schedules::CreateScheduleInput {
     schedules::CreateScheduleInput {
-        service_limits: Vec::new(),
-        request_id: None,
-
         amount_credits: 25,
         recurrence: ScheduleRecurrence::Monthly,
         expiry: CreditExpiryPolicy::EndOfPeriod,
         target_kind: BillingTargetKind::AllUsers,
         target_user_ids: Vec::new(),
+        target_org_ids: Vec::new(),
+        target_group_ids: Vec::new(),
         all_services: true,
         service_refs: Vec::new(),
         reason: Some("Monthly platform credits".to_string()),
@@ -138,7 +137,7 @@ async fn disburse_due_is_idempotent_across_replicas_and_crashes() {
     assert_eq!(
         db.collection::<BillingLedgerEntry>(BILLING_LEDGER)
             .count_documents(doc! {
-                "event_type": "grant_issued",
+                "movement": "grant_issued", // v2 keeps the lifecycle identity in movement.
                 "reference_id": { "$in": grants.iter().map(|grant| &grant.id).collect::<Vec<_>>() },
             })
             .await
@@ -304,17 +303,17 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
     let old_id = schedules::period_id(&schedule.id, old_period.start);
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .insert_one(CreditSchedulePeriod {
-            service_limits: Vec::new(),
-
             id: old_id.clone(),
             schedule_id: schedule.id.clone(),
             period_start: old_period.start,
             period_end: old_period.end,
             status: SchedulePeriodStatus::Disbursing,
-            amount_micros: schedule.amount_micros,
+            amount: schedule.amount,
             expires_at: Some(old_period.end),
             target_kind: schedule.target_kind,
             target_user_ids: Vec::new(),
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             scope: schedule.scope.clone(),
             reason: schedule.reason.clone(),
             cursor_user_id: None,
@@ -328,10 +327,6 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
         .expect("insert incomplete elapsed period");
     db.collection::<CreditGrant>(CREDIT_GRANTS)
         .insert_one(CreditGrant {
-            service_limits: Vec::new(),
-            revoke_requested_at: None,
-            revoke_requested_by: None,
-
             id: "crash-inserted-scheduled-grant".to_string(),
             batch_id: old_id.clone(),
             schedule_origin: Some(CreditGrantScheduleOrigin {
@@ -340,10 +335,12 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
             }),
             recipient_user_id: owner_id,
             target_kind: schedule.target_kind,
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             amount_credits: schedule.amount_credits,
-            amount_micros: schedule.amount_micros,
-            remaining_micros: schedule.amount_micros,
-            reserved_micros: 0,
+            amount: schedule.amount,
+            remaining: schedule.amount,
+            reserved: crate::models::credits::Credits::from_micros(0),
             scope: schedule.scope.clone(),
             expires_at: Some(old_period.end),
             reason: schedule.reason.clone(),
@@ -351,7 +348,7 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
             status: CreditGrantStatus::Active,
             issued_ledgered_at: None,
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: crate::models::credits::Credits::from_micros(0),
             active_settlement: None,
             created_at: old_period.start,
             updated_at: old_period.start,
@@ -488,7 +485,7 @@ async fn frozen_period_policy_and_signup_snapshot_survive_mid_walk_edit() {
     );
     assert!(grants.iter().all(|grant| {
         grant.amount_credits == 25
-            && grant.amount_micros == 25_000_000
+            && grant.amount == crate::models::credits::Credits::from_micros(25_000_000)
             && grant.expires_at == Some(window.end)
             && grant.reason.as_deref() == Some("Monthly platform credits")
     }));

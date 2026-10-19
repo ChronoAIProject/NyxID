@@ -2,19 +2,22 @@ use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
-use crate::api::ApiClient;
-use crate::cli::{CatalogCommands, OutputFormat};
+use crate::api::{ApiClient, ApiError, build_credential_http_client};
+use crate::cli::{AuthArgs, CatalogCommands, OutputFormat};
 
 pub async fn run(command: CatalogCommands) -> Result<()> {
     match command {
-        CatalogCommands::List { all, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+        command @ (CatalogCommands::Endpoint { .. }
+        | CatalogCommands::Discover { .. }
+        | CatalogCommands::Publish { .. }
+        | CatalogCommands::Topics { .. }) => super::catalog_tools::run_admin(command).await,
+        CatalogCommands::List { all, public, auth } => {
             let path = if all {
                 "/catalog?include_all=true"
             } else {
                 "/catalog"
             };
-            let catalog: Value = api.get(path).await?;
+            let catalog = fetch_catalog(&auth, public, path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -30,7 +33,14 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     if let Some(items) = items {
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["Slug", "Name", "Type", "Auth", "How to Add"]);
+                        table.set_header([
+                            "Slug",
+                            "Name",
+                            "Type",
+                            "Auth",
+                            "How to Add",
+                            "Inference",
+                        ]);
 
                         for item in items {
                             let slug = item["slug"].as_str().unwrap_or("-");
@@ -75,7 +85,14 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                                 format!("nyxid service add {} --credential-env <VAR>", slug)
                             };
 
-                            table.add_row([slug, name, &type_label, provider_type, &how_to_add]);
+                            table.add_row([
+                                slug,
+                                name,
+                                &type_label,
+                                provider_type,
+                                &how_to_add,
+                                &super::service::catalog_admin::inference_summary(item),
+                            ]);
                         }
                         eprintln!("{table}");
                     }
@@ -86,9 +103,13 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             }
             Ok(())
         }
-        CatalogCommands::Show { slug, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let item: Value = api.get(&format!("/catalog/{slug}")).await?;
+        CatalogCommands::Show { slug, public, auth } => {
+            let item = fetch_catalog(
+                &auth,
+                public,
+                &format!("/catalog/{}", urlencoding::encode(&slug)),
+            )
+            .await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -241,6 +262,56 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     }
 
                     eprintln!();
+                    eprintln!(
+                        "Inference: {}",
+                        super::service::catalog_admin::inference_summary(&item)
+                    );
+                    if let Some(voice) = item["inference"]["voice"].as_object() {
+                        eprintln!(
+                            "Voice protocol: {}",
+                            voice["protocol"].as_str().unwrap_or("unknown")
+                        );
+                        for (field, label) in [("models", "Voice models"), ("voices", "Voices")] {
+                            let entries: Vec<String> = voice[field]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|v| {
+                                    format!(
+                                        "{} ({}){}",
+                                        v["label"].as_str().unwrap_or(""),
+                                        v["id"].as_str().unwrap_or(""),
+                                        if v["default"] == true {
+                                            " [default]"
+                                        } else {
+                                            ""
+                                        }
+                                    )
+                                })
+                                .collect();
+                            eprintln!("{label}: {}", entries.join(", "));
+                        }
+                        eprintln!(
+                            "Voice usage: {}",
+                            voice["usage_source"].as_str().unwrap_or("unknown")
+                        );
+                        eprintln!("Voice billing units: {}", voice["billing_metrics"]);
+                    }
+                    if item["platform_key"]["available"] == true {
+                        eprintln!(
+                            "Platform key: available; nyxid service add {item_slug} --platform-key"
+                        );
+                    }
+                    eprintln!(
+                        "Platform key price: {}",
+                        super::service::catalog_admin::lane_price_label(
+                            item.get("platform_key").and_then(|p| p.get("pricing"))
+                        )
+                    );
+                    eprintln!(
+                        "Your own key price: {}",
+                        super::service::catalog_admin::lane_price_label(item.get("byok_pricing"))
+                    );
                     eprintln!("How to add:");
 
                     if svc_type == "ssh" {
@@ -281,9 +352,13 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             }
             Ok(())
         }
-        CatalogCommands::Endpoints { slug, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let result: Value = api.get(&format!("/catalog/{slug}/endpoints")).await?;
+        CatalogCommands::Endpoints { slug, public, auth } => {
+            let result = fetch_catalog(
+                &auth,
+                public,
+                &format!("/catalog/{}/endpoints", urlencoding::encode(&slug)),
+            )
+            .await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -334,6 +409,27 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
     }
 }
 
+async fn fetch_catalog(auth: &AuthArgs, public: bool, path: &str) -> Result<Value> {
+    if !public {
+        return ApiClient::from_auth_checked(auth).await?.get(path).await;
+    }
+    let base = crate::auth::login_exchange::normalized_destination(&auth.resolved_base_url()?)?;
+    let response = build_credential_http_client(auth.profile.as_deref())?
+        .get(format!("{base}/api/v1{path}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(ApiError::new(
+            path,
+            response.status(),
+            response.text().await.unwrap_or_default(),
+        )
+        .into());
+    }
+    Ok(response.json().await?)
+}
+
 fn truncate_line(s: &str, max: usize) -> String {
     let first_line = s.lines().next().unwrap_or(s);
     if first_line.chars().count() > max {
@@ -364,6 +460,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth(server.uri()),
         })
@@ -385,6 +482,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: true,
             auth: mock_auth(server.uri()),
         })
@@ -405,6 +503,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::Show {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -428,6 +527,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -478,6 +578,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -511,6 +612,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Show {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -534,6 +636,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -551,6 +654,7 @@ mod table_tests {
             .await;
 
         let result = run(CatalogCommands::Show {
+            public: false,
             slug: "nonexistent".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
@@ -570,6 +674,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "empty".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -589,6 +694,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })

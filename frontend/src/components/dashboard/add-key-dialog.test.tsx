@@ -208,6 +208,20 @@ const RFC8628_DEVICE_CODE_ENTRY = {
   default_scopes: ["openid"],
 } as unknown as CatalogEntry;
 
+const SUPABASE_ENTRY = {
+  ...OPENAI_ENTRY,
+  slug: "api-supabase",
+  name: "Supabase Data API",
+  description: "Supabase PostgREST Data API connector",
+  base_url: "https://project-ref.supabase.co/rest/v1",
+  provider_config_id: "provider-supabase",
+  provider_type: "api_key",
+  auth_method: "header",
+  auth_key_name: "apikey",
+  requires_gateway_url: true,
+  requires_credential: true,
+} as unknown as CatalogEntry;
+
 function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   const key = buildReconnectKey(overrides);
   lastReconnectKey.value = key as unknown as Record<string, unknown>;
@@ -525,6 +539,42 @@ describe("AddKeyDialog — catalog template path", () => {
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
     expect(mockNavigate).not.toHaveBeenCalled();
   });
+
+  it("requires a real Supabase project URL instead of submitting the catalog placeholder", async () => {
+    catalog.entries = [SUPABASE_ENTRY];
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({ id: "new-supabase-key" });
+    });
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /Supabase Data API/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    const endpoint = document.querySelector<HTMLInputElement>("#add-key-endpoint");
+    expect(endpoint).not.toBeNull();
+    expect(endpoint?.value).toBe("");
+    expect(endpoint?.placeholder).toBe("https://project-ref.supabase.co");
+    expect(screen.getByText("Supabase Project URL")).toBeInTheDocument();
+    expect(screen.getByText("Supabase API Key")).toBeInTheDocument();
+
+    await typeInto(user, "add-key-credential", "sb_secret_test");
+    await typeInto(user, "add-key-endpoint", "https://demo.supabase.co");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
+    expect(createKeyMutate).toHaveBeenCalledWith(
+      {
+        credential: "sb_secret_test",
+        label: "Supabase Data API",
+        service_slug: "api-supabase",
+        endpoint_url: "https://demo.supabase.co",
+      },
+      expect.anything(),
+    );
+  });
 });
 
 describe("AddKeyDialog — platform one-click path (credential_mode=both)", () => {
@@ -726,7 +776,121 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
   });
 });
 
+describe("AddKeyDialog — IFTTT OAuth", () => {
+  it("connects with the required scope before client registration and clears a prefilled node", async () => {
+    catalog.entries = [
+      {
+        ...OAUTH_ENTRY,
+        slug: "api-ifttt-mcp",
+        name: "IFTTT",
+        base_url: "https://ifttt.com/mcp",
+        auth_method: "ifttt_mcp",
+        credential_mode: "admin",
+        has_platform_oauth_credentials: false,
+        default_scopes: ["mcp"],
+        scope_catalog: [
+          {
+            scope: "mcp",
+            label: "IFTTT tools",
+            description: "Use IFTTT tools",
+            sensitive: true,
+            required: true,
+          },
+        ],
+        platform_scope_allowlist: ["mcp"],
+      },
+    ];
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: "https://ifttt.com/oauth/authorize?state=test",
+    });
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-ifttt-mcp"
+        prefillNodeId="old-node"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Via Node/i }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+    expect(screen.queryByLabelText(/Client Secret/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /IFTTT tools/i })).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Connect with IFTTT" }),
+    );
+
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "provider-oauth",
+          keyId: "created-service-1",
+          scopeOverride: ["mcp"],
+        }),
+      ),
+    );
+    expect(createKeyMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ service_slug: "api-ifttt-mcp" }),
+    );
+    expect(createKeyMutateAsync.mock.calls[0]?.[0].node_id).toBeUndefined();
+    expect(await screen.findByRole("link", { name: /IFTTT/i })).toHaveAttribute(
+      "href",
+      "https://ifttt.com/oauth/authorize?state=test",
+    );
+  });
+});
+
 describe("AddKeyDialog — reconnect path", () => {
+  it.each(["api-google-gmail", "api-google-workspace"])(
+    "keeps send optional when reconnecting %s with a read-only grant",
+    async (slug) => {
+      const read = "https://www.googleapis.com/auth/gmail.readonly";
+      const send = "https://www.googleapis.com/auth/gmail.send";
+      catalog.entries = [
+        {
+          ...OAUTH_ENTRY,
+          slug,
+          name: "Google mail",
+          default_scopes: [read, send],
+          scope_catalog: [
+            {
+              scope: send,
+              label: "Gmail (send)",
+              description: "Send email.",
+              required: false,
+            },
+          ],
+        },
+      ];
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog
+          open
+          onOpenChange={vi.fn()}
+          reconnectKey={makeReconnectKey({
+            slug,
+            catalog_service_slug: slug,
+            granted_scopes: ["openid", read],
+          })}
+        />,
+      );
+      expect(screen.getByRole("button", { name: /Gmail \(send\)/ })).toBeEnabled();
+      await user.click(
+        screen.getByRole("button", { name: /Connect with Google mail/ }),
+      );
+      await waitFor(() =>
+        expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+          expect.objectContaining({
+            scopeOverride: ["openid", read],
+          }),
+        ),
+      );
+    },
+  );
+
   it("starts OAuth reconnect with the existing key id and detail redirect without creating or deleting a key", async () => {
     catalog.entries = [OAUTH_ENTRY];
     const user = userEvent.setup();
@@ -770,6 +934,28 @@ describe("AddKeyDialog — reconnect path", () => {
     );
     expect(authorizeLink).toHaveAttribute("target", "_blank");
     expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
+  });
+
+  it("hides OAuth scopes and ignores prefills for a provider without scope support", async () => {
+    catalog.entries = [
+      { ...OAUTH_ENTRY, name: "Notion", supports_oauth_scopes: false } as CatalogEntry,
+    ];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        prefillScopes={["unsupported:scope"]}
+      />,
+    );
+    expect(document.getElementById("oauth-scope-custom")).not.toBeInTheDocument();
+    expect(screen.queryByText("unsupported:scope")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Connect with Notion/i }));
+    await waitFor(() => expect(initiateOAuthMutateAsync).toHaveBeenCalledOnce());
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeOverride: [] }),
+    );
   });
 
   it("merges granted and assistant-requested scopes for OAuth reconnect", async () => {
@@ -1700,6 +1886,81 @@ function minCatalogEntry(slug: string, name = slug): CatalogEntry {
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it.each(["api-ifttt", "api-ifttt-2"])(
+    "connects IFTTT with a raw key and never probes %s",
+    async (createdSlug) => {
+      catalog.entries = [
+        {
+          ...minCatalogEntry("api-ifttt", "IFTTT Webhooks"),
+          base_url: "https://maker.ifttt.com",
+          auth_method: "ifttt_webhook",
+          auth_key_name: "",
+          provider_type: "api_key",
+        },
+      ];
+      createKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({ id: "ifttt-connection", slug: createdSlug });
+      });
+      createApiKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({
+          id: "ifttt-agent",
+          full_key: "nyxid_ag_ifttt_test",
+          key_prefix: "nyxid_ag_",
+          scopes: ["proxy"],
+          allow_all_services: false,
+          allowed_service_ids: ["ifttt-connection"],
+        });
+      });
+      const fetchSpy = vi.spyOn(window, "fetch").mockRejectedValue(
+        new Error("IFTTT setup must not make a downstream request"),
+      );
+      const onSuccess = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog open onOpenChange={vi.fn()} onSuccess={onSuccess} />,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /IFTTT Webhooks/i }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+      );
+      expect(screen.getByLabelText(/IFTTT Webhooks key/)).toHaveAttribute(
+        "type", "password",
+      );
+      expect(
+        screen.getByPlaceholderText(/Raw key.*not a URL/i),
+      ).toBeInTheDocument();
+      await typeInto(user, "add-key-credential", "test_IFTTT_key");
+      await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+      expect(createKeyMutate).toHaveBeenCalledWith(
+        {
+          credential: "test_IFTTT_key",
+          label: "IFTTT Webhooks",
+          service_slug: "api-ifttt",
+          endpoint_url: "https://maker.ifttt.com",
+        },
+        expect.anything(),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Create Agent Key" }),
+      );
+      expect(
+        await screen.findByText(/Automatic testing isn't supported/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Test Agent Key/i }),
+      ).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Done" }));
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(onSuccess).toHaveBeenCalledWith({
+        userServiceId: "ifttt-connection",
+      });
+    },
+  );
+
   it("reports the created UserService id only when the success step is finished", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({
@@ -1851,5 +2112,96 @@ describe("AddKeyDialog — catalog service icons", () => {
     // Crucially, the fallback must NOT pretend to be a per-slug icon: the
     // `data-slug="xyz-not-real"` selector must miss entirely.
     expect(document.querySelector(`[data-slug="${unknownSlug}"]`)).toBeNull();
+  });
+});
+
+describe("platform key connection choice", () => {
+  it("defaults to platform and submits no user secret or destination", async () => {
+    catalog.entries = [{ ...OPENAI_ENTRY, platform_key: { available: true, pricing: { metric: "tokens", credits_per_unit: "0.25", sync_status: "synced" } } }];
+    createKeyMutateAsync.mockResolvedValue(buildReconnectKey({ id: "platform-service", credential_binding: "platform", status: "active", slug: OPENAI_ENTRY.slug }));
+    render(<AddKeyDialog open onOpenChange={vi.fn()} prefillSlug={OPENAI_ENTRY.slug} />);
+    const platform = await screen.findByRole("radio", { name: /Use NyxID's key/ });
+    expect(platform).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(createKeyMutateAsync).toHaveBeenCalledWith({ service_slug: OPENAI_ENTRY.slug, label: OPENAI_ENTRY.name, use_platform_key: true });
+  });
+  it("keeps the existing own-key route selectable", async () => {
+    catalog.entries = [{ ...OPENAI_ENTRY, platform_key: { available: true, pricing: null } }];
+    render(<AddKeyDialog open onOpenChange={vi.fn()} prefillSlug={OPENAI_ENTRY.slug} />);
+    await userEvent.click(await screen.findByRole("radio", { name: /Use your own key/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.queryByRole("radio", { name: /Use NyxID's key/ })).not.toBeInTheDocument();
+    expect(createKeyMutateAsync).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("AddKeyDialog — consolidated PostHog", () => {
+  function regionalEntry(region: "US" | "EU"): CatalogEntry {
+    return {
+      ...OAUTH_ENTRY,
+      slug: `api-posthog-${region.toLowerCase()}`,
+      name: `PostHog (${region})`,
+      base_url: `https://${region.toLowerCase()}.posthog.com`,
+      provider_config_id: `posthog-${region.toLowerCase()}-provider`,
+    };
+  }
+
+  it.each(["US", "EU"] as const)(
+    "shows one card and selects the original %s connection",
+    async (region) => {
+      const entry = regionalEntry(region);
+      catalog.entries = [regionalEntry("EU"), OPENAI_ENTRY, regionalEntry("US")];
+      const user = userEvent.setup();
+      render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+      expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(1);
+      await user.click(screen.getByRole("button", { name: /PostHog/ }));
+      expect(screen.getByRole("heading", { name: "Connect PostHog" })).toBeInTheDocument();
+      expect(createKeyMutateAsync).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", {
+        name: region === "US" ? /United States/ : /European Union/,
+      }));
+      expect(screen.getByRole("heading", {
+        name: `Configure routing for ${entry.name}`,
+      })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+      await user.click(screen.getByRole("button", { name: /Connect with PostHog/ }));
+      await waitFor(() => expect(createKeyMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ service_slug: entry.slug, endpoint_url: entry.base_url }),
+      ));
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+        providerId: entry.provider_config_id,
+      }));
+    },
+  );
+
+  it("matches either regional slug and retains search when going back", async () => {
+    catalog.entries = [regionalEntry("EU"), OPENAI_ENTRY, regionalEntry("US")];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText("Search services..."), "api-posthog-us");
+    await user.click(screen.getByRole("button", { name: /PostHog/ }));
+    await user.click(screen.getByRole("button", { name: "Back to catalog" }));
+    expect(screen.getByPlaceholderText("Search services...")).toHaveValue("api-posthog-us");
+    expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(1);
+  });
+
+  it("leaves a single regional entry directly selectable", async () => {
+    catalog.entries = [regionalEntry("EU")];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /PostHog/ }));
+    expect(screen.getByRole("heading", {
+      name: "Configure routing for PostHog (EU)",
+    })).toBeInTheDocument();
+  });
+
+  it("keeps multiple configurations for the same region separate", () => {
+    catalog.entries = [regionalEntry("US"), regionalEntry("EU"), {
+      ...regionalEntry("US"), slug: "posthog-us-custom",
+    }];
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(3);
   });
 });

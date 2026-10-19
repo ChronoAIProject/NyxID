@@ -12,10 +12,16 @@ use crate::services::content_type::normalize_content_type;
 /// Input for creating or upserting a single endpoint.
 #[derive(Clone)]
 pub struct EndpointInput {
+    pub data_scope: Option<crate::models::service_endpoint::DataScope>,
+    pub cost_class: Option<crate::models::service_endpoint::CostClass>,
+    pub execution: crate::models::service_endpoint::ExecutionKind,
+
+    pub async_operation: Option<crate::models::async_service_operation::AsyncOperationContract>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
     pub path: String,
+    pub target_id: Option<String>,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
@@ -27,11 +33,17 @@ pub struct EndpointInput {
 }
 
 /// Fields that can be updated on an existing endpoint.
+#[derive(Clone, Default)]
 pub struct EndpointUpdate {
+    pub data_scope: Option<Option<crate::models::service_endpoint::DataScope>>,
+    pub cost_class: Option<Option<crate::models::service_endpoint::CostClass>>,
+    pub execution: Option<crate::models::service_endpoint::ExecutionKind>,
+
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub method: Option<String>,
     pub path: Option<String>,
+    pub target_id: Option<Option<String>>,
     pub parameters: Option<Option<serde_json::Value>>,
     pub request_body_schema: Option<Option<serde_json::Value>>,
     pub request_content_type: Option<Option<String>>,
@@ -43,12 +55,149 @@ pub struct EndpointUpdate {
     pub is_active: Option<bool>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EndpointSyncActivation {
-    /// Admin-initiated reconcile: re-adding an endpoint reactivates it.
-    ForceActive,
-    /// Background/startup sync: preserve an operator's explicit activation choice.
-    PreserveExisting,
+#[derive(Clone)]
+pub enum Mutation {
+    Create(EndpointInput),
+    Update(String, EndpointUpdate),
+    Delete(String),
+    Reconcile {
+        inputs: Vec<EndpointInput>,
+        authoritative: bool,
+    },
+}
+
+fn route_shape_changed(fields: &bson::Document) -> bool {
+    ["name", "method", "path", "target_id"]
+        .iter()
+        .any(|key| fields.contains_key(*key))
+}
+
+fn only_withdraws_operation(fields: &bson::Document) -> bool {
+    fields.get_bool("is_active") == Ok(false)
+        && fields.keys().all(|key| {
+            key == "is_active" || (key == "publication" && fields.get_str(key) == Ok("draft"))
+        })
+}
+
+/// Bind every publication decision to the same live parent/authority snapshot
+/// as the operation write. Background sync uses the same kind fence.
+pub async fn commit_mutation(
+    db: &mongodb::Database,
+    observed: &crate::models::downstream_service::DownstreamService,
+    authority: Option<&super::catalog_mutation_service::Authority>,
+    mutation: Mutation,
+    audit_key: &[u8],
+) -> AppResult<(Vec<ServiceEndpoint>, Vec<String>)> {
+    use crate::models::{downstream_service::OfferingKind, service_endpoint::PublicationState};
+    let db = db.clone();
+    let observed = observed.clone();
+    let authority = authority.cloned();
+    let key = zeroize::Zeroizing::new(audit_key.to_vec());
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result = async {
+            let (parent, admin) = super::catalog_mutation_service::validate_parent(&db, session, &observed, authority.as_ref()).await?;
+            let tool = parent.offering_kind == OfferingKind::Tool;
+            let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
+            let rows: Vec<ServiceEndpoint> = coll.find(doc! {"service_id": &parent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+            let mut inserts = Vec::new();
+            let mut updates = Vec::new();
+            let mut deleted = None;
+            let mut withdrawn = Vec::new();
+            let mut contract_changed = false;
+            let initial = if tool {PublicationState::Draft} else {PublicationState::Published};
+            match &mutation {
+                Mutation::Create(input) => inserts.push(endpoint_from_input(&parent.id, input.clone(), initial)),
+                Mutation::Update(id, input) => {
+                    if tool && input.is_active.is_some() { return Err(AppError::ValidationError("Use the publication route to enable or pause tool operations".into())); }
+                    let row = rows.iter().find(|row| &row.id == id).ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?;
+                    let fields = endpoint_update_fields(row, input.clone())?;
+                    if !fields.is_empty() { contract_changed |= route_shape_changed(&fields); updates.push((row, fields)); }
+                }
+                Mutation::Delete(id) => {
+                    if tool && (!admin || authority.is_none()) { return Err(AppError::Forbidden("Only a human Admin may delete Tool operations".into())); }
+                    deleted = Some(rows.iter().find(|row| &row.id == id).ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?);
+                    contract_changed = true;
+                }
+                Mutation::Reconcile {inputs, authoritative} => {
+                    let mut names = std::collections::HashSet::new();
+                    for input in inputs {
+                        if !names.insert(input.name.as_str()) { return Err(AppError::ValidationError("Spec contains duplicate operation names".into())); }
+                        if let Some(row) = rows.iter().find(|row| row.name == input.name) {
+                            let mut update = update_from_input(input.clone());
+                            if !tool && *authoritative { update.is_active = Some(true); }
+                            let mut fields = endpoint_update_fields(row, update)?;
+                            if row.async_operation != input.async_operation {
+                                fields.insert("async_operation", bson::to_bson(&input.async_operation).map_err(|e| AppError::Internal(e.to_string()))?);
+                            }
+                            if !fields.is_empty() { contract_changed |= route_shape_changed(&fields); updates.push((row, fields)); }
+                        } else { inserts.push(endpoint_from_input(&parent.id, input.clone(), initial)); }
+                    }
+                    if *authoritative {
+                        for row in rows.iter().filter(|row| !names.contains(row.name.as_str())) {
+                            if (tool && row.publication == PublicationState::Published) || (!tool && row.is_active) {
+                                let mut fields = doc! {"is_active": false};
+                                if tool { fields.insert("publication", "draft"); withdrawn.push(row.name.clone()); }
+                                updates.push((row, fields));
+                            }
+                        }
+                    }
+                }
+            }
+            if inserts.is_empty() && updates.is_empty() && deleted.is_none() { return Ok((rows, withdrawn)); }
+            super::catalog_mutation_service::fence(&db, session, &observed, authority.as_ref()).await?;
+            // Validate targets and names against the transaction's parent.
+            for target in inserts.iter().filter_map(|row| row.target_id.as_deref())
+                .chain(updates.iter().filter_map(|(_, fields)| fields.get_str("target_id").ok())) {
+                super::destination_routing::validate_target_id(target)?;
+                if !parent.destination_targets.contains_key(target) { return Err(AppError::ValidationError("Endpoint target is absent from the parent destination map".into())); }
+                if tool && authority.is_some() && !admin { return Err(AppError::Forbidden("Tool destinations require Admin authority".into())); }
+            }
+            for row in &inserts {
+                if rows.iter().any(|before| before.name == row.name) { return Err(AppError::Conflict("Operation name already exists".into())); }
+            }
+            for (row, fields) in &updates {
+                // Withdrawal can disable an already-invalid operation without
+                // ratifying its generation. Contract edits and reactivation
+                // still require a valid generation with room to advance.
+                if !only_withdraws_operation(fields) {
+                    ensure_writable_operation_generation(row)?;
+                    if row.operation_generation == i64::MAX { return Err(AppError::Conflict("Operation generation exhausted".into())); }
+                }
+                if let Ok(name) = fields.get_str("name")
+                    && rows.iter().any(|before| before.id != row.id && before.name == name) {
+                    return Err(AppError::Conflict("Operation name already exists".into()));
+                }
+            }
+            let system = super::audit_service::AuditActor {user_id:"system".into(), ip_address:None, user_agent:None, api_key_id:None, api_key_name:None};
+            let actor = authority.as_ref().map(|a| &a.actor).unwrap_or(&system);
+            if tool && contract_changed {
+                demote_tool_in_session(&db, session, &parent.id, None, Some((actor, &key))).await?;
+            }
+            for (row, mut fields) in updates {
+                fields.insert("updated_at", bson::DateTime::now());
+                if tool { fields.insert("publication", "draft"); fields.insert("is_active", false); }
+                // A published row already advanced during conservative demotion.
+                if row.operation_generation > 0 && row.operation_generation < i64::MAX {
+                    fields.insert("operation_generation", row.operation_generation + 1);
+                }
+                coll.update_one(doc! {"_id": &row.id}, doc! {"$set": fields}).session(&mut *session).await?;
+                if tool && withdrawn.contains(&row.name) {
+                    super::audit_service::log_actor_event_in_session(&db, session, &key, actor, "tool_operation_withdrawn", serde_json::json!({"service_id":parent.id,"endpoint_id":row.id,"name":row.name,"reason":"absent_from_spec"})).await?;
+                }
+            }
+            for row in inserts { coll.insert_one(row).session(&mut *session).await?; }
+            if let Some(row) = deleted {
+                coll.delete_one(doc! {"_id": &row.id}).session(&mut *session).await?;
+                if tool { super::audit_service::log_actor_event_in_session(&db, session, &key, actor, "tool_operation_deleted", serde_json::json!({"service_id":parent.id,"endpoint_id":row.id,"name":row.name})).await?; }
+            } else if tool {
+                let event = if matches!(mutation, Mutation::Reconcile { .. }) {"tool_operations_discovered"} else {"tools_manager_operations_updated"};
+                super::audit_service::log_actor_event_in_session(&db, session, &key, actor, event, serde_json::json!({"service_id":parent.id,"authority":if admin {"admin"} else if authority.is_some() {"tools_manager"} else {"system"}})).await?;
+            }
+            Ok((coll.find(doc! {"service_id": &parent.id}).session(&mut *session).await?.stream(&mut *session).try_collect().await?, withdrawn))
+        }.await;
+        super::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Validate a request content type value for storage on an endpoint.
@@ -101,35 +250,6 @@ fn ensure_writable_operation_generation(endpoint: &ServiceEndpoint) -> AppResult
     Ok(())
 }
 
-fn writable_operation_generation_filter() -> bson::Document {
-    doc! {
-        "$or": [
-            { "operation_generation": { "$exists": false } },
-            { "operation_generation": { "$gt": 0 } },
-        ]
-    }
-}
-
-/// Build an aggregation update so a legacy missing generation advances from
-/// its canonical value 1 to 2 atomically. `$literal` prevents producer values
-/// such as strings beginning with `$` from being interpreted as expressions.
-fn semantic_update_pipeline(set_doc: bson::Document) -> Vec<bson::Document> {
-    let mut set_expressions = bson::Document::new();
-    for (field, value) in set_doc {
-        set_expressions.insert(field, doc! { "$literal": value });
-    }
-    set_expressions.insert(
-        "operation_generation",
-        doc! {
-            "$add": [
-                { "$ifNull": ["$operation_generation", 1_i64] },
-                1_i64,
-            ]
-        },
-    );
-    vec![doc! { "$set": set_expressions }]
-}
-
 /// List all active endpoints for a given service.
 pub async fn list_endpoints(
     db: &mongodb::Database,
@@ -143,56 +263,98 @@ pub async fn list_endpoints(
     Ok(endpoints)
 }
 
-/// Create a new endpoint for a service.
-pub async fn create_endpoint(
+pub async fn list_all_endpoints(
     db: &mongodb::Database,
     service_id: &str,
-    input: EndpointInput,
-) -> AppResult<ServiceEndpoint> {
-    let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
-    let now = Utc::now();
-
-    let endpoint = ServiceEndpoint {
-        id: Uuid::new_v4().to_string(),
-        service_id: service_id.to_string(),
-        name: input.name,
-        description: input.description,
-        method: input.method.to_uppercase(),
-        path: input.path,
-        parameters: input.parameters,
-        request_body_schema: input.request_body_schema,
-        request_content_type: input.request_content_type,
-        request_body_required: input.request_body_required,
-        response_description: input.response_description,
-        response: normalize_response(input.response),
-        risk: input.risk,
-        supports_idempotency_key: input.supports_idempotency_key,
-        is_active: true,
-        operation_generation: 1,
-        created_at: now,
-        updated_at: now,
-    };
-
-    coll.insert_one(&endpoint).await?;
-    Ok(endpoint)
+) -> AppResult<Vec<ServiceEndpoint>> {
+    Ok(db
+        .collection::<ServiceEndpoint>(COLLECTION_NAME)
+        .find(doc! {"service_id": service_id})
+        .await?
+        .try_collect()
+        .await?)
 }
 
-/// Update an existing endpoint by ID.
-pub async fn update_endpoint(
+pub(crate) async fn demote_tool_in_session(
     db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
     service_id: &str,
-    endpoint_id: &str,
-    updates: EndpointUpdate,
+    except: Option<&str>,
+    audit: Option<(&super::audit_service::AuditActor, &[u8])>,
 ) -> AppResult<()> {
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
-    let now = Utc::now();
-    let existing = coll
-        .find_one(doc! { "_id": endpoint_id, "service_id": service_id })
+    let mut filter = doc! {"service_id":service_id,"$or":[{"publication":"published"},{"publication":{"$exists":false},"is_active":true}]};
+    if let Some(id) = except {
+        filter.insert("_id", doc! {"$ne":id});
+    }
+    let rows: Vec<ServiceEndpoint> = coll
+        .find(filter.clone())
+        .session(&mut *session)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("Endpoint not found: {endpoint_id}")))?;
-    ensure_writable_operation_generation(&existing)?;
+        .stream(&mut *session)
+        .try_collect()
+        .await?;
+    if rows
+        .iter()
+        .any(|e| e.operation_generation <= 0 || e.operation_generation == i64::MAX)
+    {
+        return Err(AppError::Conflict(
+            "Tool operation generation invalid or exhausted".into(),
+        ));
+    }
+    coll.update_many(filter,vec![doc! {"$set":{
+        "publication":"draft","is_active":false,"updated_at":bson::DateTime::from_chrono(Utc::now()),
+        "operation_generation":{"$add":[{"$ifNull":["$operation_generation",1_i64]},1_i64]}
+    }}]).session(&mut *session).await?;
+    let system_actor = super::audit_service::AuditActor {
+        user_id: "system".into(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    let audit = match audit {
+        Some(audit) => Some(audit),
+        None => super::audit_service::audit_chain_hmac_key().map(|key| (&system_actor, key)),
+    };
+    if !rows.is_empty()
+        && let Some((actor, key)) = audit
+    {
+        super::audit_service::log_actor_event_in_session(db,session,key,actor,"tool_contract_publication_demoted",serde_json::json!({"service_id":service_id,"endpoint_ids":rows.iter().map(|e|&e.id).collect::<Vec<_>>(),"reason":"contract_changed"})).await?;
+    }
+    Ok(())
+}
+
+pub fn endpoint_update_fields(
+    existing: &ServiceEndpoint,
+    updates: EndpointUpdate,
+) -> AppResult<bson::Document> {
     let mut set_doc = bson::Document::new();
 
+    if let Some(value) = updates.data_scope
+        && existing.data_scope != value
+    {
+        set_doc.insert(
+            "data_scope",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if let Some(value) = updates.cost_class
+        && existing.cost_class != value
+    {
+        set_doc.insert(
+            "cost_class",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if let Some(value) = updates.execution
+        && existing.execution != value
+    {
+        set_doc.insert(
+            "execution",
+            bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     if let Some(name) = updates.name
         && existing.name != name
     {
@@ -216,6 +378,11 @@ pub async fn update_endpoint(
         && existing.path != path
     {
         set_doc.insert("path", path);
+    }
+    if let Some(target_id) = updates.target_id
+        && existing.target_id != target_id
+    {
+        set_doc.insert("target_id", target_id);
     }
     if let Some(parameters) = updates.parameters
         && existing.parameters != parameters
@@ -306,281 +473,316 @@ pub async fn update_endpoint(
         set_doc.insert("is_active", is_active);
     }
 
-    if set_doc.is_empty() {
-        return Ok(());
-    }
-    set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
-    let mut filter = doc! { "_id": endpoint_id, "service_id": service_id };
-    filter.extend(writable_operation_generation_filter());
-    let result = coll
-        .update_one(filter, semantic_update_pipeline(set_doc))
-        .await?;
-    if result.matched_count == 0 {
-        return Err(AppError::Conflict(format!(
-            "Endpoint {endpoint_id} was deleted or its operation_generation became invalid"
-        )));
-    }
-
-    Ok(())
+    Ok(set_doc)
 }
 
-/// Delete (hard-delete) an endpoint by ID.
-pub async fn delete_endpoint(
-    db: &mongodb::Database,
-    service_id: &str,
-    endpoint_id: &str,
-) -> AppResult<()> {
-    let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
-
-    let result = coll
-        .delete_one(doc! { "_id": endpoint_id, "service_id": service_id })
-        .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound(format!(
-            "Endpoint not found: {endpoint_id}"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Bulk upsert endpoints for a service.
-///
-/// For each input, matches by (service_id, name). If a matching endpoint exists,
-/// it is updated; otherwise a new one is created. Endpoints belonging to this
-/// service that are NOT in the input list are soft-deleted (is_active = false).
-pub async fn bulk_upsert_endpoints(
-    db: &mongodb::Database,
-    service_id: &str,
-    inputs: Vec<EndpointInput>,
-) -> AppResult<Vec<ServiceEndpoint>> {
-    let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
-    let now = Utc::now();
-
-    let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
-    let mut upserted_names: Vec<String> = Vec::with_capacity(inputs.len());
-
-    for input in inputs {
-        upserted_names.push(input.name.clone());
-        result_endpoints.push(
-            upsert_one_endpoint(
-                &coll,
-                service_id,
-                input,
-                now,
-                EndpointSyncActivation::ForceActive,
-            )
-            .await?,
-        );
-    }
-
-    // Soft-delete endpoints for this service that were not in the authoritative
-    // input. `$nin: []` intentionally matches every active endpoint, so an
-    // empty discovered contract revokes all previously published operations.
-    coll.update_many(
-        doc! {
-            "service_id": service_id,
-            "name": { "$nin": &upserted_names },
-            "is_active": true,
-        },
-        vec![doc! { "$set": {
-            "is_active": false,
-            "updated_at": bson::DateTime::from_chrono(now),
-            "operation_generation": {
-                "$switch": {
-                    "branches": [
-                        {
-                            "case": { "$eq": [
-                                { "$type": "$operation_generation" },
-                                "missing",
-                            ]},
-                            "then": 2_i64,
-                        },
-                        {
-                            "case": { "$and": [
-                                { "$isNumber": "$operation_generation" },
-                                { "$gt": ["$operation_generation", 0] },
-                            ]},
-                            "then": { "$add": ["$operation_generation", 1_i64] },
-                        },
-                    ],
-                    "default": "$operation_generation",
-                }
-            },
-        }}],
-    )
-    .await?;
-
-    Ok(result_endpoints)
-}
-
-/// Additively upsert endpoints for a service.
-///
-/// Like `bulk_upsert_endpoints`, matches by (service_id, name) and creates or
-/// updates each input -- but endpoints with other names are left untouched
-/// (nothing is soft-deleted). Used by the seeded catalog spec sync so
-/// admin-added endpoints on a system service survive restarts.
-pub async fn upsert_endpoints_additive(
-    db: &mongodb::Database,
-    service_id: &str,
-    inputs: Vec<EndpointInput>,
-) -> AppResult<Vec<ServiceEndpoint>> {
-    let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
-    let now = Utc::now();
-
-    let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        result_endpoints.push(
-            upsert_one_endpoint(
-                &coll,
-                service_id,
-                input,
-                now,
-                EndpointSyncActivation::PreserveExisting,
-            )
-            .await?,
-        );
-    }
-    Ok(result_endpoints)
-}
-
-/// Create or update a single endpoint matched by (service_id, name).
-async fn upsert_one_endpoint(
-    coll: &mongodb::Collection<ServiceEndpoint>,
+pub fn endpoint_from_input(
     service_id: &str,
     input: EndpointInput,
-    now: chrono::DateTime<Utc>,
-    activation: EndpointSyncActivation,
-) -> AppResult<ServiceEndpoint> {
-    let existing = coll
-        .find_one(doc! { "service_id": service_id, "name": &input.name })
-        .await?;
+    publication: crate::models::service_endpoint::PublicationState,
+) -> ServiceEndpoint {
+    let now = Utc::now();
+    ServiceEndpoint {
+        data_scope: input.data_scope,
+        cost_class: input.cost_class,
+        execution: input.execution,
+        publication,
+        async_operation: input.async_operation.clone(),
+        target_id: input.target_id.clone(),
+        id: Uuid::new_v4().to_string(),
+        service_id: service_id.to_string(),
+        name: input.name,
+        description: input.description,
+        method: input.method.to_uppercase(),
+        path: input.path,
+        parameters: input.parameters,
+        request_body_schema: input.request_body_schema,
+        request_content_type: input.request_content_type,
+        request_body_required: input.request_body_required,
+        response_description: input.response_description,
+        response: normalize_response(input.response),
+        risk: input.risk,
+        supports_idempotency_key: input.supports_idempotency_key,
+        is_active: publication == crate::models::service_endpoint::PublicationState::Published,
+        operation_generation: 1,
+        created_at: now,
+        updated_at: now,
+    }
+}
 
-    if let Some(existing) = existing {
-        ensure_writable_operation_generation(&existing)?;
-        let response = normalize_response(input.response.clone());
-        let desired_is_active = match activation {
-            EndpointSyncActivation::ForceActive => true,
-            EndpointSyncActivation::PreserveExisting => existing.is_active,
+pub fn update_from_input(input: EndpointInput) -> EndpointUpdate {
+    EndpointUpdate {
+        data_scope: Some(input.data_scope),
+        cost_class: Some(input.cost_class),
+        execution: Some(input.execution),
+        target_id: Some(input.target_id),
+        name: Some(input.name),
+        description: Some(input.description),
+        method: Some(input.method),
+        path: Some(input.path),
+        parameters: Some(input.parameters),
+        request_body_schema: Some(input.request_body_schema),
+        request_content_type: Some(input.request_content_type),
+        request_body_required: Some(input.request_body_required),
+        response_description: Some(input.response_description),
+        response: Some(input.response),
+        risk: Some(input.risk),
+        supports_idempotency_key: Some(input.supports_idempotency_key),
+        is_active: None,
+    }
+}
+
+/// Delete a Tool blocker only with live Admin authority, withdrawing the entire
+/// published contract in the same transaction so broader routes cannot open.
+/// Fixtures invoke the production transaction; no legacy unfenced writer is
+/// retained. Older endpoint tests supply their otherwise implicit parent here.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    pub async fn parent(
+        db: &mongodb::Database,
+        id: &str,
+    ) -> crate::models::downstream_service::DownstreamService {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME, DownstreamService, test_helpers::dummy_service,
         };
-        let unchanged = existing.description == input.description
-            && existing.method == input.method.to_uppercase()
-            && existing.path == input.path
-            && existing.parameters == input.parameters
-            && existing.request_body_schema == input.request_body_schema
-            && existing.request_content_type == input.request_content_type
-            && existing.request_body_required == input.request_body_required
-            && existing.response_description == input.response_description
-            && existing.response == response
-            && existing.risk == input.risk
-            && existing.supports_idempotency_key == input.supports_idempotency_key
-            && existing.is_active == desired_is_active;
-        if unchanged {
-            return Ok(existing);
+        let coll = db.collection::<DownstreamService>(COLLECTION_NAME);
+        if let Some(row) = coll.find_one(doc! {"_id":id}).await.unwrap() {
+            return row;
         }
-        // Update existing endpoint
-        let mut set_doc = doc! {
-            "description": input.description.as_deref(),
-            "method": input.method.to_uppercase(),
-            "path": &input.path,
-            "updated_at": bson::DateTime::from_chrono(now),
-        };
-        if activation == EndpointSyncActivation::ForceActive {
-            set_doc.insert("is_active", true);
-        }
-
-        if let Some(ref params) = input.parameters {
-            let bson_val = bson::to_bson(params)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-            set_doc.insert("parameters", bson_val);
-        } else {
-            set_doc.insert("parameters", bson::Bson::Null);
-        }
-
-        if let Some(ref schema) = input.request_body_schema {
-            let bson_val = bson::to_bson(schema)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-            set_doc.insert("request_body_schema", bson_val);
-        } else {
-            set_doc.insert("request_body_schema", bson::Bson::Null);
-        }
-
-        if let Some(ref content_type) = input.request_content_type {
-            set_doc.insert("request_content_type", content_type.as_str());
-        } else {
-            set_doc.insert("request_content_type", bson::Bson::Null);
-        }
-        set_doc.insert("request_body_required", input.request_body_required);
-
-        if let Some(ref desc) = input.response_description {
-            set_doc.insert("response_description", desc.as_str());
-        } else {
-            set_doc.insert("response_description", bson::Bson::Null);
-        }
-        let response_bson = bson::to_bson(&response)
-            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-        set_doc.insert("response", response_bson);
-        match input.risk {
-            Some(risk) => {
-                set_doc.insert(
-                    "risk",
-                    bson::to_bson(&risk).map_err(|error| {
-                        AppError::Internal(format!("BSON serialization error: {error}"))
-                    })?,
-                );
-            }
-            None => {
-                set_doc.insert("risk", bson::Bson::Null);
-            }
-        }
-        set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
-
-        let mut filter = doc! { "_id": &existing.id, "service_id": service_id };
-        filter.extend(writable_operation_generation_filter());
-        coll.find_one_and_update(filter, semantic_update_pipeline(set_doc))
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await?
-            .ok_or_else(|| {
-                AppError::Conflict(format!(
-                    "Endpoint {} was deleted or its operation_generation became invalid",
-                    existing.id
-                ))
-            })
-    } else {
-        // Create new endpoint
-        let endpoint = ServiceEndpoint {
-            id: Uuid::new_v4().to_string(),
-            service_id: service_id.to_string(),
-            name: input.name,
-            description: input.description,
-            method: input.method.to_uppercase(),
-            path: input.path,
-            parameters: input.parameters,
-            request_body_schema: input.request_body_schema,
-            request_content_type: input.request_content_type,
-            request_body_required: input.request_body_required,
-            response_description: input.response_description,
-            response: normalize_response(input.response),
-            risk: input.risk,
-            supports_idempotency_key: input.supports_idempotency_key,
-            is_active: true,
-            operation_generation: 1,
-            created_at: now,
-            updated_at: now,
-        };
-        coll.insert_one(&endpoint).await?;
-        Ok(endpoint)
+        let mut row = dummy_service();
+        row.id = id.into();
+        row.slug = id.into();
+        coll.insert_one(&row).await.unwrap();
+        coll.find_one(doc! {"_id":id}).await.unwrap().unwrap()
+    }
+    pub async fn create_endpoint(
+        db: &mongodb::Database,
+        id: &str,
+        input: EndpointInput,
+    ) -> AppResult<ServiceEndpoint> {
+        let name = input.name.clone();
+        let rows = commit_mutation(
+            db,
+            &parent(db, id).await,
+            None,
+            Mutation::Create(input),
+            &[0; 32],
+        )
+        .await?
+        .0;
+        Ok(rows.into_iter().find(|row| row.name == name).unwrap())
+    }
+    pub async fn update_endpoint(
+        db: &mongodb::Database,
+        id: &str,
+        endpoint: &str,
+        input: EndpointUpdate,
+    ) -> AppResult<()> {
+        commit_mutation(
+            db,
+            &parent(db, id).await,
+            None,
+            Mutation::Update(endpoint.into(), input),
+            &[0; 32],
+        )
+        .await
+        .map(|_| ())
+    }
+    pub async fn delete_endpoint(
+        db: &mongodb::Database,
+        id: &str,
+        endpoint: &str,
+    ) -> AppResult<()> {
+        commit_mutation(
+            db,
+            &parent(db, id).await,
+            None,
+            Mutation::Delete(endpoint.into()),
+            &[0; 32],
+        )
+        .await
+        .map(|_| ())
+    }
+    async fn reconcile(
+        db: &mongodb::Database,
+        id: &str,
+        inputs: Vec<EndpointInput>,
+        authoritative: bool,
+    ) -> AppResult<Vec<ServiceEndpoint>> {
+        let names: Vec<_> = inputs.iter().map(|input| input.name.clone()).collect();
+        let rows = commit_mutation(
+            db,
+            &parent(db, id).await,
+            None,
+            Mutation::Reconcile {
+                inputs,
+                authoritative,
+            },
+            &[0; 32],
+        )
+        .await?
+        .0;
+        Ok(rows
+            .into_iter()
+            .filter(|row| names.contains(&row.name))
+            .collect())
+    }
+    pub async fn bulk_upsert_endpoints(
+        db: &mongodb::Database,
+        id: &str,
+        inputs: Vec<EndpointInput>,
+    ) -> AppResult<Vec<ServiceEndpoint>> {
+        reconcile(db, id, inputs, true).await
+    }
+    pub async fn upsert_endpoints_additive(
+        db: &mongodb::Database,
+        id: &str,
+        inputs: Vec<EndpointInput>,
+    ) -> AppResult<Vec<ServiceEndpoint>> {
+        reconcile(db, id, inputs, false).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use crate::test_utils::*;
 
+    #[tokio::test]
+    async fn tool_inserts_are_drafts_and_discovery_preserves_publication() {
+        let Some(db) = connect_test_database("tool_endpoint_defaults").await else {
+            return;
+        };
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+        let created = create_endpoint(&db, &service.id, make_input("manual", "GET", "/manual"))
+            .await
+            .unwrap();
+        assert_eq!(
+            created.publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        assert!(!created.is_active);
+        let inputs = vec![make_input("discovered", "GET", "/discovered")];
+        let discovered = bulk_upsert_endpoints(&db, &service.id, inputs.clone())
+            .await
+            .unwrap();
+        assert!(!discovered[0].is_active);
+        assert_eq!(
+            discovered[0].publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &discovered[0].id},
+                doc! {"$set": {"publication": "paused"}},
+            )
+            .await
+            .unwrap();
+        let repeated = bulk_upsert_endpoints(&db, &service.id, inputs)
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated[0].publication,
+            crate::models::service_endpoint::PublicationState::Paused
+        );
+        assert!(!repeated[0].is_active);
+        assert!(
+            db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+                .find_one(doc! {"_id": &created.id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn endpoint_reconciliation_serializes_identity_and_preserves_activation() {
+        let db = connect_test_database("endpoint_reconcile_identity")
+            .await
+            .unwrap();
+        let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
+        coll.create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"service_id":1,"name":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+        let old = create_endpoint(&db, "service", make_input("same", "GET", "/old"))
+            .await
+            .unwrap();
+        coll.update_one(doc! {"_id":&old.id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        let parent = parent(&db, "service").await;
+        let change = Mutation::Reconcile {
+            inputs: vec![make_input("same", "PATCH", "/new")],
+            authoritative: false,
+        };
+        let (first, second) = tokio::join!(
+            commit_mutation(&db, &parent, None, change.clone(), &[0; 32]),
+            commit_mutation(&db, &parent, None, change, &[0; 32])
+        );
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert_eq!(first[0].operation_generation, old.operation_generation + 1);
+        assert!(!first[0].is_active);
+        assert_eq!(
+            bson::to_document(&first[0]).unwrap(),
+            bson::to_document(&second[0]).unwrap()
+        );
+        assert_eq!(coll.count_documents(doc! {}).await.unwrap(), 1);
+        coll.create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"path":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            upsert_endpoints_additive(&db, "service", vec![make_input("different", "GET", "/new")])
+                .await,
+            Err(AppError::DatabaseError(_))
+        ));
+        let activated =
+            bulk_upsert_endpoints(&db, "service", vec![make_input("same", "PATCH", "/new")])
+                .await
+                .unwrap();
+        assert!(activated[0].is_active);
+        assert_eq!(
+            activated[0].operation_generation,
+            old.operation_generation + 2
+        );
+        db.drop().await.unwrap();
+    }
+
     fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
         EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            async_operation: None,
+            target_id: None,
             name: name.to_string(),
             description: Some(format!("{name} endpoint")),
             method: method.to_string(),
@@ -598,6 +800,10 @@ mod tests {
 
     fn empty_update() -> EndpointUpdate {
         EndpointUpdate {
+            data_scope: None,
+            cost_class: None,
+            execution: None,
+            target_id: None,
             name: None,
             description: None,
             method: None,
@@ -899,6 +1105,10 @@ mod tests {
             &service_id,
             &ep.id,
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
+                target_id: None,
                 name: Some("ep1_renamed".to_string()),
                 description: None,
                 method: Some("post".to_string()),
@@ -940,6 +1150,10 @@ mod tests {
             "service-alpha",
             "nonexistent-id",
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
+                target_id: None,
                 name: Some("x".to_string()),
                 description: None,
                 method: None,
@@ -980,6 +1194,10 @@ mod tests {
             &owner_service_id,
             &endpoint.id,
             EndpointUpdate {
+                data_scope: None,
+                cost_class: None,
+                execution: None,
+                target_id: None,
                 name: None,
                 description: None,
                 method: None,

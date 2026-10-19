@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -13,10 +13,20 @@ use super::secret_backend::SecretBackend;
 pub struct NodeConfig {
     pub server: ServerConfig,
     pub node: NodeSection,
+    /// Only controlled managed bootstrap may set this. Self-hosted nodes leave
+    /// it absent and retain the existing registration and WSS behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_runtime: Option<nyxid_machine::managed::Binding>,
+    /// Immutable capability ceiling delivered inside the sealed bootstrap.
+    /// Older managed configs omitted this and retain shell/files only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub signing: SigningConfig,
     #[serde(default)]
     pub ssh: SshConfig,
+    #[serde(default)]
+    pub machine: nyxid_machine::config::Config,
     /// "file" (default, AES-GCM encrypted) or "keychain" (OS keychain)
     #[serde(default = "default_storage_backend")]
     pub storage_backend: String,
@@ -153,6 +163,51 @@ pub struct CredentialConfig {
     /// Alternate OAuth client ID parameter name (e.g. "client_key" for TikTok)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id_param_name: Option<String>,
+    #[serde(default)]
+    pub oauth_request_options: OAuthRequestOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthRequestEncoding {
+    #[default]
+    Form,
+    Json,
+}
+
+fn default_supports_oauth_scopes() -> bool {
+    true
+}
+
+/// Public protocol metadata retained with node credentials for later refreshes.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OAuthRequestOptions {
+    #[serde(default)]
+    pub token_request_encoding: Option<OAuthRequestEncoding>,
+    #[serde(default)]
+    pub oauth_request_headers: HashMap<String, String>,
+    #[serde(default = "default_supports_oauth_scopes")]
+    pub supports_oauth_scopes: bool,
+}
+
+impl Default for OAuthRequestOptions {
+    fn default() -> Self {
+        Self {
+            token_request_encoding: None,
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: true,
+        }
+    }
+}
+
+impl std::fmt::Debug for OAuthRequestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthRequestOptions")
+            .field("token_request_encoding", &self.token_request_encoding)
+            .field("oauth_request_headers", &"[REDACTED]")
+            .field("supports_oauth_scopes", &self.supports_oauth_scopes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +305,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -276,6 +332,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -304,6 +361,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -332,6 +390,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -361,6 +420,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 }
@@ -377,8 +437,11 @@ impl NodeConfig {
                 id: node_id,
                 auth_token_encrypted: String::new(),
             },
+            managed_runtime: None,
+            managed_capabilities: None,
             signing: SigningConfig::default(),
             ssh: SshConfig::default(),
+            machine: Default::default(),
             storage_backend,
             credentials: BTreeMap::new(),
             ssh_keys: Vec::new(),
@@ -392,6 +455,13 @@ impl NodeConfig {
             Error::Config(format!("Failed to read config at {}: {e}", path.display()))
         })?;
         let config: Self = toml::from_str(&content)?;
+        if let Some(binding) = &config.managed_runtime {
+            super::managed_config::validate_existing_config(&config, binding).map_err(|_| {
+                Error::Config(
+                    "managed runtime configuration violates its sealed capability ceiling".into(),
+                )
+            })?;
+        }
         Ok(config)
     }
 
@@ -533,6 +603,27 @@ impl NodeConfig {
             service_slug.to_string(),
             CredentialConfig::new_header(header_name.to_string(), encrypted, resolved_target_url),
         );
+        Ok(())
+    }
+
+    pub fn add_ifttt_credential_via(
+        &mut self,
+        service_slug: &str,
+        key: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        use nyxid_service_adapters::ifttt;
+        ifttt::validate_credential(key).map_err(|error| Error::Validation(error.to_string()))?;
+        let target = self
+            .resolve_target_url(service_slug, target_url)
+            .unwrap_or_else(|| ifttt::BASE_URL.to_string());
+        ifttt::validate_destination(&target)
+            .map_err(|error| Error::Validation(error.to_string()))?;
+        let encrypted = backend.store_credential_value(service_slug, key)?;
+        let mut config = CredentialConfig::new_header(String::new(), encrypted, Some(target));
+        config.injection_method = ifttt::AUTH_METHOD.to_string();
+        self.credentials.insert(service_slug.to_string(), config);
         Ok(())
     }
 

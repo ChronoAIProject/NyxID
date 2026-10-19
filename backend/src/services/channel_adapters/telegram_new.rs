@@ -1,0 +1,275 @@
+use super::telegram::TelegramAdapter;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
+
+use crate::errors::{AppError, AppResult};
+use crate::models::channel_bot::ChannelBot;
+use crate::services::channel_managed::{PlatformCredentialDescriptor, PlatformCredentialField};
+use crate::services::channel_platform::{
+    BotCredentials, BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
+    PlatformVerifySecrets, RegistrationDescriptor, RegistrationValues,
+};
+
+pub const PLATFORM: &str = "telegram-new";
+pub const MANAGER_TOKEN: &str = "manager_bot_token";
+
+#[derive(Default)]
+pub struct TelegramNewAdapter {
+    transport: TelegramAdapter,
+}
+
+impl TelegramNewAdapter {
+    #[cfg(test)]
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
+        Self {
+            transport: TelegramAdapter::media_test_adapter(base),
+        }
+    }
+}
+
+pub fn credential_descriptor() -> PlatformCredentialDescriptor {
+    PlatformCredentialDescriptor {
+        provider: PLATFORM,
+        backing: crate::services::channel_managed::PlatformCredentialBacking::Stored,
+        label: "Telegram — bot creation",
+        fields: &[PlatformCredentialField {
+            name: MANAGER_TOKEN,
+            label: "Manager bot token",
+            secret: true,
+            required: true,
+            numeric: false,
+            help: "Token of a dedicated bot with bot management enabled in BotFather. Saving validates the bot and connects its webhook automatically.",
+        }],
+        setup_checklist: &[
+            "Create a dedicated manager bot in BotFather and enable management of other bots.",
+            "Use separate manager bots for staging and production, and keep them separate from the approval bot.",
+            "Save the manager token here, then choose Telegram in Add Channel Bot.",
+        ],
+        webhook_secret_field: Some(MANAGER_TOKEN),
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformAdapter for TelegramNewAdapter {
+    async fn resolve_thread(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        self.transport
+            .resolve_thread(http, credentials, facts, ancestors)
+            .await
+    }
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .send_thread_reply(http, credentials, target, reply)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        self.transport.thread_facts(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            ..Default::default()
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        "Telegram"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
+    /// Delegates message_thread_id and reply handling to the Telegram transport.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        self.transport.outbound_capabilities()
+    }
+
+    fn platform_id(&self) -> &str {
+        PLATFORM
+    }
+
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        self.transport.message_ids_are_chat_scoped()
+    }
+
+    fn platform_credentials(&self) -> Option<PlatformCredentialDescriptor> {
+        Some(credential_descriptor())
+    }
+
+    fn registration(&self) -> RegistrationDescriptor {
+        RegistrationDescriptor {
+            documentation_url: Some("https://core.telegram.org/api/bots/managed-bots"),
+            managed_only: true,
+            managed_only_message: "Use Telegram's browser creation flow at /channel-bots/telegram-new",
+            fields: &[],
+            token_fields: &[],
+            extra_fields: &[],
+            automatic_webhook: true,
+            setup_instructions: &[
+                "Assign an agent to this bot, then open its Telegram chat and send a test message.",
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn registration_token(
+        &self,
+        _fields: &RegistrationValues<'_>,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        Err(AppError::ValidationError(
+            "Use Telegram's creation flow to connect this bot".into(),
+        ))
+    }
+
+    fn reply_context(
+        &self,
+        thread: Option<&str>,
+        created: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        self.transport.reply_context(thread, created, metadata);
+    }
+
+    async fn verify_webhook(
+        &self,
+        bot: &ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+    ) -> AppResult<()> {
+        self.transport
+            .verify_webhook(bot, secrets, headers, body)
+            .await
+    }
+
+    async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+        self.transport.parse_inbound(body).await
+    }
+
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &crate::services::channel_platform::InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        self.transport
+            .fetch_attachment(http, credentials, attachment, max_bytes)
+            .await
+    }
+
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .chat_title(http, credentials, conversation_id)
+            .await
+    }
+
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        self.transport
+            .send_reply_outcome(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn send_bound_reply_outcome(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+        target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if let Some(target) = target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation) {
+                return Err(crate::services::channel_thread_service::unavailable());
+            }
+            return self
+                .transport
+                .thread_reply_outcome(http, credentials, target, reply)
+                .await;
+        }
+        self.send_reply_outcome(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn send_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .send_reply(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        self.transport
+            .edit_reply(
+                http,
+                credentials,
+                conversation_id,
+                platform_message_id,
+                edit,
+            )
+            .await
+    }
+
+    async fn register_webhook(
+        &self,
+        http: &reqwest::Client,
+        token: &str,
+        url: &str,
+        secret: &str,
+    ) -> AppResult<()> {
+        self.transport
+            .register_webhook(http, token, url, secret)
+            .await
+    }
+
+    async fn verify_bot_token(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+    ) -> AppResult<BotIdentity> {
+        self.transport.verify_bot_token(http, credentials).await
+    }
+}

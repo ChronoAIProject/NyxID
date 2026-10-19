@@ -12,8 +12,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
+import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import type { User } from "@/types/api";
-import { AssistantSidebar } from "./assistant-sidebar";
+import {
+  AssistantSidebar,
+  type SidebarAgents,
+  type SidebarGroups,
+} from "./assistant-sidebar";
 
 vi.mock("@/hooks/use-assistant-workspace", () => ({
   useAssistantWorkspaceCounts: () => ({
@@ -21,16 +26,23 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
   }),
 }));
 
+const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
+vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => accountMocks.nyxagent }));
 vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => accountMocks.navigate,
   Link: ({
     to,
+    search,
     children,
     ...rest
   }: AnchorHTMLAttributes<HTMLAnchorElement> & {
     readonly to?: string;
+    readonly search?: Record<string, unknown>;
     readonly children?: ReactNode;
   }) => (
-    <a data-to={to} {...rest}>
+    <a data-to={to} data-search={search ? JSON.stringify(search) : undefined} href={`${to ?? ""}${search ? `?${new URLSearchParams(Object.entries(search).map(([key, value]) => [key, String(value)]))}` : ""}`} {...rest}>
       {children}
     </a>
   ),
@@ -60,6 +72,7 @@ const USER: User = {
   is_admin: false,
   is_active: true,
   created_at: "2026-07-20T00:00:00.000Z",
+  capabilities: { billing_available: true },
 };
 
 function renderSidebar(
@@ -94,6 +107,11 @@ function seedDraft(ownerUserId: string, text: string) {
 }
 
 beforeEach(() => {
+  accountMocks.navigate.mockReset();
+  accountMocks.logout.mockReset();
+  accountMocks.nyxagent = false;
+  accountMocks.panel = undefined;
+  accountMocks.open.mockReset();
   localStorage.clear();
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
@@ -366,3 +384,485 @@ describe("AssistantSidebar conversation rows", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 });
+
+describe("NyxAgent row controls", () => {
+  const row: Conversation = { ...CONVERSATION, id: `nyxa-${"a".repeat(32)}` };
+  function nyxSidebar(conversation: Conversation, onRename = vi.fn()) {
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[conversation]}
+          activeConversationId={row.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+          onRename={onRename}
+        />
+      </TooltipProvider>,
+    );
+    return onRename;
+  }
+  it("renames through a dirty-gated validated form", async () => {
+    const user = userEvent.setup();
+    const rename = nyxSidebar(row);
+    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const input = within(screen.getByRole("form", { name: "Rename chat" })).getByRole("textbox");
+    await user.clear(input);
+    await user.type(input, "New title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(rename).toHaveBeenCalledExactlyOnceWith(row.id, "New title"));
+  });
+  it("allows deleting an active turn and explains that it will stop", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[{ ...row, active_turn: { turn_id: "running", started_at: row.created_at } }]}
+          activeConversationId={row.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={onDelete}
+        />
+      </TooltipProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
+    expect(screen.getByRole("menuitem", { name: "Delete" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByText(/running reply will stop/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDelete).toHaveBeenCalledExactlyOnceWith(row.id);
+  });
+});
+
+describe("NyxBot agents in the sidebar", () => {
+  const at = "2026-09-28T00:00:00.000Z";
+  function agent(fields: Partial<AssistantAgent>): AssistantAgent {
+    return {
+      id: "agent-nyxbot",
+      kind: "nyxbot",
+      name: "NyxBot",
+      description: "",
+      display_name: null,
+      persona: null,
+      specialty: null,
+      created_by: "user",
+      status: "idle",
+      services: [],
+      account_read: true,
+      guest_access: {},
+      pending_requests: [],
+      last_reply: null,
+      home_conversation_id: null,
+      memory_count: 0,
+      created_at: at,
+      last_active_at: at,
+      destroyed_at: null,
+      pending_acknowledgements: 0,
+      channels: [],
+      ...fields,
+    };
+  }
+  const agents = [
+    agent({ channels: [{ id: "c1", platform: "telegram", bot_label: "Home", status: "active" }] }),
+    agent({
+      id: "agent-researcher",
+      kind: "specialist",
+      name: "researcher",
+      status: "running",
+      pending_acknowledgements: 2,
+    }),
+    agent({ id: "agent-mailer", kind: "specialist", name: "mailer", status: "destroyed", destroyed_at: at }),
+  ];
+  const thread: Conversation = {
+    id: `nyxa-${"c".repeat(32)}`,
+    title: "Morning briefing",
+    created_at: at,
+    last_message_at: at,
+    channel: { platform: "telegram" },
+  };
+
+  function renderAgents(
+    model: Partial<SidebarAgents> = {},
+    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups } = {},
+  ) {
+    const handlers = {
+      onSelectAgent: vi.fn(),
+      onNewThread: vi.fn(),
+      onNewAgent: vi.fn(),
+    };
+    const onSelect = vi.fn();
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={options.conversations ?? []}
+          groups={options.groups}
+          activeConversationId={thread.id}
+          onNewChat={vi.fn()}
+          onSelect={onSelect}
+          onDelete={vi.fn()}
+          agents={{
+            agents,
+            selectedAgentId: "agent-nyxbot",
+            threads: [thread],
+            ...handlers,
+            ...model,
+          }}
+        />
+      </TooltipProvider>,
+    );
+    return { ...handlers, onSelect };
+  }
+
+  it("pins NyxBot first and nests the selected agent's threads under it", async () => {
+    const user = userEvent.setup();
+    const { onSelect, onNewThread } = renderAgents();
+    const nav = screen.getByRole("navigation");
+    // Agent rows are the expandable buttons without a menu (channel bots'
+    // chat sections excepted); NyxBot is pinned first.
+    const agentRows = within(nav)
+      .getAllByRole("button")
+      .filter(
+        (button) =>
+          button.hasAttribute("aria-expanded") &&
+          !button.hasAttribute("aria-haspopup") &&
+          !/ on Telegram, /.test(button.getAttribute("aria-label") ?? ""),
+      );
+    expect(agentRows.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "NyxBot — your personal agent",
+      "researcher, specialist, Running, 2 pending requests",
+    ]);
+    const nyxbot = within(nav).getByRole("button", { name: "NyxBot — your personal agent" });
+    expect(nyxbot).toHaveAttribute("aria-expanded", "true");
+    expect(nyxbot).toHaveTextContent("Telegram");
+    const threads = within(nav).getByRole("group", { name: "Threads with NyxBot" });
+    // The channel thread sits in its bot's section, open since it is the
+    // open thread.
+    expect(
+      within(threads).getByRole("button", { name: "Telegram bot on Telegram, 1 chat" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    const row = within(threads).getByRole("button", { name: "Morning briefing" });
+    await user.click(row);
+    expect(onSelect).toHaveBeenCalledWith(thread.id);
+    await user.click(within(threads).getByRole("button", { name: "New chat with NyxBot" }));
+    expect(onNewThread).toHaveBeenCalledWith("agent-nyxbot");
+    // Only the chats of earlier engines are listed under "Chats"; none here.
+    expect(screen.queryByText("Chats")).not.toBeInTheDocument();
+  });
+
+  it("groups a bot's chats in a collapsed section with more on request", async () => {
+    const user = userEvent.setup();
+    const own: Conversation = { ...thread, id: `nyxa-${"a".repeat(32)}`, title: "Plans", channel: null };
+    const chats: Conversation[] = Array.from({ length: 7 }, (_, index) => ({
+      ...thread,
+      id: `nyxa-${String(index).repeat(32)}`,
+      title: `Chat ${String(index)}`,
+      channel: {
+        platform: "telegram",
+        channel_agent_id: "c1",
+        bot_label: "Support bot",
+        chat_kind: index === 0 ? "group" : "private",
+      },
+    }));
+    const renderWith = (active: string) =>
+      render(
+        <TooltipProvider>
+          <AssistantSidebar
+            conversations={[]}
+            activeConversationId={active}
+            onNewChat={vi.fn()}
+            onSelect={vi.fn()}
+            onDelete={vi.fn()}
+            agents={{
+              agents,
+              selectedAgentId: "agent-nyxbot",
+              threads: [own, ...chats],
+              onSelectAgent: vi.fn(),
+              onNewThread: vi.fn(),
+              onNewAgent: vi.fn(),
+            }}
+          />
+        </TooltipProvider>,
+      );
+    const { unmount } = renderWith(own.id);
+    const threads = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(threads).getByRole("button", { name: "Plans" })).toBeInTheDocument();
+    const section = within(threads).getByRole("button", {
+      name: "Support bot on Telegram, 7 chats",
+    });
+    expect(section).toHaveAttribute("aria-expanded", "false");
+    expect(within(threads).queryByRole("button", { name: "Chat 0" })).not.toBeInTheDocument();
+    await user.click(section);
+    expect(section).toHaveAttribute("aria-expanded", "true");
+    expect(within(threads).getByRole("button", { name: "Chat 4" })).toBeInTheDocument();
+    expect(within(threads).queryByRole("button", { name: "Chat 5" })).not.toBeInTheDocument();
+    await user.click(within(threads).getByRole("button", { name: "Show 2 more" }));
+    expect(within(threads).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
+    unmount();
+    // The open chat's section starts open and shows it even past the first
+    // page; closed, it opens again for another of its chats.
+    const view = renderWith(chats[6]!.id);
+    const reopened = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(
+      within(reopened).getByRole("button", { name: "Support bot on Telegram, 7 chats" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(reopened).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
+    expect(within(reopened).queryByRole("button", { name: "Chat 5" })).not.toBeInTheDocument();
+    const header = within(reopened).getByRole("button", {
+      name: "Support bot on Telegram, 7 chats",
+    });
+    await user.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    view.rerender(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[]}
+          activeConversationId={chats[1]!.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+          agents={{
+            agents,
+            selectedAgentId: "agent-nyxbot",
+            threads: [own, ...chats],
+            onSelectAgent: vi.fn(),
+            onNewThread: vi.fn(),
+            onNewAgent: vi.fn(),
+          }}
+        />
+      </TooltipProvider>,
+    );
+    expect(header).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("shows specialist status and pending requests, and selects an agent", async () => {
+    const user = userEvent.setup();
+    const { onSelectAgent, onNewAgent } = renderAgents();
+    const researcher = screen.getByRole("button", {
+      name: "researcher, specialist, Running, 2 pending requests",
+    });
+    expect(researcher).toHaveAttribute("aria-expanded", "false");
+    expect(researcher).toHaveTextContent("2");
+    await user.click(researcher);
+    expect(onSelectAgent).toHaveBeenCalledWith("agent-researcher");
+    await user.click(screen.getByRole("button", { name: "New agent" }));
+    expect(onNewAgent).toHaveBeenCalledOnce();
+  });
+
+  it("keeps destroyed specialists behind a toggle, dimmed", async () => {
+    const user = userEvent.setup();
+    renderAgents();
+    expect(screen.queryByRole("button", { name: /^mailer/ })).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Show destroyed (1)" });
+    await user.click(toggle);
+    const mailer = screen.getByRole("button", { name: "mailer, specialist, Destroyed" });
+    expect(mailer.className).toContain("opacity-50");
+    expect(screen.getByRole("button", { name: "Hide destroyed" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("names agents by their display name with the @handle beneath", () => {
+    renderAgents({
+      agents: [
+        agent({ display_name: "Nyx" }),
+        agent({ id: "agent-writer", kind: "specialist", name: "writer", display_name: "Luna" }),
+      ],
+    });
+    const nyxbot = screen.getByRole("button", { name: "Nyx (@NyxBot) — your personal agent" });
+    expect(nyxbot).toHaveTextContent("@NyxBot · personal agent");
+    const writer = screen.getByRole("button", { name: "Luna (@writer), specialist, Idle" });
+    expect(writer).toHaveTextContent("Luna");
+    expect(writer).toHaveTextContent("@writer");
+  });
+
+  it("drops the generic New chat and the earlier engines' Chats list", () => {
+    renderAgents({}, { conversations: [CONVERSATION] });
+    expect(screen.queryByRole("button", { name: "New chat" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Chats")).not.toBeInTheDocument();
+    expect(screen.queryByText("Quarterly digest")).not.toBeInTheDocument();
+  });
+
+  it("offers Home, marked current on the NyxBot home", async () => {
+    const user = userEvent.setup();
+    const onHome = vi.fn();
+    renderAgents({ homeActive: true, onHome });
+    const home = screen.getByRole("button", { name: "Home" });
+    expect(home).toHaveAttribute("aria-current", "page");
+    await user.click(home);
+    expect(onHome).toHaveBeenCalledOnce();
+  });
+
+  it("lists groups with their members and who is working", async () => {
+    const user = userEvent.setup();
+    const group = (fields: Partial<AssistantGroup>): AssistantGroup => ({
+      id: "nyxg-1",
+      name: "Launch crew",
+      members: [
+        { id: "agent-nyxbot", name: "NyxBot", kind: "nyxbot", destroyed: false, working: false },
+        { id: "agent-researcher", name: "researcher", kind: "specialist", destroyed: false, working: true },
+      ],
+      lead_agent_id: "agent-nyxbot",
+      working_agent_ids: ["agent-researcher"],
+      message_count: 3,
+      last_message_at: at,
+      created_at: at,
+      ...fields,
+    });
+    const groups: SidebarGroups = {
+      groups: [group({}), group({ id: "nyxg-2", name: "Quiet", working_agent_ids: [] })],
+      selectedGroupId: "nyxg-2",
+      onSelectGroup: vi.fn(),
+      onNewGroup: vi.fn(),
+    };
+    renderAgents({}, { groups });
+    const crew = screen.getByRole("button", {
+      name: "Launch crew, group with NyxBot, researcher, 1 working",
+    });
+    expect(screen.getByRole("button", { name: "Quiet, group with NyxBot, researcher" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await user.click(crew);
+    expect(groups.onSelectGroup).toHaveBeenCalledWith("nyxg-1");
+    await user.click(screen.getByRole("button", { name: "New group" }));
+    expect(groups.onNewGroup).toHaveBeenCalledOnce();
+  });
+
+  it("invites a first group when there are none", async () => {
+    const user = userEvent.setup();
+    const onNewGroup = vi.fn();
+    renderAgents({}, { groups: { groups: [], onSelectGroup: vi.fn(), onNewGroup } });
+    await user.click(screen.getByRole("button", { name: "Chat with several agents at once" }));
+    expect(onNewGroup).toHaveBeenCalledOnce();
+  });
+
+  it("offers no new thread for a destroyed agent", () => {
+    renderAgents({ selectedAgentId: "agent-mailer", threads: [] });
+    // Destroyed agents are hidden until shown, so nothing is expanded.
+    expect(screen.queryByRole("button", { name: /New chat with/ })).not.toBeInTheDocument();
+  });
+});
+
+
+describe("AssistantSidebar account menu", () => {
+  it("opens from the user row and exposes the shared account destinations", async () => {
+    renderSidebar();
+    const trigger = screen.getByRole("button", { name: "Account menu" });
+    expect(trigger).toHaveAttribute("data-keep-drawer-open", "");
+    await userEvent.click(trigger);
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByText("Reader")).toBeVisible();
+    expect(within(menu).getByText("reader@example.com")).toBeVisible();
+    expect(
+      within(menu).getByRole("menuitem", { name: "Settings" }),
+    ).not.toHaveAttribute("href");
+    for (const tab of ["billing", "usage"]) {
+      const item = within(menu).getByRole("menuitem", {
+        name: tab === "billing" ? "Billing" : "Usage",
+      });
+      expect(item).not.toHaveAttribute("href");
+      expect(item).not.toHaveAttribute("search");
+    }
+    expect(
+      within(menu).getByRole("menuitem", {
+        name: "Notification settings (opens in Studio)",
+      }),
+    ).toHaveAttribute("data-to", "/approvals/settings");
+    expect(
+      within(menu).getByRole("menuitem", { name: "Open Studio" }),
+    ).toHaveAttribute("data-to", "/dashboard");
+    expect(
+      within(menu).queryByRole("menuitem", { name: "NyxBot settings" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([false, undefined])(
+    "hides billing and usage when capability is %s",
+    async (billing_available) => {
+      useAuthStore.setState({
+        user: { ...USER, capabilities: { billing_available } },
+      });
+      renderSidebar();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Account menu" }),
+      );
+      expect(
+        screen.queryByRole("menuitem", { name: "Billing" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("menuitem", { name: "Usage" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("links to NyxBot settings only in NyxAgent mode", async () => {
+    accountMocks.nyxagent = true;
+    renderSidebar();
+    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
+    await waitFor(() => expect(accountMocks.open).toHaveBeenCalledWith("nyxbot", {}, expect.any(HTMLButtonElement), expect.any(Function)));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("waits for logout before navigating to login", async () => {
+    let finish: (() => void) | undefined;
+    accountMocks.logout.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderSidebar();
+    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
+    expect(accountMocks.logout).toHaveBeenCalledOnce();
+    expect(accountMocks.navigate).not.toHaveBeenCalled();
+    finish?.();
+    await waitFor(() =>
+      expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" }),
+    );
+  });
+
+  it.each(["settings", "billing", "nyxbot"] as const)(
+    "marks the user row active in %s",
+    (activeView) => {
+      accountMocks.panel = activeView;
+      render(
+        <TooltipProvider>
+          <AssistantSidebar
+            conversations={[]}
+            activeConversationId={undefined}
+            activeView="chat"
+            onNewChat={vi.fn()}
+            onSelect={vi.fn()}
+            onDelete={vi.fn()}
+          />
+        </TooltipProvider>,
+      );
+      expect(screen.getByRole("button", { name: "Account menu" })).toHaveClass(
+        "bg-overlay-strong",
+        "font-medium",
+        "text-foreground",
+      );
+    },
+  );
+});
+
+
+it.each([['discord', 'Discord'], ['slack', 'Slack'], ['whatsapp', 'WhatsApp'], ['lark', 'Lark'], ['feishu', 'Feishu'], ['x', 'X']] as const)(
+  'opens the saved %s personal conversation using its actual platform label', async (platform, name) => {
+    const user = userEvent.setup();
+    const saved: Conversation = { ...CONVERSATION, title: 'Saved native conversation', platform_thread: {
+      platform, manager_id: 'profile-id', binding_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', binding_generation: 1,
+    }};
+    const { onSelect } = renderSidebar(vi.fn(), [saved], saved.id);
+    const row = screen.getByRole('button', { name: 'Saved native conversation' });
+    expect(row).toHaveTextContent(name);
+    expect(row).not.toHaveTextContent('Telegram');
+    await user.click(row);
+    expect(onSelect).toHaveBeenCalledWith(saved.id);
+  },
+);

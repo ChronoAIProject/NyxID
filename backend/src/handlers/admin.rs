@@ -112,8 +112,8 @@ pub struct AuditLogItem {
     /// `None` when the event has no service context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_slug: Option<String>,
-    /// Display name of the acting user resolved at query time. `None` when
-    /// the event has no user, the user was deleted, or no name is set.
+    /// Display name of the acting person, organization, or service account.
+    /// `None` when the subject no longer exists or no name is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_display_name: Option<String>,
     /// Email of the acting user resolved at query time. `None` when the
@@ -950,32 +950,23 @@ fn resolve_entry_service(
     (None, raw_slug)
 }
 
-/// Batch-resolves display name + email for the acting users referenced by a
-/// page of audit entries (one MongoDB round-trip). Deleted users simply drop
-/// out of the map and render as UUID-only downstream.
+/// Batch-resolves people, organizations, and service accounts for audit display.
 async fn resolve_user_lookup(
     db: &mongodb::Database,
     entries: &[AuditLog],
-) -> AppResult<HashMap<String, (Option<String>, String)>> {
+) -> AppResult<HashMap<String, crate::services::reporting_identity_service::ReportingIdentity>> {
     let ids: Vec<String> = entries
         .iter()
         .filter_map(|e| e.user_id.clone())
         .collect::<HashSet<String>>()
         .into_iter()
         .collect();
-    if ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let users: Vec<User> = db
-        .collection::<User>(USERS)
-        .find(doc! { "_id": { "$in": &ids } })
-        .await?
-        .try_collect()
-        .await?;
-    Ok(users
-        .into_iter()
-        .map(|u| (u.id, (u.display_name, u.email)))
-        .collect())
+    Ok(crate::services::reporting_identity_service::resolve(
+        db,
+        &ids,
+        std::time::Duration::from_secs(20),
+    )
+    .await?)
 }
 
 /// GET /api/v1/admin/audit-log
@@ -999,26 +990,28 @@ pub async fn list_audit_log(
     // values (which are PII-adjacent). `None` when nothing was applied.
     let filter_marker = audit_log_filter_marker(&query);
 
-    let (entries, total) = admin_audit_service::list_entries(
-        &state.db,
-        admin_audit_service::AdminAuditLogListParams {
-            page,
-            per_page,
-            search: query.search.as_deref(),
-            search_filters: query.search_filters.as_deref(),
-            custom_filters: query.custom_filters.as_deref(),
-            event_type: query.event_type.as_deref(),
-            status: query.status.as_deref(),
-            actor: query.actor.as_deref(),
-            user_id: query.user_id.as_deref(),
-            api_key_id: query.api_key_id.as_deref(),
-            created_dates: query.created_dates.as_deref(),
-            created_from: query.created_from.as_deref(),
-            created_to: query.created_to.as_deref(),
-            sort,
-        },
-    )
-    .await?;
+    let ((entries, total), event_types) = tokio::try_join!(
+        admin_audit_service::list_entries(
+            &state.db,
+            admin_audit_service::AdminAuditLogListParams {
+                page,
+                per_page,
+                search: query.search.as_deref(),
+                search_filters: query.search_filters.as_deref(),
+                custom_filters: query.custom_filters.as_deref(),
+                event_type: query.event_type.as_deref(),
+                status: query.status.as_deref(),
+                actor: query.actor.as_deref(),
+                user_id: query.user_id.as_deref(),
+                api_key_id: query.api_key_id.as_deref(),
+                created_dates: query.created_dates.as_deref(),
+                created_from: query.created_from.as_deref(),
+                created_to: query.created_to.as_deref(),
+                sort,
+            },
+        ),
+        state.audit_event_types.get(&state.db)
+    )?;
 
     // Enrichment is best-effort display data: a lookup failure downgrades the
     // page to unenriched entries (fields are Option and simply stay absent)
@@ -1043,7 +1036,7 @@ pub async fn list_audit_log(
                 .user_id
                 .as_deref()
                 .and_then(|uid| user_lookup.get(uid).cloned())
-                .map(|(display_name, email)| (display_name, Some(email)))
+                .map(|identity| (identity.display_name, identity.email))
                 .unwrap_or((None, None));
             AuditLogItem {
                 id: e.id,
@@ -1063,8 +1056,6 @@ pub async fn list_audit_log(
             }
         })
         .collect();
-
-    let event_types = admin_audit_service::distinct_event_types(&state.db).await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -1322,6 +1313,7 @@ pub struct ChainVerifyStatusItem {
 #[derive(Debug, Serialize)]
 pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
+    pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
 }
 
@@ -1346,7 +1338,7 @@ async fn active_startup_diagnostics(
         .await?
         .try_collect()
         .await?;
-    Ok(diagnostics
+    let mut items: Vec<_> = diagnostics
         .into_iter()
         .map(|diagnostic| StartupDiagnosticItem {
             code: diagnostic.code,
@@ -1355,7 +1347,29 @@ async fn active_startup_diagnostics(
             remediation: diagnostic.remediation,
             detected_at: diagnostic.detected_at,
         })
-        .collect())
+        .collect();
+    let billing_items = crate::services::billing::startup_diagnostics(db).await?;
+    items.extend(
+        billing_items
+            .into_iter()
+            .map(|diagnostic| StartupDiagnosticItem {
+                code: diagnostic.code,
+                summary: diagnostic.summary,
+                detail: diagnostic.detail,
+                remediation: diagnostic.remediation,
+                detected_at: diagnostic.detected_at,
+            }),
+    );
+    Ok(items)
+}
+
+async fn account_status(db: &mongodb::Database) -> AppResult<Option<ChainVerifyStatusItem>> {
+    Ok(chain_verify_service::load_status(
+        db,
+        crate::services::billing::account_reconciliation::CHECK_ID,
+    )
+    .await?
+    .map(chain_status_item))
 }
 
 fn chain_status_item(
@@ -1401,6 +1415,7 @@ pub async fn get_chain_verification(
     }
     Ok(Json(ChainVerificationResponse {
         chains: items,
+        accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
     }))
 }
@@ -1421,11 +1436,16 @@ pub async fn run_chain_verification(
         state.billing_ledger_hmac_key.as_slice(),
     )
     .await?;
+    let chains = vec![
+        chain_status_item(report.audit),
+        chain_status_item(report.billing_ledger),
+    ];
+    if crate::services::billing::exact_migration::ready(&state.db).await? {
+        crate::services::billing::account_reconciliation::run_once(&state.db).await?;
+    }
     Ok(Json(ChainVerificationResponse {
-        chains: vec![
-            chain_status_item(report.audit),
-            chain_status_item(report.billing_ledger),
-        ],
+        chains,
+        accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
     }))
 }
@@ -2300,6 +2320,14 @@ mod tests {
 
         let active_id = uuid::Uuid::new_v4().to_string();
         let active = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: active_id.clone(),
             name: "OpenAI API".to_string(),
             slug: "openai".to_string(),
@@ -2309,6 +2337,14 @@ mod tests {
         // Deactivated services must still resolve: audit rows reference them
         // long after an admin retires the catalog entry.
         let inactive = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Retired Service".to_string(),
             slug: "retired".to_string(),
@@ -2328,6 +2364,15 @@ mod tests {
             .insert_one(&user)
             .await
             .expect("insert user");
+
+        let sa_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &sa_id, "name": "Heca production worker",
+                "is_active": false, "client_secret_hash": "must not be loaded",
+            })
+            .await
+            .expect("insert service account");
 
         let make_entry = |event_data: serde_json::Value, uid: Option<&str>| AuditLog {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2350,6 +2395,10 @@ mod tests {
             ),
             make_entry(serde_json::json!({ "service_id": "openai" }), None),
             make_entry(serde_json::json!({ "service_slug": "retired" }), None),
+            make_entry(
+                serde_json::json!({ "service_slug": "openai" }),
+                Some(&sa_id),
+            ),
         ];
 
         let service_lookup = resolve_service_lookup(&db, &entries)
@@ -2372,9 +2421,19 @@ mod tests {
         assert_eq!(name.as_deref(), Some("Retired Service"));
         assert_eq!(slug.as_deref(), Some("retired"));
 
-        let (display_name, email) = user_lookup.get(&user_id).cloned().expect("user resolved");
-        assert_eq!(display_name.as_deref(), Some("Test User"));
-        assert_eq!(email, format!("{user_id}@example.com"));
+        let user = user_lookup.get(&user_id).expect("user resolved");
+        assert_eq!(user.display_name.as_deref(), Some("Test User"));
+        assert_eq!(
+            user.email.as_deref(),
+            Some(format!("{user_id}@example.com").as_str())
+        );
+        let account = user_lookup.get(&sa_id).expect("service account resolved");
+        assert_eq!(
+            account.display_name.as_deref(),
+            Some("Heca production worker")
+        );
+        assert!(account.email.is_none());
+        assert_eq!(account.user_type, "service_account");
     }
 
     #[test]
@@ -3220,6 +3279,8 @@ mod operator_route_tests {
         let now = chrono::Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                protected_consent: None,
+                incremental_consent: None,
                 id: "pending-auth-code".to_string(),
                 code_hash: "pending-auth-code-hash".to_string(),
                 client_id: client_id.to_string(),
@@ -3545,19 +3606,19 @@ mod operator_route_tests {
             crate::services::oauth_broker_service::BROKER_BINDING_SCOPE
         );
 
-        let (_status, _body) = crate::handlers::oauth::register_client(
+        let response = crate::handlers::oauth::register_client(
             State(state.clone()),
-            Json(crate::handlers::oauth::RegisterClientRequest {
+            Ok(Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Allowed Before Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8080/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(broker_scope.clone()),
-            }),
+            })),
         )
-        .await
-        .expect("env-default false allows broker scope in DCR");
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
 
         let _updated = update_broker_settings(
             State(state.clone()),
@@ -3571,20 +3632,24 @@ mod operator_route_tests {
         .expect("admin can enable runtime admin-capability requirement");
         assert!(state.broker_require_admin_capability());
 
-        let err = crate::handlers::oauth::register_client(
+        let response = crate::handlers::oauth::register_client(
             State(state),
-            Json(crate::handlers::oauth::RegisterClientRequest {
+            Ok(Json(crate::handlers::oauth::RegisterClientRequest {
                 client_name: Some("Rejected After Override".to_string()),
                 redirect_uris: Some(vec!["http://localhost:8081/callback".to_string()]),
                 grant_types: None,
                 response_types: None,
                 token_endpoint_auth_method: Some("none".to_string()),
                 scope: Some(broker_scope),
-            }),
+            })),
         )
-        .await
-        .expect_err("runtime override should reject broker DCR without restart");
-        assert!(matches!(err, AppError::Forbidden(_)));
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"], "invalid_client_metadata");
     }
 
     #[tokio::test]

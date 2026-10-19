@@ -12,6 +12,12 @@ import {
   parseJsonErrorResponse,
 } from "@/lib/assistant/direct-http-error";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  currentCreditsActor,
+  isInsufficientCreditsCode,
+  isInsufficientCreditsHttp,
+  notifyCreditsDenied,
+} from "@/lib/credits-denial";
 import type { Conversation } from "@/types/assistant";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
@@ -40,20 +46,36 @@ export interface DirectTextBlock {
 }
 
 export interface DirectAssistantMessage {
+  readonly continuation_of?: string | null;
   readonly id: string;
   readonly role: "user" | "assistant";
   readonly schema_version: 1;
   readonly blocks: DirectTextBlock[];
   readonly created_at: string;
+  readonly attachments?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAttachment[];
+}
+
+interface DirectTurnError {
+  readonly attempts?: number | null;
+  readonly capacity_wait_ms?: number | null;
+  readonly code: string;
+  readonly message: string;
+  readonly upstream_error_code?: string | null;
+  readonly stage?: string;
+  readonly http_status?: number | null;
+  readonly upstream_request_id?: string | null;
+  readonly response_id?: string | null;
 }
 
 interface DirectActiveTurn {
+  readonly turnMetadata?: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null };
+  readonly continuations?: number;
   readonly turnId: string | null;
   readonly status: DirectTurnStatus;
-  readonly error: { readonly code: string; readonly message: string } | null;
+  readonly error: DirectTurnError | null;
 }
 
-interface DirectTurnState {
+export interface DirectTurnState {
   readonly messages: DirectAssistantMessage[];
   readonly activeTurn: DirectActiveTurn | null;
   readonly lastCursor: number;
@@ -64,6 +86,12 @@ interface DirectTurnEventBase {
 }
 
 export type DirectTurnEvent =
+  | (DirectTurnEventBase & { readonly event: "turn.continuing"; readonly turn_id: string; readonly continuation: number })
+  | (DirectTurnEventBase & {
+      readonly event: "turn.notice";
+      readonly code: "context_reset" | "image_input_unavailable" | "retrying";
+      readonly message: string;
+    })
   | (DirectTurnEventBase & {
       readonly event: "turn.status";
       readonly turn_id: string;
@@ -97,12 +125,10 @@ export type DirectTurnEvent =
     })
   | (DirectTurnEventBase & {
       readonly event: "turn.completed";
+      readonly turn_metadata?: { readonly attempts?: number | null; readonly capacity_wait_ms?: number | null } | null;
       readonly turn_id: string | null;
       readonly status: "blocked" | "completed" | "failed" | "cancelled";
-      readonly error: {
-        readonly code: string;
-        readonly message: string;
-      } | null;
+      readonly error: DirectTurnError | null;
     });
 
 export interface DirectTurnHandle {
@@ -127,7 +153,23 @@ function isDirectTurnActive(status: DirectTurnStatus | undefined): boolean {
   return status === "running" || status === "waiting";
 }
 
-function applyDirectTurnEvent(
+/** Only the message holding the block changes identity, so settled rows stay memoized. */
+function replaceBlock(
+  messages: DirectTurnState["messages"],
+  blockId: string,
+  update: (block: DirectTextBlock) => DirectTextBlock,
+): DirectTurnState["messages"] {
+  return messages.map((message) =>
+    message.blocks.some((block) => block.block_id === blockId)
+      ? {
+          ...message,
+          blocks: message.blocks.map((block) => (block.block_id === blockId ? update(block) : block)),
+        }
+      : message,
+  );
+}
+
+export function applyDirectTurnEvent(
   state: DirectTurnState,
   event: DirectTurnEvent,
   receivedAt = new Date().toISOString(),
@@ -136,6 +178,10 @@ function applyDirectTurnEvent(
   const nextBase = { ...state, lastCursor: event.cursor };
 
   switch (event.event) {
+    case "turn.continuing":
+      return { ...nextBase, activeTurn: state.activeTurn ? { ...state.activeTurn, continuations: event.continuation } : null };
+    case "turn.notice":
+      return nextBase;
     case "turn.status":
       return {
         ...nextBase,
@@ -179,24 +225,15 @@ function applyDirectTurnEvent(
     case "block.delta":
       return {
         ...nextBase,
-        messages: state.messages.map((message) => ({
-          ...message,
-          blocks: message.blocks.map((block) =>
-            block.block_id === event.block_id
-              ? { ...block, text: block.text + event.text }
-              : block,
-          ),
+        messages: replaceBlock(state.messages, event.block_id, (block) => ({
+          ...block,
+          text: block.text + event.text,
         })),
       };
     case "block.completed":
       return {
         ...nextBase,
-        messages: state.messages.map((message) => ({
-          ...message,
-          blocks: message.blocks.map((block) =>
-            block.block_id === event.block_id ? event.block : block,
-          ),
-        })),
+        messages: replaceBlock(state.messages, event.block_id, () => event.block),
       };
     case "message.completed":
       return nextBase;
@@ -206,13 +243,14 @@ function applyDirectTurnEvent(
         activeTurn: {
           turnId: event.turn_id,
           status: event.status,
+          turnMetadata: event.turn_metadata ? { attempts: event.turn_metadata.attempts, capacityWaitMs: event.turn_metadata.capacity_wait_ms } : undefined,
           error: event.error,
         },
       };
   }
 }
 
-function drainDirectSseBuffer(buffer: string): {
+export function drainDirectSseBuffer(buffer: string): {
   readonly payloads: string[];
   readonly rest: string;
 } {
@@ -293,6 +331,8 @@ interface RunningTurn {
   readonly turnId: string;
   readonly controller: AbortController;
   readonly onEvent: (event: DirectTurnEvent) => void;
+  /** Signed-in identity when the turn was sent (credits-denial fence). */
+  readonly actorId: string | null;
   cursor: number;
   currentMessageId: string | null;
   currentBlockId: string | null;
@@ -631,6 +671,7 @@ export class DirectAssistantTransport {
       turnId: newId("turn"),
       controller: new AbortController(),
       onEvent,
+      actorId: currentCreditsActor(),
       cursor: 0,
       currentMessageId: null,
       currentBlockId: null,
@@ -779,6 +820,10 @@ export class DirectAssistantTransport {
       );
       if (!response.ok) {
         const body = await parseJsonErrorResponse(response);
+        // Before the generic `http_402` rewrite below discards the symbol.
+        if (isInsufficientCreditsHttp(response.status, body)) {
+          this.notifyCredits(conversationId, run);
+        }
         if (
           response.status >= 400 &&
           response.status < 500 &&
@@ -902,6 +947,9 @@ export class DirectAssistantTransport {
       return false;
     }
     if (chunk.error) {
+      if (isInsufficientCreditsCode(chunk.error.code)) {
+        this.notifyCredits(conversationId, run);
+      }
       run.sawUpstreamError = true;
       this.closeOpenMessage(conversationId, run);
       this.finishUi(conversationId, run, "failed", {
@@ -931,6 +979,13 @@ export class DirectAssistantTransport {
       this.finishUi(conversationId, run, "completed", null);
     }
     return false;
+  }
+
+  private notifyCredits(conversationId: string, run: RunningTurn): void {
+    notifyCreditsDenied(
+      { key: `assistant:direct:${conversationId}:${run.turnId}`, payer: "unknown" },
+      run.actorId,
+    );
   }
 
   private openMessage(conversationId: string, run: RunningTurn): void {

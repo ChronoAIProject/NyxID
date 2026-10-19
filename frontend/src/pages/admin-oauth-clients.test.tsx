@@ -948,7 +948,7 @@ describe("AdminOAuthClientsPage", () => {
       screen.getByRole("button", {
         name: "Unfreeze columns through Created By",
       }),
-    ).toHaveClass("opacity-100", "text-primary");
+    ).toHaveClass("opacity-100", "text-primary-text");
 
     expect(
       table.querySelector('tbody td[data-column="client_name"]'),

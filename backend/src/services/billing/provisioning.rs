@@ -39,10 +39,11 @@ pub async fn get_wallet(
     db: &mongodb::Database,
     owner_id: &str,
 ) -> AppResult<Option<BillingWallet>> {
-    db.collection::<BillingWallet>(BILLING_WALLET)
+    let wallet = db
+        .collection::<BillingWallet>(BILLING_WALLET)
         .find_one(doc! { "owner_id": owner_id })
-        .await
-        .map_err(Into::into)
+        .await?;
+    Ok(wallet)
 }
 
 pub async fn ensure_owner_wallet(
@@ -52,6 +53,7 @@ pub async fn ensure_owner_wallet(
     plan_code: &str,
     default_overdraft_cap_credits: i64,
 ) -> AppResult<ProvisionedWallet> {
+    super::exact_migration::require_ready(db).await?;
     if let Some(wallet) = get_wallet(db, owner_id).await? {
         return Ok(ProvisionedWallet {
             wallet,
@@ -72,11 +74,13 @@ pub async fn ensure_owner_wallet(
         lago_subscription_id: Some(subscription_id),
         plan_kind: PlanKind::Prepaid,
         balance_credits: lago_wallet.balance_credits,
-        reserved_credits: 0,
-        pending_lago_debits: 0,
-        pending_topup_expiry_credits: 0,
+        reserved_credits: crate::models::credits::Credits::from_whole(0),
+        pending_lago_debits: crate::models::credits::Credits::from_whole(0),
+        pending_topup_expiry_credits: crate::models::credits::Credits::from_whole(0),
         has_payment_instrument: false,
-        overdraft_cap_credits: default_overdraft_cap_credits,
+        overdraft_cap_credits: crate::models::credits::Credits::from_whole(
+            default_overdraft_cap_credits,
+        ),
         suspended: false,
         collection_state: CollectionState::Good,
         topup_expiry_checked_at: None,
@@ -86,27 +90,77 @@ pub async fn ensure_owner_wallet(
         updated_at: now,
     };
 
-    match db
-        .collection::<BillingWallet>(BILLING_WALLET)
-        .insert_one(&wallet)
-        .await
-    {
-        Ok(_) => Ok(ProvisionedWallet {
-            wallet,
-            created: true,
-        }),
-        Err(error) if is_duplicate_key_error(&error) => {
-            let existing = get_wallet(db, owner_id).await?.ok_or_else(|| {
-                AppError::Internal(
-                    "billing wallet insert raced but existing wallet was not found".to_string(),
-                )
-            })?;
-            Ok(ProvisionedWallet {
-                wallet: existing,
-                created: false,
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let mut session = db.client().start_session().await?;
+        let database = db.clone();
+        let new_wallet = wallet.clone();
+        let result = session
+            .start_transaction()
+            .write_concern(
+                mongodb::options::WriteConcern::builder()
+                    .w(mongodb::options::Acknowledgment::Majority)
+                    .journal(true)
+                    .build(),
+            )
+            .and_run2(async move |session| {
+                let operation: AppResult<()> = async {
+                    let mut document = bson::to_document(&new_wallet)
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    document.insert("exact_accounting_version", 2);
+                    database
+                        .collection::<bson::Document>(BILLING_WALLET)
+                        .insert_one(document)
+                        .session(&mut *session)
+                        .await?;
+                    if new_wallet.balance_credits != crate::models::credits::Credits::ZERO {
+                        let account = format!("wallet:{}", new_wallet.owner_id);
+                        let amount = new_wallet.balance_credits;
+                        let postings = if amount > crate::models::credits::Credits::ZERO {
+                            super::ledger::transfer(account, "external:lago".into(), amount)
+                        } else {
+                            super::ledger::transfer("external:lago".into(), account, -amount)
+                        };
+                        let entry = super::ledger::exact_entry(
+                            &new_wallet.owner_id,
+                            &new_wallet.id,
+                            "wallet_funded",
+                            format!("wallet-created:{}", new_wallet.id),
+                            postings,
+                            None,
+                        );
+                        super::ledger::append_in_session(&database, session, entry).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                crate::services::api_key_mutation_service::transaction_result(operation)
             })
+            .await;
+        match result {
+            Ok(()) => {
+                return Ok(ProvisionedWallet {
+                    wallet,
+                    created: true,
+                });
+            }
+            Err(error) if is_duplicate_key_error(&error) => {
+                if let Some(existing) = get_wallet(db, owner_id).await? {
+                    return Ok(ProvisionedWallet {
+                        wallet: existing,
+                        created: false,
+                    });
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+            }
+            Err(error) => {
+                return Err(
+                    crate::services::api_key_mutation_service::map_transaction_error(error),
+                );
+            }
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -169,7 +223,7 @@ pub async fn create_topup_checkout(
         status: BillingTopUpStatus::Pending,
         paid_at: None,
         credits_expire_at: None,
-        expired_credits_micros: 0,
+        expired_credits: crate::models::credits::Credits::ZERO,
         credits_expired_at: None,
         expiry_void_transaction_id: None,
         created_at: now,
@@ -482,8 +536,14 @@ mod tests {
             first.wallet.lago_wallet_id.as_deref(),
             Some(format!("{owner_id}:wallet").as_str())
         );
-        assert_eq!(first.wallet.balance_credits, 123);
-        assert_eq!(first.wallet.overdraft_cap_credits, 7);
+        assert_eq!(
+            first.wallet.balance_credits,
+            crate::models::credits::Credits::from_whole(123)
+        );
+        assert_eq!(
+            first.wallet.overdraft_cap_credits,
+            crate::models::credits::Credits::from_whole(7)
+        );
 
         let count = db
             .collection::<BillingWallet>(BILLING_WALLET)
@@ -492,6 +552,21 @@ mod tests {
             .expect("count wallets");
         assert_eq!(count, 1);
         assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 1);
+        let entry = db
+            .collection::<crate::models::billing_ledger::BillingLedgerEntry>("billing_ledger")
+            .find_one(doc! { "movement": "wallet_funded" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.postings[0].account, format!("wallet:{owner_id}"));
+        assert_eq!(entry.postings[1].account, "external:lago");
+        assert_eq!(
+            db.collection::<bson::Document>("billing_ledger")
+                .count_documents(doc! { "movement": "opening_balance" })
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -614,7 +689,7 @@ mod tests {
             .collection::<crate::models::billing_ledger::BillingLedgerEntry>(
                 crate::models::billing_ledger::COLLECTION_NAME,
             )
-            .count_documents(doc! { "owner_id": &owner_id, "event_type": "topup_created" })
+            .count_documents(doc! { "owner_id": &owner_id, "movement": "topup_created" })
             .await
             .expect("count ledger entries");
         assert_eq!(ledger_count, 1);
@@ -775,7 +850,7 @@ mod tests {
             }
             Ok(LagoWallet {
                 id: format!("{customer_id}:wallet"),
-                balance_credits: 123,
+                balance_credits: crate::models::credits::Credits::from_whole(123),
             })
         }
 

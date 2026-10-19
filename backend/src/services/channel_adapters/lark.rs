@@ -21,6 +21,25 @@
 //! the proxy's `token_exchange` auth method share one in-memory cache with
 //! per-key single-flight.
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "bot can not be outside the group",
+    "bot/user can not be out of the chat",
+    "bot is not in the chat",
+    "bot is not a member",
+    "bot is not in the group",
+    "not in the chat",
+    "not a member of the chat",
+    "chat is dissolved",
+    "chat not found",
+    "chat does not exist",
+];
+
+#[path = "lark_thread.rs"]
+mod thread;
+
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
+
 use std::sync::Arc;
 
 use aes::Aes256;
@@ -51,7 +70,7 @@ type Aes256CbcDec = cbc::Decryptor<Aes256>;
 ///
 /// `card.action.trigger` callbacks ride on the same event subscription as
 /// inbound messages, so they don't need their own scope.
-pub const REQUIRED_BOT_SCOPES: &[&str] = &["im:message", "im:message:send_as_bot"];
+pub const REQUIRED_BOT_SCOPES: &[&str] = &["im:message", "im:message:send_as_bot", "im:resource"];
 
 /// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
 /// token endpoint. Shared with the proxy catalog seeds so there is exactly
@@ -153,7 +172,7 @@ impl LarkFamilyAdapter {
         body: &[u8],
     ) -> AppResult<PreparedWebhook> {
         let raw_payload = parse_lark_payload(body, "invalid Lark/Feishu webhook JSON")?;
-        let configured_encrypt_key = secrets.and_then(|s| s.lark_encrypt_key.as_deref());
+        let configured_encrypt_key = secrets.and_then(|s| s.get("encrypt_key"));
 
         let (effective_body, effective_payload) = if let Some(encrypt_value) =
             extract_encrypt_value(&raw_payload)
@@ -196,6 +215,7 @@ impl LarkFamilyAdapter {
         };
 
         Ok(PreparedWebhook {
+            activate_bot: true,
             body: effective_body,
             challenge_response,
         })
@@ -246,7 +266,7 @@ fn verification_token_from_secrets<'a>(
     secrets: Option<&'a PlatformVerifySecrets>,
 ) -> AppResult<&'a str> {
     secrets
-        .and_then(|value| value.lark_verification_token.as_deref())
+        .and_then(|value| value.get("verification_token"))
         .ok_or_else(|| {
             AppError::ValidationError(format!(
                 "{} verification token not configured for bot {}; PATCH /api/v1/channel-bots/{} with verification_token",
@@ -424,7 +444,7 @@ fn extract_attachments(
                 }]
             })
             .unwrap_or_default(),
-        "file" => content
+        "file" | "audio" | "media" | "video" => content
             .get("file_key")
             .and_then(|v| v.as_str())
             .filter(|key| !key.is_empty())
@@ -432,7 +452,7 @@ fn extract_attachments(
                 let content_type = detect_content_type(message_type);
                 vec![InboundAttachment {
                     content_type: content_type.to_string(),
-                    url: lark_resource_url(base_url, message_id, file_key, message_type),
+                    url: lark_resource_url(base_url, message_id, file_key, "file"),
                     platform_message_id: Some(message_id.to_string()),
                     file_key: Some(file_key.to_string()),
                     image_key: None,
@@ -469,6 +489,11 @@ fn build_message_body(
 
     let text = text.unwrap_or("");
     ("text", serde_json::json!({ "text": text }).to_string())
+}
+
+fn build_addressed_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_json::Value {
+    let (msg_type, content) = build_send_body(reply);
+    serde_json::json!({ "receive_id": conversation_id, "msg_type": msg_type, "content": content })
 }
 
 fn build_send_body(reply: &OutboundReply) -> (&'static str, String) {
@@ -539,7 +564,7 @@ fn detect_content_type(message_type: &str) -> &'static str {
         "image" => "image",
         "file" => "file",
         "audio" => "audio",
-        "video" => "video",
+        "video" | "media" => "video",
         "interactive" => "text",
         _ => "unknown",
     }
@@ -668,10 +693,246 @@ fn parse_card_action_event(
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+pub(crate) fn lark_registration() -> super::super::channel_platform::RegistrationDescriptor {
+    use super::super::channel_registration::{
+        BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
+    };
+    RegistrationDescriptor {
+        required_suffix: " for Lark/Feishu",
+        unsupported_patch_message: None,
+        token_fields: &["app_id", "app_secret"],
+        fields: &[
+            RegistrationField {
+                name: "verification_token",
+                label: "Verification Token",
+                storage: "lark_verification_token_encrypted",
+                secret: true,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: true,
+                hint: Some("Event Subscriptions > Security in the Lark/Feishu console."),
+                platform_fallback: None,
+            },
+            RegistrationField {
+                name: "app_id",
+                label: "App ID",
+                storage: "app_id",
+                secret: false,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: false,
+                hint: None,
+                platform_fallback: None,
+            },
+            RegistrationField {
+                name: "app_secret",
+                label: "App Secret",
+                storage: "app_secret_encrypted",
+                secret: true,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: false,
+                hint: None,
+                platform_fallback: None,
+            },
+            RegistrationField {
+                name: "encrypt_key",
+                label: "Encrypt Key",
+                storage: "lark_encrypt_key_encrypted",
+                secret: true,
+                required: false,
+                patchable: true,
+                clearable: true,
+                webhook_secret: true,
+                hint: Some(
+                    "Optional. Required only when encrypted callbacks are enabled in the platform console.",
+                ),
+                platform_fallback: None,
+            },
+        ],
+        extra_fields: &[
+            // Older clients submit a dummy token alongside the app credentials.
+            RegistrationField {
+                required: false,
+                ..BOT_TOKEN_FIELD
+            },
+            RegistrationField {
+                name: "public_key",
+                label: "Public Key",
+                storage: "public_key",
+                secret: false,
+                required: false,
+                patchable: false,
+                clearable: false,
+                webhook_secret: false,
+                hint: None,
+                platform_fallback: None,
+            },
+        ],
+        setup_instructions: &[
+            "In Lark/Feishu Event Subscriptions, copy the Verification Token from Security settings. Encrypt Key is optional and should match the Encrypt Key field from the same panel if you enabled encrypted callbacks.",
+        ],
+        ..RegistrationDescriptor::default()
+    }
+}
+
+pub(crate) fn parse_lark_bot_credentials(bot_token: &str) -> AppResult<(&str, &str)> {
+    bot_token
+        .split_once(':')
+        .ok_or_else(|| AppError::Internal("stored Lark/Feishu bot token is malformed".to_string()))
+}
+
+pub(crate) fn updated_lark_token(
+    current: &str,
+    fields: &super::super::channel_platform::RegistrationValues<'_>,
+) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+    if fields.get("app_id").is_none() && fields.get("app_secret").is_none() {
+        return Ok(None);
+    }
+    let (app_id, app_secret) = parse_lark_bot_credentials(current)?;
+    Ok(Some(zeroize::Zeroizing::new(format!(
+        "{}:{}",
+        fields.get("app_id").unwrap_or(app_id),
+        fields.get("app_secret").unwrap_or(app_secret)
+    ))))
+}
+
+#[cfg(test)]
+impl LarkFamilyAdapter {
+    pub(crate) fn media_test_adapter(base: &str, platform: &str) -> Self {
+        Self {
+            base_url: base.into(),
+            platform: platform.into(),
+            token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for LarkFamilyAdapter {
+    async fn resolve_thread(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        self.resolve_native_thread(http, credentials, facts, ancestors)
+            .await
+    }
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+    async fn thread_history(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        self.history_in_thread(http, credentials, target, before)
+            .await
+    }
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_history: true,
+            thread_follow: true,
+            ..Default::default()
+        }
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        _bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::lark(inbound, bot_user_id)
+    }
+
+    fn display_name(&self) -> &str {
+        if self.platform == "feishu" {
+            "Feishu"
+        } else {
+            "Lark"
+        }
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: false,
+            thread: false,
+            edit: true,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         &self.platform
+    }
+
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        super::super::channel_platform::RegistrationDescriptor {
+            documentation_url: Some(if self.platform == "feishu" {
+                "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+            } else {
+                "https://open.larksuite.com/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+            }),
+            ..lark_registration()
+        }
+    }
+
+    fn updated_token_error(&self, error: AppError) -> AppError {
+        AppError::ValidationError(format!(
+            "invalid {} app credentials: {error}",
+            self.platform_id()
+        ))
+    }
+
+    fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
+        if bot.lark_verification_token_encrypted.is_none() {
+            return Err(AppError::ValidationError(format!(
+                "Lark/Feishu bot is missing Verification Token. PATCH /api/v1/channel-bots/{} with verification_token before verify.",
+                bot.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn registration_token(
+        &self,
+        fields: &super::super::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        Ok(zeroize::Zeroizing::new(
+            match (fields.get("app_id"), fields.get("app_secret")) {
+                (Some(id), Some(secret)) => format!("{id}:{secret}"),
+                _ => fields.get("bot_token").unwrap_or_default().to_string(),
+            },
+        ))
+    }
+
+    fn updated_token(
+        &self,
+        current: &str,
+        fields: &super::super::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+        updated_lark_token(current, fields)
+    }
+
+    fn supports_reply_metadata(&self, metadata: &serde_json::Value) -> bool {
+        metadata.get("card").is_some()
     }
 
     async fn prepare_webhook(
@@ -733,13 +994,197 @@ impl PlatformAdapter for LarkFamilyAdapter {
         }
     }
 
+    async fn bot_user_id(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+    ) -> AppResult<Option<String>> {
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!("{}/open-apis/bot/v3/info", self.base_url))
+                .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["bot"]["open_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .map(str::to_owned))
+    }
+
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        if conversation_id.is_empty()
+            || conversation_id.len() > 128
+            || !conversation_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Ok(None);
+        }
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!(
+                "{}/open-apis/im/v1/chats/{conversation_id}",
+                self.base_url
+            ))
+            .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["data"]["name"].as_str().map(str::to_owned))
+    }
+
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        let base = url::Url::parse(&self.base_url).map_err(|_| media::fetch_failed())?;
+        let host = base.host_str().ok_or_else(media::fetch_failed)?;
+        // Validate before token acquisition, and again on the actual byte request.
+        media::media_client(&attachment.url, Some(&[host]), Some(&self.base_url)).await?;
+        let (app_id, app_secret) = credentials
+            .token
+            .split_once(':')
+            .ok_or_else(media::fetch_failed)?;
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        media::download(
+            &attachment.url,
+            &[host],
+            Some(&self.base_url),
+            Some(&token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let (app_id, app_secret) = credentials
+                .token
+                .split_once(':')
+                .ok_or_else(media::upload_failed)?;
+            let token = zeroize::Zeroizing::new(
+                self.get_tenant_access_token(http, app_id, app_secret)
+                    .await?,
+            );
+            let mut last = None;
+            for attachment in &reply.attachments {
+                if let Some(caption) = &attachment.caption {
+                    let text = OutboundReply {
+                        attachments: vec![],
+                        text: Some(caption.clone()),
+                        metadata: None,
+                        reply_to_platform_message_id: None,
+                    };
+                    self.send_reply(http, credentials, conversation_id, &text)
+                        .await?;
+                }
+                let image = attachment.kind == MediaKind::Image;
+                let (endpoint, field, key) = if image {
+                    ("images", "image", "image_key")
+                } else {
+                    ("files", "file", "file_key")
+                };
+                let mut form =
+                    reqwest::multipart::Form::new().part(field, media::multipart_part(attachment)?);
+                if image {
+                    form = form.text("image_type", "message");
+                } else {
+                    form = form.text("file_type", "stream").text(
+                        "file_name",
+                        media::safe_filename(attachment.filename.as_deref()),
+                    );
+                }
+                let upload = media::platform_json(
+                    http.post(format!("{}/open-apis/im/v1/{endpoint}", self.base_url))
+                        .bearer_auth(token.as_str())
+                        .multipart(form),
+                    self.display_name(),
+                    &[],
+                )
+                .await?;
+                let code = upload["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                upload["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
+                }
+                let handle = upload["data"][key]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
+                let content = serde_json::json!({key: handle}).to_string();
+                let response = media::platform_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
+                    .query(&[("receive_id_type", "chat_id")]).bearer_auth(token.as_str())
+                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content})), self.display_name(), &[]).await?;
+                let code = response["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                response["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
+                }
+                last = Some(
+                    response["data"]["message_id"]
+                        .as_str()
+                        .ok_or_else(media::upload_failed)?
+                        .to_string(),
+                );
+            }
+            return Ok(last);
+        }
+        let bot_token = credentials.token;
         // For Lark/Feishu, bot_token is stored as "app_id:app_secret".
         // We must exchange it for a tenant_access_token first.
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
@@ -753,19 +1198,14 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
 
-        let (msg_type, content) = build_send_body(reply);
-
-        let body = serde_json::json!({
-            "receive_id": conversation_id,
-            "msg_type": msg_type,
-            "content": content,
-        });
+        let body = build_addressed_message_body(conversation_id, reply);
 
         let url = format!(
             "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
             self.base_url
         );
 
+        crate::services::channel_platform::mark_provider_attempt();
         let resp: serde_json::Value = http
             .post(&url)
             .header("Authorization", format!("Bearer {tenant_token}"))
@@ -774,16 +1214,18 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "{} send message request failed: {e}",
-                    self.platform
+                    "{} send message request failed: {}",
+                    self.platform,
+                    e.without_url()
                 ))
             })?
             .json()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "{} send message response parse failed: {e}",
-                    self.platform
+                    "{} send message response parse failed: {}",
+                    self.platform,
+                    e.without_url()
                 ))
             })?;
 
@@ -794,10 +1236,20 @@ impl PlatformAdapter for LarkFamilyAdapter {
                 .get("msg")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error");
-            return Err(AppError::ChannelPlatformError(format!(
-                "{} send message failed (code {code}): {msg}",
-                self.platform
-            )));
+            // 230002 is the documented bot-outside-group refusal. Other
+            // non-zero codes require an explicit chat-membership marker.
+            let description = if code == 230002 {
+                "bot can not be outside the group"
+            } else {
+                msg
+            };
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    &self.platform,
+                    description,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
 
         let message_id = resp
@@ -812,10 +1264,12 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn edit_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        _conversation_id: &str,
         platform_message_id: &str,
         edit: &OutboundEdit,
     ) -> AppResult<()> {
+        let bot_token = credentials.token;
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
             AppError::ChannelPlatformError(format!(
                 "{} bot_token must be in app_id:app_secret format",
@@ -886,8 +1340,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let bot_token = credentials.token;
         // For Lark/Feishu, bot_token is "app_id:app_secret". Verify the
         // credentials by attempting to obtain a tenant_access_token.
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
@@ -904,6 +1359,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: app_id.to_string(),
+            display_name: None,
             platform_bot_username: format!("{}_bot", self.platform),
         })
     }
@@ -925,6 +1381,80 @@ mod tests {
     /// pass to the adapter constructors.
     fn test_cache() -> Arc<TokenExchangeCache> {
         Arc::new(TokenExchangeCache::new())
+    }
+
+    #[tokio::test]
+    async fn registration_verifies_app_credentials_without_a_bot_token() {
+        use crate::services::channel_platform::{BotCredentials, RegistrationValues};
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for platform in ["lark", "feishu"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                .and(body_json(serde_json::json!({
+                    "app_id": "cli_test", "app_secret": "app-secret"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "code": 0, "tenant_access_token": "tenant-token", "expire": 7200
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+            let descriptor = adapter.registration();
+            assert!(
+                !descriptor
+                    .fields
+                    .iter()
+                    .any(|field| field.name == "bot_token")
+            );
+            let mut fields = RegistrationValues(std::collections::BTreeMap::from([
+                ("app_id", "cli_test"),
+                ("app_secret", "app-secret"),
+                ("verification_token", "verification-token"),
+            ]));
+            descriptor.validate(&fields, false).unwrap();
+            let token = adapter.registration_token(&fields).unwrap();
+            let identity = adapter
+                .verify_bot_token(
+                    &reqwest::Client::new(),
+                    &BotCredentials::from(token.as_str()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(identity.platform_bot_id, "cli_test");
+
+            // Old clients can still submit the redundant field without changing credentials.
+            fields.0.insert("bot_token", "legacy-placeholder");
+            descriptor.validate(&fields, false).unwrap();
+            assert_eq!(*adapter.registration_token(&fields).unwrap(), *token);
+        }
+    }
+
+    #[test]
+    fn registration_requires_app_and_webhook_credentials_even_with_a_legacy_token() {
+        use crate::services::channel_platform::RegistrationValues;
+
+        for adapter in [
+            LarkFamilyAdapter::lark(test_cache()),
+            LarkFamilyAdapter::feishu(test_cache()),
+        ] {
+            let descriptor = adapter.registration();
+            for missing in ["app_id", "app_secret", "verification_token"] {
+                let mut fields = RegistrationValues(std::collections::BTreeMap::from([
+                    ("bot_token", "legacy-placeholder"),
+                    ("app_id", "cli_test"),
+                    ("app_secret", "app-secret"),
+                    ("verification_token", "verification-token"),
+                ]));
+                fields.0.remove(missing);
+                assert!(descriptor.validate(&fields, false).is_err(), "{missing}");
+                fields.0.insert(missing, " ");
+                assert!(descriptor.validate(&fields, false).is_err(), "{missing}");
+            }
+        }
     }
 
     #[test]
@@ -963,10 +1493,26 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
+            x_events: None,
+            last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: platform.to_string(),
             label: "Test Lark Bot".to_string(),
+            credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "testbot".to_string(),
@@ -988,11 +1534,14 @@ mod tests {
         verification_token: Option<&str>,
         encrypt_key: Option<&str>,
     ) -> PlatformVerifySecrets {
-        PlatformVerifySecrets {
-            lark_verification_token: verification_token.map(str::to_string),
-            lark_encrypt_key: encrypt_key.map(str::to_string),
-            ..PlatformVerifySecrets::default()
+        let mut secrets = PlatformVerifySecrets::default();
+        if let Some(token) = verification_token {
+            secrets.insert("verification_token", token.to_string());
         }
+        if let Some(key) = encrypt_key {
+            secrets.insert("encrypt_key", key.to_string());
+        }
+        secrets
     }
 
     fn message_event_body(token: &str) -> Vec<u8> {
@@ -1679,6 +2228,7 @@ mod tests {
     #[test]
     fn build_body_plain_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".to_string()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1691,6 +2241,7 @@ mod tests {
     #[test]
     fn build_body_text_missing_defaults_to_empty() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1713,6 +2264,7 @@ mod tests {
             ]
         });
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": card.clone() })),
@@ -1727,6 +2279,7 @@ mod tests {
     #[test]
     fn build_body_card_wins_over_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("ignored fallback".to_string()),
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": { "elements": [] } })),
@@ -1738,6 +2291,7 @@ mod tests {
     #[test]
     fn build_body_metadata_without_card_uses_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("plain".to_string()),
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "other": "value" })),
@@ -1781,5 +2335,166 @@ mod tests {
         let m = &msgs[0];
         assert_eq!(m.reply_to_platform_message_id.as_deref(), Some("om_parent"));
         assert_eq!(m.thread_id.as_deref(), Some("ot_thread"));
+    }
+    #[test]
+    fn initiated_request_contains_only_target_and_content() {
+        let mut reply = OutboundReply {
+            attachments: vec![],
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        let body = build_addressed_message_body("chat", &reply);
+        assert_eq!(
+            body,
+            serde_json::json!({ "receive_id": "chat", "msg_type": "text", "content": "{\"text\":\"hello\"}" })
+        );
+        reply.reply_to_platform_message_id = Some("ignored".into());
+        reply.metadata = Some(serde_json::json!({ "thread_id": "ignored" }));
+        assert_eq!(build_addressed_message_body("chat", &reply), body);
+    }
+
+    #[tokio::test]
+    async fn native_edit_capability_succeeds_on_platform_acceptance() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for platform in ["lark", "feishu"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "code": 0, "tenant_access_token": "tenant-token", "expire": 7200 })))
+                .mount(&server).await;
+            Mock::given(method("PUT"))
+                .and(path("/open-apis/im/v1/messages/message"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "code": 0 })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = LarkFamilyAdapter {
+                base_url: server.uri(),
+                platform: platform.into(),
+                token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+            };
+            assert!(adapter.outbound_capabilities().edit);
+            adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"app:secret".into(),
+                    "chat",
+                    "message",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            let description = format!("{marker}: private message content");
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "lark",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            assert!(matches!(
+                error,
+                AppError::ChannelConversationNotReachable(_)
+            ));
+            assert!(!error.to_string().contains("private message content"));
+        }
+        for description in [
+            "message content format incorrect".to_string(),
+            "界".repeat(201),
+        ] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "lark",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("lark send failed: {expected}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_classifies_membership_codes_and_messages_for_both_platforms() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let oversized = "界".repeat(201);
+        for platform in ["lark", "feishu"] {
+            for (code, description, unreachable) in [
+                (230002, "private upstream detail", true),
+                (
+                    99999,
+                    "bot is not in the chat: private upstream detail",
+                    true,
+                ),
+                (99999, "message content format incorrect", false),
+                (99999, oversized.as_str(), false),
+            ] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": 0, "tenant_access_token": "tenant-token", "expire": 7200
+                    })))
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST"))
+                    .and(path("/open-apis/im/v1/messages"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": code, "msg": description
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let adapter = LarkFamilyAdapter {
+                    base_url: server.uri(),
+                    platform: platform.into(),
+                    token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+                };
+                let error = adapter
+                    .send_reply(
+                        &reqwest::Client::new(),
+                        &crate::services::channel_platform::BotCredentials {
+                            billing: None,
+                            token: "app:secret",
+                            platform_bot_id: None,
+                            platform_secrets: None,
+                        },
+                        "chat",
+                        &OutboundReply {
+                            attachments: vec![],
+                            text: Some("hello".into()),
+                            reply_to_platform_message_id: None,
+                            metadata: None,
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    matches!(error, AppError::ChannelConversationNotReachable(_)),
+                    unreachable
+                );
+                if unreachable {
+                    assert!(!error.to_string().contains("private upstream detail"));
+                } else {
+                    let expected: String = description.chars().take(200).collect();
+                    assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                        if detail == format!("{platform} send failed: {expected}")));
+                }
+            }
+        }
     }
 }

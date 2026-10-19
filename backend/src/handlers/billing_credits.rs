@@ -12,7 +12,9 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
+use crate::handlers::admin_helpers::{
+    require_admin, require_admin_or_operator, require_credit_grant_manager,
+};
 use crate::models::billing_target::{BillingServiceScope, BillingTargetKind};
 use crate::models::credit_grant::{CreditGrant, CreditGrantStatus};
 use crate::models::usage_allowance::{AllowanceRecurrence, UsageAllowance};
@@ -27,18 +29,22 @@ pub struct IssueGrantRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     #[serde(default)]
     pub service_refs: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
-    #[serde(default)]
-    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
-    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct IssueGrantResponse {
+    pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub batch_id: String,
     pub created_count: usize,
     /// Recipients whose immutable issuance ledger entry was confirmed inline.
@@ -80,31 +86,6 @@ pub struct BillingBenefitsQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct CreditServiceLimitResponse {
-    pub key: String,
-    pub service_ids: Vec<String>,
-    pub service_slugs: Vec<String>,
-    pub label: Option<String>,
-    pub limit_micros: String,
-    pub consumed_micros: String,
-    pub reserved_micros: String,
-}
-
-pub(super) fn service_limit_response(
-    rule: crate::models::credit_service_limit::CreditServiceLimit,
-) -> CreditServiceLimitResponse {
-    CreditServiceLimitResponse {
-        key: rule.key,
-        service_ids: rule.service_ids,
-        service_slugs: rule.service_slugs,
-        label: rule.label,
-        limit_micros: rule.limit_micros.to_string(),
-        consumed_micros: rule.consumed_micros.to_string(),
-        reserved_micros: rule.reserved_micros.to_string(),
-    }
-}
-
-#[derive(Debug, Serialize, ToSchema)]
 pub struct CreditGrantResponse {
     pub id: String,
     pub batch_id: String,
@@ -118,18 +99,15 @@ pub struct CreditGrantResponse {
     pub recipient_billing_enabled: Option<bool>,
     pub activation_state: CreditGrantActivationState,
     pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub amount_credits: i64,
+    pub amount: String,
+    pub remaining: String,
+    pub reserved: String,
     pub amount_micros: i64,
     pub remaining_micros: i64,
     pub reserved_micros: i64,
-    pub allocated_micros_exact: String,
-    pub remaining_micros_exact: String,
-    pub reserved_micros_exact: String,
-    pub used_micros: String,
-    pub available_micros: String,
-    pub reclaimed_micros: String,
-    pub revoke_requested_at: Option<DateTime<Utc>>,
-    pub service_limits: Vec<CreditServiceLimitResponse>,
     pub scope: BillingServiceScope,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
@@ -150,29 +128,78 @@ pub struct CreditGrantListResponse {
     pub total: u64,
 }
 
+fn present_allowance_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateAllowanceRequest {
+    pub units: Option<Vec<billing::allowances::AllowanceUnitInput>>,
     pub service_ref: String,
-    pub quantity: i64,
-    pub recurrence: AllowanceRecurrence,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub metric: Option<Option<crate::models::service_billing::BillingMetric>>,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub quantity: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub recurrence: Option<Option<AllowanceRecurrence>>,
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReplaceAllowanceBundleRequest {
+    pub service_ref: String,
+    pub units: Vec<billing::allowances::AllowanceUnitInput>,
+    pub target_kind: BillingTargetKind,
+    #[serde(default)]
+    pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetAllowanceBundleActiveRequest {
+    pub is_active: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AllowanceBundleResponse {
+    pub bundle_id: String,
+    pub allowances: Vec<UsageAllowanceResponse>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum CreateAllowanceResponse {
+    Single(UsageAllowanceResponse),
+    Bundle(AllowanceBundleResponse),
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct UpdateAllowanceRequest {
     pub service_ref: Option<String>,
+    pub metric: Option<crate::models::service_billing::BillingMetric>,
     pub quantity: Option<i64>,
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UsageAllowanceResponse {
     pub id: String,
+    pub bundle_id: Option<String>,
     pub service_id: String,
     pub service_slug: String,
     pub metric: crate::models::service_billing::BillingMetric,
@@ -180,6 +207,8 @@ pub struct UsageAllowanceResponse {
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub is_active: bool,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
@@ -222,20 +251,22 @@ pub async fn issue_grant(
     auth_user: AuthUser,
     Json(body): Json<IssueGrantRequest>,
 ) -> AppResult<Json<IssueGrantResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_credit_grant_manager(&state, &auth_user).await?;
+    let target_org_ids = body.target_org_ids.clone();
+    let target_group_ids = body.target_group_ids.clone();
     let grants = billing::grants::issue_grants(
         &state.db,
         billing::grants::IssueCreditGrantInput {
             amount_credits: body.amount_credits,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             expires_at: body.expires_at,
             reason: body.reason,
             granted_by: auth_user.user_id.to_string(),
-            request_id: body.request_id,
-            service_limits: body.service_limits,
         },
     )
     .await?;
@@ -275,10 +306,16 @@ pub async fn issue_grant(
         Some(serde_json::json!({
             "batch_id": batch_id,
             "recipient_count": grants.len(),
+            "target_kind": body.target_kind,
+            "target_org_count": target_org_ids.len(),
+            "target_group_count": target_group_ids.len(),
             "amount_credits_each": body.amount_credits,
         })),
     );
     Ok(Json(IssueGrantResponse {
+        target_kind: body.target_kind,
+        target_org_ids,
+        target_group_ids,
         batch_id,
         created_count: grants.len(),
         activated_count,
@@ -342,7 +379,6 @@ pub async fn admin_list_grants(
     delete,
     path = "/api/v1/admin/credits/grants/{grant_id}",
     tag = "Admin Credits",
-    description = "Request reclaim of this allocation's unspent remainder. Accepted during request holds: the response remains active with revoke_requested_at until admitted work and existing settlement operations finish. New holds and extra consumption stop immediately. Repeated requests return the same pending or terminal allocation; no other funds or recurring policy are changed.",
     params(("grant_id" = String, Path)),
     responses((status = 200, body = CreditGrantResponse)),
     security(("bearer_auth" = []))
@@ -352,26 +388,13 @@ pub async fn revoke_grant(
     auth_user: AuthUser,
     Path(grant_id): Path<String>,
 ) -> AppResult<Json<CreditGrantResponse>> {
-    require_admin(&state, &auth_user).await?;
-    let grant = billing::grants::request_revoke_grant(
-        &state.db,
-        &grant_id,
-        Some(&auth_user.user_id.to_string()),
-    )
-    .await?;
+    require_credit_grant_manager(&state, &auth_user).await?;
+    let grant = billing::grants::revoke_grant(&state.db, &grant_id).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
-        match grant.status {
-            CreditGrantStatus::Revoked => "billing.credit_grant.revoked",
-            CreditGrantStatus::Active => "billing.credit_grant.reclaim_requested",
-            _ => "billing.credit_grant.reclaim_unchanged",
-        },
-        Some(
-            serde_json::json!({ "grant_id": grant_id, "status": grant.status,
-            "pending": grant.status == CreditGrantStatus::Active && grant.revoke_requested_at.is_some(),
-            "requested_by": grant.revoke_requested_by, "requested_at": grant.revoke_requested_at }),
-        ),
+        "billing.credit_grant.revoked",
+        Some(serde_json::json!({ "grant_id": grant_id })),
     );
     Ok(Json(grant_response(grant, None, None)))
 }
@@ -415,23 +438,59 @@ pub async fn user_list_grants(
     path = "/api/v1/admin/credits/allowances",
     tag = "Admin Credits",
     request_body = CreateAllowanceRequest,
-    responses((status = 200, body = UsageAllowanceResponse)),
+    responses((status = 200, body = CreateAllowanceResponse)),
     security(("bearer_auth" = []))
 )]
 pub async fn create_allowance(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<CreateAllowanceRequest>,
-) -> AppResult<Json<UsageAllowanceResponse>> {
+) -> AppResult<Json<CreateAllowanceResponse>> {
     require_admin(&state, &auth_user).await?;
+    if let Some(units) = body.units {
+        if body.metric.is_some() || body.quantity.is_some() || body.recurrence.is_some() {
+            return Err(AppError::ValidationError(
+                "units cannot be combined with metric, quantity, or recurrence".into(),
+            ));
+        }
+        let rows = billing::allowances::create_allowance_bundle(
+            &state.db,
+            billing::allowances::AllowanceBundleInput {
+                service_ref: body.service_ref,
+                units,
+                target_kind: body.target_kind,
+                target_user_ids: body.target_user_ids,
+                target_org_ids: body.target_org_ids,
+                target_group_ids: body.target_group_ids,
+                created_by: auth_user.user_id.to_string(),
+            },
+        )
+        .await?;
+        audit_bundle(
+            &state,
+            &auth_user,
+            "billing.usage_allowance_bundle.created",
+            &rows,
+        );
+        return Ok(Json(CreateAllowanceResponse::Bundle(bundle_response(rows))));
+    }
     let allowance = billing::allowances::create_allowance(
         &state.db,
         billing::allowances::CreateAllowanceInput {
+            metric: body.metric.flatten(),
             service_ref: body.service_ref,
-            quantity: body.quantity,
-            recurrence: body.recurrence,
+            quantity: body
+                .quantity
+                .flatten()
+                .ok_or_else(|| AppError::ValidationError("quantity is required".into()))?,
+            recurrence: body
+                .recurrence
+                .flatten()
+                .ok_or_else(|| AppError::ValidationError("recurrence is required".into()))?,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             created_by: auth_user.user_id.to_string(),
         },
     )
@@ -440,9 +499,90 @@ pub async fn create_allowance(
         state.db.clone(),
         &auth_user,
         "billing.usage_allowance.created",
-        Some(serde_json::json!({ "allowance_id": allowance.id })),
+        Some(serde_json::json!({ "allowance_id": allowance.id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
+        })),
     );
-    Ok(Json(allowance_response(allowance)))
+    Ok(Json(CreateAllowanceResponse::Single(allowance_response(
+        allowance,
+    ))))
+}
+
+fn bundle_response(rows: Vec<UsageAllowance>) -> AllowanceBundleResponse {
+    AllowanceBundleResponse {
+        bundle_id: rows[0]
+            .bundle_id
+            .clone()
+            .unwrap_or_else(|| rows[0].id.clone()),
+        allowances: rows.into_iter().map(allowance_response).collect(),
+    }
+}
+fn audit_bundle(state: &AppState, auth: &AuthUser, event: &str, rows: &[UsageAllowance]) {
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth,
+        event,
+        Some(serde_json::json!({
+            "bundle_id": rows[0].bundle_id.as_ref().unwrap_or(&rows[0].id),
+            "allowance_ids": rows.iter().map(|r| &r.id).collect::<Vec<_>>(), "count": rows.len(),
+            "metrics": rows.iter().map(|r| r.metric).collect::<Vec<_>>(),
+            "active_count": rows.iter().filter(|r| r.is_active).count(),
+        })),
+    );
+}
+#[utoipa::path(put, path = "/api/v1/admin/credits/allowances/bundles/{bundle_key}", tag = "Admin Credits",
+    params(("bundle_key" = String, Path)), request_body = ReplaceAllowanceBundleRequest,
+    responses((status = 200, body = AllowanceBundleResponse)), security(("bearer_auth" = [])))]
+pub async fn replace_allowance_bundle(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<ReplaceAllowanceBundleRequest>,
+) -> AppResult<Json<AllowanceBundleResponse>> {
+    require_admin(&state, &auth).await?;
+    let rows = billing::allowances::replace_allowance_bundle(
+        &state.db,
+        &key,
+        billing::allowances::AllowanceBundleInput {
+            service_ref: body.service_ref,
+            units: body.units,
+            target_kind: body.target_kind,
+            target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
+            created_by: auth.user_id.to_string(),
+        },
+    )
+    .await?;
+    audit_bundle(
+        &state,
+        &auth,
+        "billing.usage_allowance_bundle.replaced",
+        &rows,
+    );
+    Ok(Json(bundle_response(rows)))
+}
+#[utoipa::path(patch, path = "/api/v1/admin/credits/allowances/bundles/{bundle_key}", tag = "Admin Credits",
+    params(("bundle_key" = String, Path)), request_body = SetAllowanceBundleActiveRequest,
+    responses((status = 200, body = AllowanceBundleResponse)), security(("bearer_auth" = [])))]
+pub async fn set_allowance_bundle_active(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<SetAllowanceBundleActiveRequest>,
+) -> AppResult<Json<AllowanceBundleResponse>> {
+    require_admin(&state, &auth).await?;
+    let rows = billing::allowances::set_bundle_active(&state.db, &key, body.is_active).await?;
+    audit_bundle(
+        &state,
+        &auth,
+        "billing.usage_allowance_bundle.toggled",
+        &rows,
+    );
+    Ok(Json(bundle_response(rows)))
 }
 
 #[utoipa::path(
@@ -483,11 +623,14 @@ pub async fn update_allowance(
         &state.db,
         &allowance_id,
         billing::allowances::UpdateAllowanceInput {
+            metric: body.metric,
             service_ref: body.service_ref,
             quantity: body.quantity,
             recurrence: body.recurrence,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             is_active: body.is_active,
         },
     )
@@ -498,6 +641,10 @@ pub async fn update_allowance(
         "billing.usage_allowance.updated",
         Some(serde_json::json!({
             "allowance_id": allowance_id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
             "is_active": allowance.is_active,
         })),
     );
@@ -540,9 +687,6 @@ fn grant_response(
     recipient_billing_enabled: Option<bool>,
 ) -> CreditGrantResponse {
     let activation_state = activation_state(&grant);
-    let used_micros = billing::grants::used_micros(&grant).to_string();
-    let available_micros =
-        billing::grants::eligible_available_micros(&grant, Utc::now()).to_string();
     let schedule_id = grant
         .schedule_origin
         .as_ref()
@@ -551,8 +695,6 @@ fn grant_response(
         .schedule_origin
         .as_ref()
         .map(|origin| origin.period_start);
-    let held = billing::service_limits::held_micros(&grant);
-    let display_rules = billing::service_limits::rules_with_commitments(&grant);
     CreditGrantResponse {
         id: grant.id,
         batch_id: grant.batch_id,
@@ -564,26 +706,15 @@ fn grant_response(
         recipient_billing_enabled,
         activation_state,
         target_kind: grant.target_kind,
+        target_org_ids: grant.target_org_ids,
+        target_group_ids: grant.target_group_ids,
         amount_credits: grant.amount_credits,
-        amount_micros: grant.amount_micros,
-        remaining_micros: grant.remaining_micros,
-        reserved_micros: grant.reserved_micros,
-        allocated_micros_exact: grant.amount_micros.to_string(),
-        remaining_micros_exact: grant.remaining_micros.to_string(),
-        reserved_micros_exact: held.to_string(),
-        used_micros,
-        available_micros,
-        reclaimed_micros: if grant.status == CreditGrantStatus::Revoked {
-            grant.terminal_amount_micros
-        } else {
-            0
-        }
-        .to_string(),
-        revoke_requested_at: grant.revoke_requested_at,
-        service_limits: display_rules
-            .into_iter()
-            .map(service_limit_response)
-            .collect(),
+        amount: grant.amount.to_string(),
+        remaining: grant.remaining.to_string(),
+        reserved: grant.reserved.to_string(),
+        amount_micros: grant.amount.display_micros(),
+        remaining_micros: grant.remaining.display_micros(),
+        reserved_micros: grant.reserved.display_micros(),
         scope: grant.scope,
         expires_at: grant.expires_at,
         reason: grant.reason,
@@ -600,6 +731,7 @@ fn grant_response(
 fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
     UsageAllowanceResponse {
         id: allowance.id,
+        bundle_id: allowance.bundle_id,
         service_id: allowance.service_id,
         service_slug: allowance.service_slug,
         metric: allowance.metric,
@@ -607,6 +739,8 @@ fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
         recurrence: allowance.recurrence,
         target_kind: allowance.target_kind,
         target_user_ids: allowance.target_user_ids,
+        target_org_ids: allowance.target_org_ids,
+        target_group_ids: allowance.target_group_ids,
         is_active: allowance.is_active,
         created_by: allowance.created_by,
         created_at: allowance.created_at,
@@ -717,6 +851,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowance_bundles_reject_mixed_fields_and_non_admin_writes() {
+        let (state, admin_id, operator_id, user_id) = setup("bundle_handler_validation")
+            .await
+            .expect("MongoDB required");
+        let body = serde_json::json!({
+            "service_ref": "service", "target_kind": "all_users",
+            "units": [{ "metric": "tokens", "quantity": 100, "recurrence": "daily" }],
+        });
+        for (field, value) in [
+            ("metric", serde_json::json!("tokens")),
+            ("quantity", serde_json::json!(100)),
+            ("recurrence", serde_json::json!("daily")),
+        ] {
+            for value in [value, serde_json::Value::Null] {
+                let mut mixed = body.clone();
+                mixed[field] = value;
+                let error = create_allowance(
+                    State(state.clone()),
+                    test_auth_user(&admin_id),
+                    Json(serde_json::from_value(mixed).unwrap()),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(error, AppError::ValidationError(ref message) if message.contains("cannot be combined"))
+                );
+            }
+        }
+        for actor in [operator_id, user_id] {
+            let auth = test_auth_user(&actor);
+            let create = create_allowance(
+                State(state.clone()),
+                auth.clone(),
+                Json(serde_json::from_value(body.clone()).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            let replace = replace_allowance_bundle(
+                State(state.clone()),
+                auth.clone(),
+                Path("bundle".into()),
+                Json(serde_json::from_value(body.clone()).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            let toggle = set_allowance_bundle_active(
+                State(state.clone()),
+                auth,
+                Path("bundle".into()),
+                Json(SetAllowanceBundleActiveRequest { is_active: false }),
+            )
+            .await
+            .unwrap_err();
+            for error in [create, replace, toggle] {
+                assert!(matches!(error, AppError::Forbidden(_)));
+            }
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<UsageAllowance>(crate::models::usage_allowance::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn operator_reads_credit_admin_surfaces_but_cannot_mutate_them() {
         let Some((state, _admin_id, operator_id, _user_id)) =
             setup("billing_credits_operator_access").await
@@ -745,12 +949,11 @@ mod tests {
             State(state.clone()),
             operator.clone(),
             Json(IssueGrantRequest {
-                service_limits: Vec::new(),
-                request_id: None,
-
                 amount_credits: 1,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -770,11 +973,15 @@ mod tests {
             State(state.clone()),
             operator.clone(),
             Json(CreateAllowanceRequest {
+                metric: None,
                 service_ref: "service-1".to_string(),
-                quantity: 1,
-                recurrence: AllowanceRecurrence::Daily,
+                quantity: Some(Some(1)),
+                recurrence: Some(Some(AllowanceRecurrence::Daily)),
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
             }),
         )
         .await
@@ -784,6 +991,7 @@ mod tests {
             operator,
             Path("allowance-1".to_string()),
             Json(UpdateAllowanceRequest {
+                metric: None,
                 is_active: Some(false),
                 ..Default::default()
             }),
@@ -794,6 +1002,86 @@ mod tests {
         for error in [issue, revoke, create, update] {
             assert!(matches!(error, AppError::Forbidden(_)));
         }
+    }
+
+    #[tokio::test]
+    async fn credits_manager_operator_issues_and_revokes_grants_only() {
+        let Some((state, _admin_id, operator_id, user_id)) =
+            setup("billing_credits_manager_access").await
+        else {
+            return;
+        };
+        let credits_manager = state
+            .db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CREDITS_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .expect("credits manager role is seeded");
+        for id in [&operator_id, &user_id] {
+            role_service::assign_role_to_user(&state.db, id, &credits_manager.id)
+                .await
+                .unwrap();
+        }
+        // amount 0 passes authorization and then fails validation.
+        let issue_body = || {
+            Json(IssueGrantRequest {
+                amount_credits: 0,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                all_services: true,
+                service_refs: Vec::new(),
+                expires_at: None,
+                reason: None,
+            })
+        };
+
+        let operator = test_auth_user(&operator_id);
+        let issue = issue_grant(State(state.clone()), operator.clone(), issue_body())
+            .await
+            .expect_err("invalid amount");
+        assert!(matches!(issue, AppError::ValidationError(_)), "{issue:?}");
+        let revoke = revoke_grant(
+            State(state.clone()),
+            operator.clone(),
+            Path("missing-grant".to_string()),
+        )
+        .await
+        .expect_err("grant does not exist");
+        assert!(!matches!(revoke, AppError::Forbidden(_)), "{revoke:?}");
+        let create = create_allowance(
+            State(state.clone()),
+            operator,
+            Json(CreateAllowanceRequest {
+                metric: None,
+                service_ref: "service-1".to_string(),
+                quantity: Some(Some(1)),
+                recurrence: Some(Some(AllowanceRecurrence::Daily)),
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
+            }),
+        )
+        .await
+        .expect_err("allowances stay admin-only");
+        assert!(matches!(create, AppError::Forbidden(_)));
+
+        // The role alone does nothing for a regular user.
+        let user = test_auth_user(&user_id);
+        let issue = issue_grant(State(state.clone()), user.clone(), issue_body())
+            .await
+            .expect_err("regular user");
+        let revoke = revoke_grant(State(state.clone()), user, Path("missing-grant".into()))
+            .await
+            .expect_err("regular user");
+        for error in [issue, revoke] {
+            assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+        }
+        state.db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -843,12 +1131,11 @@ mod tests {
             State(state.clone()),
             admin.clone(),
             Json(IssueGrantRequest {
-                service_limits: Vec::new(),
-                request_id: None,
-
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -861,11 +1148,15 @@ mod tests {
             State(state),
             admin,
             Json(CreateAllowanceRequest {
+                metric: None,
                 service_ref: "service-1".to_string(),
-                quantity: 0,
-                recurrence: AllowanceRecurrence::Monthly,
+                quantity: Some(Some(0)),
+                recurrence: Some(Some(AllowanceRecurrence::Monthly)),
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
             }),
         )
         .await
@@ -874,68 +1165,7 @@ mod tests {
         assert!(matches!(grant, AppError::ValidationError(_)));
         assert!(matches!(allowance, AppError::ValidationError(_)));
     }
-    #[tokio::test]
-    async fn reclaim_handler_reports_and_audits_pending_request_before_final_removal() {
-        let (state, admin_id, _, user_id) = setup("billing_reclaim_pending_audit")
-            .await
-            .expect("real Mongo required");
-        let admin = test_auth_user(&admin_id);
-        let Json(issued) = issue_grant(
-            State(state.clone()),
-            admin.clone(),
-            Json(IssueGrantRequest {
-                amount_credits: 1000,
-                target_kind: BillingTargetKind::SelectedUsers,
-                target_user_ids: vec![user_id],
-                all_services: true,
-                service_refs: vec![],
-                service_limits: vec![],
-                expires_at: None,
-                reason: None,
-                request_id: None,
-            }),
-        )
-        .await
-        .unwrap();
-        let id = state
-            .db
-            .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
-            .find_one(doc! { "batch_id": &issued.batch_id })
-            .await
-            .unwrap()
-            .unwrap()
-            .id;
-        state
-            .db
-            .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": &id },
-                doc! { "$set": { "reserved_micros": 40_000_000_i64 } },
-            )
-            .await
-            .unwrap();
-        let Json(pending) = revoke_grant(State(state.clone()), admin.clone(), Path(id.clone()))
-            .await
-            .unwrap();
-        assert_eq!(pending.status, CreditGrantStatus::Active);
-        assert!(pending.revoke_requested_at.is_some());
-        assert_eq!(pending.remaining_micros_exact, "1000000000");
-        assert_eq!(pending.available_micros, "0");
-        let Json(replayed) = revoke_grant(State(state.clone()), admin, Path(id.clone()))
-            .await
-            .unwrap();
-        assert_eq!(replayed.revoke_requested_at, pending.revoke_requested_at);
-        let audit = state.db.collection::<crate::models::audit_log::AuditLog>(
-            crate::models::audit_log::COLLECTION_NAME,
-        );
-        let entry = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if let Some(entry) = audit.find_one(doc! { "event_type": "billing.credit_grant.reclaim_requested", "event_data.grant_id": &id }).await.unwrap() { break entry; }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }).await.unwrap();
-        assert_eq!(entry.user_id.as_deref(), Some(admin_id.as_str()));
-        assert_eq!(entry.event_data.unwrap()["pending"], true);
-        assert_eq!(audit.count_documents(doc! { "event_type": "billing.credit_grant.revoked", "event_data.grant_id": &id }).await.unwrap(), 0);
-    }
 }
+
+#[cfg(test)]
+mod target_tests;

@@ -134,7 +134,7 @@ export function AssistantAccountProfileUpdateDialog({
           </DialogDescription>
         </DialogHeader>
         {!resultUserId ? (
-          <div className="space-y-2 border-y border-border py-4 text-[12px]">
+          <div className="space-y-2 border-y border-border py-4 text-12">
             {params.displayName !== undefined ? (
               <div className="flex items-center justify-between gap-4">
                 <span className="text-muted-foreground">Display name</span>
@@ -151,8 +151,8 @@ export function AssistantAccountProfileUpdateDialog({
             ) : null}
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
-        {verified ? <p className="text-[11px] text-success">Account profile verified.</p> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
+        {verified ? <p className="text-11 text-success">Account profile verified.</p> : null}
         <DialogFooter>
           {!resultUserId ? (
             <>

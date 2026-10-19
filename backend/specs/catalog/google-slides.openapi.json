@@ -1,0 +1,175 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Slides",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted Google Slides operations on their dedicated origin. Full Drive OAuth scope authorizes every published operation; connect this product separately from Drive or Workspace."
+  },
+  "servers": [
+    {
+      "url": "https://slides.googleapis.com"
+    }
+  ],
+  "paths": {
+    "/v1/presentations": {
+      "post": {
+        "operationId": "slides_create_presentation",
+        "summary": "Create an empty presentation with a title. Add slides and content with slides_batch_update_presentation.",
+        "x-aevatar-tool": {
+          "name": "slides_create_presentation",
+          "description": "Create an empty presentation with a title. Add slides and content with slides_batch_update_presentation.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/presentations/{presentationId}": {
+      "get": {
+        "operationId": "slides_get_presentation",
+        "summary": "Read a presentation, its pages, and object IDs needed to target edits.",
+        "x-aevatar-tool": {
+          "name": "slides_get_presentation",
+          "description": "Read a presentation, its pages, and object IDs needed to target edits.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "presentationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional partial-response field mask."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/presentations/{presentationId}:batchUpdate": {
+      "post": {
+        "operationId": "slides_batch_update_presentation",
+        "summary": "Apply structural, content, and formatting edits to a presentation in one batch.",
+        "x-aevatar-tool": {
+          "name": "slides_batch_update_presentation",
+          "description": "Apply structural, content, and formatting edits to a presentation in one batch.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "presentationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "description": "Ordered API request objects, applied atomically. Each entry contains exactly one request, such as createSlide, createShape, insertText, replaceAllText, updateTextStyle, or deleteObject."
+                  },
+                  "writeControl": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "requiredRevisionId": {
+                        "type": "string",
+                        "description": "Reject the batch if the presentation changed since this revision was read."
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "requests"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -32,7 +32,13 @@ pub struct ConnectLink {
     pub user_id: String,
     pub service_slug: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_platform_key: Option<bool>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
     pub label: Option<String>,
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
     pub requested_by: Option<String>,
     #[serde(default)]
     pub requesting_app_id: Option<String>,
@@ -98,6 +104,10 @@ impl fmt::Debug for ConnectLink {
             .field("service_slug", &self.service_slug)
             .field("service_id", &self.service_id)
             .field("label", &self.label)
+            .field(
+                "endpoint_url",
+                &self.endpoint_url.as_ref().map(|url| RedactedLen(url.len())),
+            )
             .field("requested_by", &self.requested_by)
             .field("requesting_app_id", &self.requesting_app_id)
             .field("requesting_app_name", &self.requesting_app_name)
@@ -143,11 +153,14 @@ mod tests {
     fn fixture() -> ConnectLink {
         let now = Utc::now();
         ConnectLink {
+            scopes: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_slug: "api-github-pat".to_string(),
+            use_platform_key: None,
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),
+            endpoint_url: Some("https://private.example.test".to_string()),
             requested_by: Some("codex-release".to_string()),
             requesting_app_id: Some("desktop-client".to_string()),
             requesting_app_name: Some("Desktop Client".to_string()),
@@ -211,6 +224,7 @@ mod tests {
         assert!(!debug.contains(&link.token_hash));
         assert!(!debug.contains("completion-claim-secret"));
         assert!(!debug.contains("app.example.test"));
+        assert!(!debug.contains("private.example.test"));
         assert!(debug.contains("redacted"));
         assert!(debug.contains("api-github-pat"));
     }

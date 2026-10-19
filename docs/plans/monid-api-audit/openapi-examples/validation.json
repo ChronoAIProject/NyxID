@@ -1,0 +1,26 @@
+[
+  {
+    "file": "apollo-1.json",
+    "openapi": "3.1.0",
+    "operations": 5,
+    "validated": true
+  },
+  {
+    "file": "pdl-2.json",
+    "openapi": "3.1.0",
+    "operations": 1,
+    "validated": true
+  },
+  {
+    "file": "tinyfish-3.json",
+    "openapi": "3.1.0",
+    "operations": 1,
+    "validated": true
+  },
+  {
+    "file": "tinyfish-4.json",
+    "openapi": "3.1.0",
+    "operations": 1,
+    "validated": true
+  }
+]

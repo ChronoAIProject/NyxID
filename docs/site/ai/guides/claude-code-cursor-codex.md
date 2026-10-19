@@ -9,6 +9,41 @@ This guide walks both Claude Code (Anthropic) and Codex (OpenAI) to the point wh
 
 For the underlying data model, see [Agent isolation](/docs/shared/concepts/agent-isolation).
 
+## Install with Codex / Codex CLI
+
+Use a local Codex environment capable of running installation commands. The
+recommended prompt is:
+
+```text
+Install NyxID CLI and Codex skills using https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md. Verify the installation. After it succeeds, ask whether I want to upload and save my existing Codex credentials in my NyxID account for compatible AI features. Only read or upload credential contents after I explicitly approve the destination and account. Use separate provider authorization when local credentials cannot be safely reused.
+```
+
+Installation is the lightweight CLI plus skills, not a self-hosted backend.
+Codex user skills live at `~/.agents/skills/`; `CODEX_HOME` selects configuration
+and credentials. Verify `nyxid --version`, `nyxid ai-setup status` and the presence
+of `~/.agents/skills/nyxid/SKILL.md` before offering optional credential saving.
+
+`nyxid provider connect-codex` inspects your live NyxID account and asks for separate
+destination/account approval before opening local credentials. Check this
+command's `--help` first: the original published `v0.15.0` predates it. Older
+releases can update or use **AI Services > OpenAI Codex** authorization instead.
+
+Only API keys in supported file storage can be imported; `keyring`, `auto`, and
+ChatGPT OAuth use separate provider authorization. Shared Codex OAuth refresh
+rotation can break local sign-in and is never imported as an OpenAI API key.
+After approval, the helper makes a small paid Responses request through the
+exact saved connection. `saved`, `usable`, and `reconnect_required` distinguish
+storage from verified access; repeat with `--verify` or inspect with `--status`.
+Existing credentials require explicit ID/version replacement consent. Skipping
+leaves installation successful; run the command later to resume.
+
+In **AI Services > Codex connection**, verify or manage the connection. Disable
+pauses it; Delete removes NyxID's connection without signing local Codex out or
+revoking the upstream API key. Follow the canonical manifest for the full consent
+procedure. Official references: [authentication](https://developers.openai.com/codex/auth),
+[refresh lifecycle](https://learn.chatgpt.com/docs/auth/ci-cd-auth), and
+[skill locations](https://developers.openai.com/codex/skills).
+
 ## Prerequisites
 
 - `nyxid` CLI installed and authenticated. Follow [Connect your agent](/docs/ai/getting-started/connect-your-agent) if not.
@@ -164,7 +199,7 @@ Follow Part 1 with `--platform cursor` and scope it to whichever services Cursor
 | Scope list stored but ignored | `allow_all_services` left as `true` | Pass both `--allowed-services` and `--allow-all-services false` |
 | `X-NyxID-Agent-Id` missing | Request used session auth, not an Agent Key | Use `Authorization: Bearer nyx_…` (or `x-api-key: nyx_…` for Anthropic paths) |
 | Claude traffic fails | Anthropic service not registered | Run `nyxid service add llm-anthropic` |
-| Wrong agent shows in audit log | Terminal loaded the wrong `.envrc` | Run `direnv reload` and re-check `echo $ANTHROPIC_API_KEY` |
+| Wrong agent shows in audit log | Terminal loaded the wrong `.envrc` | Run `direnv reload` and inspect `nyxid whoami`; do not print credential environment values |
 
 ## Production key layout
 

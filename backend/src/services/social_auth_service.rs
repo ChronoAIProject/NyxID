@@ -629,7 +629,7 @@ pub struct FindOrCreateUserResult {
 ///
 /// When `allow_new_users` is `false`, first-time social sign-ups are rejected
 /// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
-/// email/password registration — callers should pass `!config.invite_code_required`.
+/// email/password registration — callers should use the global invitation-code flag.
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
@@ -766,6 +766,7 @@ mod tests {
     ) -> AppConfig {
         AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -802,12 +803,14 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -818,8 +821,10 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
+            agent_key_login_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
             connection_expiry_notifications: true,
@@ -875,10 +880,14 @@ mod tests {
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: 20 * 1024 * 1024,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,
@@ -902,7 +911,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }

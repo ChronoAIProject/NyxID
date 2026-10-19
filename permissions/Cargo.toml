@@ -1,0 +1,39 @@
+[package]
+name = "nyxid-permissions"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Experimental provider-aware permissions and a local Google Drive proof of concept."
+
+[[bin]]
+name = "nyxid-drive-permissions-poc"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum.workspace = true
+bytes = "1.11"
+clap = { version = "4.6", features = ["derive"] }
+http = "1.4"
+futures.workspace = true
+memchr = "2"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+subtle = "2"
+thiserror = "2"
+tokio.workspace = true
+url = "2.5"
+urlencoding = "2.1"
+uuid.workspace = true
+zeroize = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+[package.metadata.dist]
+dist = false

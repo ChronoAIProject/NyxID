@@ -212,6 +212,7 @@ fn existing_outcome(
     fingerprint: &str,
 ) -> AppResult<ReceiptOutcome> {
     let receipt = check_fingerprint(receipt, fingerprint)?;
+    crate::services::service_history::context::receipt(&receipt.id);
     match receipt.status {
         AssistantActionReceiptStatus::Completed => Ok(ReceiptOutcome::Replay(receipt)),
         AssistantActionReceiptStatus::Pending => Ok(ReceiptOutcome::InProgress(receipt)),
@@ -334,7 +335,10 @@ async fn reserve_or_replay_with_all_markers(
         .insert_one(&receipt)
         .await
     {
-        Ok(_) => Ok(ReceiptOutcome::Reserved(receipt)),
+        Ok(_) => {
+            crate::services::service_history::context::receipt(&receipt.id);
+            Ok(ReceiptOutcome::Reserved(receipt))
+        }
         Err(error) if duplicate_key(&error) => {
             let winner = find_receipt(db, user_id, action, action_request_id)
                 .await?

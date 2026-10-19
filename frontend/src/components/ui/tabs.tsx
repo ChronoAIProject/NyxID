@@ -33,9 +33,13 @@ const TabsList = React.forwardRef<
     if (!list) return;
     const observer = new MutationObserver(updateIndicator);
     observer.observe(list, { attributes: true, subtree: true, attributeFilter: ["data-state"] });
+    const resizeObserver = new ResizeObserver(updateIndicator);
+    resizeObserver.observe(list);
+    list.querySelectorAll<HTMLElement>("[role=tab]").forEach((tab) => resizeObserver.observe(tab));
     list.addEventListener("scroll", updateIndicator);
     return () => {
       observer.disconnect();
+      resizeObserver.disconnect();
       list.removeEventListener("scroll", updateIndicator);
     };
   }, [updateIndicator]);
@@ -48,7 +52,7 @@ const TabsList = React.forwardRef<
         else if (ref) ref.current = node;
       }}
       className={cn(
-        "relative flex h-8 w-fit items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto overflow-y-hidden scrollbar-none",
+        "min-h-control relative flex h-8 w-fit max-w-full items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto overflow-y-hidden scrollbar-none",
         className,
       )}
       {...props}
@@ -72,7 +76,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 text-[12px] font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium",
+      "inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 text-12 font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium",
       className,
     )}
     {...props}

@@ -3,7 +3,7 @@ import { z } from "zod";
 export const chainVerifyOutcomeSchema = z.enum(["ok", "broken"]);
 
 export const chainVerifyStatusSchema = z.object({
-  chain: z.enum(["audit_log", "billing_ledger"]),
+  chain: z.enum(["audit_log", "billing_ledger", "billing_accounts"]),
   outcome: chainVerifyOutcomeSchema,
   cursor_seq: z.number().int(),
   head_seq: z.number().int().nullable().optional(),
@@ -27,7 +27,15 @@ export const startupDiagnosticSchema = z.object({
 });
 
 export const chainVerificationResponseSchema = z.object({
-  chains: z.array(chainVerifyStatusSchema),
+  chains: z.array(
+    chainVerifyStatusSchema.extend({
+      chain: z.enum(["audit_log", "billing_ledger"]),
+    }),
+  ),
+  accounts: chainVerifyStatusSchema
+    .extend({ chain: z.literal("billing_accounts") })
+    .nullable()
+    .optional(),
   startup_diagnostics: z.array(startupDiagnosticSchema).default([]),
 });
 

@@ -3,6 +3,7 @@ import {
   Select,
   SelectContent,
   SelectItem,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -10,7 +11,9 @@ import {
 const PERSONAL_VALUE = "__personal__";
 
 interface OrgScopeSelectProps {
-  /** Current scope: `null` means personal; a string is an org id. */
+  readonly id?: string;
+  readonly "aria-describedby"?: string;
+  /** `null` means personal; `all` selects every scope when allowAll is set. */
   readonly value: string | null;
   readonly onChange: (value: string | null) => void;
   readonly disabled?: boolean;
@@ -20,6 +23,9 @@ interface OrgScopeSelectProps {
    *  to true — the backend rejects create/list under an org for non-admins,
    *  so offering non-admin orgs in a create-time picker leads to 403s. */
   readonly adminOnly?: boolean;
+  /** Offer an aggregate listing above the individual owner scopes. */
+  readonly allowAll?: boolean;
+  readonly personalLabel?: string;
 }
 
 /**
@@ -34,11 +40,15 @@ interface OrgScopeSelectProps {
  * create-admin paths).
  */
 export function OrgScopeSelect({
+  id,
+  "aria-describedby": ariaDescribedBy,
   value,
   onChange,
   disabled,
   label = "Scope",
   adminOnly = true,
+  allowAll = false,
+  personalLabel = "Personal",
 }: OrgScopeSelectProps) {
   const { data: orgs, isLoading } = useOrgs();
 
@@ -54,11 +64,19 @@ export function OrgScopeSelect({
       }
       disabled={disabled || isLoading}
     >
-      <SelectTrigger aria-label={label}>
-        <SelectValue placeholder="Personal" />
+      <SelectTrigger id={id} aria-label={label} aria-describedby={ariaDescribedBy}>
+        <SelectValue placeholder={personalLabel} />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value={PERSONAL_VALUE}>Personal</SelectItem>
+        {allowAll && (
+          <>
+            <SelectItem value="all">View all</SelectItem>
+            <SelectSeparator asChild className="border-0">
+              <hr />
+            </SelectSeparator>
+          </>
+        )}
+        <SelectItem value={PERSONAL_VALUE}>{personalLabel}</SelectItem>
         {eligibleOrgs.map((org) => (
           <SelectItem key={org.id} value={org.id}>
             {org.display_name || org.id}

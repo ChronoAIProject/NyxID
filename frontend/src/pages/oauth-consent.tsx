@@ -1,57 +1,97 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { MachineGrantConsent } from "@/components/shared/machine-grant-consent";
+import { readMachineConsentScope } from "@/schemas/machine-grants";
+import { readProtectedConsentRequest } from "@/hooks/use-machine-grants";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Badge } from "@/components/ui/badge";
-import { Button, ButtonIcon } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { AlertTriangle, ShieldCheck } from "lucide-react";
 import {
-  OAUTH_SCOPE_META,
-  scopeRiskBadgeVariant,
-  scopeRiskLabel,
-} from "@/lib/constants";
+  AlertTriangle,
+  ArrowRight,
+  ChevronDown,
+  CircleUserRound,
+  KeyRound,
+  Mail,
+  RefreshCw,
+  Save,
+  ShieldCheck,
+  ShieldQuestion,
+  UserRound,
+  UsersRound,
+  Waypoints,
+} from "lucide-react";
+import { OAUTH_SCOPE_META } from "@/lib/constants";
 import { useApplyTheme } from "@/hooks/use-theme";
-import { NyxidLogo } from "@/components/brand/nyxid-logo";
-import { DetailSection } from "@/components/shared/detail-section";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
-import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
+import { cn } from "@/lib/utils";
+import {
+  oauthConsentServiceAccessSchema,
+  readIncrementalConsentRequest,
+} from "@/schemas/oauth-consent";
+import { useAuthStore } from "@/stores/auth-store";
 
-/**
- * Standalone shell for the consent surface, matching `login-device.tsx` — the
- * sibling "a human reviews and approves an access request" page. The
- * `bg-background` is load-bearing: the document body carries an inline dark
- * colour as an anti-flash guard for the never-themed public pages, so a themed
- * standalone page that doesn't paint its own canvas renders a light card on a
- * black void.
- */
-function ConsentShell({ children }: { readonly children: ReactNode }) {
+import {
+  agentGrant,
+  type AccessLevel,
+  type AccessServiceRow,
+} from "@/lib/agent-grant";
+import { ServiceAccessTable } from "./oauth-consent-access";
+import { OAuthIncrementalConsentPage } from "./oauth-incremental-consent";
+
+// Paint the canvas because public pages leave a dark body anti-flash color.
+function ConsentShell({
+  children,
+  email,
+  heading,
+  preview = false,
+  wide = false,
+}: {
+  readonly children: ReactNode;
+  readonly email?: string;
+  readonly heading?: ReactNode;
+  readonly preview?: boolean;
+  /** Two-column layout on large screens. */
+  readonly wide?: boolean;
+}) {
   return (
     <main
-      className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center sm:py-10"
+      className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-6 text-foreground"
       style={{
-        paddingTop: "max(2rem, var(--sat))",
+        paddingTop: "max(1.25rem, var(--sat))",
         paddingBottom: "max(2rem, var(--sab))",
       }}
     >
-      <div className="flex w-full max-w-xl flex-col gap-5">
-        <div className="flex justify-center">
-          <NyxidLogo className="h-8 w-auto" />
+      <div className={cn("w-full max-w-[560px]", wide && "lg:max-w-[1040px]")}>
+        {heading}
+        <div className="connect-link-card overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm">
+          <div className="p-5 sm:p-8">{children}</div>
+          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">
+            {preview ? "Preview · " : ""}Signed in as{" "}
+            <span className="break-all text-foreground">
+              {email || "your NyxID account"}
+            </span>
+          </div>
         </div>
-        {children}
+        <p className="mt-5 text-center text-xs text-muted-foreground">
+          Application access via NyxID
+        </p>
       </div>
     </main>
   );
 }
-
-/**
- * Fill for sections nested inside the Card. `bg-overlay` is the theme-aware
- * successor to the `white/[α]` idiom (app.css "Interactive chrome"): identical
- * in dark, black-alpha on light, so the nested layer survives both themes.
- */
-const NESTED_SECTION = "bg-overlay";
 
 function readParam(search: URLSearchParams, key: string): string {
   return search.get(key) ?? "";
@@ -65,14 +105,25 @@ function parseHost(uri: string): string {
   }
 }
 
-interface ConsentServiceDisplay {
+export interface ConsentServiceDisplay {
+  readonly id: string;
+  readonly is_active: boolean;
   readonly label?: string | null;
   readonly slug: string;
+  readonly resource_uri: string;
   readonly catalog_service_name?: string | null;
+  readonly catalog_service_description?: string | null;
   readonly credential_source: {
     readonly type: "personal" | "org";
     readonly org_name?: string;
+    readonly allowed?: boolean;
   };
+}
+
+export interface ConsentPreview {
+  readonly search: URLSearchParams;
+  readonly services: readonly ConsentServiceDisplay[];
+  readonly email: string;
 }
 
 /// Human-readable primary text for a service row. Never render the raw
@@ -95,15 +146,164 @@ function serviceOrgName(service: ConsentServiceDisplay): string | null {
     : null;
 }
 
-export function OAuthConsentPage() {
+export function OAuthConsentPage({
+  preview,
+}: {
+  readonly preview?: ConsentPreview;
+} = {}) {
+  const [requestHandle] = useState(() =>
+    new URLSearchParams(window.location.search).get("consent_request_id"),
+  );
+  const [incremental] = useState(() =>
+    readIncrementalConsentRequest(new URLSearchParams(window.location.search)),
+  );
+  if (requestHandle) return <StoredIncrementalConsent handle={requestHandle} />;
+  if (incremental) return <OAuthIncrementalConsentPage {...incremental} />;
+  return <StandardConsentPage preview={preview} />;
+}
+
+function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
+  const owner = useAuthStore((state) => state.user?.id);
+  const [request, setRequest] = useState<{ token?: string; owner?: string; failed?: boolean }>({});
+  useEffect(() => {
+    if (!owner) return;
+    const abort = new AbortController();
+    void readProtectedConsentRequest(handle, abort.signal).then((token) => {
+      if (!abort.signal.aborted) setRequest({ token, owner });
+    }).catch(() => {
+      if (!abort.signal.aborted) setRequest({ failed: true, owner });
+    });
+    return () => abort.abort();
+  }, [handle, owner]);
+  const isPending = !request.token && !request.failed || request.owner !== owner;
+  const isError = request.failed === true;
+  if (isPending || isError) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-xl items-center px-4">
+        {isPending ? (
+          <p role="status">Loading authorization request...</p>
+        ) : (
+          <ErrorBanner message="This authorization request is unavailable. Return to the application and try again." />
+        )}
+      </main>
+    );
+  }
+  const parsed = readIncrementalConsentRequest(
+    new URLSearchParams({ consent_request: request.token ?? "" }),
+  );
+  return parsed ? (
+    <OAuthIncrementalConsentPage {...parsed} />
+  ) : (
+    <OAuthIncrementalConsentPage error="Invalid consent request. Please restart authorization." />
+  );
+}
+
+const SCOPE_ICONS: Readonly<Record<string, typeof CircleUserRound>> = {
+  openid: CircleUserRound,
+  profile: UserRound,
+  email: Mail,
+  roles: ShieldCheck,
+  groups: UsersRound,
+  proxy: Waypoints,
+  offline_access: RefreshCw,
+  "urn:nyxid:scope:broker_binding": KeyRound,
+};
+
+const IDENTITY_SCOPE_WORDS: Readonly<Record<string, string>> = {
+  openid: "identity",
+  profile: "name",
+  email: "email",
+  roles: "roles",
+  groups: "groups",
+};
+
+function identityScopeSummary(identityScopes: readonly string[]): string {
+  const words = identityScopes.map((item) => IDENTITY_SCOPE_WORDS[item]);
+  const list =
+    words.length > 1
+      ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`
+      : (words[0] ?? "");
+  return `See your ${list}.`;
+}
+
+function ScopeIcon({ scope }: { readonly scope: string }) {
+  const Icon = SCOPE_ICONS[scope] ?? ShieldQuestion;
+  return <Icon className="h-4 w-4" aria-hidden="true" />;
+}
+
+function ServiceScrollList({
+  children,
+  bordered = true,
+}: {
+  readonly children: ReactNode;
+  readonly bordered?: boolean;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [hiddenEdges, setHiddenEdges] = useState({ top: false, bottom: false });
+  const updateEdges = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const top = element.scrollTop > 1;
+    const bottom =
+      element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+    setHiddenEdges((current) =>
+      current.top === top && current.bottom === bottom
+        ? current
+        : { top, bottom },
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    updateEdges();
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateEdges);
+    observer.observe(element);
+    if (element.firstElementChild) observer.observe(element.firstElementChild);
+    return () => observer.disconnect();
+  }, [children, updateEdges]);
+
+  return (
+    <div className={`relative ${bordered ? "border-y border-border/60" : ""}`}>
+      <div
+        ref={scrollRef}
+        tabIndex={0}
+        role="region"
+        aria-label="Service access list"
+        onScroll={updateEdges}
+        className="max-h-[min(18rem,45dvh)] overflow-y-auto overscroll-contain focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+      >
+        <div className="divide-y divide-border/60">{children}</div>
+      </div>
+      <div
+        aria-hidden="true"
+        data-scroll-fade="top"
+        className={`pointer-events-none absolute inset-x-0 top-0 h-7 bg-gradient-to-b from-card to-transparent transition-opacity duration-150 ${hiddenEdges.top ? "opacity-100" : "opacity-0"}`}
+      />
+      <div
+        aria-hidden="true"
+        data-scroll-fade="bottom"
+        className={`pointer-events-none absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-card to-transparent transition-opacity duration-150 ${hiddenEdges.bottom ? "opacity-100" : "opacity-0"}`}
+      />
+    </div>
+  );
+}
+
+function StandardConsentPage({
+  preview,
+}: {
+  readonly preview?: ConsentPreview;
+} = {}) {
   useApplyTheme();
+  const user = useAuthStore((state) => state.user);
   const { data: userServices, isLoading: userServicesLoading } =
-    useUserServices();
+    useUserServices(!preview);
   // The consent page renders once per authorize redirect; capture every
   // repeated query value in one immutable snapshot so downstream memos keep
   // stable array identities across local state updates.
   const [authorizeQuery] = useState(() => {
-    const search = new URLSearchParams(window.location.search);
+    const search =
+      preview?.search ?? new URLSearchParams(window.location.search);
     return {
       search,
       resources: search.getAll("resource"),
@@ -138,17 +338,26 @@ export function OAuthConsentPage() {
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
+  const [preparedMachineRequest, setPreparedMachineRequest] = useState<string | null>(null);
+  const machineScope = scope.split(/\s+/).includes("machine") || Boolean(readMachineConsentScope(consentRequest)?.scope.split(/\s+/).includes("machine"));
   // Server-resolved hints: the app's declared default services matched to
-  // this user (pre-selected), and declared services the user has no match
-  // for (informational only).
+  // this user (fixed on the consent screen), and declared services the
+  // user has no match for (informational only).
   const bindingReview =
     search.get("binding_review") === "true" && Boolean(bindingGrantId);
   const currentBindingAllowsAllServices =
     search.get("current_binding_allow_all_services") === "true";
   const isLarkBinding = externalSubjectPlatform.toLowerCase() === "lark";
+  // Agent apps requesting `proxy` choose service grants; binding reviews
+  // keep their own grant flow.
+  const agentAccess = !bindingReview && scope.split(/\s+/).includes("proxy");
   const [allowAllServices, setAllowAllServices] = useState(
     bindingReview && currentBindingAllowsAllServices,
   );
+  const [defaultLevel, setDefaultLevel] = useState<AccessLevel>("off");
+  const [levelOverrides, setLevelOverrides] = useState<
+    Readonly<Record<string, AccessLevel>>
+  >(() => Object.fromEntries(preselectServiceIds.map((id) => [id, "allow"])));
   const [customize, setCustomize] = useState(bindingReview);
   const [selectedServiceIds, setSelectedServiceIds] = useState<
     readonly string[]
@@ -175,10 +384,18 @@ export function OAuthConsentPage() {
     !consentRequest;
 
   const scopes = scope.split(/\s+/).filter(Boolean);
+  // Agent apps get one profile row; `proxy` is shown as the service table.
+  const identityScopes = agentAccess
+    ? scopes.filter((item) => IDENTITY_SCOPE_WORDS[item])
+    : [];
+  const listedScopes = agentAccess
+    ? scopes.filter((item) => !IDENTITY_SCOPE_WORDS[item] && item !== "proxy")
+    : scopes;
   const redirectHost = parseHost(redirectUri);
+  const email = preview?.email ?? user?.email;
   const selectableServices = useMemo(
     () =>
-      (userServices ?? [])
+      (preview?.services ?? userServices ?? [])
         .filter(
           (service) =>
             service.is_active &&
@@ -194,7 +411,7 @@ export function OAuthConsentPage() {
             },
           ),
         ),
-    [userServices],
+    [preview, userServices],
   );
   const resourceSelectedServiceIds = useMemo(() => {
     const requested = new Set(resources);
@@ -206,16 +423,21 @@ export function OAuthConsentPage() {
     () =>
       Array.from(
         new Set([
+          ...preselectServiceIds,
           ...requiredServiceIds,
           ...resourceSelectedServiceIds,
           ...selectedServiceIds,
         ]),
       ).filter(
         (id) =>
-          requiredServiceIds.includes(id) || !deselectedServiceIds.includes(id),
+          preselectServiceIds.includes(id) ||
+          requiredServiceIds.includes(id) ||
+          resourceSelectedServiceIds.includes(id) ||
+          !deselectedServiceIds.includes(id),
       ),
     [
       deselectedServiceIds,
+      preselectServiceIds,
       requiredServiceIds,
       resourceSelectedServiceIds,
       selectedServiceIds,
@@ -236,12 +458,10 @@ export function OAuthConsentPage() {
           id,
           primary: service ? serviceDisplayName(service) : id,
           secondary: service ? serviceSecondaryText(service) : "",
+          description: service?.catalog_service_description?.trim() || "",
           orgName: service ? serviceOrgName(service) : null,
-          requestedByApp:
-            preselectServiceIds.includes(id) ||
-            resourceSelectedServiceIds.includes(id) ||
-            requiredServiceIds.includes(id),
           requiredByApp:
+            preselectServiceIds.includes(id) ||
             resourceSelectedServiceIds.includes(id) ||
             requiredServiceIds.includes(id),
           currentlyAuthorized:
@@ -265,8 +485,44 @@ export function OAuthConsentPage() {
     ],
   );
 
+  const accessRows = useMemo<readonly AccessServiceRow[]>(
+    () =>
+      selectableServices.map((service) => ({
+        id: service.id,
+        name: serviceDisplayName(service),
+        secondary: serviceSecondaryText(service),
+        orgName: serviceOrgName(service),
+        requiredByApp:
+          resourceSelectedServiceIds.includes(service.id) ||
+          requiredServiceIds.includes(service.id),
+      })),
+    [selectableServices, resourceSelectedServiceIds, requiredServiceIds],
+  );
+  const grant = agentGrant(accessRows, defaultLevel, levelOverrides);
+  const submittedAccess = agentAccess
+    ? {
+        allow_all_services: grant.allowAll,
+        allowed_service_ids: grant.serviceIds,
+      }
+    : serviceAccess;
+
+  function changeDefaultLevel(level: AccessLevel) {
+    setDefaultLevel(level);
+    setLevelOverrides({});
+  }
+
+  function changeServiceLevel(serviceId: string, level: AccessLevel) {
+    setLevelOverrides((current) => ({ ...current, [serviceId]: level }));
+  }
+
   function toggleService(serviceId: string, checked: boolean) {
-    if (!checked && requiredServiceIds.includes(serviceId)) return;
+    if (
+      !checked &&
+      (preselectServiceIds.includes(serviceId) ||
+        resourceSelectedServiceIds.includes(serviceId) ||
+        requiredServiceIds.includes(serviceId))
+    )
+      return;
     setSelectedServiceIds((current) => {
       if (checked) {
         return current.includes(serviceId) ? current : [...current, serviceId];
@@ -283,9 +539,9 @@ export function OAuthConsentPage() {
 
   if (missing) {
     return (
-      <ConsentShell>
-        <header className="flex flex-col gap-2 text-center">
-          <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
+      <ConsentShell email={email} preview={Boolean(preview)}>
+        <header className="py-12 text-center">
+          <h1 className="text-22 font-bold leading-tight text-foreground sm:text-28">
             Invalid consent request
           </h1>
         </header>
@@ -295,89 +551,157 @@ export function OAuthConsentPage() {
   }
 
   return (
-    <ConsentShell>
-      <header className="flex flex-col gap-2 text-center">
-        <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
-          {bindingReview
-            ? isLarkBinding
-              ? "Review Lark bot access"
-              : "Review application access"
-            : isLarkBinding
-              ? "Authorize Lark bot"
-              : "Authorize application"}
-        </h1>
-        <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
-          {bindingReview ? (
-            <>
-              Review the NyxID services available to{" "}
-              <span className="font-medium text-foreground">{clientName}</span>.
-            </>
-          ) : (
-            <>
-              <span className="font-medium text-foreground">{clientName}</span>{" "}
-              wants to access your account via OAuth.
-            </>
+    <ConsentShell
+      email={email}
+      preview={Boolean(preview)}
+      wide={agentAccess}
+      heading={
+        <header className="mb-4 flex flex-col items-center gap-1.5 text-center">
+          <div className="mb-1 flex flex-col items-center gap-1">
+            <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
+              <NyxidIcon className="size-8" />
+            </div>
+            <span className="text-xs font-medium text-foreground">NyxID</span>
+          </div>
+          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
+            {bindingReview
+              ? isLarkBinding
+                ? "Review Lark bot access"
+                : "Review application access"
+              : isLarkBinding
+                ? "Authorize Lark bot"
+                : "Authorize application"}
+          </h1>
+          <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
+            {bindingReview ? (
+              <>
+                Review the NyxID services available to{" "}
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>
+                .
+              </>
+            ) : (
+              <>
+                <span className="font-medium text-foreground">
+                  {clientName}
+                </span>{" "}
+                wants to access your account via OAuth.
+              </>
+            )}
+          </p>
+          {preview && (
+            <p className="text-11 font-medium uppercase text-muted-foreground">
+              Preview · Decisions disabled
+            </p>
           )}
-        </p>
-      </header>
-
-      <Card className="border-border/50">
-        <CardContent className="flex flex-col gap-4 pt-4">
-          <DetailSection title="App details" className={NESTED_SECTION}>
-            <DetailRow label="Application" value={clientName} />
-            <DetailRow label="Redirect host" value={redirectHost} />
-            <DetailRow label="Client ID" value={clientId} mono copyable />
-            <DetailRow label="Redirect URI" value={redirectUri} mono copyable />
-          </DetailSection>
-
-          <DetailSection title="Requested access" className={NESTED_SECTION}>
-            {scopes.map((item) => {
-                const meta = OAUTH_SCOPE_META[item] ?? {
-                  title: "Custom permission",
-                  description:
-                    "This app is requesting a non-standard permission.",
-                  risk: "medium" as const,
-                };
-                return (
-                  <div key={`meta-${item}`} className="px-4 py-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
-                        {meta.title}
-                      </p>
-                      <Badge
-                        variant={scopeRiskBadgeVariant(meta.risk)}
-                        className="shrink-0"
-                      >
-                        {scopeRiskLabel(meta.risk)}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                      {meta.description}
+        </header>
+      }
+    >
+      <div
+        className={cn(
+          agentAccess &&
+            "lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:grid-rows-[auto_auto_1fr] lg:gap-x-10",
+        )}
+      >
+        <section
+          aria-labelledby="oauth-permissions"
+          className={cn("pb-5", agentAccess && "lg:col-start-1 lg:row-start-1")}
+        >
+          <h2
+            id="oauth-permissions"
+            className="text-15 font-semibold text-foreground"
+          >
+            This will allow {clientName} to:
+          </h2>
+          <div className="mt-4 divide-y divide-border/60">
+            {identityScopes.length > 0 && (
+              <div className="flex items-start gap-3 py-3">
+                <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-overlay text-muted-foreground">
+                  <ScopeIcon scope="openid" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-13 font-medium text-foreground">
+                    Your NyxID profile
+                  </p>
+                  <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                    {identityScopeSummary(identityScopes)}
+                  </p>
+                  <code className="mt-1 block break-all text-11 text-muted-foreground">
+                    {identityScopes.join(" ")}
+                  </code>
+                </div>
+              </div>
+            )}
+            {listedScopes.map((item) => {
+              const meta = OAUTH_SCOPE_META[item];
+              return (
+                <div
+                  key={`meta-${item}`}
+                  className="flex items-start gap-3 py-3.5"
+                >
+                  <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-overlay text-muted-foreground">
+                    <ScopeIcon scope={item} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className={`text-13 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                    >
+                      {meta?.title ?? item}
                     </p>
-                    <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
-                      {item}
-                    </p>
+                    {meta && (
+                      <>
+                        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                          {meta.description}
+                        </p>
+                        <code className="mt-1 block break-all text-11 text-muted-foreground">
+                          {item}
+                        </code>
+                      </>
+                    )}
                   </div>
-                );
-              })}
-          </DetailSection>
+                </div>
+              );
+            })}
+          </div>
+        </section>
 
-          <DetailSection
-            title="Service access"
-            className={NESTED_SECTION}
-            action={
+        {agentAccess ? (
+          <ServiceAccessTable
+            clientName={clientName}
+            rows={accessRows}
+            loading={!preview && userServicesLoading}
+            defaultLevel={defaultLevel}
+            onDefaultLevelChange={changeDefaultLevel}
+            overrides={levelOverrides}
+            onLevelChange={changeServiceLevel}
+            className="lg:col-start-2 lg:row-span-3 lg:row-start-1 lg:border-t-0 lg:pt-0"
+          />
+        ) : (
+          <section
+            aria-labelledby="oauth-services"
+            className="border-t border-border py-5"
+          >
+            <div className="flex items-center justify-between gap-4">
+              <h2
+                id="oauth-services"
+                className="text-15 font-semibold text-foreground"
+              >
+                Service access
+              </h2>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
                 className="shrink-0"
+                aria-expanded={customize}
+                aria-controls="oauth-service-list"
                 onClick={() => setCustomize((current) => !current)}
               >
                 {customize ? "Done" : "Customize"}
               </Button>
-            }
-          >
-            <p className="px-4 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+            </div>
+            <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
               {serviceAccess.allow_all_services
                 ? bindingReview && currentBindingAllowsAllServices
                   ? "This binding currently authorizes all available services."
@@ -388,302 +712,369 @@ export function OAuthConsentPage() {
                     : "This app will be able to use these services through the proxy:"
                   : "No service access requested. This app only signs you in."}
             </p>
-
-            {!customize &&
-              !serviceAccess.allow_all_services &&
-              (summaryServices.length > 0 || unmatchedDefaults.length > 0) && (
-                <div className="divide-y divide-border/30">
-                  {summaryServices.map((item) => (
-                    <div
-                      key={item.id}
-                      className="flex items-start justify-between gap-3 px-4 py-2.5"
-                    >
-                      <div className="min-w-0">
-                        <p className="break-words text-[12px] font-medium text-foreground">
-                          {item.primary}
-                        </p>
-                        {item.secondary && (
-                          <p className="mt-0.5 break-words text-[11px] text-muted-foreground">
-                            {item.secondary}
+            <div id="oauth-service-list" className="mt-4">
+              {!customize &&
+                !serviceAccess.allow_all_services &&
+                (summaryServices.length > 0 ||
+                  unmatchedDefaults.length > 0) && (
+                  <ServiceScrollList>
+                    {summaryServices.map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
+                      >
+                        <div className="min-w-0">
+                          <p className="break-words text-13 font-medium text-foreground">
+                            {item.primary}
                           </p>
-                        )}
-                        {item.orgName && (
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                            <Badge variant="secondary" className="text-[10px]">
-                              Org
+                          {item.description && (
+                            <p
+                              className="mt-1 line-clamp-2 break-words text-12 leading-relaxed text-muted-foreground"
+                              title={item.description}
+                            >
+                              {item.description}
+                            </p>
+                          )}
+                          {item.secondary && (
+                            <p className="mt-1 break-words text-11 text-text-tertiary">
+                              {item.secondary}
+                            </p>
+                          )}
+                          {item.orgName && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                              <Badge variant="secondary" className="text-10">
+                                Org
+                              </Badge>
+                              <span className="break-words text-11 text-muted-foreground">
+                                {item.orgName}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 flex-wrap gap-1 sm:justify-end">
+                          {item.currentlyAuthorized && bindingReview && (
+                            <Badge variant="secondary" className="text-10">
+                              Authorized now
                             </Badge>
-                            <span className="break-words text-[11px] text-muted-foreground">
-                              {item.orgName}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex shrink-0 flex-wrap justify-end gap-1">
-                        {item.currentlyAuthorized && bindingReview && (
-                          <Badge variant="secondary" className="text-[10px]">
-                            Authorized now
-                          </Badge>
-                        )}
-                        {item.requiredByApp ? (
-                          <Badge variant="secondary" className="text-[10px]">
-                            Required by app
-                          </Badge>
-                        ) : (
-                          item.requestedByApp && (
-                            <Badge variant="secondary" className="text-[10px]">
-                              Requested by app
+                          )}
+                          {item.requiredByApp && (
+                            <Badge variant="secondary" className="text-10">
+                              Required by app
                             </Badge>
-                          )
-                        )}
-                        {item.newlySelected && (
-                          <Badge variant="accent" className="text-[10px]">
-                            New
-                          </Badge>
-                        )}
+                          )}
+                          {item.newlySelected && (
+                            <Badge variant="accent" className="text-10">
+                              New
+                            </Badge>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                  {unmatchedDefaults.map((name) => (
-                    <div key={`unmatched-${name}`} className="px-4 py-2.5">
-                      <p className="break-words text-[12px] leading-relaxed text-muted-foreground">
-                        <span className="font-medium text-foreground">
-                          {name}
-                        </span>{" "}
-                        — requested by this app, but you have no matching
-                        service in your account.
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    ))}
+                    {unmatchedDefaults.map((name) => (
+                      <div key={`unmatched-${name}`} className="py-3.5">
+                        <p className="break-words text-12 leading-relaxed text-muted-foreground">
+                          <span className="font-medium text-foreground">
+                            {name}
+                          </span>{" "}
+                          — requested by this app, but you have no matching
+                          service in your account.
+                        </p>
+                      </div>
+                    ))}
+                  </ServiceScrollList>
+                )}
 
-            {customize && (
-              <div className="divide-y divide-border/30">
-                <div className="flex items-center justify-between gap-2 px-4 py-2.5">
-                  <Label htmlFor="oauth-allow-all-services">All services</Label>
-                  <Switch
-                    id="oauth-allow-all-services"
-                    aria-label="All services"
-                    checked={allowAllServices}
-                    onCheckedChange={setAllowAllServices}
-                  />
-                </div>
+              {customize && (
+                <div className="divide-y divide-border/60 border-y border-border/60">
+                  <div className="flex items-center justify-between gap-3 py-3.5">
+                    <Label htmlFor="oauth-allow-all-services">
+                      All services
+                    </Label>
+                    <Switch
+                      id="oauth-allow-all-services"
+                      aria-label="All services"
+                      checked={allowAllServices}
+                      onCheckedChange={setAllowAllServices}
+                    />
+                  </div>
 
-                {!allowAllServices && (
-                  <div className="divide-y divide-border/30">
-                    {userServicesLoading ? (
-                      <p className="px-4 py-2.5 text-[12px] text-muted-foreground">
-                        Loading services...
-                      </p>
-                    ) : selectableServices.length > 0 ? (
-                      selectableServices.map((service) => {
-                        const orgName = serviceOrgName(service);
-                        return (
-                          <div
-                            key={service.id}
-                            className="flex items-start gap-2.5 px-4 py-2.5"
-                          >
-                            <Checkbox
-                              id={`oauth-service-${service.id}`}
-                              checked={effectiveSelectedServiceIds.includes(
-                                service.id,
-                              )}
-                              disabled={requiredServiceIds.includes(service.id)}
-                              onCheckedChange={(checked) =>
-                                toggleService(service.id, checked === true)
-                              }
-                            />
-                            <div className="min-w-0">
-                              <Label
-                                htmlFor={`oauth-service-${service.id}`}
-                                className="cursor-pointer text-[12px] leading-5 text-foreground"
-                              >
-                                <span className="block break-words font-medium">
-                                  {serviceDisplayName(service)}
-                                </span>
-                                {serviceSecondaryText(service) && (
-                                  <span className="block break-words text-[11px] font-normal text-muted-foreground">
-                                    {serviceSecondaryText(service)}
-                                  </span>
+                  {!allowAllServices && (
+                    <ServiceScrollList bordered={false}>
+                      {!preview && userServicesLoading ? (
+                        <p className="py-3.5 text-12 text-muted-foreground">
+                          Loading services...
+                        </p>
+                      ) : selectableServices.length > 0 ? (
+                        selectableServices.map((service) => {
+                          const orgName = serviceOrgName(service);
+                          const requiredByApp =
+                            preselectServiceIds.includes(service.id) ||
+                            resourceSelectedServiceIds.includes(service.id) ||
+                            requiredServiceIds.includes(service.id);
+                          return (
+                            <div
+                              key={service.id}
+                              className="flex items-start gap-3 py-3.5"
+                            >
+                              <Checkbox
+                                id={`oauth-service-${service.id}`}
+                                checked={effectiveSelectedServiceIds.includes(
+                                  service.id,
                                 )}
-                              </Label>
-                              {orgName && (
-                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                  <Badge
-                                    variant="secondary"
-                                    className="text-[10px]"
-                                  >
-                                    Org
-                                  </Badge>
-                                  <span className="break-words text-[11px] font-normal text-muted-foreground">
-                                    {orgName}
+                                disabled={requiredByApp}
+                                onCheckedChange={(checked) =>
+                                  toggleService(service.id, checked === true)
+                                }
+                              />
+                              <div className="min-w-0">
+                                <Label
+                                  htmlFor={`oauth-service-${service.id}`}
+                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-13 leading-5 text-foreground`}
+                                >
+                                  <span className="block break-words font-medium">
+                                    {serviceDisplayName(service)}
                                   </span>
-                                </div>
-                              )}
-                              <div className="mt-1 flex flex-wrap gap-1">
-                                {bindingReview &&
-                                  (currentBindingAllowsAllServices ||
-                                    currentBindingServiceIds.includes(
-                                      service.id,
-                                    )) && (
+                                  {service.catalog_service_description?.trim() && (
+                                    <span
+                                      className="mt-1 line-clamp-2 break-words text-12 font-normal leading-relaxed text-muted-foreground"
+                                      title={
+                                        service.catalog_service_description
+                                      }
+                                    >
+                                      {service.catalog_service_description}
+                                    </span>
+                                  )}
+                                  {serviceSecondaryText(service) && (
+                                    <span className="mt-1 block break-words text-11 font-normal text-text-tertiary">
+                                      {serviceSecondaryText(service)}
+                                    </span>
+                                  )}
+                                </Label>
+                                {orgName && (
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                                     <Badge
                                       variant="secondary"
-                                      className="text-[10px]"
+                                      className="text-10"
                                     >
-                                      Authorized now
+                                      Org
                                     </Badge>
-                                  )}
-                                {requiredServiceIds.includes(service.id) && (
-                                  <Badge
-                                    variant="secondary"
-                                    className="text-[10px]"
-                                  >
-                                    Required by app
-                                  </Badge>
+                                    <span className="break-words text-11 font-normal text-muted-foreground">
+                                      {orgName}
+                                    </span>
+                                  </div>
                                 )}
-                                {bindingReview &&
-                                  effectiveSelectedServiceIds.includes(
-                                    service.id,
-                                  ) &&
-                                  !currentBindingAllowsAllServices &&
-                                  !currentBindingServiceIds.includes(
-                                    service.id,
-                                  ) &&
-                                  !requiredServiceIds.includes(service.id) && (
+                                <div className="mt-1.5 flex flex-wrap gap-1">
+                                  {bindingReview &&
+                                    (currentBindingAllowsAllServices ||
+                                      currentBindingServiceIds.includes(
+                                        service.id,
+                                      )) && (
+                                      <Badge
+                                        variant="secondary"
+                                        className="text-10"
+                                      >
+                                        Authorized now
+                                      </Badge>
+                                    )}
+                                  {requiredByApp && (
                                     <Badge
-                                      variant="accent"
-                                      className="text-[10px]"
+                                      variant="secondary"
+                                      className="text-10"
                                     >
-                                      New
+                                      Required by app
                                     </Badge>
                                   )}
+                                  {bindingReview &&
+                                    effectiveSelectedServiceIds.includes(
+                                      service.id,
+                                    ) &&
+                                    !currentBindingAllowsAllServices &&
+                                    !currentBindingServiceIds.includes(
+                                      service.id,
+                                    ) &&
+                                    !requiredServiceIds.includes(
+                                      service.id,
+                                    ) && (
+                                      <Badge
+                                        variant="accent"
+                                        className="text-10"
+                                      >
+                                        New
+                                      </Badge>
+                                    )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <p className="px-4 py-2.5 text-[12px] text-muted-foreground">
-                        No active services are available.
-                      </p>
-                    )}
+                          );
+                        })
+                      ) : (
+                        <p className="py-3.5 text-12 text-muted-foreground">
+                          No active services are available.
+                        </p>
+                      )}
+                    </ServiceScrollList>
+                  )}
+                  <div className="py-3">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="w-full"
+                      onClick={() => setCustomize(false)}
+                    >
+                      <Save aria-hidden="true" />
+                      Save selection
+                    </Button>
                   </div>
-                )}
-              </div>
-            )}
-          </DetailSection>
-
-          <div className="flex gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning/10">
-              <AlertTriangle className="h-4 w-4 text-warning" />
+                </div>
+              )}
             </div>
-            <p className="text-[12px] leading-relaxed text-warning">
-              Only continue if you trust this application.
-            </p>
+          </section>
+        )}
+
+        <section
+          aria-labelledby="oauth-trust"
+          className={cn(
+            "border-t border-border py-5",
+            agentAccess && "lg:col-start-1 lg:row-start-2",
+          )}
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle
+              className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+              aria-hidden="true"
+            />
+            <div>
+              <h2
+                id="oauth-trust"
+                className="text-14 font-semibold text-foreground"
+              >
+                Make sure you trust {clientName}
+              </h2>
+              <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+                This app may receive the account information above and use the
+                services you approve. Continue only if you trust it. You can
+                revoke access later from Authorized Applications.
+              </p>
+            </div>
           </div>
+        </section>
 
-          <form
-            method="POST"
-            action="/oauth/authorize/decision"
-            className="flex flex-col gap-2 sm:flex-row sm:justify-end"
-          >
-            <input type="hidden" name="response_type" value={responseType} />
-            <input type="hidden" name="client_id" value={clientId} />
-            <input type="hidden" name="redirect_uri" value={redirectUri} />
-            <input type="hidden" name="scope" value={scope} />
-            <input type="hidden" name="state" value={state} />
-            <input type="hidden" name="code_challenge" value={codeChallenge} />
-            <input
-              type="hidden"
-              name="code_challenge_method"
-              value={codeChallengeMethod}
+        <details
+          className={cn(
+            "group border-t border-border py-4",
+            agentAccess && "lg:col-start-1 lg:row-start-3 lg:self-start",
+          )}
+        >
+          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+            App details
+            <ChevronDown
+              className="h-4 w-4 transition-transform group-open:rotate-180"
+              aria-hidden="true"
             />
-            <input type="hidden" name="nonce" value={nonce} />
-            <input
-              type="hidden"
-              name="consent_request"
-              value={consentRequest}
-            />
-            {prompt && <input type="hidden" name="prompt" value={prompt} />}
-            {externalSubjectPlatform && (
-              <input
-                type="hidden"
-                name="external_subject_platform"
-                value={externalSubjectPlatform}
-              />
-            )}
-            {externalSubjectTenant && (
-              <input
-                type="hidden"
-                name="external_subject_tenant"
-                value={externalSubjectTenant}
-              />
-            )}
-            {externalSubjectExternalUserId && (
-              <input
-                type="hidden"
-                name="external_subject_external_user_id"
-                value={externalSubjectExternalUserId}
-              />
-            )}
-            {bindingGrantId && (
-              <input
-                type="hidden"
-                name="binding_grant_id"
-                value={bindingGrantId}
-              />
-            )}
-            <input
-              type="hidden"
-              name="allow_all_services"
-              value={serviceAccess.allow_all_services ? "true" : "false"}
-            />
-            {!serviceAccess.allow_all_services &&
-              serviceAccess.allowed_service_ids.map((serviceId) => (
-                <input
-                  key={serviceId}
-                  type="hidden"
-                  name="allowed_service_ids"
-                  value={serviceId}
-                />
-              ))}
-            {resources.map((resource) => (
-              <input
-                key={resource}
-                type="hidden"
-                name="resource"
-                value={resource}
-              />
-            ))}
+          </summary>
+          <div className="mt-3 divide-y divide-border/60 border-y border-border/60">
+            <DetailRow label="Application" value={clientName} />
+            <DetailRow label="Redirect host" value={redirectHost} />
+            <DetailRow label="Client ID" value={clientId} mono copyable />
+            <DetailRow label="Redirect URI" value={redirectUri} mono copyable />
+            <DetailRow label="Requested scopes" value={scope} mono />
+          </div>
+        </details>
+      </div>
 
-            <Button
-              type="submit"
-              variant="outline"
-              name="decision"
-              value="deny"
-              className="w-full sm:w-auto"
-            >
-              {bindingReview ? "Cancel" : "Deny"}
-            </Button>
-            <Button
-              variant="primary"
-              type="submit"
-              name="decision"
-              value="allow"
-              className="w-full sm:w-auto"
-            >
-              <ButtonIcon variant="primary">
-                <ShieldCheck />
-              </ButtonIcon>
-              {bindingReview ? "Update access" : "Allow"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+      {machineScope && <MachineGrantConsent consentRequest={consentRequest} onPrepared={setPreparedMachineRequest} disabled={Boolean(preview)} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
+      <form
+        method="POST"
+        action="/oauth/authorize/decision"
+        onSubmit={preview ? (event) => event.preventDefault() : undefined}
+        className={cn(
+          "flex flex-col gap-2 border-t border-border pt-5",
+          agentAccess && "lg:flex-row-reverse lg:items-center lg:justify-start",
+        )}
+      >
+        <input type="hidden" name="response_type" value={responseType} />
+        <input type="hidden" name="client_id" value={clientId} />
+        <input type="hidden" name="redirect_uri" value={redirectUri} />
+        <input type="hidden" name="scope" value={scope} />
+        <input type="hidden" name="state" value={state} />
+        <input type="hidden" name="code_challenge" value={codeChallenge} />
+        <input
+          type="hidden"
+          name="code_challenge_method"
+          value={codeChallengeMethod}
+        />
+        <input type="hidden" name="nonce" value={nonce} />
+        <input type="hidden" name="consent_request" value={preparedMachineRequest ?? consentRequest} />
+        {prompt && <input type="hidden" name="prompt" value={prompt} />}
+        {externalSubjectPlatform && (
+          <input
+            type="hidden"
+            name="external_subject_platform"
+            value={externalSubjectPlatform}
+          />
+        )}
+        {externalSubjectTenant && (
+          <input
+            type="hidden"
+            name="external_subject_tenant"
+            value={externalSubjectTenant}
+          />
+        )}
+        {externalSubjectExternalUserId && (
+          <input
+            type="hidden"
+            name="external_subject_external_user_id"
+            value={externalSubjectExternalUserId}
+          />
+        )}
+        {bindingGrantId && (
+          <input type="hidden" name="binding_grant_id" value={bindingGrantId} />
+        )}
+        <input
+          type="hidden"
+          name="allow_all_services"
+          value={submittedAccess.allow_all_services ? "true" : "false"}
+        />
+        {!submittedAccess.allow_all_services &&
+          submittedAccess.allowed_service_ids.map((serviceId) => (
+            <input
+              key={serviceId}
+              type="hidden"
+              name="allowed_service_ids"
+              value={serviceId}
+            />
+          ))}
+        {resources.map((resource) => (
+          <input
+            key={resource}
+            type="hidden"
+            name="resource"
+            value={resource}
+          />
+        ))}
 
-      <p className="text-center text-[11px] text-text-tertiary">
-        You can revoke this access at any time from Authorized Applications.
-      </p>
+        <Button
+          type="submit"
+          variant="primary"
+          name="decision"
+          value="allow"
+          disabled={Boolean(preview) || (machineScope && !preparedMachineRequest)}
+          className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
+        >
+          {bindingReview ? "Update access" : "Allow access"}
+          <ArrowRight className="ml-2 size-4" aria-hidden="true" />
+        </Button>
+        <Button
+          type="submit"
+          variant="ghost"
+          name="decision"
+          value="deny"
+          disabled={Boolean(preview)}
+          className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-28")}
+        >
+          {bindingReview ? "Cancel" : "Decline"}
+        </Button>
+      </form>
     </ConsentShell>
   );
 }

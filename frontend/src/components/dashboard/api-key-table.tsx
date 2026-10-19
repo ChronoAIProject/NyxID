@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   useAllAdminedApiKeys,
@@ -8,6 +8,8 @@ import {
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { ApiKey } from "@/types/api";
 import { formatDate, formatRelativeTime, copyToClipboard } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -46,6 +48,10 @@ function parseScopesString(scopes: string): readonly string[] {
 function servicesSummary(key: ApiKey): string {
   if (key.allow_all_services) return "All services";
   const count = key.allowed_service_ids?.length ?? 0;
+  if (key.allow_auto_connected_services)
+    return count
+      ? `${String(count)} selected + all platform services`
+      : "All platform services";
   if (count === 0) return "—";
   return `${String(count)} service${count === 1 ? "" : "s"}`;
 }
@@ -60,7 +66,11 @@ export function ApiKeyTable({
   readonly viewMode?: "grid" | "table";
 } = {}) {
   const navigate = useNavigate();
-  const { data: apiKeys, isLoading } = useAllAdminedApiKeys();
+  const { data: allApiKeys, isLoading } = useAllAdminedApiKeys();
+  const [showAssistantKeys, setShowAssistantKeys] = useState(false);
+  const apiKeys = (allApiKeys ?? []).filter((key) =>
+    showAssistantKeys || key.platform !== "nyxid-assistant",
+  );
   const deleteMutation = useDeleteApiKey();
   const rotateMutation = useRotateApiKey();
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
@@ -94,7 +104,7 @@ export function ApiKeyTable({
     }
   }
 
-  const handleCopyKey = useCallback(async () => {
+  async function handleCopyKey() {
     if (!newKeyValue) return;
     try {
       await copyToClipboard(newKeyValue);
@@ -102,7 +112,7 @@ export function ApiKeyTable({
     } catch {
       toast.error("Failed to copy to clipboard");
     }
-  }, [newKeyValue]);
+  }
 
   if (isLoading) {
     return (
@@ -114,13 +124,13 @@ export function ApiKeyTable({
     );
   }
 
-  if (!apiKeys || apiKeys.length === 0) {
+  if (!allApiKeys || allApiKeys.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <CogsIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground/30">No API keys yet</p>
-          <p className="text-xs text-muted-foreground/30">
+          <p className="text-12 font-medium text-muted-foreground">No API keys yet</p>
+          <p className="text-xs text-muted-foreground">
             Create one to get started.
           </p>
         </div>
@@ -175,23 +185,28 @@ export function ApiKeyTable({
               {renderActions(key)}
             </div>
             <Link to="/keys/api-key/$keyId" params={{ keyId: key.id }} className="h-full block">
-              <Card className="h-full transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
+              <Card className="h-full transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/30">
                 <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
                   <div className="flex items-start justify-between gap-2 pr-8">
                     <div className="min-w-0">
-                      <p className="truncate text-[12px] font-medium text-foreground">{key.name}</p>
-                      <code className="text-[11px] font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+                      <p className="truncate text-12 font-medium text-foreground">{key.name}</p>
+                      <code className="text-11 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1">
                     {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
+                    {key.platform === "nyxid-assistant" && (
+                      <span className="text-10 text-text-tertiary">
+                        System-managed by the NyxID assistant
+                      </span>
+                    )}
                     {scopesList.map((scope) => (
                       <Badge key={scope} variant={scopeBadgeVariant(scope)}>
                         {scope.charAt(0).toUpperCase() + scope.slice(1)}
                       </Badge>
                     ))}
                   </div>
-                  <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <div className="mt-auto flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                     <span>{ownerLabel}</span>
                     <span>{servicesSummary(key)}</span>
                     <span>{key.bindings_count > 0 ? `${String(key.bindings_count)} binding${key.bindings_count === 1 ? "" : "s"}` : "No bindings"}</span>
@@ -221,22 +236,27 @@ export function ApiKeyTable({
               tabIndex={0}
               onClick={() => void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } })}
               onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } }); }}
-              className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
             >
               <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                 {renderActions(key)}
               </div>
-              <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{key.name}</p>
-              <code className="text-[11px] font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+              <p className="pr-10 text-13 font-semibold text-foreground truncate">{key.name}</p>
+              <code className="text-11 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
               <div className="mt-2 flex flex-wrap gap-1">
                 {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
+                {key.platform === "nyxid-assistant" && (
+                  <span className="text-10 text-text-tertiary">
+                    System-managed by the NyxID assistant
+                  </span>
+                )}
                 {scopesList.map((scope) => (
                   <Badge key={scope} variant={scopeBadgeVariant(scope)}>
                     {scope.charAt(0).toUpperCase() + scope.slice(1)}
                   </Badge>
                 ))}
               </div>
-              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                 <span>{isOrg ? source.org_name : "Personal"}</span>
                 <span>{servicesSummary(key)}</span>
                 <span>{key.last_used_at ? `Used ${formatRelativeTime(key.last_used_at)}` : "Never used"}</span>
@@ -270,14 +290,14 @@ export function ApiKeyTable({
               return (
                 <TableRow
                   key={key.id}
-                  className="border-border/30 cursor-pointer hover:bg-white/[0.03]"
+                  className="border-border/30 cursor-pointer hover:bg-overlay"
                   onClick={() => void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } })}
                 >
                   <TableCell>
                     <p className="truncate font-medium text-foreground">
                       {key.name}
                     </p>
-                    <p className="truncate text-[11px] text-text-tertiary mt-0.5">
+                    <p className="truncate text-11 text-text-tertiary mt-0.5">
                       {isOrg ? (
                         <span className="inline-flex items-center gap-1">
                           <OrgAvatar
@@ -294,14 +314,21 @@ export function ApiKeyTable({
                   </TableCell>
 
                   <TableCell>
-                    <code className="font-mono text-[11px] text-muted-foreground">
+                    <code className="font-mono text-11 text-muted-foreground">
                       {key.key_prefix}••••••••
                     </code>
                   </TableCell>
 
                   <TableCell className="whitespace-nowrap">
                     {key.platform ? (
-                      <Badge variant="secondary">{key.platform}</Badge>
+                      <>
+                        <Badge variant="secondary">{key.platform}</Badge>
+                        {key.platform === "nyxid-assistant" && (
+                          <span className="ml-2 text-10 text-text-tertiary">
+                            System-managed by the NyxID assistant
+                          </span>
+                        )}
+                      </>
                     ) : (
                       <span className="text-text-tertiary">—</span>
                     )}
@@ -337,7 +364,7 @@ export function ApiKeyTable({
                         ? formatRelativeTime(key.last_used_at)
                         : <span className="text-text-tertiary">—</span>}
                     </p>
-                    <p className="text-[10px] text-text-tertiary mt-0.5">
+                    <p className="text-10 text-text-tertiary mt-0.5">
                       Created {formatDate(key.created_at)}
                     </p>
                   </TableCell>
@@ -356,7 +383,19 @@ export function ApiKeyTable({
 
   return (
     <>
-      {viewMode === "grid" ? gridView : tableView}
+      <div className="mb-4 flex items-center gap-2">
+        <Switch
+          id="show-assistant-chat-keys"
+          checked={showAssistantKeys}
+          onCheckedChange={setShowAssistantKeys}
+        />
+        <Label htmlFor="show-assistant-chat-keys">Show assistant chat keys</Label>
+      </div>
+      {apiKeys.length ? (viewMode === "grid" ? gridView : tableView) : (
+        <p className="py-8 text-center text-12 text-muted-foreground">
+          Assistant chat keys are hidden. Turn on the toggle to view them.
+        </p>
+      )}
 
       <Dialog
         open={deleteTarget !== null}
@@ -405,7 +444,7 @@ export function ApiKeyTable({
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
-            <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all select-all">
+            <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all select-all">
               {newKeyValue}
             </code>
             <Button

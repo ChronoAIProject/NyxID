@@ -470,6 +470,12 @@ pub async fn forward_trigger_event(
     let user_id =
         uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
     let auth_user = AuthUser {
+        org_agent_access: None,
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id,
         session_id: None,
         scope: String::new(),
@@ -485,6 +491,7 @@ pub async fn forward_trigger_event(
         allowed_node_ids: Vec::new(),
         api_key_id: Some(conversation.agent_api_key_id),
         api_key_name: None,
+        api_key_credential_id: None,
         api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
         rate_limit_per_second: None,
         rate_limit_burst: None,
@@ -620,6 +627,8 @@ fn build_device_callback_payload(
         .map_err(|e| AppError::Internal(format!("failed to serialize event envelope: {e}")))?;
 
     Ok(CallbackPayload {
+        thread_context: None,
+        activity: None,
         // NyxID-assigned message id so async replies via /channel-relay/reply
         // resolve to the persisted ChannelMessage. The client-supplied
         // `event_id` is preserved in `ChannelMessage.platform_message_id`.
@@ -739,6 +748,7 @@ mod tests {
 
     fn conversation() -> ChannelConversation {
         ChannelConversation {
+            activity_callback: None,
             id: "conv-1".to_string(),
             user_id: "user-1".to_string(),
             // Device channels have no backing bot. See NyxID#221 /
@@ -750,6 +760,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: "key-1".to_string(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: Utc::now(),
@@ -770,13 +781,19 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             last_used_at: None,
             expires_at: None,
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,

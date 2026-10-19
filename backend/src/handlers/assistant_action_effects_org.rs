@@ -197,6 +197,8 @@ pub struct DeleteAssistantAccountRequest {
     /// control: the effect route is mounted and reachable, so the server has
     /// to verify the confirmation itself for it to mean anything.
     pub confirm_email: String,
+    #[serde(default)]
+    pub deletion_policy_version: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
@@ -578,6 +580,7 @@ struct ConfirmedAccountDeleteFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
     confirm_email: &'a str,
+    deletion_policy_version: &'a str,
 }
 
 #[derive(Serialize)]
@@ -717,15 +720,14 @@ async fn effective_approval_service_id(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<String> {
-    if let Some(service) = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "_id": service_id,
-            "user_id": user_id,
-            "is_active": true,
-        })
-        .await?
+    if let Some(service) =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! {
+                "_id": service_id,
+                "user_id": user_id,
+                "is_active": true,
+            })
+            .await?
     {
         return Ok(service.catalog_service_id.unwrap_or(service.id));
     }
@@ -790,17 +792,16 @@ async fn grant_for_actor(
     }
 
     let mut service_ids = Vec::new();
-    let mut cursor = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": &grant.user_id,
-            "$or": [
-                { "_id": &grant.service_id },
-                { "catalog_service_id": &grant.service_id },
-            ],
-        })
-        .await?;
+    let mut cursor =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find(doc! {
+                "user_id": &grant.user_id,
+                "$or": [
+                    { "_id": &grant.service_id },
+                    { "catalog_service_id": &grant.service_id },
+                ],
+            })
+            .await?;
     while let Some(service) = cursor.try_next().await? {
         service_ids.push(service.id);
     }
@@ -935,6 +936,10 @@ async fn delete_account(
     tele: TelemetryContext,
     Json(body): Json<DeleteAssistantAccountRequest>,
 ) -> AppResult<Json<AssistantAccountResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    crate::services::admin_user_service::validate_account_deletion_policy(
+        &body.deletion_policy_version,
+    )?;
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
     let user = require_user(&state, &user_id).await?;
@@ -952,6 +957,7 @@ async fn delete_account(
         action: ACCOUNT_DELETE_ACTION,
         user_id: &user_id,
         confirm_email: &confirm_email,
+        deletion_policy_version: &body.deletion_policy_version,
     })?;
     let receipt = reserve_or_replay(
         &state.db,
@@ -979,8 +985,14 @@ async fn delete_account(
             true
         }
         ReceiptOutcome::Reserved(receipt) => {
-            let _ =
-                users::delete_me(State(state.clone()), auth_user, tele, HeaderMap::new()).await?;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_HEADER,
+                axum::http::HeaderValue::from_static(
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+                ),
+            );
+            let _ = users::delete_me(State(state.clone()), auth_user, tele, headers).await?;
             mark_completed(&state.db, &receipt).await?;
             false
         }
@@ -2435,6 +2447,7 @@ async fn update_service_account_action(
         HeaderMap::new(),
         Path(id.clone()),
         Json(admin_service_accounts::UpdateServiceAccountRequest {
+            expected_access: None,
             name: body.name,
             description: body.description,
             allowed_scopes: None,
@@ -3374,6 +3387,7 @@ async fn connect_openclaw_action(
         TelemetryContext::default(),
         Json(keys::CreateKeyRequest {
             service_slug: Some("llm-openclaw".to_string()),
+            use_platform_key: false,
             credential: Some(credential),
             label: body.label.unwrap_or_else(|| "OpenClaw".to_string()),
             endpoint_url: Some(gateway_url),
@@ -3888,6 +3902,7 @@ mod wave4_effect_tests {
             TelemetryContext::default(),
             Json(keys::CreateKeyRequest {
                 service_slug: Some("llm-openclaw".to_string()),
+                use_platform_key: false,
                 credential: Some(body.credential.clone()),
                 label: body.label.clone().unwrap_or_else(|| "OpenClaw".to_string()),
                 endpoint_url: Some(body.gateway_url.clone()),
@@ -4353,7 +4368,7 @@ mod wave4_effect_tests {
         // Wrong confirmation must be refused.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-wrong", "confirmEmail": "someone@else.test" }),
+            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data", "confirmEmail": "someone@else.test" }),
         )
         .await;
         assert!(
@@ -4364,7 +4379,7 @@ mod wave4_effect_tests {
         // Empty confirmation must be refused too.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-empty", "confirmEmail": "   " }),
+            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data", "confirmEmail": "   " }),
         )
         .await;
         assert!(
@@ -4529,15 +4544,33 @@ mod wave4_effect_tests {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "owner@example.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         let second = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
             action: ACCOUNT_DELETE_ACTION,
             user_id: "user-1",
             confirm_email: "someone@else.test",
+            deletion_policy_version:
+                crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         })
         .unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn account_delete_fingerprint_binds_the_acknowledged_policy() {
+        let fingerprint = |policy| {
+            fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
+                action: ACCOUNT_DELETE_ACTION,
+                user_id: "user-1",
+                confirm_email: "owner@example.test",
+                deletion_policy_version: policy,
+            })
+            .unwrap()
+        };
+        assert_ne!(fingerprint("machine-data"), fingerprint("previous-policy"));
     }
 
     #[tokio::test]
@@ -5313,6 +5346,8 @@ mod wave4_effect_tests {
                 action: ACCOUNT_DELETE_ACTION,
                 user_id: id_a,
                 confirm_email: "owner@example.test",
+                deletion_policy_version:
+                    crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
             }
         );
         fingerprint_case!(
@@ -5649,8 +5684,9 @@ mod wave4_effect_tests {
                 changed_field_count += 1;
             }
         }
+        // Account deletion now also binds the acknowledged policy version.
         assert_eq!(
-            changed_field_count, 93,
+            changed_field_count, 94,
             "adding or removing a bound semantic field requires reviewing this count"
         );
     }

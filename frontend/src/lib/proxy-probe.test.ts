@@ -70,6 +70,18 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-github-pat")).toBe("user");
     expect(probePathForSlug("api-telegram-bot")).toBe("getMe");
     expect(probePathForSlug("api-google")).toBe("oauth2/v1/userinfo");
+    expect(probePathForSlug("api-google-workspace")).toBe(
+      "drive/v3/files?pageSize=1&fields=files(id)",
+    );
+    expect(probePathForSlug("api-google-calendar")).toBe(
+      "calendar/v3/users/me/calendarList?maxResults=1",
+    );
+    expect(probePathForSlug("api-google-drive-2")).toBe(
+      "drive/v3/files?pageSize=1&fields=files(id)",
+    );
+    expect(probePathForSlug("api-google-gmail-2")).toBe(
+      "gmail/v1/users/me/messages?maxResults=1",
+    );
     // Bases with version/api segment → recipe drops the duplicated prefix
     expect(probePathForSlug("api-discord-bot")).toBe("users/@me");
     expect(probePathForSlug("api-discord")).toBe("users/@me");
@@ -80,9 +92,22 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-twitter")).toBe("users/me");
     expect(probePathForSlug("api-twitch")).toBe("users");
     expect(probePathForSlug("api-facebook")).toBe("me");
+    expect(probePathForSlug("api-linkedin")).toBe("v2/userinfo");
     expect(probePathForSlug("api-lark")).toBe("authen/v1/user_info");
     expect(probePathForSlug("api-feishu")).toBe("authen/v1/user_info");
   });
+
+  it.each(["api-google-docs", "api-google-sheets", "api-google-slides"])(
+    "%s requires a document ID and never offers an automatic probe",
+    (slug) => {
+      for (const connectionSlug of [slug, `${slug}-2`]) {
+        expect(recipeForSlug(connectionSlug)).toBeNull();
+        expect(isKnownUntestable(connectionSlug)).toBe(true);
+        expect(isTestable(connectionSlug)).toBe(false);
+        expect(probePathForSlug(connectionSlug)).toBe("");
+      }
+    },
+  );
 
   it("returns '' for explicitly untestable seeded slugs", () => {
     // Registered as `null` — no probe endpoint we can rely on.
@@ -160,6 +185,14 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
 });
 
 describe("recipeForSlug — suffix strip edge cases", () => {
+  it.each(["api-aurinko", "api-aurinko-2"])(
+    "%s probes the authenticated account endpoint from the unversioned base",
+    (slug) => {
+      expect(recipeForSlug(slug)).toEqual({ path: "v1/account" });
+      expect(probePathForSlug(slug)).toBe("v1/account");
+      expect(isTestable(slug)).toBe(true);
+    },
+  );
   it("does NOT strip letter-only suffixes (llm-openai-abc → miss)", () => {
     expect(recipeForSlug("llm-openai-abc")).toBeUndefined();
     expect(probePathForSlug("llm-openai-abc")).toBe("");
@@ -486,5 +519,45 @@ describe("probeAgentKey — fetch integration", () => {
     expect(outcome.httpStatus).toBeNull();
     expect(outcome.reachedNyxid).toBe(false);
     expect(outcome.agentKeyValid).toBe(false);
+  });
+});
+
+describe("probeAgentKey credits exhaustion", () => {
+  it("reports NyxID's 402 insufficient_credits inline without opening the dialog", async () => {
+    const { useCreditsDenialStore } = await import(
+      "@/stores/credits-denial-store"
+    );
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "insufficient_credits",
+          error_code: 11300,
+          message: "Insufficient credits",
+        }),
+        { status: 402, headers: { "x-nyxid-agent-id": "ag-1" } },
+      ),
+    );
+    const outcome = await probeAgentKey("llm-openai", {
+      bearerToken: "tok",
+      fetchImpl: fetchMock,
+    });
+    expect(outcome).toMatchObject({
+      httpStatus: 402,
+      agentKeyValid: false,
+      downstreamStatus: "credits_exhausted",
+    });
+    expect(outcome.diagnostic).toContain(
+      "The account this key bills to is out of credits",
+    );
+    expect(useCreditsDenialStore.getState().current).toBeNull();
+  });
+
+  it("treats a downstream's own insufficient_credits as a downstream response", () => {
+    const outcome = classifyProbe("llm-openai", nyxidResponse(402), 402, {
+      error: "insufficient_credits",
+      message: "Upstream quota",
+    });
+    expect(outcome.downstreamStatus).toBe("unexpected");
+    expect(outcome.agentKeyValid).toBe(true);
   });
 });

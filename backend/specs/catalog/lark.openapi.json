@@ -3,7 +3,7 @@
   "info": {
     "title": "Lark / Feishu API (User OAuth)",
     "version": "v1-nyxid-overlay",
-    "description": "NyxID-hosted overlay of the Lark / Feishu open APIs most used by agents acting as a logged-in user: IM messaging, chat discovery, and Bitable reads. Paths are relative to the /open-apis base; NyxID injects the user access token."
+    "description": "NyxID-hosted overlay of the Lark / Feishu open APIs most used by agents acting as a logged-in user: IM messaging, chat discovery, Bitable reads, and native Approval task listing and forwarding. Paths are relative to the /open-apis base; NyxID injects the user access token."
   },
   "servers": [
     {
@@ -690,6 +690,218 @@
         "responses": {
           "200": {
             "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/approval/v4/tasks": {
+      "get": {
+        "operationId": "approval_tasks_query",
+        "summary": "List the authenticated user’s Lark Approval tasks",
+        "description": "Requires the user OAuth scope approval:task:read. Use topic=1 for pending approvals. Results include task_id, instance_code, and support_api_operate; check API support before forwarding. Follow page_token when has_more is true.",
+        "externalDocs": {
+          "url": "https://open.larksuite.com/document/server-docs/approval-v4/task/query"
+        },
+        "x-aevatar-tool": {
+          "name": "approval_tasks_query",
+          "description": "List native Lark/Feishu Approval tasks for the authenticated user, including the task and instance IDs needed to forward an approval.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "topic",
+            "in": "query",
+            "required": true,
+            "description": "1: pending; 2: handled; 17: unread notice; 18: read notice.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1",
+                "2",
+                "17",
+                "18"
+              ]
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "description": "Number of results, between 1 and 100 (provider default 100).",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "description": "Pagination token from the previous response.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id_type",
+            "in": "query",
+            "required": false,
+            "description": "Type of user IDs in the response.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id",
+                "user_key"
+              ]
+            }
+          },
+          {
+            "name": "locale",
+            "in": "query",
+            "required": false,
+            "description": "Response language.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "zh-CN",
+                "en-US",
+                "ja-JP"
+              ]
+            }
+          },
+          {
+            "name": "definition_code",
+            "in": "query",
+            "required": false,
+            "description": "Filter by approval definition code.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": false,
+            "description": "Search keyword.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_timestamp",
+            "in": "query",
+            "required": false,
+            "description": "Start of task time range, Unix seconds as a string.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "end_timestamp",
+            "in": "query",
+            "required": false,
+            "description": "End of task time range, Unix seconds as a string.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lark response envelope; code 0 indicates success. Nonzero codes are provider errors even when HTTP status is 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/approval/v4/tasks/forward": {
+      "post": {
+        "operationId": "approval_task_forward",
+        "summary": "Forward a native Lark Approval task to another person",
+        "description": "Requires the user OAuth scope approval:task:write. Acts as the authenticated user and changes the task’s approver. Obtain instance_code and task_id from approval_tasks_query and verify support_api_operate. Explicitly select user_id_type matching transfer_user_id. The task must still be actionable by the connected user; do not blindly retry provider state errors. This is the user-token forward endpoint, not the tenant-token tasks/transfer endpoint.",
+        "externalDocs": {
+          "url": "https://open.larksuite.com/api-explorer?project=approval&resource=task&version=v4&apiName=forward"
+        },
+        "x-nyxid-changes-existing": true,
+        "x-aevatar-tool": {
+          "name": "approval_task_forward",
+          "description": "Forward an existing native Lark/Feishu Approval task to another person as the connected user. Changes the current approver.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "user_id_type",
+            "in": "query",
+            "required": true,
+            "description": "ID type of transfer_user_id; select explicitly to avoid recipient ID mismatches.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id",
+                "user_key"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "instance_code",
+                  "task_id",
+                  "transfer_user_id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "instance_code": {
+                    "type": "string",
+                    "description": "Approval instance code paired with task_id."
+                  },
+                  "task_id": {
+                    "type": "string",
+                    "description": "Approval task ID from the user task list."
+                  },
+                  "transfer_user_id": {
+                    "type": "string",
+                    "description": "Recipient user ID matching user_id_type."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "Optional reason for forwarding, at most 500 characters."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lark response envelope; code 0 indicates success. Nonzero codes are provider errors even when HTTP status is 200.",
             "content": {
               "application/json": {
                 "schema": {

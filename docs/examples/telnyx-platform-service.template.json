@@ -1,0 +1,42 @@
+{
+  "name": "Telnyx Platform",
+  "slug": "telnyx-platform",
+  "description": "Verified fixed-model Telnyx text chat, paid with NyxID credits",
+  "service_type": "http",
+  "service_category": "internal",
+  "visibility": "public",
+  "base_url": "https://api.telnyx.com/v2",
+  "auth_method": "bearer",
+  "forward_access_token": false,
+  "platform_key": {
+    "enabled": false,
+    "audience": "restricted",
+    "allowed_owner_ids": []
+  },
+  "proxy_operation_policy": {
+    "rules": [{"method": "POST", "path_template": "/ai/openai/chat/completions"}]
+  },
+  "billing": {
+    "platform_billable": true,
+    "platform_charge_nyxid_credentials_only": true,
+    "managed_execution": {
+      "model": "REPLACE_WITH_VERIFIED_MODEL_ID",
+      "max_input_tokens": 0,
+      "max_output_tokens": 0,
+      "max_request_bytes": 65536,
+      "max_response_bytes": 1048576,
+      "tariff_version": "REPLACE_WITH_ACCOUNT_VERIFIED_VERSION",
+      "tariff_source": "https://api.telnyx.com/v2/pricing/products/REPLACE_WITH_PRODUCT",
+      "tariff_verified_at": {"$date": "1970-01-01T00:00:00Z"}
+    },
+    "platform_key_pricing": {
+      "metric": "input_tokens",
+      "credits_per_unit": "REPLACE_WITH_UNCACHED_INPUT_CREDITS_PER_TOKEN",
+      "components": [
+        {"metric": "output_tokens", "credits_per_unit": "REPLACE_WITH_OUTPUT_CREDITS_PER_TOKEN"},
+        {"metric": "cache_read_tokens", "credits_per_unit": "REPLACE_WITH_CACHED_INPUT_CREDITS_PER_TOKEN"}
+      ]
+    },
+    "resale_billable": false
+  }
+}

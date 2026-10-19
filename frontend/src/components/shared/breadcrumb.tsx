@@ -19,7 +19,7 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
       {parentTo && (
         <Link
           to={parentTo}
-          className="mr-1 flex h-7 w-7 items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04] text-text-tertiary transition-all duration-200 hover:border-white/[0.15] hover:text-foreground"
+          className="mr-1 flex h-7 w-7 items-center justify-center rounded-[6px] border border-hairline bg-overlay text-text-tertiary transition-all duration-200 hover:border-hairline-strong hover:text-foreground"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
         </Link>

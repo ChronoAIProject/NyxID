@@ -77,7 +77,7 @@ function UpstreamResponse({
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-[10px] font-semibold uppercase text-text-tertiary">
+        <h4 className="text-10 font-semibold uppercase text-text-tertiary">
           Upstream response {index + 1}
         </h4>
         {response ? (
@@ -87,17 +87,17 @@ function UpstreamResponse({
         ) : null}
       </div>
       {outcome === "no_response" ? (
-        <p className="text-[11px] text-warning">No upstream response.</p>
+        <p className="text-11 text-warning">No upstream response.</p>
       ) : outcome === "unknown" ? (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           Response metadata not reported by this backend.
         </p>
       ) : response ? (
-        <div className="rounded-lg border border-border/60 bg-background/50 p-3 text-[11px]">
+        <div className="rounded-lg border border-border/60 bg-background/50 p-3 text-11">
           <p className="text-muted-foreground">
             Backend-observed Aevatar response metadata
           </p>
-          <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 font-mono text-[10px]">
+          <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 font-mono text-10">
             <dt className="text-text-tertiary">status</dt>
             <dd>{response.status}</dd>
             <dt className="text-text-tertiary">SSE</dt>
@@ -113,19 +113,19 @@ function UpstreamResponse({
             ))}
           </dl>
           {!envelope.degraded && envelope.droppedHeaders ? (
-            <p className="mt-2 text-[10px] text-warning">
+            <p className="mt-2 text-10 text-warning">
               Allowlisted response headers were dropped by the wire-log size
               ladder.
             </p>
           ) : null}
         </div>
       ) : envelope.degraded && envelope.status ? (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Minimal backend echo retained status {envelope.status}; response
           headers were degraded.
         </p>
       ) : (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           Backend reported a response, but its metadata was degraded.
         </p>
       )}
@@ -149,14 +149,14 @@ function ResponseCapture({
   const capture = entry.capture;
   if (!capture) {
     return (
-      <p className="text-[11px] text-text-tertiary">
+      <p className="text-11 text-text-tertiary">
         Delivered-body capture is not available for this persisted exchange.
       </p>
     );
   }
   if (capture.state === "evicted") {
     return (
-      <p className="text-[11px] text-text-tertiary">
+      <p className="text-11 text-text-tertiary">
         Delivered-body capture was evicted from session memory.
       </p>
     );
@@ -166,7 +166,7 @@ function ResponseCapture({
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-[10px] font-semibold uppercase text-text-tertiary">
+        <h4 className="text-10 font-semibold uppercase text-text-tertiary">
           Delivered response
         </h4>
         <Badge variant="secondary">
@@ -185,9 +185,9 @@ function ResponseCapture({
               aria-selected={!rendered}
               onClick={() => onRenderedChange(false)}
               className={cn(
-                "h-6 rounded-md px-2 text-[10px] font-medium",
+                "h-6 rounded-md px-2 text-10 font-medium",
                 !rendered
-                  ? "bg-white/[0.08] text-foreground"
+                  ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
               )}
             >
@@ -199,9 +199,9 @@ function ResponseCapture({
               aria-selected={rendered}
               onClick={() => onRenderedChange(true)}
               className={cn(
-                "h-6 rounded-md px-2 text-[10px] font-medium",
+                "h-6 rounded-md px-2 text-10 font-medium",
                 rendered
-                  ? "bg-white/[0.08] text-foreground"
+                  ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
               )}
             >
@@ -210,14 +210,14 @@ function ResponseCapture({
           </div>
         ) : null}
       </div>
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-11 text-muted-foreground">
         Decoded response entity as delivered by NyxID to this browser.
       </p>
       {capture.sse && rendered ? (
         <AssistantWireReplayView exchange={entry} />
       ) : capture.sse ? (
         <div className="overflow-hidden rounded-lg border border-border/60 bg-background/60">
-          <div className="max-h-96 overflow-auto font-mono text-[10px] leading-5">
+          <div className="max-h-96 overflow-auto font-mono text-10 leading-5">
             {capture.sse.lines.slice(0, visibleLines).map((line, index) => (
               <div
                 key={`${String(index)}-${line.ending}`}
@@ -252,11 +252,11 @@ function ResponseCapture({
           ) : null}
         </div>
       ) : capture.body ? (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-[10px] leading-5 text-muted-foreground">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
           {capture.body.text}
         </pre>
       ) : (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           Waiting for delivered response data.
         </p>
       )}
@@ -280,20 +280,20 @@ function WireLogPayload({
           key={`${envelope.path}-${String(index)}`}
           className="space-y-2"
         >
-          <h4 className="text-[10px] font-semibold uppercase text-text-tertiary">
+          <h4 className="text-10 font-semibold uppercase text-text-tertiary">
             Request {index + 1} - backend echo
           </h4>
-          <p className="text-[11px] leading-5 text-muted-foreground">
+          <p className="text-11 leading-5 text-muted-foreground">
             Reconstructed request assembled by NyxID before credential and
             identity injection; headers are an allowlisted subset.
           </p>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-[10px] leading-5 text-muted-foreground">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-10 leading-5 text-muted-foreground">
             {requestJson(envelope)}
           </pre>
         </section>
       ))}
       {droppedEchoCount ? (
-        <p className="text-[11px] text-warning">
+        <p className="text-11 text-warning">
           {droppedEchoCount} later backend echo
           {droppedEchoCount === 1 ? " was" : "es were"} dropped by the wire-log
           size ladder.
@@ -323,17 +323,17 @@ function LazyWireLogPayload({
 
   if (wireLog.isPending) {
     return (
-      <p className="text-[11px] text-muted-foreground">Loading wire log...</p>
+      <p className="text-11 text-muted-foreground">Loading wire log...</p>
     );
   }
   if (wireLog.isError) {
     return (
-      <p className="text-[11px] text-destructive">Could not load wire log.</p>
+      <p className="text-11 text-destructive">Could not load wire log.</p>
     );
   }
   if (wireLog.data?.status === "expired") {
     return (
-      <p className="text-[11px] text-warning">
+      <p className="text-11 text-warning">
         Wire log expired or unavailable.
       </p>
     );
@@ -406,7 +406,7 @@ function WireLogEntry({
           />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[10px] tabular-nums text-text-tertiary">
+              <span className="text-10 tabular-nums text-text-tertiary">
                 {new Date(entry.ts).toLocaleTimeString([], {
                   hour: "2-digit",
                   minute: "2-digit",
@@ -425,7 +425,7 @@ function WireLogEntry({
                 <TooltipContent>NyxID response to this browser</TooltipContent>
               </Tooltip>
             </span>
-            <span className="mt-1 block break-all font-mono text-[11px] leading-5 text-muted-foreground">
+            <span className="mt-1 block break-all font-mono text-11 leading-5 text-muted-foreground">
               {entry.label}
             </span>
           </span>
@@ -460,7 +460,7 @@ function WireLogEntry({
               showResponses={showResponses}
             />
           ) : (
-            <p className="text-[11px] text-warning">
+            <p className="text-11 text-warning">
               Wire log payload unavailable.
             </p>
           )}
@@ -565,7 +565,7 @@ export function AssistantWireLogPanel({
         <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border/60 px-5 py-3">
           <label
             htmlFor="wire-log-capture"
-            className="flex items-center gap-2 text-[12px] font-medium text-foreground"
+            className="flex items-center gap-2 text-12 font-medium text-foreground"
           >
             <Switch
               id="wire-log-capture"
@@ -577,7 +577,7 @@ export function AssistantWireLogPanel({
           </label>
           <label
             htmlFor="wire-log-responses"
-            className="flex items-center gap-2 text-[12px] font-medium text-foreground"
+            className="flex items-center gap-2 text-12 font-medium text-foreground"
           >
             <Switch
               id="wire-log-responses"
@@ -589,7 +589,7 @@ export function AssistantWireLogPanel({
           </label>
           <label
             htmlFor="wire-log-all-conversations"
-            className="flex items-center gap-2 text-[12px] font-medium text-foreground"
+            className="flex items-center gap-2 text-12 font-medium text-foreground"
           >
             <Switch
               id="wire-log-all-conversations"
@@ -614,11 +614,11 @@ export function AssistantWireLogPanel({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {entries.length === 0 ? (
-            <div className="flex min-h-40 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
+            <div className="flex min-h-40 items-center justify-center px-6 text-center text-12 text-text-tertiary">
               No captured requests
             </div>
           ) : visibleEntries.length === 0 ? (
-            <div className="flex min-h-40 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
+            <div className="flex min-h-40 items-center justify-center px-6 text-center text-12 text-text-tertiary">
               No captured requests for this conversation
             </div>
           ) : (
@@ -654,7 +654,7 @@ export function AssistantWireLogPanel({
           )}
         </div>
 
-        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-[11px] leading-4 text-text-tertiary">
+        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-11 leading-4 text-text-tertiary">
           <p>
             Raw captures are session-only and may contain sensitive payloads
             verbatim without the chat renderer's credential redaction, including

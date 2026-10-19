@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::bson_datetime;
+
 pub const COLLECTION_NAME: &str = "oauth_states";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -8,8 +10,13 @@ pub struct OAuthState {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_context: Option<crate::models::service_change_event::HistoryContext>,
     pub provider_config_id: String,
     pub code_verifier: Option<String>,
+    /// Outbound provider authorization parameter; independent of popup correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_nonce: Option<String>,
     /// Encrypted device_auth_id (OpenAI) or device_code (RFC 8628) for polling
     #[serde(default)]
     pub device_code_encrypted: Option<String>,
@@ -19,6 +26,9 @@ pub struct OAuthState {
     /// Polling interval in seconds for device code flow
     #[serde(default)]
     pub poll_interval: Option<i32>,
+    /// Last time the upstream device token endpoint was contacted.
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_polled_at: Option<DateTime<Utc>>,
     /// When an admin initiates a flow on behalf of a service account,
     /// this holds the SA ID. Tokens are stored under this ID instead of user_id.
     #[serde(default)]
@@ -80,6 +90,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -87,6 +98,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
@@ -94,6 +106,7 @@ mod tests {
             attempt_nonce: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: Some("provider-nonce".to_string()),
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -101,6 +114,11 @@ mod tests {
         let doc = bson::to_document(&state).expect("serialize");
         let restored: OAuthState = bson::from_document(doc).expect("deserialize");
         assert_eq!(state.id, restored.id);
+        assert_eq!(
+            restored.authorization_nonce.as_deref(),
+            Some("provider-nonce")
+        );
+        assert_ne!(restored.authorization_nonce, restored.attempt_nonce);
         assert_eq!(state.code_verifier, restored.code_verifier);
         assert!(restored.target_user_id.is_none());
         assert!(restored.credential_user_id.is_none());
@@ -112,6 +130,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_device_code_flow() {
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -119,6 +138,7 @@ mod tests {
             device_code_encrypted: Some("encrypted_device_code".to_string()),
             user_code_encrypted: Some("encrypted_user_code".to_string()),
             poll_interval: Some(5),
+            last_polled_at: None,
             target_user_id: None,
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
@@ -126,6 +146,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -142,6 +163,7 @@ mod tests {
         let sa_id = uuid::Uuid::new_v4().to_string();
         let redirect = "/admin/service-accounts/some-sa-id".to_string();
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -149,6 +171,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: Some(sa_id.clone()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),
@@ -156,6 +179,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -193,9 +217,11 @@ mod tests {
         assert!(restored.connect_link_id.is_none());
         assert!(restored.flow_kind.is_none());
         assert!(restored.attempt_nonce.is_none());
+        assert!(restored.authorization_nonce.is_none());
 
         let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
         assert!(!reserialized.contains_key("flow_kind"));
         assert!(!reserialized.contains_key("attempt_nonce"));
+        assert!(!reserialized.contains_key("authorization_nonce"));
     }
 }

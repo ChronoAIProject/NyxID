@@ -3,7 +3,7 @@
   "info": {
     "title": "Google API",
     "version": "v1-nyxid-overlay",
-    "description": "NyxID-hosted overlay of common Google API operations reachable under www.googleapis.com (userinfo, Gmail, Drive, Calendar). NyxID injects the OAuth token; each product still requires its scope on the stored credential."
+    "description": "NyxID-hosted overlay of common Google API operations reachable under www.googleapis.com (userinfo, Gmail, Drive, Calendar), including authoring and rewriting Google Docs, Sheets, and Slides content through Drive. NyxID injects the OAuth token; each product still requires its scope on the stored credential."
   },
   "servers": [
     {
@@ -182,6 +182,82 @@
         "responses": {
           "200": {
             "description": "File page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "drive_create_file",
+        "summary": "Create file metadata, a folder, or an empty Google Doc, Sheet, or Slides file. Write its content with drive_upload_file_content.",
+        "x-aevatar-tool": {
+          "name": "drive_create_file",
+          "description": "Create file metadata, a folder, or an empty Google Doc, Sheet, or Slides file. Write its content with drive_upload_file_content.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Native Google types: application/vnd.google-apps.document (Doc), application/vnd.google-apps.spreadsheet (Sheet), application/vnd.google-apps.presentation (Slides), application/vnd.google-apps.folder (folder)."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -403,6 +479,1038 @@
         "responses": {
           "200": {
             "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "drive_update_file",
+        "summary": "Update file metadata, rename, move, or move a file to trash.",
+        "x-aevatar-tool": {
+          "name": "drive_update_file",
+          "description": "Update file metadata, rename, move, or move a file to trash.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "addParents",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "removeParents",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Native Google types: application/vnd.google-apps.document (Doc), application/vnd.google-apps.spreadsheet (Sheet), application/vnd.google-apps.presentation (Slides), application/vnd.google-apps.folder (folder)."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "drive_delete_file",
+        "summary": "Permanently delete a file or folder owned by the user.",
+        "x-aevatar-tool": {
+          "name": "drive_delete_file",
+          "description": "Permanently delete a file or folder owned by the user.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}/copy": {
+      "post": {
+        "operationId": "drive_copy_file",
+        "summary": "Copy a Drive file with optional new metadata.",
+        "x-aevatar-tool": {
+          "name": "drive_copy_file",
+          "description": "Copy a Drive file with optional new metadata.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Use application/vnd.google-apps.folder to create a folder."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}/export": {
+      "get": {
+        "operationId": "drive_export_file",
+        "summary": "Export a native Google document to the requested MIME type. Use text/markdown to read a Google Doc's body before rewriting it with drive_upload_file_content.",
+        "x-aevatar-tool": {
+          "name": "drive_export_file",
+          "description": "Export a native Google document to the requested MIME type. Use text/markdown to read a Google Doc's body before rewriting it with drive_upload_file_content.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "mimeType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Target MIME type, for example text/markdown, text/html, text/plain, application/pdf, or application/vnd.openxmlformats-officedocument.wordprocessingml.document."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload/drive/v3/files": {
+      "post": {
+        "operationId": "drive_upload_file",
+        "summary": "Upload a new file's raw binary content. Rename or move it with drive_update_file. To author a Google Doc, use drive_create_file then drive_upload_file_content.",
+        "x-aevatar-tool": {
+          "name": "drive_upload_file",
+          "description": "Upload a new file's raw binary content. Rename or move it with drive_update_file. To author a Google Doc, use drive_create_file then drive_upload_file_content.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "uploadType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "media"
+              ]
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload/drive/v3/files/{fileId}": {
+      "patch": {
+        "operationId": "drive_upload_file_content",
+        "summary": "Replace a Drive file's content. Uploading Markdown to a Google Doc, Sheet, or Slides file rewrites the document body; Drive converts it into the native format.",
+        "x-aevatar-tool": {
+          "name": "drive_upload_file_content",
+          "description": "Replace a Drive file's content. Uploading Markdown to a Google Doc, Sheet, or Slides file rewrites the document body; Drive converts it into the native format.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uploadType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "media"
+              ]
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/markdown": {
+              "schema": {
+                "type": "string",
+                "description": "Replacement content as Markdown. Drive converts it into the native Google document when the target file is a Doc, Sheet, or Slides file. Read the current content first with drive_export_file using mimeType text/markdown."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/users/me/calendarList": {
+      "get": {
+        "operationId": "calendar_list_calendars",
+        "summary": "List the user's calendars, including their IDs and access roles.",
+        "x-aevatar-tool": {
+          "name": "calendar_list_calendars",
+          "description": "List the user's calendars, including their IDs and access roles.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "showHidden",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "minAccessRole",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "calendar_add_to_list",
+        "summary": "Add an existing calendar to the user's calendar list.",
+        "x-aevatar-tool": {
+          "name": "calendar_add_to_list",
+          "description": "Add an existing calendar to the user's calendar list.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/users/me/calendarList/{calendarId}": {
+      "delete": {
+        "operationId": "calendar_remove_from_list",
+        "summary": "Remove a calendar from the user's calendar list.",
+        "x-aevatar-tool": {
+          "name": "calendar_remove_from_list",
+          "description": "Remove a calendar from the user's calendar list.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars": {
+      "post": {
+        "operationId": "calendar_create_calendar",
+        "summary": "Create a new secondary calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_create_calendar",
+          "description": "Create a new secondary calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "summary"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/{calendarId}": {
+      "get": {
+        "operationId": "calendar_get_calendar",
+        "summary": "Get calendar metadata. Use primary or a calendar ID from calendar_list_calendars.",
+        "x-aevatar-tool": {
+          "name": "calendar_get_calendar",
+          "description": "Get calendar metadata. Use primary or a calendar ID from calendar_list_calendars.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "calendar_update_calendar",
+        "summary": "Update a calendar's name, description, location, or time zone.",
+        "x-aevatar-tool": {
+          "name": "calendar_update_calendar",
+          "description": "Update a calendar's name, description, location, or time zone.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "calendar_delete_calendar",
+        "summary": "Delete a secondary calendar. Google does not permit deleting the primary calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_delete_calendar",
+          "description": "Delete a secondary calendar. Google does not permit deleting the primary calendar.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/{calendarId}/events/{eventId}": {
+      "get": {
+        "operationId": "calendar_get_event",
+        "summary": "Get an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_get_event",
+          "description": "Get an event on the selected calendar.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeZone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "calendar_update_event",
+        "summary": "Update an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_update_event",
+          "description": "Update an event on the selected calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sendUpdates",
+            "in": "query",
+            "required": false,
+            "description": "Which guests receive notifications.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "externalOnly",
+                "none"
+              ]
+            }
+          },
+          {
+            "name": "conferenceDataVersion",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "start": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "end": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "Exclusive end date for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "email": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "email"
+                      ]
+                    }
+                  },
+                  "recurrence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "conferenceData": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "calendar_delete_event",
+        "summary": "Delete an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_delete_event",
+          "description": "Delete an event on the selected calendar.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sendUpdates",
+            "in": "query",
+            "required": false,
+            "description": "Which guests receive notifications.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "externalOnly",
+                "none"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/freeBusy": {
+      "post": {
+        "operationId": "calendar_free_busy",
+        "summary": "Check availability across accessible calendars.",
+        "x-aevatar-tool": {
+          "name": "calendar_free_busy",
+          "description": "Check availability across accessible calendars.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "timeMin": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeMax": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "description": "Calendar or group ID."
+                        }
+                      },
+                      "required": [
+                        "id"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "timeMin",
+                  "timeMax",
+                  "items"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {

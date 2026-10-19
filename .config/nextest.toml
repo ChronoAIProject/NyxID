@@ -1,5 +1,10 @@
 [profile.ci]
 fail-fast = false
+# The slowest test in a healthy run takes about 40 s. Terminate any test after
+# five minutes so a stalled runner or a hung test fails fast with its name and
+# output (and junit.xml is still written) instead of consuming the 90-minute
+# job timeout. No retries: a flaky test must stay visible.
+slow-timeout = { period = "60s", terminate-after = 5 }
 
 [profile.ci.junit]
 path = "junit.xml"

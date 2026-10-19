@@ -8,11 +8,15 @@ import type { PublicConfig } from "@/types/api";
  * /public/config). Default `true` preserves behavior for existing
  * consumers (settings, auth-flow, MCP tabs).
  */
-export function usePublicConfig(options?: { enabled?: boolean }) {
+export function usePublicConfig(options?: {
+  enabled?: boolean;
+  refetchInterval?: number;
+}) {
   return useQuery({
     queryKey: ["public-config"],
     queryFn: () => api.get<PublicConfig>("/public/config"),
-    staleTime: Infinity,
+    staleTime: 30_000,
     enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval,
   });
 }

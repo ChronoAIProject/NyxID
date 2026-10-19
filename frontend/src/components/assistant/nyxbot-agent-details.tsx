@@ -1,0 +1,1026 @@
+import { AgentSkills } from "./agent-skills";
+import { AgentLearningReview } from "./agent-learning-review";
+import { MachineCapabilities } from "./machine-capabilities";
+import { AgentOperationScopes } from "./agent-operation-scopes";
+import { MachineGrantPicker } from "./machine-grant-picker";
+import { AgentAutomations } from "./automation-preferences";
+import { useEffect, useState, type ReactNode } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useQueryClient } from "@tanstack/react-query";
+import { Trash2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Form,
+  FormControl,
+  FormDescription,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+  useAppForm,
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { AgentKindBadge } from "@/components/assistant/nyxbot-agent-panels";
+import { ChannelBotsManager } from "@/components/assistant/nyxbot-channels";
+import {
+  PERSONA_HINT,
+  ServiceGrantPicker,
+  TEXTAREA_CLASS,
+} from "@/components/assistant/nyxbot-agent-forms";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  nyxBotQueryKeys,
+  useDeleteNyxBotAgent,
+  useDestroyNyxBotAgent,
+  useForgetNyxBotMemory,
+  useRememberNyxBotMemory,
+  useNyxBotAgent,
+  useNyxBotSettings,
+  useSetNyxBotAgentGrants,
+  useUpdateNyxBotAgent,
+} from "@/hooks/use-nyxbot-agents";
+import { ApiError } from "@/lib/api-client";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import type { AgentDetailsTab } from "@/lib/assistant/search";
+import {
+  ACCESS_MODE_DESCRIPTION,
+  ACCESS_MODE_LABEL,
+  AGENT_STATUS_LABEL,
+  agentHandle,
+  agentTitle,
+  effectiveAccessMode,
+} from "@/lib/assistant/nyxbot-labels";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { ModelSelect } from "@/components/assistant/nyxbot-access-controls";
+import { formatDateTime } from "@/lib/utils";
+import {
+  ASSISTANT_AGENT_DISPLAY_NAME_MAX,
+  ASSISTANT_MEMORY_NOTE_MAX,
+  assistantMemoryNoteSchema,
+  ASSISTANT_AGENT_PERSONA_MAX,
+  assistantAgentGrantsSchema,
+  assistantAgentProfileSchema,
+  nyxAgentAccessModeSchema,
+  type AssistantAgent,
+  type AssistantAgentGrants,
+  type AssistantAgentMemoryNote,
+  type AssistantGuestAccess,
+  type AssistantAgentProfile,
+} from "@/schemas/assistant-nyxagent";
+import { useAuthStore } from "@/stores/auth-store";
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function Section({
+  title,
+  description,
+  children,
+  id,
+}: {
+  readonly title: string;
+  readonly description?: string;
+  readonly children?: ReactNode;
+  readonly id?: string;
+}) {
+  return (
+    <section
+      id={id}
+      tabIndex={id ? -1 : undefined}
+      aria-label={title}
+      className="space-y-3 outline-none"
+    >
+      <div className="space-y-1">
+        <h3 className="text-13 font-semibold text-foreground">{title}</h3>
+        {description ? (
+          <p className="text-12 text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/**
+ * Who can widen a specialist's access, and why the agent itself cannot. Org
+ * agents are maintained by the organization: only its maintainers approve.
+ */
+export function accessAuthorityCopy(
+  agent: AssistantAgent,
+  requestMode: "denied" | "routed_to_nyxbot" | undefined,
+): string {
+  const sandbox = "This specialist is sandboxed: it cannot grant access to itself or to other agents.";
+  const direct = "When you talk to it directly, it tells you what it is missing and continues; you grant access below.";
+  if (agent.owner_kind === "org") {
+    const org = agent.owner_name ?? "the organization";
+    return agent.can_maintain === false
+      ? `${sandbox} Only a maintainer of ${org} (an Admin or Member) can approve or grant its access; you can view it but not change it.`
+      : `${sandbox} Maintainers of ${org}, including you, approve and grant its access here; your personal NyxBot cannot approve it on the organization's behalf.`;
+  }
+  return requestMode === "routed_to_nyxbot"
+    ? `${sandbox} ${direct} Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them.`
+    : `${sandbox} ${direct} Its requests are never routed: only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead.`;
+}
+
+const GRANTS_SECTION_ID = "agent-details-grants";
+const SKILLS_SECTION_ID = "agent-details-skills";
+
+function isNoAccess(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 403 || error.status === 404);
+}
+
+/** Says why the forms are read-only instead of leaving a silently dead Save button. */
+function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
+  if (agent.status === "destroyed") {
+    return (
+      <section
+        role="note"
+        aria-label="Agent destroyed"
+        className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
+      >
+        <p className="font-medium text-foreground">
+          {agentTitle(agent)} was destroyed
+          {agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}.
+        </p>
+        <p>
+          Its grants, skills and settings are read-only and it no longer runs.
+          {agent.kind === "specialist" && agent.can_maintain !== false
+            ? " You can delete it permanently below."
+            : ""}
+        </p>
+      </section>
+    );
+  }
+  if (agent.can_maintain === false) {
+    const org = agent.owner_name ?? "the organization";
+    return (
+      <section
+        role="note"
+        aria-label="Read-only"
+        className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
+      >
+        <p className="font-medium text-foreground">Read-only.</p>
+        <p>
+          Only a maintainer of {org} (an Admin or Member) can change its grants,
+          skills and settings. You can view them.
+        </p>
+      </section>
+    );
+  }
+  return null;
+}
+
+/**
+ * Everything about one agent: its role, grants, memory, channel bots and
+ * lifecycle. Opened from the thread header.
+ */
+export function AgentDetailsSheet({
+  agentId,
+  agents,
+  proposalId,
+  tab,
+  open,
+  onOpenChange,
+  onDeleted,
+}: {
+  readonly agentId: string | undefined;
+  readonly agents: readonly AssistantAgent[];
+  readonly proposalId?: string;
+  readonly tab?: AgentDetailsTab;
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onDeleted: () => void;
+}) {
+  const detail = useNyxBotAgent(agentId, open);
+  const agent = detail.data?.agent;
+  const loadedAgentId = agent?.id;
+  const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
+  const noAccess = detail.error ? isNoAccess(detail.error) : false;
+  useEffect(() => {
+    if (!open || !tab || !loadedAgentId) return;
+    const target = document.getElementById(tab === "grants" ? GRANTS_SECTION_ID : SKILLS_SECTION_ID);
+    if (!target) return;
+    // jsdom has no scrollIntoView.
+    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
+    target.focus({ preventScroll: true });
+  }, [open, tab, loadedAgentId]);
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+        <SheetHeader className="space-y-1.5 pr-6">
+          <SheetTitle>Agent details</SheetTitle>
+          <SheetDescription>
+            {agent
+              ? agent.kind === "nyxbot"
+                ? "Your personal agent. It has full access and remembers across all its threads and chat apps."
+                : "A specialist with its own memory. It uses only the services, machines and skills granted here and handles the work you give it directly itself."
+              : noAccess
+                ? "This agent is not available to you."
+                : "Loading agent..."}
+          </SheetDescription>
+        </SheetHeader>
+        <div className="mt-5 space-y-8">
+          {detail.error ? (
+            noAccess ? (
+              <section
+                role="note"
+                aria-label="No access"
+                className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
+              >
+                <p className="font-medium text-foreground">You cannot view this agent.</p>
+                <p>
+                  It belongs to an organization you are not a member of, or it no
+                  longer exists. Its grants and skills cannot be shown or changed here.
+                </p>
+              </section>
+            ) : (
+              <ErrorBanner
+                message={`Could not load this agent. ${detail.error.message}`}
+                onRetry={() => void detail.refetch()}
+              />
+            )
+          ) : null}
+          {agent ? (
+            <>
+              <div className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary">
+                <AgentAvatar agent={agent} size="lg" />
+                <span className="text-15 font-semibold text-foreground">
+                  {agentTitle(agent)}
+                </span>
+                {agentHandle(agent) ? <span>{agentHandle(agent)}</span> : null}
+                <AgentKindBadge kind={agent.kind} />
+                <Badge variant={agent.status === "running" ? "success" : "secondary"}>
+                  {AGENT_STATUS_LABEL[agent.status]}
+                </Badge>
+                <span>
+                  {agent.kind === "specialist"
+                    ? `Created by ${agent.created_by === "nyxbot" ? "NyxBot" : "you"} · `
+                    : ""}
+                  {agent.memory_count}{" "}
+                  {agent.memory_count === 1 ? "memory" : "memories"}
+                </span>
+              </div>
+              <ReadOnlyNote agent={agent} />
+              <Section
+                title="Ownership"
+                description={
+                  agent.owner_kind === "org"
+                    ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
+                    : "Personal agent"
+                }
+              />
+              <ProfileForm
+                key={[agent.id, agent.name, agent.description, agent.display_name, agent.persona].join(
+                  ":",
+                )}
+                agent={agent}
+              />
+              {agent.kind === "specialist" ? (
+                <>
+                  <Section title="Access authority" description={accessAuthorityCopy(agent, requestMode)} />
+                  <GrantsForm
+                    key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                    agent={agent}
+                  />
+                </>
+              ) : (
+                <Section id={GRANTS_SECTION_ID} title="Access" description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.">
+                  <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
+                </Section>
+              )}
+              <AgentSkills id={SKILLS_SECTION_ID} agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
+                } />
+              <AgentLearningReview key={`${agent.id}:${proposalId ?? ""}`} agentId={agent.id} proposalId={proposalId} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
+              {agent.can_use !== false ? (
+                <AgentAutomations agentId={agent.id} />
+              ) : null}
+              {agent.can_maintain !== false ? (
+                <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
+              ) : null}
+              {agent.status === "destroyed" ||
+              agent.owner_kind === "org" ? null : (
+                <Section
+                  title="Channel bots"
+                  description={`Chat with ${agentTitle(agent)} from these bots.`}
+                >
+                  <ChannelBotsManager agents={agents} agent={agent} />
+                </Section>
+              )}
+              {agent.kind === "specialist" && agent.can_maintain !== false ? (
+                <Lifecycle agent={agent} onDeleted={onDeleted} />
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+/** The access-mode select's value for "follow the workspace mode". */
+const INHERIT = "inherit";
+
+function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
+  const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
+  const update = useUpdateNyxBotAgent();
+  const workspaceMode = useNyxBotSettings().data?.access_mode;
+  const nyxbot = agent.kind === "nyxbot";
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  const form = useAppForm<AssistantAgentProfile>({
+    resolver: zodResolver(assistantAgentProfileSchema(agent.kind)),
+    defaultValues: {
+      name: agent.name,
+      display_name: agent.display_name ?? "",
+      description: agent.description,
+      persona: agent.persona ?? "",
+      model: agent.model ?? "",
+      access_mode_override: agent.access_mode_override ?? null,
+    },
+  });
+  const [error, setError] = useState<string>();
+
+  async function save(values: AssistantAgentProfile) {
+    setError(undefined);
+    const dirty = form.formState.dirtyFields;
+    try {
+      // Only what changed; an emptied display name or persona clears it.
+      await update.mutateAsync({
+        id: agent.id,
+        ...(dirty.name && !nyxbot ? { name: values.name } : {}),
+        ...(dirty.display_name ? { display_name: values.display_name } : {}),
+        ...(dirty.description ? { description: values.description } : {}),
+        ...(dirty.persona ? { persona: values.persona } : {}),
+        ...(dirty.model ? { model: values.model } : {}),
+        ...(dirty.access_mode_override ? { access_mode_override: values.access_mode_override } : {}),
+      });
+      form.reset(values);
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save. Try again."));
+    }
+  }
+
+  return (
+    <Section title="Profile">
+      <Form {...form}>
+        <form aria-label="Profile" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
+          {nyxbot ? null : (
+            <FormField
+              control={form.control}
+              name="name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Name</FormLabel>
+                  <FormControl>
+                    <Input
+                      maxLength={32}
+                      disabled={readOnly}
+                      {...field}
+                      onChange={(event) => field.onChange(event.target.value.toLowerCase())}
+                    />
+                  </FormControl>
+                  <FormDescription className="text-11">
+                    The @handle used in groups and by NyxBot.
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          )}
+          <FormField
+            control={form.control}
+            name="display_name"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Display name</FormLabel>
+                <FormControl>
+                  <Input
+                    maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
+                    disabled={readOnly}
+                    autoComplete="off"
+                    placeholder={nyxbot ? "NyxBot" : agent.name}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription className="text-11">
+                  Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave
+                  empty to use it.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {advancedControls && <FormField
+            control={form.control}
+            name="model"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Model</FormLabel>
+                <ModelSelect
+                  label="Agent model"
+                  value={field.value || undefined}
+                  disabled={readOnly}
+                  onChange={field.onChange}
+                />
+                <FormDescription className="text-11">
+                  Used by this agent's new threads. Each thread can switch from its composer.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />}
+          <FormField
+            control={form.control}
+            name="access_mode_override"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Access mode</FormLabel>
+                <Select
+                  value={field.value ?? INHERIT}
+                  disabled={readOnly}
+                  onValueChange={(value) =>
+                    field.onChange(value === INHERIT ? null : nyxAgentAccessModeSchema.parse(value))
+                  }
+                >
+                  <FormControl>
+                    <SelectTrigger aria-label="Agent access mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value={INHERIT}>
+                      Workspace setting
+                      {workspaceMode ? ` (${ACCESS_MODE_LABEL[workspaceMode]})` : ""}
+                    </SelectItem>
+                    {nyxAgentAccessModeSchema.options.map((option) => (
+                      <SelectItem key={option} value={option}>
+                        {ACCESS_MODE_LABEL[option]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FormDescription className="text-11">
+                  {ACCESS_MODE_DESCRIPTION[effectiveAccessMode(workspaceMode, field.value)]}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="description"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{nyxbot ? "Notes" : "Role"}</FormLabel>
+                <FormControl>
+                  <textarea
+                    className={TEXTAREA_CLASS}
+                    maxLength={2048}
+                    disabled={readOnly}
+                    placeholder={nyxbot ? "How NyxBot should work with you (optional)." : undefined}
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="persona"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Persona</FormLabel>
+                <FormControl>
+                  <textarea
+                    className={TEXTAREA_CLASS}
+                    maxLength={ASSISTANT_AGENT_PERSONA_MAX}
+                    disabled={readOnly}
+                    placeholder={PERSONA_HINT}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription className="text-11">
+                  Personality and tone only; it never changes what the agent may
+                  do.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {error ? (
+            <p role="alert" className="text-12 text-destructive">
+              {error}
+            </p>
+          ) : null}
+          {readOnly ? null : (
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                size="sm"
+                variant="primary"
+                isLoading={update.isPending}
+                disabled={!form.formState.isDirty}
+              >
+                Save
+              </Button>
+            </div>
+          )}
+        </form>
+      </Form>
+    </Section>
+  );
+}
+
+function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
+  const grants = useSetNyxBotAgentGrants();
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
+  const form = useAppForm<AssistantAgentGrants>({
+    resolver: zodResolver(assistantAgentGrantsSchema),
+    defaultValues: {
+      services: agent.services,
+      machines: agent.machines ?? [],
+      logins: agent.logins ?? [],
+      account_read: agent.account_read,
+      guest_access: agent.guest_access,
+    },
+  });
+  const [error, setError] = useState<string>();
+  const services = form.watch("services");
+
+  async function save(values: AssistantAgentGrants) {
+    setError(undefined);
+    // Send only the levels changed here, for services being granted: the
+    // server keeps the others, and drops levels of services taken away.
+    const changed = Object.fromEntries(
+      values.services
+        .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
+        .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
+    );
+    try {
+      await grants.mutateAsync({
+        id: agent.id,
+        services: values.services,
+        ...(form.getFieldState("machines").isDirty ? { machines: values.machines } : {}),
+        ...(form.getFieldState("logins").isDirty ? { logins: values.logins } : {}),
+        account_read: values.account_read,
+        ...(Object.keys(changed).length ? { guest_access: changed } : {}),
+      });
+      form.reset(values);
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save the grants. Try again."));
+    }
+  }
+
+  return (
+    <Section
+      id={GRANTS_SECTION_ID}
+      title="Grants"
+      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
+    >
+      <Form {...form}>
+        <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
+          <FormField
+            control={form.control}
+            name="services"
+            render={({ field }) => (
+              <FormItem>
+                <ServiceGrantPicker
+                  org={agent.owner_kind === "org" ? agent.owner_id : undefined}
+                  value={field.value}
+                  onChange={field.onChange}
+                  disabled={readOnly}
+                />
+              </FormItem>
+            )}
+          />
+          {(["machines", ...(agent.owner_kind === "org" ? [] : ["logins"])] as (
+              | "machines"
+              | "logins"
+            )[]
+          ).map((kind) => (
+            <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
+                <FormItem>
+                  <MachineGrantPicker
+                    org={
+                      agent.owner_kind === "org" ? agent.owner_id : undefined
+                    }
+                    kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={readOnly} />
+                </FormItem>
+              )}
+            />
+          ))}
+          {services.length && agent.owner_kind !== "org" ? (
+            <FormField
+              control={form.control}
+              name="guest_access"
+              render={({ field }) => (
+                <FormItem>
+                  <GuestAccessList
+                    services={services}
+                    value={field.value}
+                    onChange={field.onChange}
+                    disabled={readOnly}
+                  />
+                </FormItem>
+              )}
+            />
+          ) : null}
+          {agent.owner_kind !== "org" ? (
+            <FormField
+            control={form.control}
+            name="account_read"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+                  <div className="space-y-1">
+                    <FormLabel>Read my account</FormLabel>
+                    <FormDescription className="text-12">
+                        Look up keys, services and nodes; never change them.
+                      </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={readOnly}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </div>
+              </FormItem>
+            )}
+          />
+          ) : null}
+          {error ? (
+            <p role="alert" className="text-12 text-destructive">
+              {error}
+            </p>
+          ) : null}
+          {readOnly ? null : (
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                size="sm"
+                variant="primary"
+                isLoading={grants.isPending}
+                disabled={!form.formState.isDirty}
+              >
+                Save grants
+              </Button>
+            </div>
+          )}
+        </form>
+      </Form>
+      {agent.can_maintain !== false ? (
+        <>
+          <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
+        </>
+      ) : null}
+    </Section>
+  );
+}
+
+const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
+  read: "Look things up only",
+  use: "Use, but not change or delete",
+  all: "Everything this agent can do",
+};
+
+/**
+ * What people other than you may do with each granted service when they talk
+ * to this agent in a group or shared chat. Anything behind your approval
+ * stays yours at every level.
+ */
+function GuestAccessList({
+  services,
+  value,
+  onChange,
+  disabled,
+}: {
+  readonly services: readonly string[];
+  readonly value: Record<string, AssistantGuestAccess>;
+  readonly onChange: (value: Record<string, AssistantGuestAccess>) => void;
+  readonly disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-border p-4">
+      <div className="space-y-1">
+        <p className="text-12 font-medium text-foreground">
+          What others in its chats may do
+        </p>
+        <p className="text-12 text-muted-foreground">
+          For people other than you in the agent&apos;s group and shared chats.
+          &ldquo;Use&rdquo; lets them look things up, create and act (send a
+          message, turn a light on), but not change or delete what already
+          exists. Anything behind your approval stays yours. You can also ask
+          NyxBot to change this.
+        </p>
+      </div>
+      <ul aria-label="Guest access" className="space-y-1.5">
+        {services.map((slug) => {
+          const id = `guest-access-${slug}`;
+          return (
+            <li key={slug} className="flex items-center justify-between gap-3">
+              <label
+                htmlFor={id}
+                className="min-w-0 flex-1 truncate font-mono text-11 text-muted-foreground"
+              >
+                {slug}
+              </label>
+              <Select
+                value={value[slug] ?? "use"}
+                disabled={disabled}
+                onValueChange={(level) =>
+                  onChange({ ...value, [slug]: level as AssistantGuestAccess })
+                }
+              >
+                <SelectTrigger id={id} className="w-56">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(GUEST_ACCESS_LABEL) as AssistantGuestAccess[]).map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {GUEST_ACCESS_LABEL[level]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function MemoryList({
+  agent,
+  memory,
+}: {
+  readonly agent: AssistantAgent;
+  readonly memory: readonly AssistantAgentMemoryNote[];
+}) {
+  const forget = useForgetNyxBotMemory();
+  const [error, setError] = useState<string>();
+  const name = agentTitle(agent);
+  const remember = useRememberNyxBotMemory();
+  const memoryForm = useAppForm<{ text: string }>({
+    resolver: zodResolver(assistantMemoryNoteSchema),
+    defaultValues: { text: "" },
+  });
+  const [editing, setEditing] = useState<string>();
+  async function saveNote({ text }: { text: string }) {
+    setError(undefined);
+    try {
+      await remember.mutateAsync({
+        agentId: agent.id,
+        text,
+        replaceId: editing,
+      });
+      memoryForm.reset({ text: "" });
+      setEditing(undefined);
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save shared memory."));
+    }
+  }
+
+  async function remove(note: AssistantAgentMemoryNote) {
+    setError(undefined);
+    try {
+      await forget.mutateAsync({ agentId: agent.id, noteId: note.id });
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not forget this note. Try again."));
+    }
+  }
+
+  return (
+    <Section
+      title="Memory"
+      description={
+        agent.owner_kind === "org"
+          ? "Shared organization memory. Never save private member content here."
+          : `What ${name} remembers across its threads and chat apps.`}
+    >
+      {error ? (
+        <p role="alert" className="text-12 text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {agent.owner_kind === "org" && agent.status !== "destroyed" ? (
+        <form
+          aria-label="Shared memory"
+          onSubmit={memoryForm.handleSubmit(saveNote)}
+          className="space-y-2"
+        >
+          <label
+            htmlFor="shared-memory-note"
+            className="text-12 font-medium"
+          >
+            {editing ? "Edit shared note" : "Add shared note"}
+          </label>
+          <textarea
+            id="shared-memory-note"
+            className={TEXTAREA_CLASS}
+            maxLength={ASSISTANT_MEMORY_NOTE_MAX}
+            {...memoryForm.register("text")}
+          />
+          <div className="flex justify-end gap-2">
+            {editing ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setEditing(undefined);
+                  memoryForm.reset({ text: "" });
+                }}
+              >
+                Cancel edit
+              </Button>
+            ) : null}
+            <Button
+              type="submit"
+              size="sm"
+              variant="primary"
+              isLoading={remember.isPending}
+              disabled={
+                !memoryForm.formState.isDirty ||
+                !memoryForm.watch("text").trim()
+              }
+            >
+              Save shared note
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {memory.length ? (
+        <ul aria-label={`${name} memory`} className="divide-y divide-border/30 rounded-lg border border-border">
+          {memory.map((note) => (
+            <li key={note.id} className="flex items-start gap-2 px-3 py-2.5">
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <p className="whitespace-pre-wrap break-words text-12 text-foreground">
+                  {note.text}
+                </p>
+                <p className="font-mono text-10 text-text-tertiary">
+                  {formatDateTime(note.updated_at)}
+                </p>
+              </div>
+              {agent.owner_kind === "org" && agent.status !== "destroyed" ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setEditing(note.id);
+                    memoryForm.reset({ text: note.text });
+                  }}
+                >
+                  Edit note
+                </Button>
+              ) : null}
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 shrink-0"
+                aria-label={`Forget: ${note.text.slice(0, 60)}`}
+                disabled={forget.isPending}
+                onClick={() => void remove(note)}
+              >
+                <Trash2 />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+          Nothing remembered yet.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+function Lifecycle({
+  agent,
+  onDeleted,
+}: {
+  readonly agent: AssistantAgent;
+  readonly onDeleted: () => void;
+}) {
+  const userId = useAuthStore((state) => state.user?.id);
+  const queryClient = useQueryClient();
+  const destroy = useDestroyNyxBotAgent();
+  const remove = useDeleteNyxBotAgent();
+  const [confirm, setConfirm] = useState<"destroy" | "delete">();
+  const [error, setError] = useState<string>();
+  const destroyed = agent.status === "destroyed";
+  const pending = destroy.isPending || remove.isPending;
+
+  async function run() {
+    setError(undefined);
+    try {
+      if (confirm === "destroy") {
+        await destroy.mutateAsync(agent.id);
+        // Its open threads become read-only.
+        await queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.root(userId) });
+      } else {
+        await remove.mutateAsync(agent.id);
+        nyxAgentTransport.forgetAgent(agent.id);
+        onDeleted();
+      }
+      setConfirm(undefined);
+    } catch (cause) {
+      setError(errorMessage(cause, "That did not work. Try again."));
+    }
+  }
+
+  return (
+    <section
+      aria-label="Danger zone"
+      className="space-y-3 rounded-xl border border-destructive/40 p-4"
+    >
+      <div className="space-y-1">
+        <h3 className="text-13 font-semibold text-destructive">
+          {destroyed ? "Delete permanently" : "Destroy agent"}
+        </h3>
+        <p className="text-12 text-destructive/70">
+          {destroyed
+            ? `${agentTitle(agent)} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
+            : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."}
+        </p>
+      </div>
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={() => {
+            setError(undefined);
+            setConfirm(destroyed ? "delete" : "destroy");
+          }}
+        >
+          {destroyed ? "Delete permanently" : "Destroy"}
+        </Button>
+      </div>
+      <Dialog
+        open={confirm !== undefined}
+        onOpenChange={(open) => {
+          if (!open && !pending) setConfirm(undefined);
+        }}
+      >
+        <DialogContent className="md:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {confirm === "delete"
+                ? `Delete ${agentTitle(agent)} permanently?`
+                : `Destroy ${agentTitle(agent)}?`}
+            </DialogTitle>
+            <DialogDescription>
+              {confirm === "delete"
+                ? "The agent, its memory and every thread with it are deleted. This cannot be undone."
+                : "Any running turn stops, its access is revoked and its channel bots are disconnected. Its threads stay here, read-only. This cannot be undone."}
+            </DialogDescription>
+          </DialogHeader>
+          {error ? (
+            <p role="alert" className="text-12 text-destructive">
+              {error}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="ghost" disabled={pending} onClick={() => setConfirm(undefined)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" isLoading={pending} onClick={() => void run()}>
+              {confirm === "delete" ? "Delete permanently" : "Destroy"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
+}

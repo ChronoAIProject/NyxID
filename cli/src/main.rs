@@ -1,15 +1,22 @@
+mod machine_updater;
+use commands::update_attestation;
 mod api;
 mod auth;
 mod browser;
 mod cli;
+mod clipboard;
 mod commands;
+mod credential_guidance;
 mod error_format;
+mod net_diagnostics;
 pub mod node;
 pub mod org_resolver;
+mod output;
 mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod tls;
 mod update_check;
 mod wizard;
 
@@ -18,8 +25,26 @@ use clap::Parser;
 
 use crate::cli::{Cli, Commands};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // rustls-native-certs 0.8 treats empty SSL_CERT_FILE as a selected path.
+    // Normalize empty CA variables before Tokio or any other worker starts.
+    for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+        if std::env::var_os(name).is_some_and(|value| value.is_empty()) {
+            // SAFETY: this is the single-threaded process entry point, before
+            // runtime construction, tracing, TLS, or any other initialization.
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create CLI runtime")
+        .block_on(run_main());
+}
+
+async fn run_main() {
     // Pick a rustls CryptoProvider explicitly. With both `aws_lc_rs` and `ring`
     // enabled via feature unification (sigstore vs quinn/etc.), rustls cannot
     // auto-select and panics on first TLS use. See issue #696.
@@ -66,7 +91,12 @@ async fn main() {
         // consent — different concern).
         let mut consent =
             telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
-        let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
+        let machine_login = matches!(&cli.command, Commands::Login(args)
+            if args.no_wait || matches!(args.output, cli::OutputFormat::Json))
+            || matches!(&cli.command, Commands::Update(args) if args.command.is_some());
+        if !machine_login {
+            let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
+        }
         if consent.enabled {
             telemetry::TelemetryClient::init(profile.as_deref())
         } else {
@@ -105,6 +135,26 @@ async fn main() {
     }
 
     if let Err(e) = result {
+        if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginFailure>() {
+            if json_output_from_argv {
+                println!("{}", error.json());
+            } else {
+                eprintln!("{}", error.text());
+            }
+            std::process::exit(error.kind.exit_code());
+        }
+        if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginError>() {
+            if json_output_from_argv {
+                println!("{}", error.json());
+            } else {
+                eprintln!("{error}");
+            }
+            std::process::exit(error.exit_code());
+        }
+        if let Some(readiness) = e.downcast_ref::<commands::admin_tools::PendingReadiness>() {
+            // The command already emitted the complete structured readiness report.
+            std::process::exit(readiness.exit_code);
+        }
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         // 3: a human must log in again; 4: renewal outcome unknown, retry later.
         let code = if e.downcast_ref::<auth::ReauthRequired>().is_some() {
@@ -134,11 +184,12 @@ fn install_rustls_crypto_provider() {
 fn extract_profile(command: &Commands) -> Option<String> {
     // `AuthArgs` (profile-bearing struct) is flattened into many
     // subcommands; rather than enumerate all of them we peek at the
-    // one path we care about — the login command is the primary place
-    // profile is user-supplied. This is best-effort; telemetry tags
+    // login and diagnostic paths where profile selection matters here.
+    // This is best-effort; telemetry tags
     // without profile are acceptable.
     match command {
         Commands::Login(args) => args.profile.clone(),
+        Commands::Doctor(args) => args.profile.clone(),
         _ => None,
     }
 }
@@ -159,6 +210,8 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Mfa { .. } => ("user", "mfa"),
         Commands::Session { .. } => ("user", "session"),
         Commands::Catalog { .. } => ("catalog", "subcommand"),
+        Commands::Tools { .. } => ("tools", "subcommand"),
+        Commands::Keys(_) => ("service", "list"),
         Commands::Service { .. } => ("service", "subcommand"),
         Commands::Pool { .. } => ("pool", "subcommand"),
         Commands::Trigger { .. } => ("trigger", "subcommand"),
@@ -228,6 +281,8 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Session { command } => commands::session::run(command).await,
 
         Commands::Catalog { command } => commands::catalog::run(command).await,
+        Commands::Tools { command } => commands::catalog_tools::run_tools(command).await,
+        Commands::Keys(auth) => commands::service::run(cli::ServiceCommands::List { auth }).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,
         Commands::Trigger { command } => commands::trigger::run(command).await,
@@ -330,6 +385,68 @@ mod tests {
 
         let info = Cli::parse_from(["nyxid", "info"]);
         assert!(extract_profile(&info.command).is_none());
+    }
+
+    #[test]
+    fn login_callback_conflicts_with_other_login_modes() {
+        for mode in [
+            "--password",
+            "--device",
+            "--agent-key",
+            "--code",
+            "--no-wait",
+        ] {
+            let err = match Cli::try_parse_from(["nyxid", "login", "--callback", mode]) {
+                Ok(_) => panic!("--callback must conflict with {mode}"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn login_accepts_callback_and_clipboard_flags() {
+        for flag in ["-c", "--clipboard"] {
+            let cli = Cli::parse_from(["nyxid", "login", "--callback", flag]);
+            let Commands::Login(args) = cli.command else {
+                panic!("login");
+            };
+            assert!(args.callback);
+            assert!(args.clipboard);
+        }
+    }
+
+    #[tokio::test]
+    async fn login_callback_rejects_json_output_and_resume_before_dispatch() {
+        for args in [
+            vec!["nyxid", "login", "--callback", "--output", "json"],
+            vec!["nyxid", "login", "--callback", "resume", "request-id"],
+        ] {
+            let cli = Cli::parse_from(args);
+            let Commands::Login(args) = cli.command else {
+                panic!("login");
+            };
+            let error = auth::run_login(args)
+                .await
+                .expect_err("incompatible callback mode");
+            assert_eq!(
+                error.to_string(),
+                "--callback cannot be combined with --output json or login resume."
+            );
+        }
+    }
+
+    #[test]
+    fn login_clipboard_conflicts_with_password_and_code() {
+        for flag in ["-c", "--clipboard"] {
+            for mode in ["--password", "--code"] {
+                let error = match Cli::try_parse_from(["nyxid", "login", flag, mode]) {
+                    Ok(_) => panic!("{flag} must conflict with {mode}"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            }
+        }
     }
 
     #[test]

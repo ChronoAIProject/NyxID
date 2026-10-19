@@ -1,4 +1,13 @@
-import { useEffect } from "react";
+import { ProviderServices } from "@/components/providers/provider-services";
+import { useState } from "react";
+import { canAdminWrite, type ProviderConfig } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import {
+  useChangeReview,
+  useEditorMounted,
+} from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -9,6 +18,7 @@ import {
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { Separator } from "@/components/ui/separator";
 import {
   useAppForm,
@@ -35,99 +45,100 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 import {
   PROVIDER_TYPE_LABELS,
-  splitScopes,
-  stripEmptyStrings,
+  providerFormPayload,
+  providerFormValues,
 } from "./provider-edit.helpers";
 
 export function ProviderEditPage() {
-  const { providerId } = useParams({ strict: false }) as {
-    providerId: string;
-  };
-  const navigate = useNavigate();
+  const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
+  useBreadcrumbLabel(provider?.name);
+  if (isLoading && !provider) return <Skeleton className="h-96 w-full" />;
+  if (!provider)
+    return (
+      <ErrorBanner
+        message={
+          error instanceof ApiError ? error.message : "Unable to load provider"
+        }
+        onRetry={refetch}
+      />
+    );
+  return <ProviderEditForm key={providerId} source={provider} />;
+}
+
+function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
+  const [provider, setProvider] = useState(source);
+  const providerId = provider.id;
+  const isMounted = useEditorMounted();
+  const navigate = useNavigate();
   const updateMutation = useUpdateProvider(providerId);
+  const isAdmin = canAdminWrite(useAuthStore((state) => state.user));
 
   const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
-    defaultValues: {
-      name: "",
-      slug: "",
-      description: "",
-      provider_type: "oauth2",
-      credential_mode: "admin" as const,
-      authorization_url: "",
-      token_url: "",
-      revocation_url: "",
-      default_scopes: "",
-      is_active: true,
-      client_id: "",
-      client_secret: "",
-      client_id_param_name: "",
-      supports_pkce: true,
-      device_code_url: "",
-      device_token_url: "",
-      hosted_callback_url: "",
-      api_key_instructions: "",
-      api_key_url: "",
-      icon_url: "",
-      documentation_url: "",
-    },
+    defaultValues: providerFormValues(provider),
   });
-
-  useEffect(() => {
-    if (provider) {
-      form.reset({
-        name: provider.name,
-        slug: provider.slug,
-        description: provider.description ?? "",
-        provider_type: provider.provider_type,
-        credential_mode: provider.credential_mode ?? "admin",
-        authorization_url: "",
-        token_url: "",
-        revocation_url: "",
-        default_scopes: provider.default_scopes?.join(", ") ?? "",
-        is_active: provider.is_active,
-        client_id: "",
-        client_secret: "",
-        client_id_param_name: provider.client_id_param_name ?? "",
-        supports_pkce: provider.supports_pkce,
-        device_code_url: "",
-        device_token_url: "",
-        hosted_callback_url: provider.hosted_callback_url ?? "",
-        api_key_instructions: provider.api_key_instructions ?? "",
-        api_key_url: provider.api_key_url ?? "",
-        icon_url: provider.icon_url ?? "",
-        documentation_url: provider.documentation_url ?? "",
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider]);
+  const stale =
+    !sameValue(providerFormValues(provider), providerFormValues(source)) ||
+    !sameValue(provider.revocation, source.revocation) ||
+    ((!!form.watch("client_id")?.trim() ||
+      !!form.watch("client_secret")?.trim()) &&
+      (provider.updated_at !== source.updated_at ||
+        provider.has_client_id !== source.has_client_id ||
+        provider.has_client_secret !== source.has_client_secret));
+  type ReviewedProvider = {
+    providerId: string;
+    data: Parameters<typeof updateMutation.mutateAsync>[0];
+  };
+  const review = useChangeReview<ReviewedProvider>(
+    saveChanges,
+    stale,
+    providerId,
+  );
 
   const watchedProviderType = useWatch({
     control: form.control,
     name: "provider_type",
   });
 
-  async function onSubmit(data: UpdateProviderFormData) {
-    if (!provider) return;
+  function onSubmit(data: UpdateProviderFormData) {
+    const before = providerFormPayload(providerFormValues(provider));
+    const patch = changedFields(before, providerFormPayload(data));
+    for (const field of ["authorization_url", "token_url"] as const) {
+      if (patch[field] === "") {
+        form.setError(field, {
+          message: "This endpoint cannot be cleared; enter a valid URL.",
+        });
+        return;
+      }
+    }
+    const payload: Parameters<typeof updateMutation.mutateAsync>[0] = {
+      ...patch,
+    };
+    if (patch.revocation_url && provider.revocation) {
+      delete payload.revocation_url;
+      payload.revocation = {
+        ...provider.revocation,
+        url: patch.revocation_url,
+      };
+    }
+    if (patch.revocation_url === "") {
+      delete payload.revocation_url;
+      payload.revocation = null;
+    }
+    review.review(
+      { providerId, data: payload },
+      describeChanges(before, patch, {
+        secretFields: ["client_id", "client_secret"],
+      }),
+    );
+  }
+
+  async function saveChanges({ providerId: targetId, data }: ReviewedProvider) {
+    if (targetId !== providerId) return;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { slug: _, provider_type: _providerType, ...updateFields } = data;
-      const isOAuthOrDeviceCode =
-        data.provider_type === "oauth2" ||
-        data.provider_type === "device_code";
-      const cleaned = stripEmptyStrings({
-        ...updateFields,
-        default_scopes: splitScopes(data.default_scopes),
-        supports_pkce:
-          data.provider_type === "oauth2" ? data.supports_pkce : undefined,
-        credential_mode: isOAuthOrDeviceCode
-          ? updateFields.credential_mode
-          : undefined,
-      });
-      await updateMutation.mutateAsync(
-        cleaned as Parameters<typeof updateMutation.mutateAsync>[0],
-      );
+      await updateMutation.mutateAsync(data);
+      if (!isMounted()) return;
       toast.success("Provider updated");
       void navigate({
         to: "/providers/$providerId",
@@ -139,28 +150,8 @@ export function ProviderEditPage() {
       } else {
         toast.error("Failed to update provider");
       }
+      throw err;
     }
-  }
-
-  if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <Skeleton className="h-10 w-64" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    );
-  }
-
-  if (error || !provider) {
-    return (
-      <div className="space-y-8">
-        <PageHeader title="Provider Not Found" />
-        <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
-          onRetry={refetch}
-        />
-      </div>
-    );
   }
 
   const isOAuth = watchedProviderType === "oauth2";
@@ -170,15 +161,24 @@ export function ProviderEditPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title={`Edit ${provider.name}`}
-      />
+      <PageHeader title={`Edit ${provider.name}`} />
 
+      <ProviderServices provider={source} />
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setProvider(source);
+            form.reset(providerFormValues(source));
+            review.cancel();
+          }}
+        />
+      )}
+      {review.dialog}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -198,7 +198,7 @@ export function ProviderEditPage() {
             />
 
             <div>
-              <p className="text-[12px] font-medium mb-1">Slug</p>
+              <p className="text-12 font-medium mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -206,7 +206,7 @@ export function ProviderEditPage() {
             </div>
 
             <div>
-              <p className="text-[12px] font-medium mb-1">Provider Type</p>
+              <p className="text-12 font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -224,7 +224,7 @@ export function ProviderEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -264,12 +264,12 @@ export function ProviderEditPage() {
                   <FormItem>
                     <FormLabel>Credential Mode</FormLabel>
                     <Select
-                      value={field.value ?? "admin"}
+                      value={field.value || "admin"}
                       onValueChange={field.onChange}
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue />
+                          <SelectValue placeholder="Admin Only" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
@@ -322,11 +322,11 @@ export function ProviderEditPage() {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Leave URL fields blank to keep current values.
+                  Saved endpoint URLs are shown below.
                 </p>
 
                 <FormField
@@ -336,10 +336,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Authorization URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -353,10 +350,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Token URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -370,10 +364,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Revocation URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -405,7 +396,12 @@ export function ProviderEditPage() {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>
+                        Client ID —{" "}
+                        {provider.has_client_id
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           placeholder="Leave blank to keep current"
@@ -422,7 +418,12 @@ export function ProviderEditPage() {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret</FormLabel>
+                      <FormLabel>
+                        Client Secret —{" "}
+                        {provider.has_client_secret
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
@@ -433,6 +434,16 @@ export function ProviderEditPage() {
                       <p className="text-xs text-muted-foreground">
                         Only fill in if you want to change the client secret.
                       </p>
+                      {!isAdmin && provider.has_client_secret && (
+                        <p className="text-xs text-muted-foreground">
+                          Catalog Managers: on a provider someone else
+                          created, URLs, credential mode and token settings
+                          can change only before anyone has connected, and
+                          only with the current client ID and secret
+                          re-entered here. Replacing the client requires an
+                          Admin.
+                        </p>
+                      )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -458,17 +469,40 @@ export function ProviderEditPage() {
                     </FormItem>
                   )}
                 />
+                <FormField
+                  control={form.control}
+                  name="authorization_nonce_required"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center justify-between rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <FormLabel>Authorization nonce required</FormLabel>
+                        <p className="text-xs text-muted-foreground">
+                          Generate a fresh nonce for each hosted OAuth
+                          authorization attempt.
+                          Enable only when the provider requires it, after
+                          upgrading all backend replicas.
+                        </p>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value ?? false}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
               </>
             )}
 
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Leave URL fields blank to keep current values.
+                  Saved endpoint URLs are shown below.
                 </p>
 
                 <FormField
@@ -478,10 +512,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Device Code URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
                         Endpoint to request a device code (RFC 8628 step 1).
@@ -498,10 +529,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Device Token URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
                         Endpoint to poll for token (RFC 8628 step 3).
@@ -518,10 +546,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Authorization URL (fallback)</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -535,10 +560,7 @@ export function ProviderEditPage() {
                     <FormItem>
                       <FormLabel>Token URL (fallback)</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="Leave blank to keep current"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -570,7 +592,12 @@ export function ProviderEditPage() {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>
+                        Client ID —{" "}
+                        {provider.has_client_id
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           placeholder="Leave blank to keep current"
@@ -605,7 +632,7 @@ export function ProviderEditPage() {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   Telegram Widget Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -635,7 +662,12 @@ export function ProviderEditPage() {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Bot Token</FormLabel>
+                      <FormLabel>
+                        Bot Token —{" "}
+                        {provider.has_client_secret
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
@@ -656,7 +688,9 @@ export function ProviderEditPage() {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">API Key Configuration</h3>
+                <h3 className="text-13 font-semibold">
+                  API Key Configuration
+                </h3>
 
                 <FormField
                   control={form.control}
@@ -666,7 +700,7 @@ export function ProviderEditPage() {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />
@@ -698,8 +732,45 @@ export function ProviderEditPage() {
               </>
             )}
 
+            {(isOAuth || isDeviceCode) && (
+              <div className="space-y-2 rounded-md border border-border p-3 text-xs">
+                <p>
+                  Token endpoint authentication:{" "}
+                  {provider.token_endpoint_auth_method}
+                </p>
+                {isDeviceCode && (
+                  <p>Device code format: {provider.device_code_format}</p>
+                )}
+                {provider.device_verification_url && (
+                  <p className="break-all">
+                    Device verification URL: {provider.device_verification_url}
+                  </p>
+                )}
+                {provider.extra_auth_params && (
+                  <div>
+                    Additional authorization parameters:
+                    <pre className="whitespace-pre-wrap">
+                      {JSON.stringify(provider.extra_auth_params, null, 2)}
+                    </pre>
+                  </div>
+                )}
+                {provider.revocation && (
+                  <p className="break-all">
+                    Revocation: {provider.revocation.style},{" "}
+                    {provider.revocation.url}; authentication:{" "}
+                    {provider.revocation.auth}; revokes grant:{" "}
+                    {provider.revocation.revokes_grant ? "Yes" : "No"}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex items-center justify-end gap-3 pt-4">
-              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={updateMutation.isPending}
+                disabled={stale || !form.formState.isDirty}
+              >
                 Save Changes
               </Button>
               <Button

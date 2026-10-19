@@ -197,3 +197,35 @@ describe("NodeScopeCard", () => {
     expect(within(scope).queryByText("Personal Node")).not.toBeInTheDocument();
   });
 });
+
+it("implies only same-owner platform services and retains explicit selections", async () => {
+  const user = userEvent.setup();
+  const rows = mockUseKeys().data.map((row: { id: string }) => ({
+    ...row,
+    auto_connected: true,
+  }));
+  mockUseKeys.mockReturnValue({ data: rows });
+  render(
+    <ServiceScopeCard
+      keyId="key-1"
+      allowAllServices={false}
+      allowAutoConnectedServices
+      allowedServiceIds={["svc-personal"]}
+      allowedServices={[]}
+      apiKeySource={{ type: "personal" }}
+    />,
+    { wrapper: createWrapper() },
+  );
+  await user.click(editButton());
+  const personal = screen.getByRole("checkbox", { name: "Personal Service" });
+  expect(personal).toBeChecked();
+  expect(personal).toBeDisabled();
+  const org = screen.getByRole("checkbox", { name: /Org Service/ });
+  expect(org).toBeEnabled();
+  expect(org).not.toBeChecked();
+  await user.click(
+    screen.getByRole("checkbox", { name: /includes ones added later/ }),
+  );
+  expect(personal).toBeEnabled();
+  expect(personal).toBeChecked();
+});

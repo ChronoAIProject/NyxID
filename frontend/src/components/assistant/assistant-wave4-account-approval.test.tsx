@@ -18,22 +18,41 @@ const IDS = {
   factor: "00000000-0000-4000-8000-000000000005",
 };
 
-const { mockGet, mockPost, MockApiError } = vi.hoisted(() => {
+const { mockGet, mockPost, mockApiClient, mockSetUser, MockApiError } = vi.hoisted(() => {
   class HoistedApiError extends Error {
     readonly status: number;
     constructor(status: number, message = `HTTP ${String(status)}`) { super(message); this.status = status; }
   }
-  return { mockGet: vi.fn(), mockPost: vi.fn(), MockApiError: HoistedApiError };
+  return { mockGet: vi.fn(), mockPost: vi.fn(), mockApiClient: vi.fn(), mockSetUser: vi.fn(), MockApiError: HoistedApiError };
 });
-vi.mock("@/lib/api-client", () => ({ api: { get: mockGet, post: mockPost }, ApiError: MockApiError }));
+vi.mock("@/lib/api-client", () => ({ api: { get: mockGet, post: mockPost }, apiClient: mockApiClient, ApiError: MockApiError }));
+vi.mock("@/stores/auth-store", () => ({ useAuthStore: { getState: () => ({ setUser: mockSetUser }) } }));
 
 function renderDialog(element: ReactNode) { return render(element); }
 function accountEvidence(overrides: Record<string, unknown> = {}) { return { id: IDS.user, is_active: true, mfa_enabled: false, display_name_length: 7, avatar_url_length: null, updated_at: "2026-01-01T00:00:00.000Z", ...overrides }; }
 function configEvidence(overrides: Record<string, unknown> = {}) { return { service_id: IDS.service, approval_required: true, approval_mode: "per_request", rule_count: 0, default_effect: null, updated_at: "2026-01-01T00:00:00.000Z", ...overrides }; }
 
-beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
+beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); mockSetUser.mockReset(); mockApiClient.mockReset(); mockApiClient.mockImplementation((endpoint: string) => mockGet(endpoint)); });
 
 describe("Wave 4 account journeys", () => {
+  it("discloses all managed Machine data and retained records in the actual account deletion dialog", () => {
+    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-disclosure" onComplete={vi.fn()} />);
+    const dialog = screen.getByRole("dialog", { name: "Delete account" });
+    expect(dialog).toHaveTextContent(/all (?:of your )?managed Machines/i);
+    expect(dialog).toHaveTextContent(/paused \/workspace disks/i);
+    expect(dialog).toHaveTextContent(/temporary (?:files|data)/i);
+    expect(dialog).toHaveTextContent(/irreversible/i);
+    expect(dialog).toHaveTextContent(/no snapshots/i);
+    expect(dialog).toHaveTextContent(/no recovery or restore/i);
+    expect(dialog).toHaveTextContent(/at most 1 hour after a job ends/i);
+    expect(dialog).toHaveTextContent(/30 days after the job ends/i);
+    expect(dialog).toHaveTextContent(/90 days after completion/i);
+    expect(dialog).toHaveTextContent(/audit and financial records/i);
+    expect(dialog).toHaveTextContent(/cleanup pending/i);
+    expect(screen.getByRole("button", { name: "Delete account" })).toBeDisabled();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
   it("updates a profile only after the projection advances", async () => {
     mockGet.mockResolvedValueOnce(accountEvidence()).mockResolvedValueOnce(accountEvidence({ display_name_length: 11, updated_at: "2026-01-01T00:00:01.000Z" }));
     mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
@@ -84,7 +103,51 @@ describe("Wave 4 account journeys", () => {
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", {
       actionRequestId: "delete-1",
       confirmEmail: expect.any(String),
+      deletionPolicyVersion: "machine-data",
     });
+  });
+
+  it("shows committed account deletion after the real revoked-session 401 and clears the session on completion", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockRejectedValueOnce(new MockApiError(401));
+    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
+    const onComplete = vi.fn();
+    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-revoked-session" onComplete={onComplete} />);
+    await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
+    expect(mockApiClient).toHaveBeenCalledWith("/users/me/authorization", { preserveSessionOn401: true });
+    expect(mockSetUser).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onComplete).toHaveBeenCalledWith(IDS.user);
+    expect(mockSetUser).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it("still rejects a successful deletion response when the account remains readable", async () => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockResolvedValueOnce(accountEvidence());
+    mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
+    const onComplete = vi.fn();
+    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-still-present" onComplete={onComplete} />);
+    await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The account still exists after deletion.");
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(mockSetUser).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 500])("does not turn a rejected deletion mutation (%s) into account deletion success", async (status) => {
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence());
+    mockPost.mockRejectedValue(new MockApiError(status));
+    const onComplete = vi.fn();
+    renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId={`delete-rejected-${String(status)}`} onComplete={onComplete} />);
+    await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(`HTTP ${String(status)}`);
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockApiClient).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it("keeps MFA material in the browser and reports only the account id", async () => {

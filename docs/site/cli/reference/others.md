@@ -1,9 +1,9 @@
 ---
 title: Other commands
-description: Reference for the remaining nyxid commands — updating the CLI, account & MFA, sessions, approvals, notifications, endpoints, credentials, service accounts, developer apps, channel relay, admin, and telemetry.
+description: Reference for the remaining nyxid commands — updating the CLI, hosted connect links, account & MFA, sessions, approvals, notifications, endpoints, credentials, service accounts, developer apps, channel relay, admin, and telemetry.
 ---
 
-The pages above cover the headline command groups. This is the catch-all reference for everything else `nyxid` exposes: keeping the CLI itself current, account and session management, approvals and notifications, endpoints and credentials, service accounts and developer apps, channel relay, admin, and telemetry. Run `nyxid --help` or `nyxid <command> --help` for the authoritative flag list.
+The pages above cover the headline command groups. This is the catch-all reference for everything else `nyxid` exposes: keeping the CLI itself current, hosted connect links, account and session management, approvals and notifications, endpoints and credentials, service accounts and developer apps, channel relay, admin, and telemetry. Run `nyxid --help` or `nyxid <command> --help` for the authoritative flag list.
 
 :::note
 Commands that call the NyxID API accept the common flags `--base-url`, `--access-token` / `--access-token-env`, `--profile`, and `--output table|json`. Account-bootstrap commands (`login`, `register`, password reset) take `--base-url` explicitly. See [Authenticate](/docs/cli/getting-started/authenticate).
@@ -12,6 +12,24 @@ Commands that call the NyxID API accept the common flags `--base-url`, `--access
 :::tip
 Secret-issuing commands (`api-key create`, `service-account create`, `node register-token`, `*-rotate`, …) open a browser wizard so the new secret is shown in a page you control. Add `--terminal` to print it to the terminal instead, or `--no-wait` to create a remote pairing and pick the result up later with [`nyxid pairing resume`](#pairing).
 :::
+
+## connect
+
+Create a single-use hosted link for a catalog service. The human reviews the request and completes OAuth, device-code authorization, or API-key entry in the browser.
+
+```bash
+nyxid connect github --scope public_repo
+nyxid connect github --scope "public_repo,read:org" --scope user:email
+nyxid connect github --scope public_repo --no-wait --output json
+```
+
+`--scope SCOPES` is repeatable and accepts comma- or space-separated values. Hosted connect links carry these scopes on top of provider defaults and display them for consent. Non-empty scopes are rejected for API-key/no-auth services, providers that disable OAuth scopes, and OpenAI-format device-code providers. Omit the flag for default permissions. CLI versions older than **0.18.1** have no `connect --scope`; update the CLI first.
+
+`--label` names the request, `--no-wait` returns the link immediately, and `--timeout` sets the wait limit (default 900 seconds). JSON output includes non-empty `scopes`. Agents can also use MCP `nyx__connect_service` with `scopes: ["public_repo"]`, then `nyx__wait_for_connection`.
+
+To add scopes to an **existing connection**, use the console: **External Services → connection → Manage permissions**.
+
+For bot setup with signed completion notifications, use [channel-bot connect-link](#channel-bot-connect-link).
 
 ## update
 
@@ -48,8 +66,11 @@ nyxid ai-setup status                        # show which tools have skills inst
 Bootstrap and tear down the locally stored session. Day-to-day login lives in [Authenticate](/docs/cli/getting-started/authenticate).
 
 ```bash
-nyxid login --base-url <BASE_URL>        # browser sign-in; auto-falls back to device-code when headless
+nyxid login --base-url <BASE_URL>        # selectable device-code v2 approval (desktop default)
+nyxid login --callback --base-url <BASE_URL> # local browser callback; full account session without code entry/review
+nyxid login -c --base-url <BASE_URL>     # --clipboard: copy the user code before browser opening
 nyxid login --device --base-url <BASE_URL>  # force RFC 8628 device-code flow (no local browser needed)
+nyxid login --agent-key --profile agent --base-url <BASE_URL> # choose/create an Agent Key in the web UI or approve by phone QR
 nyxid login --password --email <addr>    # email + password (only if EMAIL_AUTH_ENABLED)
 nyxid logout                             # clear the stored session
 nyxid register --base-url <URL> --email <addr> --invite-code <CODE>
@@ -60,6 +81,10 @@ nyxid whoami                             # current identity
 nyxid status                             # session + instance summary
 nyxid doctor [--json]                    # local connectivity / config diagnostics
 ```
+
+`login --agent-key` authorizes only an Agent Key credential, with no account session or fallback. It conflicts with `--password`, `--device`, `--callback`, and `--code`; `--profile` and `--base-url` select its storage and backend. `whoami` and `status` report Agent Key identity, and `logout` revokes the calling login credential before clearing it locally. See [Agent Key login](/docs/cli/getting-started/authenticate#agent-key-login).
+
+`--clipboard` is best-effort and copies only the user code. It conflicts with `--password` and `--code`, and is allowed with `--callback` for its device-code fallback. `--output json` and `--no-wait` print the code without copying or opening a browser. `--callback` falls back to device-code login if the browser cannot open; it conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`, and explicitly rejects `--output json` and `login resume`.
 
 ## profile
 
@@ -162,7 +187,7 @@ nyxid oauth bindings revoke <hash> [--yes]
 Machine-to-machine identities for the OAuth2 `client_credentials` grant. The `client_secret` is shown once at create / rotate.
 
 ```bash
-nyxid service-account create --name <name> --scopes "openid profile" [--org <id|slug|name>]
+nyxid service-account create --name <name> --scopes "llm:proxy roles" [--org <id|slug|name>]
 nyxid service-account list [--org <id|slug|name>] [--search <q>]
 nyxid service-account show <id>
 nyxid service-account update <id> [--name|--scopes|--is-active <bool>]
@@ -207,7 +232,34 @@ nyxid channel-bot list [--org <id|slug|name>]
 nyxid channel-bot show <id>
 nyxid channel-bot delete <id> [--yes]
 nyxid channel-bot verify <id>                # re-check token + re-register webhook
+nyxid channel-bot health <id>                # delivery diagnostics + recommended action
 ```
+
+### channel-bot connect-link
+
+Create a tracked bot setup request and return immediately without polling:
+
+```bash
+nyxid channel-bot connect-link discord --label "Support bot" \
+  --webhook-url https://app.example.com/events/nyxid \
+  --webhook-signing-secret-file ./nyxid-webhook.key \
+  --callback-url https://app.example.com/setup/return \
+  --expires-in 900 --output json
+nyxid channel-bot connect-link-status <request-id> --output json
+nyxid channel-bot cancel-connect-link <request-id> --output json
+```
+
+`--org <id|slug|name>` selects an organization you administer. `--requested-by`
+sets an app display name; authenticated agent-key and OAuth app names take
+precedence. Direct webhooks require `--webhook-signing-secret-file` to save the
+one-time signing secret for your receiver.
+The webhook receives signed `channel_connect.completed`, `.cancelled`, or
+`.expired` events. The optional browser callback runs after explicit user
+continuation. `connect-link-status` is available for diagnostics and recovery;
+it returns no tokens or secrets. Existing `nyxid connect` service commands and
+`channel-bot register --managed` retain their current behavior.
+
+The CLI creates the secret file with mode `0600` on Unix and refuses existing files or symlinks before creating the request. JSON and terminal output contain the file path and signing key ID, never the signing secret. JSON uses `webhook_signing_secret_file` for the path. Configure your receiver with the file's contents. The HTTP API still returns the signing secret once to the creating platform. This command does not use the browser secret-delivery wizard or require `--no-wait`. See [Receive a completion callback](/docs/web/guides/channel-bots#receive-a-completion-callback) for signature verification and [connect](#connect) for service connection links.
 
 ### channel-bot route
 

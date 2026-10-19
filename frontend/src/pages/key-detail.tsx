@@ -1,3 +1,7 @@
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
+import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
+import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
+import { CredentialBindingCard } from "@/components/dashboard/credential-binding-card";
 import { useEffect, useMemo, useState } from "react";
 import {
   Link,
@@ -15,6 +19,7 @@ import {
   useCatalogEntry,
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { useAuthStore } from "@/stores/auth-store";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
 import { grantRevocationDescription } from "@/schemas/oauth-revocation";
@@ -66,6 +71,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { KEY_DETAIL_TABS, KEY_DETAIL_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
+import { useBreadcrumbSection } from "@/components/layout/breadcrumb-context";
 import {
   Globe,
   KeyRound,
@@ -122,7 +129,7 @@ function LarkPermissionSetupCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-text-tertiary" />
-            <CardTitle className="text-[15px]">Configure Permissions</CardTitle>
+            <CardTitle className="text-15">Configure Permissions</CardTitle>
           </div>
           <Button variant="primary" asChild>
             <a href={url} target="_blank" rel="noopener noreferrer">
@@ -155,6 +162,127 @@ function LarkPermissionSetupCard({
               ))}
             </ul>
           </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+const GOOGLE_SCOPE_PREFIX = "https://www.googleapis.com/auth/";
+const GOOGLE_WORKSPACE_SERVICE_SLUGS = new Set([
+  "api-google-workspace",
+  "api-google-calendar",
+  "api-google-drive",
+  "api-google-gmail",
+  "api-google-docs",
+  "api-google-sheets",
+  "api-google-slides",
+]);
+
+function GooglePermissionsSection({
+  product,
+  grantedScopes,
+  lastAuthorizedAt,
+  onRefresh,
+  refreshing,
+}: {
+  readonly product: string;
+  readonly grantedScopes?: readonly string[] | null;
+  readonly lastAuthorizedAt?: string | null;
+  readonly onRefresh: () => void;
+  readonly refreshing: boolean;
+}) {
+  const granted = grantedScopes?.length ? new Set(grantedScopes) : null;
+  const has = (scope: string) => granted?.has(`${GOOGLE_SCOPE_PREFIX}${scope}`) ?? false;
+  const access = (scope: string) =>
+    granted === null ? "Unknown" : has(scope) ? "Granted" : "Not granted";
+  const driveAccess = granted === null
+    ? "Unknown"
+    : has("drive")
+      ? "Full access"
+      : has("drive.file") && has("drive.readonly")
+        ? "Read + app files"
+        : has("drive.file")
+          ? "App files"
+          : has("drive.readonly")
+            ? "Read only"
+            : "Not granted";
+  const calendarAccess = granted === null
+    ? "Unknown"
+    : has("calendar")
+      ? "Full access"
+      : has("calendar.readonly")
+        ? "Read only"
+        : "Not granted";
+  const driveLabels: Record<string, string> = {
+    "api-google-drive": "Drive, Docs, Sheets, Slides",
+    "api-google-docs": "Docs",
+    "api-google-sheets": "Sheets",
+    "api-google-slides": "Slides",
+  };
+  const rows = product === "api-google-workspace"
+    ? [
+        ["Drive, Docs, Sheets, Slides", driveAccess],
+        ["Calendar", calendarAccess],
+        ["Gmail read", access("gmail.readonly")],
+        ["Gmail send", access("gmail.send")],
+      ]
+    : product === "api-google-gmail" ? [
+        ["Gmail read", access("gmail.readonly")],
+        ["Gmail send", access("gmail.send")],
+      ] : product === "api-google-calendar" ? [
+        ["Calendar", calendarAccess],
+      ] : [[driveLabels[product] ?? "Drive", driveAccess]];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-text-tertiary" />
+            <CardTitle className="text-15">Google permissions</CardTitle>
+          </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Refresh saved permissions"
+            title="Refresh saved permissions"
+            disabled={refreshing}
+            onClick={onRefresh}
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+        </div>
+        <CardDescription>
+          Last reported by Google at authorization or token refresh. Access can
+          change before the next token refresh.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <dl className="divide-y divide-border/50">
+          {rows.map(([label, value]) => (
+            <div key={label} className="flex items-center justify-between gap-3 py-2 text-12">
+              <dt>{label}</dt>
+              <dd>
+                <Badge variant={value === "Not granted" ? "warning" : value === "Unknown" ? "secondary" : "success"}>
+                  {value}
+                </Badge>
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {lastAuthorizedAt && (
+          <p className="text-11 text-muted-foreground">
+            Last authorized {new Date(lastAuthorizedAt).toLocaleString()}
+          </p>
+        )}
+        {granted && (
+          <details className="text-11 text-muted-foreground">
+            <summary className="cursor-pointer">Reported OAuth scopes</summary>
+            <ul className="mt-2 space-y-1 break-all font-mono">
+              {grantedScopes?.map((scope) => <li key={scope}>{scope}</li>)}
+            </ul>
+          </details>
         )}
       </CardContent>
     </Card>
@@ -211,8 +339,8 @@ function EndpointSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Globe className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Endpoint</CardTitle>
+          <Globe className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Endpoint</CardTitle>
         </div>
         <CardDescription>Target URL for proxied requests</CardDescription>
       </CardHeader>
@@ -223,7 +351,7 @@ function EndpointSection({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://api.example.com/v1"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -253,7 +381,7 @@ function EndpointSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-[12px]">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
               {endpointUrl}
             </code>
             {!readOnly && (
@@ -329,8 +457,8 @@ function OpenApiSpecSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">OpenAPI Spec</CardTitle>
+          <FileJson className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">OpenAPI Spec</CardTitle>
         </div>
         <CardDescription>
           Optional — lets AI agents discover concrete API operations instead of
@@ -344,7 +472,7 @@ function OpenApiSpecSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="https://api.example.com/openapi.json"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
               type="url"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
@@ -361,7 +489,7 @@ function OpenApiSpecSection({
           </div>
         ) : specUrl ? (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-[12px]">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
               {specUrl}
             </code>
             {!readOnly && (
@@ -397,10 +525,12 @@ function OpenApiSpecSection({
 
 function RecommendedSkillsSection({
   endpointId,
+  serviceId,
   skills,
   readOnly = false,
 }: {
   readonly endpointId: string;
+  readonly serviceId?: string;
   readonly skills: readonly string[];
   readonly readOnly?: boolean;
 }) {
@@ -408,6 +538,7 @@ function RecommendedSkillsSection({
   // Seeded only when entering edit mode, mirroring OpenApiSpecSection.
   const [draft, setDraft] = useState("");
   const updateEndpoint = useUpdateEndpoint();
+  const updateKey = useUpdateKey();
 
   function handleEdit() {
     setDraft(skills.join(", "));
@@ -419,26 +550,28 @@ function RecommendedSkillsSection({
       .split(",")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
-    updateEndpoint.mutate(
-      { endpointId, recommended_skills: list },
-      {
-        onSuccess: () => {
-          toast.success(
-            list.length > 0
-              ? "Recommended skills saved"
-              : "Recommended skills cleared",
-          );
-          setEditing(false);
-        },
-        onError: (err) => {
-          const message =
-            err instanceof ApiError
-              ? err.message
-              : "Failed to update recommended skills";
-          toast.error(message);
-        },
+    const callbacks = {
+      onSuccess: () => {
+        toast.success(
+          list.length > 0
+            ? "Recommended skills saved"
+            : "Recommended skills cleared",
+        );
+        setEditing(false);
       },
-    );
+      onError: (err: unknown) => {
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : "Failed to update recommended skills";
+        toast.error(message);
+      },
+    };
+    if (serviceId) {
+      updateKey.mutate({ keyId: serviceId, recommended_skills: list }, callbacks);
+    } else {
+      updateEndpoint.mutate({ endpointId, recommended_skills: list }, callbacks);
+    }
   }
 
   function handleCancel() {
@@ -449,8 +582,8 @@ function RecommendedSkillsSection({
     <Card className="h-full">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Recommended Skills</CardTitle>
+          <FileJson className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Recommended Skills</CardTitle>
         </div>
         <CardDescription>
           Optional — skill names (Ornn or bundled) agents should load to use
@@ -464,7 +597,7 @@ function RecommendedSkillsSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="nyxid-service-skill-authoring, my-service-skill"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -473,7 +606,7 @@ function RecommendedSkillsSection({
               size="icon"
               variant="ghost"
               onClick={handleSave}
-              disabled={updateEndpoint.isPending}
+              disabled={updateEndpoint.isPending || updateKey.isPending}
             >
               <Check className="h-4 w-4" />
             </Button>
@@ -485,7 +618,7 @@ function RecommendedSkillsSection({
                 <Badge
                   key={skill}
                   variant="secondary"
-                  className="font-mono text-[11px]"
+                  className="font-mono text-11"
                 >
                   {skill}
                 </Badge>
@@ -579,8 +712,8 @@ function ApiKeySection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">API Key</CardTitle>
+            <KeyRound className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">API Key</CardTitle>
           </div>
           {showRotateInHeader && (
             <Button
@@ -793,8 +926,8 @@ function ServiceSection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Server className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Service</CardTitle>
+            <Server className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">Service</CardTitle>
           </div>
           {/* Disable is reversible, so it is not a destructive action —
               `destructive` (red) is reserved for Delete, the one action here
@@ -828,7 +961,7 @@ function ServiceSection({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <code className="rounded bg-muted px-2 py-1 font-mono text-[12px]">
+          <code className="rounded bg-muted px-2 py-1 font-mono text-12">
             /proxy/s/{slug}
           </code>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
@@ -914,8 +1047,8 @@ function UserAgentOverrideSection({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Server className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">User-Agent override</CardTitle>
+          <Server className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">User-Agent override</CardTitle>
         </div>
         <CardDescription>
           Optional outgoing User-Agent override for proxied HTTP requests.
@@ -1041,8 +1174,8 @@ function NodeSetupHelper({
     <Card className="min-w-0 md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Node Setup</CardTitle>
+          <Terminal className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Node Setup</CardTitle>
         </div>
         <CardDescription>
           Run this on your node to configure credentials
@@ -1050,7 +1183,7 @@ function NodeSetupHelper({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-[11px] font-medium text-muted-foreground">
+        <p className="text-11 font-medium text-muted-foreground">
           Recommended (auto-detects requirements):
         </p>
         <div className="relative">
@@ -1066,7 +1199,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-[11px] font-medium text-muted-foreground">Manual:</p>
+        <p className="text-11 font-medium text-muted-foreground">Manual:</p>
         <div className="relative">
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
             {manualCommand}
@@ -1080,7 +1213,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           The agent will prompt for the secret value securely. After adding, the
           credential will be encrypted and stored locally on the node.
         </p>
@@ -1113,15 +1246,15 @@ function SshConnectionSection({
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Shield className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">SSH Connection</CardTitle>
+          <Shield className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">SSH Connection</CardTitle>
         </div>
         <CardDescription>
           SSH certificate authentication details
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 text-[12px] sm:grid-cols-2">
+        <div className="grid gap-4 text-12 sm:grid-cols-2">
           <div>
             <span className="text-xs font-medium text-muted-foreground">
               Host
@@ -1434,8 +1567,8 @@ function ApiUsageSection({
       <CardHeader className="pb-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-center gap-2">
-            <Code className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">API Usage</CardTitle>
+            <Code className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">API Usage</CardTitle>
           </div>
           {showAgentSetup && (
             <Button variant="outline" asChild>
@@ -1461,11 +1594,11 @@ function ApiUsageSection({
       </CardHeader>
       <CardContent className="min-w-0 space-y-4">
         <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
             Base URL
           </p>
           <div className="relative">
-            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-[12px]">
+            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-12">
               {proxyUrl}
             </pre>
             <Button
@@ -1477,7 +1610,7 @@ function ApiUsageSection({
               <Copy className="h-3.5 w-3.5" />
             </Button>
           </div>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
+          <p className="mt-1.5 text-11 text-muted-foreground">
             Append the downstream API path after this URL
             {examplePath ? (
               <>
@@ -1492,7 +1625,7 @@ function ApiUsageSection({
             . {authNote}
           </p>
           {showGenericEndpointExample && (
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
+            <p className="mt-1.5 text-11 text-muted-foreground">
               Run{" "}
               <code className="rounded bg-background px-1">
                 nyxid catalog endpoints {catalogSlug}
@@ -1503,7 +1636,7 @@ function ApiUsageSection({
         </div>
 
         <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
             Authentication
           </p>
           <div className="space-y-2 text-xs text-muted-foreground">
@@ -1518,7 +1651,7 @@ function ApiUsageSection({
                 <Link
                   to="/keys"
                   search={{ tab: "nyxid" }}
-                  className="font-medium text-primary underline-offset-4 hover:underline"
+                  className="font-medium text-primary-text underline-offset-4 hover:underline"
                 >
                   Agent Keys
                 </Link>{" "}
@@ -1539,11 +1672,11 @@ function ApiUsageSection({
 
         {apiKeyExample && (
           <div>
-            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            <p className="mb-1.5 text-11 font-medium text-muted-foreground">
               Example (with API key)
             </p>
             {modelExample.needsProviderModelNote && requestBody && (
-              <p className="mb-1.5 text-[11px] text-muted-foreground">
+              <p className="mb-1.5 text-11 text-muted-foreground">
                 Replace{" "}
                 <code className="rounded bg-background px-1">gpt-4o</code> with
                 your provider&apos;s model.
@@ -1571,7 +1704,7 @@ function ApiUsageSection({
               Advanced: Bearer token example
             </summary>
             <div className="mt-3 space-y-2">
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 Bearer auth is intended for self-hosted deployments or
                 environments where you already have a NyxID access token. For
                 most users, prefer the API Key example above.
@@ -1631,6 +1764,7 @@ function DeleteKeyDialog({
           response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
             : "Removed from NyxID. Upstream access remains active.",
+          { action: { label: "View history", onClick: () => { void navigate({ to: "/keys/$keyId", params: { keyId } }); } }, duration: 15000 },
         );
         close();
         void navigate({ to: "/keys", search: {} });
@@ -1714,7 +1848,7 @@ function LabelEditor({
   if (readOnly) {
     return (
       <h2
-        className="text-[28px] font-bold leading-none tracking-tight"
+        className="text-28 font-bold leading-none tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1781,7 +1915,7 @@ function LabelEditor({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className="text-[28px] font-bold leading-none tracking-tight"
+        className="text-28 font-bold leading-none tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1795,6 +1929,123 @@ function LabelEditor({
         <Pencil className="h-4 w-4" />
       </Button>
     </div>
+  );
+}
+
+function IconEditor({
+  keyId,
+  slug,
+  iconUrl,
+  catalogIconUrl,
+  readOnly,
+}: {
+  readonly keyId: string;
+  readonly slug: string;
+  /** This connection's own override, edited here. */
+  readonly iconUrl?: string | null;
+  /** The catalog icon shown when there is no override. */
+  readonly catalogIconUrl?: string | null;
+  readonly readOnly: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(iconUrl ?? "");
+  const updateKey = useUpdateKey();
+  const trimmed = draft.trim();
+  let valid = trimmed.length === 0;
+  if (trimmed.length > 0 && trimmed.length <= 2048 && isValidHttpUrl(trimmed)) {
+    const parsed = new URL(trimmed);
+    valid = !parsed.username && !parsed.password && !trimmed.includes("#");
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) setDraft(iconUrl ?? "");
+    setOpen(nextOpen);
+  }
+
+  function handleSave() {
+    if (!valid) return;
+    updateKey.mutate(
+      { keyId, icon_url: trimmed },
+      {
+        onSuccess: () => {
+          toast.success(
+            trimmed ? "Service icon updated" : "Default icon restored",
+          );
+          setOpen(false);
+        },
+        onError: (error) => {
+          toast.error(
+            error instanceof ApiError ? error.message : "Failed to update icon",
+          );
+        },
+      },
+    );
+  }
+
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-1">
+        <ServiceIcon slug={slug} iconUrl={iconUrl || catalogIconUrl} size="md" />
+        {!readOnly && (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-6 w-6"
+            title="Change service icon"
+            aria-label="Change service icon"
+            onClick={() => handleOpenChange(true)}
+          >
+            <Pencil className="h-3 w-3" />
+          </Button>
+        )}
+      </div>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Service icon</DialogTitle>
+            <DialogDescription>Use an image URL for this service.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-3 py-2">
+            <ServiceIcon
+              slug={slug}
+              iconUrl={valid ? trimmed || catalogIconUrl : iconUrl || catalogIconUrl}
+              size="lg"
+            />
+            <div className="min-w-0 flex-1 space-y-2">
+              <Label htmlFor="service-icon-url">Image URL</Label>
+              <Input
+                id="service-icon-url"
+                type="url"
+                value={draft}
+                maxLength={2048}
+                placeholder="https://example.com/icon.svg"
+                onChange={(event) => setDraft(event.target.value)}
+                aria-invalid={!valid}
+              />
+              {!valid && (
+                <p className="text-xs text-destructive">
+                  Enter an HTTP(S) image URL without credentials or a fragment.
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDraft("")} disabled={!draft}>
+              Use default
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleSave}
+              disabled={
+                !valid || trimmed === (iconUrl ?? "") || updateKey.isPending
+              }
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -1833,8 +2084,8 @@ function AccessPolicySection({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <ShieldCheck className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Access policy</CardTitle>
+          <ShieldCheck className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Access policy</CardTitle>
         </div>
         <CardDescription>
           Org-owned services can require an admin role for proxy execution.
@@ -1846,7 +2097,7 @@ function AccessPolicySection({
             <Label htmlFor="admin-only-policy" className="text-xs font-medium">
               Admin-only execution
             </Label>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               When enabled, regular organization members cannot proxy this
               service. Organization admins retain access.
             </p>
@@ -1939,8 +2190,8 @@ function DefaultHeadersSection({
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Default request headers</CardTitle>
+          <FileJson className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Default request headers</CardTitle>
         </div>
         <CardDescription>
           Headers NyxID injects on every proxied request for this service.
@@ -1952,7 +2203,7 @@ function DefaultHeadersSection({
       <CardContent className="space-y-4">
         {catalogHeaders && catalogHeaders.length > 0 && (
           <div className="space-y-2">
-            <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
               From catalog (admin-configured)
             </p>
             <DefaultHeadersEditor
@@ -1968,7 +2219,7 @@ function DefaultHeadersSection({
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
               Your headers
             </p>
             {!readOnly && !editing && (
@@ -2101,10 +2352,10 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-[13px] font-semibold text-foreground">
+          <h3 className="text-13 font-semibold text-foreground">
             WebSocket auth frames
           </h3>
-          <p className="text-[11px] text-muted-foreground mt-0.5">
+          <p className="text-11 text-muted-foreground mt-0.5">
             User-owned frame injection rules for post-upgrade auth.
           </p>
         </div>
@@ -2153,7 +2404,7 @@ function WsFrameInjectionsSection({
         <div className="px-5 py-4">
           <Badge variant="secondary">{rules.length}/4 rules</Badge>
           {rules.length === 0 && (
-            <p className="mt-2 text-[12px] text-muted-foreground">
+            <p className="mt-2 text-12 text-muted-foreground">
               No user-owned WebSocket auth-frame rules.
             </p>
           )}
@@ -2165,12 +2416,27 @@ function WsFrameInjectionsSection({
 
 export function KeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
+  const identity = useAuthStore((state) => state.user?.id);
+  return <KeyDetailView key={JSON.stringify([identity, keyId])} keyId={keyId} />;
+}
+
+function KeyDetailView({ keyId }: { readonly keyId: string }) {
   const navigate = useNavigate();
+  const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
+    readonly tab?: string;
     readonly provider_status?: string;
     readonly message?: string;
   };
-  const { data: keyInfo, isLoading, error, refetch } = useKey(keyId);
+  const { data: keyInfo, isLoading, isFetching, error, refetch } = useKey(keyId);
+  const { data: transferAuthorization } = useOwnershipTransferAuthorization(
+    "service",
+    keyInfo?.catalog_service_id ?? "",
+    identity,
+  );
+  const catalogTransferResource = transferAuthorization?.can_transfer
+    ? transferAuthorization.resource
+    : null;
   // Issue #416: resolve the bound node's name so the auto-connected
   // detail branch can show real routing instead of a hardcoded
   // "Direct" label. Auto-connected services don't expose a routing
@@ -2194,6 +2460,16 @@ export function KeyDetailPage() {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
+  const requestedTab = parseTab(search.tab, KEY_DETAIL_TABS, KEY_DETAIL_TAB_DEFAULT);
+  const platformManaged = keyInfo?.auto_connected || keyInfo?.credential_binding === "platform";
+  const tab = (requestedTab === "history" && !keyInfo?.authorship) ||
+    (requestedTab === "advanced" && platformManaged && !catalogTransferResource)
+    ? KEY_DETAIL_TAB_DEFAULT : requestedTab;
+  useBreadcrumbSection(tab);
+
+  function setTab(value: string) {
+    void navigate({ to: "/keys/$keyId", params: { keyId }, search: { tab: value }, replace: true });
+  }
 
   const catalogHeaders = useMemo<readonly DefaultRequestHeader[] | null>(() => {
     if (!catalogEntry?.default_request_headers) return null;
@@ -2211,7 +2487,7 @@ export function KeyDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.provider_status]);
 
-  if (isLoading) {
+  if (isLoading && !keyInfo) {
     return (
       <div className="space-y-8">
         <Skeleton className="h-20 w-full" />
@@ -2224,18 +2500,21 @@ export function KeyDetailPage() {
     );
   }
 
-  if (error || !keyInfo) {
+  if (!keyInfo) {
+    const retainedHistory = /^[0-9a-f-]{36}$/i.test(keyId);
+    const detailsMissing = retainedHistory && error instanceof ApiError && error.status === 404;
     return (
       <div className="space-y-8">
-        <PageHeader title="Key Not Found" />
-        <ErrorBanner
+        <PageHeader title={detailsMissing ? "Service history" : "Service details unavailable"} />
+        {retainedHistory && <ServiceHistory serviceId={keyId} />}
+        {!detailsMissing && <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
               : "Failed to load key details."
           }
           onRetry={refetch}
-        />
+        />}
       </div>
     );
   }
@@ -2281,6 +2560,7 @@ export function KeyDetailPage() {
     !keyInfo.credential_missing &&
     keyInfo.status === "active" &&
     !isOpenAiDeviceCode &&
+    catalogEntry?.supports_oauth_scopes !== false &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
@@ -2301,14 +2581,35 @@ export function KeyDetailPage() {
 
   return (
     <div className="space-y-8">
+      {error && (
+        <ErrorBanner
+          message="Unable to refresh service details. Your unsaved edits are preserved."
+          onRetry={refetch}
+        />
+      )}
+      {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
+          <p>Local preview · full details from production. Account changes and execution are disabled.</p>
+          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
+        </div>
+      )}
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">
+        ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
+      </Link>
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
+            <IconEditor
+              keyId={keyInfo.id}
+              slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
+              iconUrl={keyInfo.icon_url}
+              catalogIconUrl={keyInfo.catalog_icon_url}
+              readOnly={readOnly}
+            />
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2
-                  className="text-[28px] font-bold leading-none tracking-tight"
+                  className="text-28 font-bold leading-none tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
                 >
                   {keyInfo.label}
@@ -2321,7 +2622,7 @@ export function KeyDetailPage() {
                 />
               )}
               <div className="flex items-center gap-2">
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   {keyInfo.catalog_service_name
                     ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
                     : `/proxy/s/${keyInfo.slug}`}
@@ -2393,10 +2694,10 @@ export function KeyDetailPage() {
               <Shield className="h-4.5 w-4.5 text-success" />
             </div>
             <div>
-              <p className="text-[13px] font-semibold text-foreground">
+              <p className="text-13 font-semibold text-foreground">
                 Shared from {source.org_name}
               </p>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 You are a {source.role} of this organization and can
                 {source.allowed
                   ? " use this credential through the proxy, but only admins can modify it."
@@ -2409,10 +2710,10 @@ export function KeyDetailPage() {
           <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <div className="space-y-1">
-              <p className="text-[13px] font-semibold text-foreground">
+              <p className="text-13 font-semibold text-foreground">
                 Credential missing
               </p>
-              <p className="text-[12px] text-warning">
+              <p className="text-12 text-warning">
                 The stored credential no longer exists. Reconnect or delete this service.
               </p>
             </div>
@@ -2420,15 +2721,28 @@ export function KeyDetailPage() {
         )}
       </div>
 
-      {keyInfo.auto_connected ? (
-        <>
+      {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
+
+      <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
+      {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
+        <Tabs
+          value={tab}
+          onValueChange={setTab}
+          className="space-y-6"
+        >
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            {catalogTransferResource && <TabsTrigger value="advanced">Advanced</TabsTrigger>}
+            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+          </TabsList>
+          <TabsContent value="overview" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-[15px]">Service Details</CardTitle>
+              <CardTitle className="text-15">Service Details</CardTitle>
               <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid gap-4 text-[12px] sm:grid-cols-2">
+              <div className="grid gap-4 text-12 sm:grid-cols-2">
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
                     Endpoint
@@ -2489,12 +2803,43 @@ export function KeyDetailPage() {
             />
           )}
 
+          {!keyInfo.auto_connected && (
+            <div className="space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <RecommendedSkillsSection
+                  endpointId={keyInfo.endpoint_id}
+                  serviceId={keyInfo.id}
+                  skills={keyInfo.recommended_skills ?? []}
+                  readOnly={readOnly}
+                />
+                <UserAgentOverrideSection
+                  serviceId={keyInfo.id}
+                  customUserAgent={keyInfo.custom_user_agent}
+                  readOnly={readOnly}
+                />
+                {isOrgSource && (
+                  <AccessPolicySection
+                    serviceId={keyInfo.id}
+                    adminOnly={keyInfo.admin_only ?? false}
+                    readOnly={readOnly}
+                  />
+                )}
+              </div>
+              <DefaultHeadersSection
+                serviceId={keyInfo.id}
+                userHeaders={keyInfo.default_request_headers ?? []}
+                catalogHeaders={catalogHeaders}
+                readOnly={readOnly}
+              />
+            </div>
+          )}
+
           {/* Auto-connected keys still have catalog-level default headers
               applied at proxy time (NyxID#356). Surface them read-only so
               users can see why those headers reach the downstream. Keep this
               behind disclosure so verification stays before inherited HTTP
               mechanics. */}
-          {!isSsh && catalogHeaders && catalogHeaders.length > 0 && (
+          {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
               <summary className="cursor-pointer text-sm font-medium text-foreground">
                 Advanced: inherited request headers
@@ -2509,12 +2854,20 @@ export function KeyDetailPage() {
               </div>
             </details>
           )}
-        </>
+          </TabsContent>
+          {catalogTransferResource && (
+            <TabsContent value="advanced" className="space-y-4">
+              <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
+            </TabsContent>
+          )}
+          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
+        </Tabs>
       ) : (
-        <Tabs defaultValue="overview" className="space-y-4">
+        <Tabs value={tab} onValueChange={setTab} className="space-y-6">
           <TabsList className="w-full max-w-full">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="advanced">Advanced</TabsTrigger>
+            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
@@ -2554,6 +2907,16 @@ export function KeyDetailPage() {
                 readOnly={readOnly}
               />
             </div>
+
+            {GOOGLE_WORKSPACE_SERVICE_SLUGS.has(keyInfo.catalog_service_slug ?? "") && (
+              <GooglePermissionsSection
+                product={keyInfo.catalog_service_slug ?? ""}
+                grantedScopes={keyInfo.granted_scopes}
+                lastAuthorizedAt={keyInfo.last_authorized_at}
+                onRefresh={() => void refetch()}
+                refreshing={isFetching}
+              />
+            )}
 
             {!isSsh && (
               <ApiUsageSection
@@ -2666,7 +3029,11 @@ export function KeyDetailPage() {
                   certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
                 />
               )}
+            {catalogTransferResource && (
+              <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
+            )}
           </TabsContent>
+          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
         </Tabs>
       )}
 

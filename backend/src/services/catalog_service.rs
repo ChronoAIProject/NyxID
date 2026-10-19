@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
+use super::ownership_transfer_service::{catalog_owner, catalog_owner_filter};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 #[cfg(test)]
 use crate::models::org_membership::OrgMembership;
@@ -17,10 +18,15 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{catalog_spec_sync, org_service, role_service};
+use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
@@ -50,6 +56,7 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917),
     /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
     /// for providers with no curated catalog. The connect UIs render these as
@@ -62,6 +69,8 @@ pub struct CatalogEntry {
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: HashMap<String, String>,
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -85,13 +94,19 @@ pub struct CatalogEntry {
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
-    pub capabilities: Option<ServiceCapabilities>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     pub billing: Option<ServiceBilling>,
+    pub inference: Option<super::inference_service::InferenceView>,
+    pub platform_key: super::inference_service::PlatformKeyView,
+    pub byok_pricing: Option<super::inference_service::LanePricingView>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: i64,
+    pub skills_manifest_digest: String,
     /// Declared credential fields for `token_exchange` services. When set,
     /// clients should render one input per field (text vs password per the
     /// `secret` flag) and compose a JSON object from the values before
@@ -122,7 +137,50 @@ fn build_catalog_entry(
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     let platform_client_id_present = oauth_client_id.is_some();
+    let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
+        &crate::services::catalog_skill_service::state(&svc),
+    );
+    let google_product = provider
+        .filter(|p| p.slug == "google")
+        .and_then(|_| super::google_workspace::GoogleProduct::from_slug(&svc.slug));
+    let default_scopes = google_product
+        .map(|p| p.default_scopes())
+        .or_else(|| provider.and_then(|p| p.default_scopes.clone()));
+    let mut scope_catalog = provider.and_then(|p| super::scope_catalog::for_provider(&p.slug));
+    if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
+        let allowed = product.allowed_scopes();
+        catalog.retain(|entry| allowed.contains(&entry.scope));
+    }
+    let platform_available = super::platform_key_service::has_platform_key(&svc)
+        && svc.platform_key.as_ref().is_none_or(|p| {
+            p.audience == crate::models::downstream_service::PlatformKeyAudience::Public
+        });
+    let capabilities = super::inference_service::capabilities(&svc);
+    let inference =
+        super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), platform_available);
+    let platform_key = super::inference_service::PlatformKeyView {
+        available: platform_available,
+        pricing: svc
+            .billing
+            .as_ref()
+            .and_then(|b| b.platform_key_pricing.as_ref())
+            .map(Into::into),
+    };
+    let byok_pricing = svc
+        .billing
+        .as_ref()
+        .and_then(|b| b.byok_pricing.as_ref())
+        .map(Into::into);
+    // Computed before the literal moves fields out of `svc`.
+    let icon_url = catalog_icon_url(&svc, provider);
     CatalogEntry {
+        offering_kind: svc.offering_kind,
+        topics: svc.topics.clone(),
+        supplier: svc.supplier.clone(),
+        import_source: svc.import_source.clone(),
+        inference,
+        platform_key,
+        byok_pricing,
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
         ssh_port: svc.ssh_config.as_ref().map(|c| c.port),
@@ -161,7 +219,7 @@ fn build_catalog_entry(
         requires_gateway_url: provider.is_some_and(|p| p.requires_gateway_url),
         api_key_instructions: provider.and_then(|p| p.api_key_instructions.clone()),
         api_key_url: provider.and_then(|p| p.api_key_url.clone()),
-        icon_url: provider.and_then(|p| p.icon_url.clone()),
+        icon_url,
         documentation_url: provider.and_then(|p| p.documentation_url.clone()),
         credential_mode: provider.map(|p| p.credential_mode.clone()),
         // OAuth config
@@ -170,13 +228,26 @@ fn build_catalog_entry(
         device_code_url: provider.and_then(|p| p.device_code_url.clone()),
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
-        default_scopes: provider.and_then(|p| p.default_scopes.clone()),
-        scope_catalog: provider.and_then(|p| crate::services::scope_catalog::for_provider(&p.slug)),
+        default_scopes,
+        supports_oauth_scopes: provider.is_none_or(|p| p.supports_oauth_scopes),
+        scope_catalog,
         scope_removal: provider
             .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),
+        token_request_encoding: provider.and_then(|p| p.token_request_encoding.clone()),
+        oauth_request_headers: provider
+            .map(|p| {
+                p.oauth_request_headers
+                    .iter()
+                    .filter(|(name, value)| {
+                        crate::models::provider_config::is_public_oauth_header(name, value)
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
@@ -195,9 +266,11 @@ fn build_catalog_entry(
                     || p.credential_mode == "user"
                     || (platform_client_id_present && platform_secret_present))
         }),
-        platform_scope_allowlist: provider.and_then(|p| {
-            crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
-                .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+        platform_scope_allowlist: google_product.map(|p| p.allowed_scopes()).or_else(|| {
+            provider.and_then(|p| {
+                crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
+                    .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+            })
         }),
         requires_credential,
         openapi_spec_url: svc.openapi_spec_url,
@@ -205,15 +278,32 @@ fn build_catalog_entry(
         homepage_url: svc.homepage_url,
         repository_url: svc.repository_url,
         issues_url: svc.issues_url,
-        capabilities: svc.capabilities,
+        capabilities,
         billing: svc.billing,
         auth_notes: svc.auth_notes,
         known_limitations: svc.known_limitations,
         required_permissions: svc.required_permissions,
         examples_url: svc.examples_url,
         recommended_skills: svc.recommended_skills,
+        recommended_skill_refs: svc.recommended_skill_refs,
+        skills_revision: svc.skills_revision,
+        skills_manifest_digest,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
         default_request_headers: svc.default_request_headers,
+    }
+}
+
+/// The icon a catalog service displays: a Tool offering's own icon, otherwise
+/// its provider's icon. Connection views reuse it as the fallback below a
+/// per-connection override.
+pub(crate) fn catalog_icon_url(
+    svc: &DownstreamService,
+    provider: Option<&ProviderConfig>,
+) -> Option<String> {
+    if svc.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        svc.icon_url.clone()
+    } else {
+        provider.and_then(|p| p.icon_url.clone())
     }
 }
 
@@ -257,12 +347,14 @@ async fn provider_platform_secret_nonempty(
 
 /// MongoDB filter for visibility that hides private services from non-owners.
 /// Public services and legacy documents without a visibility field are visible to all.
-fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+pub(crate) fn visibility_filter(user_id: &str, owner_ids: &[&str]) -> mongodb::bson::Document {
     doc! {
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
-            { "visibility": "private", "created_by": user_id },
+            { "$and": [{ "visibility": "private" }, catalog_owner_filter(user_id)] },
+            { "owner_user_id": { "$in": owner_ids } },
+            { "platform_key.enabled": true },
         ],
     }
 }
@@ -296,6 +388,7 @@ pub async fn list_catalog(
     list_catalog_filtered(
         db,
         encryption_keys,
+        user_id,
         doc! {
             "service_type": "http",
             "is_active": true,
@@ -305,15 +398,16 @@ pub async fn list_catalog(
                         { "requires_user_credential": true },
                         { "requires_user_credential": { "$exists": false } },
                         { "provider_config_id": { "$ne": null } },
+                        { "platform_key.enabled": true },
                     ],
                 },
                 legacy_service_category_filter(&["connection", "internal"]),
                 {
                     "$nor": [
                         { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                     ],
                 },
-                visibility_filter(user_id),
             ],
         },
     )
@@ -334,19 +428,30 @@ pub async fn list_catalog_all(
             {
                 "$nor": [
                     { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                 ],
             },
-            visibility_filter(user_id),
         ],
     };
-    list_catalog_filtered(db, encryption_keys, filter).await
+    list_catalog_filtered(db, encryption_keys, user_id, filter).await
 }
 
 async fn list_catalog_filtered(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-    filter: mongodb::bson::Document,
+    user_id: &str,
+    mut filter: mongodb::bson::Document,
 ) -> AppResult<Vec<CatalogEntry>> {
+    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let owner_ids: Vec<&str> = grants
+        .readable_owner_ids()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    filter
+        .get_array_mut("$and")
+        .map_err(|_| AppError::Internal("Missing catalog filter".into()))?
+        .push(visibility_filter(user_id, &owner_ids).into());
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(filter)
@@ -390,7 +495,13 @@ async fn list_catalog_filtered(
             .as_ref()
             .and_then(|pid| providers.iter().find(|p| &p.id == pid));
 
-        let spr = sprs.iter().find(|r| r.service_id == svc.id);
+        let spr = sprs.iter().find(|r| {
+            r.service_id == svc.id
+                && svc
+                    .provider_config_id
+                    .as_deref()
+                    .is_none_or(|id| id == r.provider_config_id)
+        });
 
         let oauth_client_id = match provider {
             Some(provider) if provider.credential_mode != "user" => {
@@ -408,13 +519,22 @@ async fn list_catalog_filtered(
             _ => false,
         };
 
-        resolved_entries.push(build_catalog_entry(
-            svc,
-            provider,
-            spr,
-            oauth_client_id,
-            platform_secret_present,
-        ));
+        let available =
+            super::platform_key_service::available_with_grants(&svc, provider, user_id, &grants);
+        if svc.visibility == "private"
+            && catalog_owner(&svc) != user_id
+            && !grants.readable_owner_ids().contains(catalog_owner(&svc))
+            && !available
+        {
+            continue;
+        }
+        let inference =
+            super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), available);
+        let mut entry =
+            build_catalog_entry(svc, provider, spr, oauth_client_id, platform_secret_present);
+        entry.platform_key.available = available;
+        entry.inference = inference;
+        resolved_entries.push(entry);
     }
 
     Ok(resolved_entries)
@@ -462,7 +582,7 @@ pub async fn get_downstream_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -478,12 +598,23 @@ pub async fn get_downstream_service_by_slug(
 /// Callers are responsible for loading `svc` first; both
 /// `get_catalog_entry` and `get_downstream_service_by_slug` use this
 /// helper so their visibility rules cannot drift.
-async fn enforce_catalog_read_access(
+pub(crate) async fn enforce_catalog_read_access(
     db: &mongodb::Database,
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
-    if svc.visibility != "private" || svc.created_by == user_id {
+    if svc.visibility != "private"
+        || catalog_owner(svc) == user_id
+        || super::platform_key_service::available(db, svc, user_id).await?
+    {
+        return Ok(());
+    }
+    if svc.owner_user_id.is_some()
+        && super::platform_key_service::OwnerGrants::load_for_listing(db, user_id)
+            .await?
+            .readable_owner_ids()
+            .contains(catalog_owner(svc))
+    {
         return Ok(());
     }
     let is_admin = match db
@@ -503,7 +634,7 @@ async fn enforce_catalog_read_access(
     };
     if !caller_may_read_catalog_entry(
         &svc.visibility,
-        &svc.created_by,
+        catalog_owner(svc),
         user_id,
         is_admin,
         has_active_user_service,
@@ -567,7 +698,7 @@ pub async fn get_catalog_entry(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -583,7 +714,7 @@ pub async fn get_catalog_entry(
 
     let spr = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .find_one(doc! { "service_id": &svc.id })
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(&svc))
         .await?;
 
     let oauth_client_id = match provider.as_ref() {
@@ -599,13 +730,19 @@ pub async fn get_catalog_entry(
         _ => false,
     };
 
-    Ok(build_catalog_entry(
+    let available = super::platform_key_service::available(db, &svc, user_id).await?;
+    let inference =
+        super::inference_service::view(&svc, provider.as_ref().map(|p| p.slug.as_str()), available);
+    let mut entry = build_catalog_entry(
         svc,
         provider.as_ref(),
         spr.as_ref(),
         oauth_client_id,
         platform_secret_present,
-    ))
+    );
+    entry.platform_key.available = available;
+    entry.inference = inference;
+    Ok(entry)
 }
 
 /// Does `user_id` have an active provisioned `UserService` for catalog
@@ -623,8 +760,7 @@ async fn has_active_user_service_for_catalog(
     catalog_service_id: &str,
 ) -> AppResult<bool> {
     // Fast path: personal row.
-    let personal = db
-        .collection::<UserService>(USER_SERVICES)
+    let personal = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! {
             "user_id": user_id,
             "catalog_service_id": catalog_service_id,
@@ -644,16 +780,16 @@ async fn has_active_user_service_for_catalog(
     }
 
     let org_user_ids: Vec<&str> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
-    let candidates: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": { "$in": &org_user_ids },
-            "catalog_service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let candidates: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": { "$in": &org_user_ids },
+                "catalog_service_id": catalog_service_id,
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     for us in candidates {
         let Some(membership) = memberships.iter().find(|m| m.org_user_id == us.user_id) else {
@@ -773,14 +909,19 @@ mod tests {
 
     fn user_service(id: &str, user_id: &str) -> UserService {
         UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -894,6 +1035,14 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),
@@ -903,6 +1052,10 @@ mod tests {
             requires_user_credential: true,
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             ..dummy_service()
         }
     }
@@ -1302,5 +1455,51 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].slug, "internal-svc");
+    }
+}
+
+#[cfg(test)]
+mod catalog_icon_tests {
+    use super::catalog_icon_url;
+    use crate::models::downstream_service::OfferingKind;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::models::provider_config::ProviderConfig;
+    use mongodb::bson::{self, doc};
+
+    fn provider_with_icon(icon_url: &str) -> ProviderConfig {
+        bson::from_document(doc! {
+            "_id": "provider-1",
+            "slug": "zoho-mail",
+            "name": "Zoho Mail",
+            "provider_type": "oauth2",
+            "is_active": true,
+            "credential_mode": "admin",
+            "created_by": "system",
+            "icon_url": icon_url,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        })
+        .expect("provider document")
+    }
+
+    #[test]
+    fn services_show_their_provider_icon_and_tools_their_own() {
+        let provider = provider_with_icon("https://nyx.example/catalog-icons/zoho");
+        let mut service = dummy_service();
+        service.icon_url = Some("https://nyx.example/catalog-icons/tool".to_string());
+
+        assert_eq!(
+            catalog_icon_url(&service, Some(&provider)).as_deref(),
+            Some("https://nyx.example/catalog-icons/zoho"),
+            "AI services inherit the provider icon"
+        );
+        assert_eq!(catalog_icon_url(&service, None), None);
+
+        service.offering_kind = OfferingKind::Tool;
+        assert_eq!(
+            catalog_icon_url(&service, Some(&provider)).as_deref(),
+            Some("https://nyx.example/catalog-icons/tool"),
+            "Tool offerings keep their own icon"
+        );
     }
 }

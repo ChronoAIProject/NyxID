@@ -65,6 +65,8 @@ pub struct ExecutionAuthorityProjection {
     pub user_service_id: String,
     pub destination_base_url: String,
     pub auth_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     pub auth_key_name: String,
     pub service_category: String,
     pub requires_user_credential: bool,
@@ -75,6 +77,7 @@ pub struct ExecutionAuthorityProjection {
     pub credential: CredentialProjection,
     pub identity_injection: IdentityInjectionProjection,
     pub default_headers: DefaultHeadersProjection,
+    #[serde(serialize_with = "serialize_policy_projection")]
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
     pub node_route: NodeRouteProjection,
 }
@@ -104,6 +107,7 @@ pub fn build_projection(
         user_service_id: resolution.user_service_id.clone(),
         destination_base_url: target.base_url.clone(),
         auth_method: target.auth_method.clone(),
+        auth_scheme: service.auth_scheme.clone(),
         auth_key_name: target.auth_key_name.clone(),
         service_category: service.service_category.clone(),
         requires_user_credential: service.requires_user_credential,
@@ -164,9 +168,32 @@ pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
         "credential": &projection.credential,
         "identity_injection": &projection.identity_injection,
         "default_headers": &projection.default_headers,
-        "proxy_operation_policy": &projection.proxy_operation_policy,
+        "proxy_operation_policy": policy_projection(projection.proxy_operation_policy.as_ref()),
         "node_route": &projection.node_route,
     }))
+}
+
+// Freeze the real v1/v2 nested policy shape explicitly. New routing selectors
+// are already bound by destination_base_url and the endpoint/catalog fences;
+// serializing the extended model here would silently redefine old projections.
+fn policy_projection(policy: Option<&ProxyOperationPolicy>) -> serde_json::Value {
+    match policy {
+        None => serde_json::Value::Null,
+        Some(policy) => serde_json::json!({"rules": policy.rules.iter().map(|rule| {
+            let mut value = serde_json::json!({"method": rule.method, "path_template": rule.path_template});
+            if !rule.path_parameter_constraints.is_empty() {
+                value["path_parameter_constraints"] = serde_json::json!(rule.path_parameter_constraints);
+            }
+            value
+        }).collect::<Vec<_>>() }),
+    }
+}
+
+fn serialize_policy_projection<S: serde::Serializer>(
+    policy: &Option<ProxyOperationPolicy>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    policy_projection(policy.as_ref()).serialize(serializer)
 }
 
 fn project_headers(headers: &[DefaultRequestHeader]) -> Vec<HeaderProjection> {
@@ -191,6 +218,7 @@ mod tests {
             user_service_id: "us-alpha".to_string(),
             destination_base_url: "https://api.example.test".to_string(),
             auth_method: "bearer".to_string(),
+            auth_scheme: None,
             auth_key_name: "Authorization".to_string(),
             service_category: "connection".to_string(),
             requires_user_credential: true,
@@ -231,6 +259,21 @@ mod tests {
     }
 
     #[test]
+    fn catalog_auth_scheme_binds_only_present_configuration() {
+        let mut projection = sample_projection();
+        let original = digest(&projection);
+        let value = serde_json::to_value(&projection).unwrap();
+        assert!(value.get("auth_scheme").is_none());
+        assert_eq!(original, mcp_service::canonical_sha256(value));
+        let v1 = legacy_digest(&projection);
+        projection.auth_scheme = Some("Zoho-oauthtoken".into());
+        assert_ne!(digest(&projection), original);
+        assert_eq!(legacy_digest(&projection), v1);
+        projection.auth_scheme = None;
+        assert_eq!(digest(&projection), original);
+    }
+
+    #[test]
     fn digest_is_deterministic_for_a_fixed_projection() {
         let first = digest(&sample_projection());
         let second = digest(&sample_projection());
@@ -259,6 +302,43 @@ mod tests {
             digest(&changed),
             "v2 must reject authority changes that v1 cannot observe"
         );
+    }
+
+    #[test]
+    fn workspace_preserves_v1_v2_policy_shape_and_binds_the_selected_origin() {
+        use crate::models::downstream_service::{ProxyOperationRule, ProxyPathConstraint};
+        let mut projection = sample_projection();
+        projection.proxy_operation_policy = Some(ProxyOperationPolicy {
+            rules: vec![ProxyOperationRule {
+                method: "GET".into(),
+                path_template: "/v4/spreadsheets/{id}/values/{range}".into(),
+                target_id: None,
+                path_parameter_constraints: [("range".into(), ProxyPathConstraint::SheetsA1Range)]
+                    .into(),
+            }],
+        });
+        // This literal is the pre-B nested policy, including A's path grammar.
+        let expected = serde_json::json!({"rules":[{
+            "method":"GET", "path_template":"/v4/spreadsheets/{id}/values/{range}",
+            "path_parameter_constraints":{"range":"sheets_a1_range"}
+        }]});
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["proxy_operation_policy"],
+            expected
+        );
+        let v1 = legacy_digest(&projection);
+        let v2 = digest(&projection);
+        projection.proxy_operation_policy.as_mut().unwrap().rules[0].target_id =
+            Some("sheets".into());
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["proxy_operation_policy"],
+            expected
+        );
+        assert_eq!(legacy_digest(&projection), v1);
+        assert_eq!(digest(&projection), v2);
+        projection.destination_base_url = "https://sheets.googleapis.com".into();
+        assert_ne!(legacy_digest(&projection), v1);
+        assert_ne!(digest(&projection), v2);
     }
 
     #[test]

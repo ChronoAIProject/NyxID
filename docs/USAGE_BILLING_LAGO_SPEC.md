@@ -1,7 +1,7 @@
 # Implementation Spec: Usage Metering & Billing via Lago
 
-> **Status:** v4 — implemented billing and allocation accounting. Implements [ADR-014 Rev 2](./ADR-014-usage-billing-lago.md).
-> **Date:** 2026-10-17
+> **Status:** v3 — implementation-ready. Implements [ADR-014 Rev 2](./ADR-014-usage-billing-lago.md).
+> **Date:** 2026-06-23
 > **Read first:** ADR-014 (decisions + the 12 Hard Requirements that gate "billable"). This spec turns
 > those decisions into concrete modules, collections, signatures, insertion points, and a test plan.
 > All file:line references are against the current tree and may drift — re-grep before editing.
@@ -11,24 +11,22 @@
 > (R1–R12) promoted inline** — the spec now reads as one coherent doc. Material corrections from the
 > review: a metadata-only resolution phase precedes the gate (the old "gate in `execute_proxy_inner`"
 > was not implementable); resale keys on a `CredentialClass` enum (not `has_server_credential`); settle
-> debits locally and is idempotent; `Forwarded` rows are never
+> debits locally and is idempotent (the repo has no Mongo transactions); `Forwarded` rows are never
 > auto-freed; connection-shaped metering uses per-flush `transaction_id`s; Lago 422 is branched by
 > sub-code; there is no `billable` field (it is `resale_billable` + plan-level platform).
-> **v4** records the implemented allocation-local service limits, durable reclaim,
-> retry-safe issuance and transactional admission that supersede v3 §5.1.
 
 ## 0. Guiding constraints (from the ADR + reviews)
 
-- **Build the meter before billing.** The unified meter ships and is verified *before* any service can
+- **Build the meter before billing.** The unified meter ships and is verified _before_ any service can
   charge (Hard req. 1, 12).
 - **Money correctness over convenience.** Durable-before-forward, stable per-request/per-layer
   `transaction_id`, reserve-then-true-up funding with an immediate local debit, bidirectional Lago
-  reconciliation, and idempotent settle. Financial admission uses MongoDB transactions as described in §5.1.
+  reconciliation, idempotent settle (no DB transactions exist in this repo).
 - **Thin Lago client, NyxID-owned gate/ledger.** No rating/invoicing/dunning in NyxID. NyxID may cache
-  Lago's rate card *read-only* (approximate) only to size reservations and bound the cap.
+  Lago's rate card _read-only_ (approximate) only to size reservations and bound the cap.
 - **Cross-instance, no per-process state.** All billing state in MongoDB (Oracle-queue precedent,
   CLAUDE.md §11). Atomic ops via `find_one_and_update`.
-- **Two layers.** *Resale* (catalog-level, only when NyxID supplies the credential) vs *platform*
+- **Two layers.** _Resale_ (catalog-level, only when NyxID supplies the credential) vs _platform_
   (plan-level, any proxied request). Independent line items, independent `transaction_id`s.
 - **Metadata before secrets.** Entitlement and owner resolution run on a metadata-only route context
   that does **not** decrypt credentials; credential decryption + reservation happen just before the
@@ -38,12 +36,12 @@
 
 Each phase is independently shippable and leaves the system correct. Nothing charges until P3.
 
-| Phase | Deliverable | Hard reqs | Self-contained? |
-|---|---|---|---|
-| **P1 — Unified meter** | Metadata route context (§4.0) + one meter per path writing a durable `usage_meter` ledger (capture only, **no wallet, no gate, no Lago**). `billing_owner_id`, `billing_request_id`, per-layer/per-flush `transaction_id`, request/byte counters, `CredentialClass` resale signal. `ServiceBilling` catalog field + write surfaces + anonymous-incompatibility validation. | 1,2,3,5,6,7,8,9,12 | Yes — `wallet_id`/`reserved_credits` are `Option`, unused in P1 |
-| **P2 — Lago sink + display** | `LagoClient` + idempotent (GET-or-create) provisioning + event push + bidirectional reconcile + dead-letter. A Lago-compatibility spike (§11) precedes freezing the client signatures. Read-only `billing` block in API/UI. | 11 | Yes — builds on the P1 ledger |
-| **P3 — The gate** | `billing_wallet` + entitlement (fail-closed, on route context) + reserve-then-true-up funding (local debit, idempotent settle) + cached rate card + overdraft cap + conditional fail-open. `BILLING_ENABLED` flips charging on. | 4 + D4 | Needs P2 |
-| **P4 — Surfaces + backfill** | Billing UI (credits, invoices, per-service cost), CLI, top-up, one-time Lago backfill of existing owners. | — | Needs P3 |
+| Phase                        | Deliverable                                                                                                                                                                                                                                                                                                                                                                | Hard reqs          | Self-contained?                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------- |
+| **P1 — Unified meter**       | Metadata route context (§4.0) + one meter per path writing a durable `usage_meter` ledger (capture only, **no wallet, no gate, no Lago**). `billing_owner_id`, `billing_request_id`, per-layer/per-flush `transaction_id`, request/byte counters, `CredentialClass` resale signal. `ServiceBilling` catalog field + write surfaces + anonymous-incompatibility validation. | 1,2,3,5,6,7,8,9,12 | Yes — `wallet_id`/`reserved_credits` are `Option`, unused in P1 |
+| **P2 — Lago sink + display** | `LagoClient` + idempotent (GET-or-create) provisioning + event push + bidirectional reconcile + dead-letter. A Lago-compatibility spike (§11) precedes freezing the client signatures. Read-only `billing` block in API/UI.                                                                                                                                                | 11                 | Yes — builds on the P1 ledger                                   |
+| **P3 — The gate**            | `billing_wallet` + entitlement (fail-closed, on route context) + reserve-then-true-up funding (local debit, idempotent settle) + cached rate card + overdraft cap + conditional fail-open. `BILLING_ENABLED` flips charging on.                                                                                                                                            | 4 + D4             | Needs P2                                                        |
+| **P4 — Surfaces + backfill** | Billing UI (credits, invoices, per-service cost), CLI, top-up, one-time Lago backfill of existing owners.                                                                                                                                                                                                                                                                  | —                  | Needs P3                                                        |
 
 ## 2. Module map
 
@@ -79,7 +77,7 @@ backend/src/
 ```rust
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum BillingMetric { #[default] Tokens, Requests, Bytes }
+pub enum BillingMetric { #[default] Tokens, Requests, Bytes, InputTokens, OutputTokens, CacheReadTokens, CacheWriteTokens, Images }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -95,6 +93,7 @@ pub enum UsageStatus { Reserved, Forwarded, Finalized, Failed, Abandoned, DeadLe
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,        // catalog master credential NyxID owns/pays for → resale-eligible
+    NyxidPlatformOauthApp,     // shared OAuth app, user-authorized token  → platform only
     UserOwned,                 // user-stored BYO key (UserApiKey)        → platform only
     AgentOverrideUserOwned,    // per-agent binding swapped in a user key  → platform only
     NodeManaged,               // credential lives on the node            → platform only
@@ -106,38 +105,120 @@ pub struct ResaleUsage   { pub metric: BillingMetric, pub quantity: i64 }
 pub struct ResaleSpec    { pub metric: BillingMetric, pub lago_metric_code: String }
 ```
 
-### 3.1 `ServiceBilling` (resale layer; sub-struct on `DownstreamService`)
+### 3.1 `ServiceBilling` (catalog pricing and resale)
 
-Mirrors the `ServiceCapabilities` pattern (`models/downstream_service.rs:14-30, 266-268`). **There is
-no `billable` field** — resale is `resale_billable`; the platform layer is plan-level (Lago plan), not
-catalog config.
+The stored optional `DownstreamService.billing` retains all legacy fields:
+`platform_billable`, `platform_metric`, `platform_pricing`,
+`platform_pricing_cleanup_metric_code`, `resale_billable`, `resale_metric`, and
+`lago_resale_metric_code`. Absent billing remains free. NyxID-authored legacy
+platform prices use `platform_svc_{slug}`; legacy plan-authored rates remain valid.
 
-```rust
-// models/service_billing.rs
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
-pub struct ServiceBilling {
-    /// Resale (downstream value) charges — only honored when the FINAL CredentialClass is
-    /// NyxidManagedMaster (§3.0). Default false.
-    #[serde(default)]
-    pub resale_billable: bool,
-    #[serde(default)]
-    pub resale_metric: BillingMetric,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lago_resale_metric_code: Option<String>,
-}
-```
+`ServiceBilling.byok_pricing` and `platform_key_pricing` are optional `LanePricing`
+blocks. Existing `metric`, decimal `credits_per_unit`, `lago_metric_code`, `sync_status`
+and `sync_error` fields remain the primary component. Optional/defaulted `components`
+adds objects with those same five fields. Metrics must be unique across the primary
+and additional components of each lane. Supported units are `tokens` (provider total),
+`requests`, `bytes`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, and `images`. Legacy `platform_metric` and `resale_metric` still
+accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
+`schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
-On `DownstreamService`, sibling to `capabilities`:
+| Final credential class                                                | Lane              |
+| --------------------------------------------------------------------- | ----------------- |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |
+| NyxidManagedMaster                                                    | Platform key      |
+| NoAuth                                                                | None (meter only) |
 
-```rust
-#[serde(default, skip_serializing_if = "Option::is_none")]
-pub billing: Option<ServiceBilling>,
-```
+At least one configured lane selects lane mode. A missing matching lane is free,
+even if legacy platform billing is enabled. While the selected lane's primary is
+pending or failed, the whole lane uses the legacy configuration (or is free);
+all additional components are ignored, even if synced. Once the primary is synced,
+it and every synced additional component create separate platform usage rows using
+their own metric/code. Unsynced additional components are free until they sync and
+never add a legacy charge. For example, a synced input primary and pending output
+component charges only input; after output syncs, both charge. Total `tokens` is
+charged only when explicitly configured.
+With no lanes, legacy behavior is unchanged. Resale remains independent. The
+`platform_charge_nyxid_credentials_only` restriction still applies after lane selection.
 
-Platform metric codes are global constants: `platform_requests`, `platform_bytes`. `UserService`
-inherits resale config through `catalog_service_id`.
+Stable primary Lago codes remain `platform_svc_{slug}_byok` / `platform_svc_{slug}_pk`;
+additional components use `platform_svc_{slug}_{byok|pk}_{metric}`. Each price has its
+own rate-cache row and synchronization state. Removed components are recorded in
+server-owned `component_cleanup_metric_codes`, including when their entire lane is
+removed. The same pricing synchronizer, full Lago plan charge array with IDs, and
+reconcile interval handle all charges. Price/metric/code fences prevent stale admin
+sync completions from activating obsolete prices; stale writes after removal restore
+cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.
 
-**"Billing-active" rollup (R7).** A request is *billing-active* iff `ServiceBilling.resale_billable`
+Older admin payloads omitting lanes or nested `components` preserve them. A null lane
+clears the entire lane; `components: null` or `[]` clears only additional components.
+Lane-only edits preserve omitted legacy fallback and resale fields. Legacy-only edits
+retain their historical full-block behavior while preserving omitted lanes.
+
+Capture checks token-family and image metrics on **both** configured lanes, including
+pending components and non-`llm-` slugs. JSON, accumulated SSE, realtime WS, node and
+MCP paths feed normalized `PlatformUsage` classes. OpenAI cached prompt/input tokens
+and Gemini `cachedContentTokenCount` are subsets of input and are subtracted from
+priced `input_tokens`, clamped at zero. Anthropic cache-read/cache-creation counts
+are outside input and are kept separate without subtraction. Output tokens are their
+own class. `TokenBreakdown` preserves provider accounting for display; normalized
+classes are priced. Successful OpenAI `/images/generations`, `/images/edits`, and
+`/images/variations` responses count `data[]` entries, including paths with proxy or
+version prefixes; image usage can also populate all token classes. Completed image
+SSE events count once per image index; partial previews do not count. Capture uses
+existing bounded bodies/buffers and never reads an additional response body. MCP
+estimates tokens only for token-family services when reported usage is absent.
+Without provider-reported usage, input/output/cache token classes are zero while
+legacy `tokens` still uses the byte estimate, so per-class pricing requires
+providers that report usage.
+
+Each platform component has independent allowance -> grant -> wallet funding,
+settlement, ledger reference and Lago event. The primary transaction identity remains
+unchanged; additional rows append `:component:{metric_code}`. A durable primary-row
+`pending_platform_usage` snapshot lets reconciliation finish partially materialized
+component settlements. Repeated opens/settlements reuse the same identities. Estimates
+use the request-byte token estimator for `tokens`, `input_tokens`, and
+`output_tokens` (the best available output proxy); `cache_read_tokens` and
+`cache_write_tokens` reserve one unit because the input estimate already covers
+cache quantities. Images use the request's `n` (default 1); requests and bytes
+reserve one unit. The request body is parsed for `n` only when an active platform
+price uses images. Standalone legacy metrics and resale retain their existing
+one-unit reservation gate. Zero final units release every hold
+and emit no Lago event. Platform-key execution still bills the acting person.
+
+An allowance may select any configured primary/component unit on either lane, plus
+the legacy fallback while any lane primary is unsynced (or when no lanes exist).
+An unsynced additional component never re-enables the fallback metric. Admin service
+responses expose this computed, non-stored list as `allowance_metrics`; the allowance
+dialog consumes it directly. Allowances fund only identical-metric usage rows.
+Omitted allowance metric defaults to BYOK primary, then platform-key primary,
+then legacy; `effective_platform_metric` remains this display default.
+Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
+grant expiry and operation dedupe identities are unchanged. Exact accounting adds versioned ledger postings.
+
+Unit prices support `PRICE_FRACTIONAL_DIGITS = 12` and at most 1,000,000 credits/unit.
+The normalized exact decimal goes to Lago. Optional `credits_per_unit_pico` (10^-12
+credits) is preferred in cache/funding/reservations; legacy `credits_per_unit_micros`
+is still populated by truncation for rolling compatibility. Missing precise fields
+use the old micro rate exactly. Money uses checked i128 picocredit `Credits`,
+Decimal128 credits in MongoDB, and decimal strings in JSON. Funding calculates
+cost once and subtracts allowance and grants to obtain the exact wallet debit.
+Lago quantities floor cumulatively with durable owner/metric/rate carry; they do
+not round up per row. Balanced v2 ledger postings cover every balance movement;
+v1 canonical bytes remain unchanged. See [exact accounting](BILLING_EXACT_ACCOUNTING.md).
+
+**Rollout:** upgrade ALL replicas before authoring component prices, allowances
+using new metrics, or prices beyond six fractional digits. Old binaries cannot deserialize the new enum variants or charge
+additional components. The 0.31 exact-accounting cutover requires draining old billing writers before
+starting the migration with `BILLING_EXACT_CUTOVER_DRAINED=true`; subsequent
+new-version replicas resume the recorded background migration. Pending cutover
+returns 503 for billed admission and pauses money sweeps; the server, nonbilling
+traffic and legacy-tolerant UI reads remain available. Malformed documents are
+isolated and reported through Integrity while other rows continue migrating.
+Old binaries fail to read migrated amounts and must not be restarted. See the
+exact-accounting deployment contract.
+
+**"Billing-active" rollup (R7).** A request is _billing-active_ iff `ServiceBilling.resale_billable`
 (and the resolved credential is `NyxidManagedMaster`) **OR** the resolved billing owner is on a
 platform-metered Lago plan. The `BILLING_ENABLED` startup invariant (§9) refuses to serve a
 billing-active request unless the meter+ledger (P1) and, for charging, the gate (P3) are wired —
@@ -152,13 +233,24 @@ manually, so P1 must also add `billing` to `CreateServiceRequest` (`services.rs:
 **Anonymous incompatibility (Hard req 9) is bidirectional (R10).** Reject `resale_billable=true` when
 the service has enabled anonymous endpoints (in `services.rs`), AND reject enabling an anonymous
 endpoint when `resale_billable` (in `admin_anonymous_endpoints.rs`) — extend
-`validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP
-400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
+`validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP 400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
 billing-active.
+
+For shared OAuth apps (including X), admins can opt into
+`ServiceBilling.platform_charge_nyxid_credentials_only` alongside `platform_billable`
+and a per-request `platform_pricing`. The flag defaults to false, preserving existing
+platform billing. When true, only `NyxidManagedMaster` and `NyxidPlatformOauthApp`
+(`UserApiKey.credential_source = "platform"`) qualify for platform charges; BYO and
+legacy untagged keys, agent overrides, node-managed credentials and no-auth requests
+remain metered without platform charges. Apply the restriction after lane selection,
+so a configured BYOK lane cannot bypass it. Shared-app OAuth retains its prior
+user-token price lane for compatibility. Resale still requires `NyxidManagedMaster`.
 
 ### 3.2 `usage_meter` — durable ledger + reservation lifecycle
 
-One row per `(billing_request_id, layer)` for request-shaped paths; per
+One row per `(billing_request_id, layer, component)` for request-shaped paths;
+legacy/primary transaction IDs remain unchanged. Additional platform components append
+`:component:{metric_code}`. Connection identifiers retain their flush identity; per
 `(billing_request_id, layer, flush_seq)` for connection-shaped paths (R4 — otherwise Lago dedups all
 flushes after the first). Written **before** the downstream send (record-before-forward).
 
@@ -180,7 +272,7 @@ pub struct UsageMeterRow {
     pub lago_metric_code: String,
     pub credential_class: CredentialClass,               // resale only when NyxidManagedMaster
     #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<String>,
-    #[serde(default)] pub reserved_credits: i64,         // 0/unused in P1 (no wallet); set in P3
+    #[serde(default)] pub reserved_credits: Credits,         // 0/unused in P1 (no wallet); set in P3
     #[serde(skip_serializing_if = "Option::is_none")] pub quantity: Option<i64>, // actual metered (settle)
     #[serde(default, skip_serializing_if = "Option::is_none")] pub pending_resale_quantity: Option<i64>, // multi-layer settle outbox marker
     pub status: UsageStatus,
@@ -207,6 +299,7 @@ downstream cost may already be incurred, so those are charged at the reservation
 reconciliation / dead-lettered — never silently freed.
 
 **Indexes** (`db.rs`, mirroring oracle patterns at `db.rs:1715-1743`):
+
 - unique `{ transaction_id: 1 }` — idempotency / no double-row.
 - `{ status: 1, lago_acked: 1, updated_at: 1 }` — reconcile/dead-letter sweeps.
 - sparse `{ pending_resale_quantity: 1 }` — incomplete multi-layer intent materialization.
@@ -223,11 +316,11 @@ pub struct BillingWallet {
     pub lago_customer_id: String,                         // == external_customer_id (unique)
     #[serde(skip_serializing_if = "Option::is_none")] pub lago_subscription_id: Option<String>,
     pub plan_kind: PlanKind,                              // Prepaid | Subscription | Hybrid
-    pub balance_credits: i64,                             // last value SYNCED from Lago
-    pub reserved_credits: i64,                            // open holds (NyxID-owned)
-    pub pending_lago_debits: i64,                         // finalized-but-not-yet-synced burns (R3.1)
+    pub balance_credits: Credits,                             // last value SYNCED from Lago
+    pub reserved_credits: Credits,                            // open holds (NyxID-owned)
+    pub pending_lago_debits: Credits,                         // finalized-but-not-yet-synced burns (R3.1)
     pub has_payment_instrument: bool,                     // gates conditional fail-open
-    pub overdraft_cap_credits: i64,                       // money-denominated, via rate cache
+    pub overdraft_cap_credits: Credits,                       // money-denominated, via rate cache
     pub suspended: bool,
     pub collection_state: CollectionState,               // Good | PastDue | Suspended
     #[serde(with = "...chrono_datetime_as_bson_datetime")] pub balance_synced_at: DateTime<Utc>,
@@ -238,26 +331,33 @@ pub struct BillingWallet {
 
 **Availability (R3.1):** `available = balance_credits − reserved_credits − pending_lago_debits`.
 `balance_credits` is authoritative-from-Lago (synced by sweep); `reserved_credits` are open holds;
-`pending_lago_debits` is the sum of finalized-but-unsynced burns so availability drops *immediately* at
+`pending_lago_debits` is the sum of finalized-but-unsynced burns so availability drops _immediately_ at
 settle (not only at the next sync — without this, the next request reserves the same money). The
 periodic sync sets `balance_credits` from Lago and zeroes the `pending_lago_debits` it has accounted
 for. **Indexes:** unique `{ owner_id: 1 }`, unique `{ lago_customer_id: 1 }`.
 
-### 3.4 `billing_rate_cache` — read-only Lago rate mirror (P2/P3)
+### 3.4 `billing_rate_cache` — exact Lago rate mirror
 
-```rust
-// COLLECTION_NAME = "billing_rate_cache"
-pub struct BillingRateCache {
-    #[serde(rename = "_id")] pub id: String,             // "{lago_metric_code}:{model|*}"
-    pub lago_metric_code: String,
-    #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<String>,
-    pub credits_per_unit_micros: i64,                    // integer, scaled; APPROXIMATE — never invoicing
-    #[serde(with = "...chrono_datetime_as_bson_datetime")] pub synced_at: DateTime<Utc>,
-}
-```
+`BillingRateCache` keeps its `_id = {lago_metric_code}:{model|*}`, metric code, optional
+model and BSON `synced_at`. It adds optional `credits_per_unit_pico: i64` alongside
+legacy `credits_per_unit_micros: i64`. `UsageFunding` and `LayerReservation` carry both.
+New code prefers pico (10^-12 credits); missing pico scales the legacy micro rate.
+Optional BSON `retired_at` marks a row whose NyxID-authored price was removed: price
+cleanup sets it instead of deleting the row, `fresh_rate` refuses it for new
+reservations, and historical usage pricing (`/billing/usage`, admin usage, settlement
+fallbacks) keeps reading it. A later full-row sync of the same code clears it.
+Finish upgrading all backend replicas before removing prices: old replicas ignore
+`retired_at` and could still reserve against a removed price until the rate TTL
+(`BILLING_RATE_CACHE_TTL_SECS`, default 900s) expires, whereas deletion refused immediately.
+NyxID's `PRICE_FRACTIONAL_DIGITS = 12`, maximum 1,000,000 credits/unit, fits i64.
+Lago receives the normalized decimal string exactly, and `plan_rates` plus reconcile
+preserve all 12 digits when mirroring it. External Lago rates outside the precise
+field's supported numeric syntax/range fail the refresh rather than falling back.
 
-Refreshed by a sweep from Lago plan/charge config. Used only for reservation sizing + cap
-denomination. Authoritative pricing stays in Lago.
+Costs use checked Credits arithmetic with no per-event conversion. Legacy integer
+response fields truncate only after exact aggregation. Grants and wallet remainders
+move precisely the funded amount, including fractions below one microcredit.
+See §3.1 and BILLING_EXACT_ACCOUNTING.md for storage and upgrade requirements.
 
 ## 4. Metering — route context, per-path map, emit API (P1)
 
@@ -289,6 +389,18 @@ metadata pass out of it (or compute the context from the already-resolved `pre`/
 **after** the agent-credential override at `proxy.rs:1289-1300`, where the final credential is known —
 do **not** read the pre-override `has_server_credential`).
 
+Token capture checks both configured lanes, regardless of catalog slug or price sync
+state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
+services unless a response actually reports usage; token-metered responses without
+reported usage retain the existing estimate.
+
+Mixed billing lanes may use different units. Allowances match the actual request's
+selected platform metric at reservation and settlement. Admin allowance create/update
+accepts optional `metric`, validated against configured lane units (plus a legacy
+fallback unit while a lane primary is pending/failed). Omitted `metric` defaults to BYOK's unit,
+otherwise platform key's unit, otherwise the legacy service default. Existing allowance
+rows retain their original unit; the UI offers a unit selector for mixed lanes.
+
 ### 4.1 `MeteredProxyContext`
 
 The emit-side handle, derived from `BillingRouteContext` + measured usage. `billing_request_id` is
@@ -302,14 +414,14 @@ which is deliberately regenerated per failover attempt (opposite lifecycle, R8).
 There is **no single shared seam.** Each entry path owns its sequence; all call the same
 `meter::{open, settle, fail}` (§4.3) and, in P3, the same `gate` (§5).
 
-| Entry path | Resolve + gate/reserve site | Dispatch / send | Settle (meter) | Shape |
-|---|---|---|---|---|
-| `/proxy` (`execute_proxy_inner:1132`) | single fan-in ~`proxy.rs:1352` (after owner+credential-class+target resolved, **before** the WS/node/direct arms at `1662/1720/2236`) | `forward_request:2236` / node `send_proxy_request:1849` / WS bridges | buffered `2455`; SSE task `2308`; node Complete `1869`, Streaming `1893` | request (HTTP), connection (WS) |
-| Codex/ChatGPT direct branch | same fan-in | `send_to_chatgpt` (`proxy.rs:2150/2187`) — bypasses `forward_request` | in the ChatGPT translator finalize | request |
-| `/llm` gateway (`llm_gateway.rs:64/330`) | in `llm_proxy_request` ~`:265` (after resolution `:125`, before send) | `forward_request:273/644` AND Codex branch `:224/634` | its existing extraction `:827-933` → meter | request |
-| MCP (`mcp_service::execute_tool`) | **inside** `execute_tool` after target resolution, before node/direct dispatch (`mcp_service.rs:2372+`) | execute_tool's own node/direct forwarding | post-dispatch within execute_tool | request (per tool call) |
-| SSH exec (`ssh_exec.rs:91`) | before the exec call | `ssh_service` exec | on response (`metric=requests` or raw stdout/stderr bytes pre-truncation) | request |
-| WS direct (`proxy.rs:3250`) / node (`3365`); SSH tunnel (`ssh_tunnel.rs:173`) / web terminal | at upgrade (reserve per-connection cap, R6) | bridge loop | periodic flush + settle on disconnect | connection-session |
+| Entry path                                                                                   | Resolve + gate/reserve site                                                                                                           | Dispatch / send                                                       | Settle (meter)                                                            | Shape                           |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------- |
+| `/proxy` (`execute_proxy_inner:1132`)                                                        | single fan-in ~`proxy.rs:1352` (after owner+credential-class+target resolved, **before** the WS/node/direct arms at `1662/1720/2236`) | `forward_request:2236` / node `send_proxy_request:1849` / WS bridges  | buffered `2455`; SSE task `2308`; node Complete `1869`, Streaming `1893`  | request (HTTP), connection (WS) |
+| Codex/ChatGPT direct branch                                                                  | same fan-in                                                                                                                           | `send_to_chatgpt` (`proxy.rs:2150/2187`) — bypasses `forward_request` | in the ChatGPT translator finalize                                        | request                         |
+| `/llm` gateway (`llm_gateway.rs:64/330`)                                                     | in `llm_proxy_request` ~`:265` (after resolution `:125`, before send)                                                                 | `forward_request:273/644` AND Codex branch `:224/634`                 | its existing extraction `:827-933` → meter                                | request                         |
+| MCP (`mcp_service::execute_tool`)                                                            | **inside** `execute_tool` after target resolution, before node/direct dispatch (`mcp_service.rs:2372+`)                               | execute_tool's own node/direct forwarding                             | post-dispatch within execute_tool                                         | request (per tool call)         |
+| SSH exec (`ssh_exec.rs:91`)                                                                  | before the exec call                                                                                                                  | `ssh_service` exec                                                    | on response (`metric=requests` or raw stdout/stderr bytes pre-truncation) | request                         |
+| WS direct (`proxy.rs:3250`) / node (`3365`); SSH tunnel (`ssh_tunnel.rs:173`) / web terminal | at upgrade (reserve per-connection cap, R6)                                                                                           | bridge loop                                                           | periodic flush + settle on disconnect                                     | connection-session              |
 
 **Metric capture.** Tokens reuse `llm_usage_service` (buffered + SSE accumulator). Requests = 1/call;
 bytes = request/response length (HTTP) or `ConnectionUsageStats { frames_in/out, bytes_in/out,
@@ -363,139 +475,49 @@ fail-closed.
 (== the owner's overdraft-cap slice), flush + true-up periodically, and kill the stream when
 cumulative flushed bytes exceed `available`.
 
-### 5.1 Transactional admission and recoverable settlement
+### 5.1 Atomic reserve + idempotent settle (no DB transactions — R3.2)
 
-Billable admission requires MongoDB 8 in a replica set or a transaction-capable
-cluster. Disabled billing returns before database access. Free metering without
-financial holds retains its ordinary durable usage-row path.
+The repo has **no** `start_session`/`with_transaction` (only a TODO at `services.rs:2127`), so
+multi-doc atomicity is achieved with idempotent guards, mirroring `oracle_task_service.rs:959`.
 
-`BillingService::open` prepares Lago entitlement checks and rate estimates before
-starting the transaction. The transaction revalidates wallet identity,
-subscription and suspension, then reserves allowance units, grant total and
-matching service-limit counters, and wallet credits, and inserts **every**
-platform/resale usage row using the same `ClientSession`. Only a confirmed commit
-permits forwarding. Failure before either usage row aborts all new holds; there
-is no post-abort compensation that could release another request's money.
-Driver transaction retries use fresh reservation layers. Duplicate/uncertain
-admission resolves the complete durable meter outside the failed transaction,
-including when a winner used the last available credit.
+**Reserve (prepaid):**
 
-Grant/allowance reservation CAS excludes `active_settlement`. An applicable
-source with positive residual capacity helps its blocking operation outside the
-admission transaction and retries within a bounded budget. An exhausted or
-unrelated source does not block independently funded or free traffic. Wallet
-availability subtracts request holds, pending Lago debits and purchased-expiry
-holds; overdraft admission still requires the applicable plan/payment instrument.
+```rust
+db.collection::<BillingWallet>("billing_wallet").find_one_and_update(
+    doc!{ "owner_id": &owner, "suspended": false,
+          "$expr": { "$gte": [ { "$subtract": [ { "$subtract": ["$balance_credits","$reserved_credits"] },
+                                                 "$pending_lago_debits" ] }, est ] } },
+    doc!{ "$inc": { "reserved_credits": est }, "$set": { "updated_at": now } },
+).with_options(FindOneAndUpdateOptions::builder().return_document(ReturnDocument::After).build()).await?
+// Some(_) == reserved. MongoDB serializes writes on the single wallet doc → no over-commit. (Wallet docs
+// must default reserved_credits/pending_lago_debits to 0, else $subtract on a missing field → null → deny.)
+```
 
-Settlement retains the existing durable resource-operation bridge. A usage row
-has a leased funding claim. Each new resource lock is acquired in a transaction
-that also **conditionally writes** the usage row under that original claim,
-unfinished state and `released=false`. A unique operation fence forces a write
-conflict with takeover/finalization, avoiding read/write skew. Refreshing history
-never adopts a successor's claim. Release operations use the separate
-`released=true`, failed/abandoned protocol and apply each release once.
+**Overdraft reserve (card-backed):** same op with the cap-inclusive filter
+`{$gte:[{$subtract:[{$add:["$balance_credits","$overdraft_cap_credits"]}, {$add:["$reserved_credits","$pending_lago_debits"]}]}, est]}`
+AND `has_payment_instrument: true` — atomic so concurrent card-backed requests cannot exceed the cap.
 
-After taking a usage claim, finish all resource locks for that usage row,
-including consumed grants/exhausted allowance periods, before reloading funding
-history and calculating wallet remainder. These lookups use the named sparse
-`settlement_usage_row` index on `active_settlement.usage_row_id` in both resource
-collections. Any worker can finish an existing durable operation even when its
-original lease expired.
+**Settle (idempotent, two steps):**
 
-A grant operation atomically applies total and matching rule consumption/release,
-records its operation ID on the usage row, confirms the deduplicated consumption
-ledger entry, then clears the lock. A failed journal append retains the lock for
-retry. Wallet settlement keeps its existing operation/usage-row crash bridge.
-Only wallet-funded quantity reaches Lago. Operation IDs, ledger dedupe identities
-and hash chaining are unchanged.
+```rust
+// 1. atomically claim the row's terminal transition (idempotent: a re-run finds status already Finalized)
+let claimed = usage_meter.find_one_and_update(
+    doc!{ "_id": &row_id, "status": { "$in": ["reserved","forwarded"] } },
+    doc!{ "$set": { "status":"finalized", "released": false, "quantity": actual,
+                    "finalized_at": now, "updated_at": now } },
+).with_options(FindOneAndUpdateOptions::builder().return_document(ReturnDocument::After).build()).await?;
+// 2. only if WE made the transition, move the wallet (release hold + local debit so availability drops now)
+if claimed.is_some() {
+    billing_wallet.update_one(doc!{ "owner_id": &owner },
+        doc!{ "$inc": { "reserved_credits": -est, "pending_lago_debits": actual } }).await?;
+    usage_meter.update_one(doc!{ "_id": &row_id }, doc!{ "$set": { "released": true } }).await?;
+}
+```
 
-Historical orphan holds created by older admission code without a usage row or
-operation intent cannot safely be attributed from current active-row sums. This
-implementation prevents new gaps; it does not infer, free or migrate old money.
-Investigating such legacy records requires evidence of their original requests.
-
-### 5.2 Allocation-local service limits and reclaim
-
-One `CreditGrant` remains the allocation identity and shared monetary total.
-Optional `service_limits` contain frozen canonical service IDs, display slugs, a
-stable rule key, optional label, and exact integer microcredit limit/consumed/
-reserved counters. One group may contain multiple concrete services sharing one
-limit. Groups must be disjoint after resolving ID/slug aliases. Unknown services,
-contradictory selected-service scope, nonpositive/over-total limits, overlapping
-aliases and oversized inputs are rejected. Canonical ID wins over slug whenever
-execution has an ID; slug fallback only supports routes without canonical ID.
-
-Limits are hard caps **inside** the shared total. They do not earmark funds and
-are not an account-wide policy. All-services scope leaves unlisted services
-eligible for the total. Selected-service scope remains available. If every
-eligible service is capped, realizable available value is the lesser of the
-unheld total and summed residual group limits. The unused accounting remainder
-remains attributable and reclaimable even when no policy capacity is left.
-Platform and resale share the same cap; allowance-covered platform units use no
-monetary cap. Estimate holds and actual true-up extras obey total and rule limits
-atomically. Other allocations and purchased funds independently cover overage.
-
-Unapplied extra-settlement locks already commit value: summaries subtract
-`max(consume_micros - reserved_micros, 0)` from total and matching-rule capacity
-and include it in held/pending usage. Applied locks have already moved counters
-and are not subtracted twice. Summary reads never mutate counters.
-
-`DELETE /api/v1/admin/credits/grants/{grant_id}` requests reclaim. The durable
-`revoke_requested_at`/actor fence stops new reservations and unreserved extra
-consumption immediately. Previously admitted holds and already acquired locks
-can finish. While either exists, the response stays `status=active` with
-`revoke_requested_at`; availability is zero. Audit records a reclaim request,
-not a completed removal. Once holds are zero and the lock is absent, atomic
-finalization removes exactly the current remainder and records the existing
-`grant-revoked:{id}` movement. Terminal markers retry on ledger failure. Repeated
-DELETE returns the same pending/terminal allocation. Expiry and full-consumption
-races retain this fence; another allocation and the wallet are never debited.
-
-Recurring policies freeze scope/rules in each `CreditSchedulePeriod`. Each
-ordinary grant disbursement has fresh counters and retains the existing UUID v5
-identity `{schedule_id}:{period_start_ms}:{recipient_user_id}` and
-`grant-issued:{grant_id}` ledger key. Schedule edits affect future periods only.
-Pausing a policy stops future periods; reclaiming targets an issued instance.
-
-### 5.3 Allocation submission and read contracts
-
-The established one-time and recurring POST routes accept additive optional
-`request_id` UUID and `service_limits` fields. `credit_allocation_requests` stores
-an actor-scoped deterministic identity, serialized submitted payload and frozen
-snapshot. Reusing a key with a different payload is a conflict. Exact retries
-reuse original policy/recipients; all-owner recipient membership is frozen, so
-new signups cannot receive a replayed one-time allocation. Per-recipient grant
-IDs and policy IDs are deterministic for keyed submissions. Bounded unordered
-chunks insert only absent grants; partial completion resumes through replay
-without resetting consumption, activation or reclaimed state. At most 50
-one-time recipients are journaled inline; others remain unspendable until normal
-activation recovery. Legacy callers may omit the key and retain their API.
-The frontend keeps a key across ambiguous retries and replaces it for changed
-settings, a genuinely new operation or successful completion.
-
-- `GET /api/v1/admin/credits/summary` streams active-row projections and returns
-  exact decimal-string monetary fields. Outstanding equals unreserved confirmed
-  realizable value + held usage + pending activation + unavailable confirmed
-  remainder. Restrictions and near-expiry amounts are subsets of unreserved
-  value; expired unheld value is separate. These are allocation amounts before
-  recipient-level permission/suspension gates.
-- `GET /api/v1/billing/credits` returns the authorized owner's combined purchased
-  and issued available value, with string-valued wallet diagnostics and source
-  details. It accepts an authorized organization `owner_id`. Unsuspended total
-  is `max(wallet availability,0) + eligible issued capacity`; suspension zeros
-  spendability while preserving recorded source balances. Expired-held and
-  pending-reclaim sources stay visible with zero available value.
-- Detail responses add exact allocated/used/held/remaining/available/reclaimed
-  values, rule counters, reclaim request and recurring identity. Established
-  routes and legacy numeric fields remain compatible. Included usage stays in
-  actual units and never contributes to monetary totals. Reads do not provision
-  wallets, create periods, append financial entries or settle/reclaim anything.
-
-**Deployment:** upgrade every backend and billing/reconciliation worker before
-enabling creation of service limits or pending reclaim. Older binaries ignore
-additive policy fields and cannot enforce caps or the reclaim fence. This is not
-a mixed-version enforcement guarantee. Financial admission requires replica-set
-transactions; there is no standalone financial fallback or balance migration.
+A recovery sweep handles `status=Finalized && released=false` (crash between step 1 and step 2) by
+re-applying the wallet move. The `pending_lago_debits` is cleared by the balance sync once Lago
+confirms the burn (so the cap bounds total exposure across one full `BILLING_RECONCILE_INTERVAL_SECS`
+window of inflated balance, not just one request).
 
 ## 6. `BillingOwnerResolver` (consumes `OwnerAccess`) (§6)
 
@@ -509,8 +531,13 @@ pub enum PaysFrom { Personal, OrgWallet { org_id: String } }  // MemberWallet DE
 ```
 
 - `Direct` → personal wallet.
-- `AsOrg*` → **org wallet** (P1/P3 default). Per-member wallets + per-member spend caps are DEFERRED
-  (no org-billing-policy field exists yet — ADR open question).
+- `AsOrg*` → **org wallet** for org-owned credentials (`UserOwned`, `AgentOverrideUserOwned`,
+  `NodeManaged`, and `NyxidPlatformOauthApp`).
+- **Platform-key exception:** execution uses `BillingOwnerResolver::resolve_for_execution` with
+  the final credential class, after agent overrides. `NyxidManagedMaster` always selects the
+  requesting person's personal wallet and billing rollout, even when an org grant supplies
+  access through an org-owned service. Other classes delegate to the resource-owner resolver
+  and retain its org ACL. Approval ownership and rate limiting are independent and unchanged.
 - **Legacy `DownstreamService` path (R9):** `effective_owner_for_approval` is `None` there (set only in
   the `pre_resolved` arm, `proxy.rs:1187`). Fall back to the **actor's personal wallet**, and treat
   legacy-path requests as platform-metered only (never resale). Document this; the legacy path is still
@@ -531,7 +558,7 @@ pub trait LagoApi {
     async fn record_event(&self, ev: &LagoEvent) -> AppResult<LagoAck>;                    // POST /events
     async fn record_events_batch(&self, evs: &[LagoEvent]) -> AppResult<Vec<LagoAck>>;     // fall back to loop if unsupported
     async fn current_usage(&self, customer_id, sub_id) -> AppResult<LagoUsage>;
-    async fn wallet_balance(&self, customer_id) -> AppResult<i64>;
+    async fn wallet_balance_exact(&self, customer_id) -> AppResult<Credits>;
     async fn entitlements(&self, sub_external_id) -> AppResult<Vec<Entitlement>>;          // endpoint path version-dependent (R11)
 }
 ```
@@ -546,12 +573,14 @@ Lago via the §11 spike before freezing these signatures.
 **Never** `path`, raw `api_key_id`, bodies, or downstream URLs.
 
 **Ingestion failure policy — branch on the Lago error `code`, not the HTTP status (R5):**
+
 - `transaction_id_taken` (422) → **SUCCESS** (`lago_acked=true`; the event was already applied — do
   NOT dead-letter).
 - `billable_metric_not_found` / subscription / closed-period (422) → `DeadLetter` + alert.
 - `429` → backoff + retry. `5xx`/timeout → retry; row stays `lago_acked=false`.
 
 **Reconcile sweep** (`reconcile.rs`, spawned like the OAuth sweep `main.rs:732`):
+
 1. Re-push `lago_acked=false AND updated_at < now-grace` rows.
 2. `Reserved && forwarded=false && updated_at < now-abandon_grace` → `Abandoned` (release holds).
    **`Forwarded` rows are charged/held/dead-lettered, never auto-freed** (R3.3).
@@ -568,14 +597,14 @@ Lago via the §11 spike before freezing these signatures.
 Add to `AppError` (`errors/mod.rs`), map status in `status_code()`, assign in `error_code()`, add keys
 in `error_key()` (oracle 11000-block is the template).
 
-| Code | Variant | Key | HTTP | Notes |
-|---|---|---|---|---|
-| 11300 | `InsufficientCredits` | `insufficient_credits` | 402 | prepaid below next reservation |
-| 11301 | `BillingNotConfigured` | `billing_not_configured` | 402 | billing-active, no wallet/plan |
-| 11302 | `BillingProviderUnavailable` | `billing_provider_unavailable` | 402 | explicit fail-closed override only |
-| 11303 | `PlanEntitlementRequired` | `plan_entitlement_required` | 402 | plan excludes service (incl. fail-closed unknown) |
-| 11304 | `AnonymousIncompatibleBilling` | `anonymous_incompatible_billing` | **400** | `resale_billable` + anon endpoint (write time) |
-| 11307 | `WalletSuspended` | `wallet_suspended` | 402 | cap breached / collection suspended |
+| Code  | Variant                        | Key                              | HTTP    | Notes                                             |
+| ----- | ------------------------------ | -------------------------------- | ------- | ------------------------------------------------- |
+| 11300 | `InsufficientCredits`          | `insufficient_credits`           | 402     | prepaid below next reservation                    |
+| 11301 | `BillingNotConfigured`         | `billing_not_configured`         | 402     | billing-active, no wallet/plan                    |
+| 11302 | `BillingProviderUnavailable`   | `billing_provider_unavailable`   | 402     | explicit fail-closed override only                |
+| 11303 | `PlanEntitlementRequired`      | `plan_entitlement_required`      | 402     | plan excludes service (incl. fail-closed unknown) |
+| 11304 | `AnonymousIncompatibleBilling` | `anonymous_incompatible_billing` | **400** | `resale_billable` + anon endpoint (write time)    |
+| 11307 | `WalletSuspended`              | `wallet_suspended`               | 402     | cap breached / collection suspended               |
 
 ## 9. Config / env (`config.rs` + `docs/ENV.md`)
 
@@ -629,6 +658,7 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 `CredentialClass` derivation (BYO/override/master/no-auth/node).
 
 **Integration (money-correctness):**
+
 - **Concurrency drain:** N parallel reserves against balance B → total ≤ B; prepaid never over-commits.
 - **Post-settle double-spend:** finalize a request, immediately fire another → second sees reduced
   `available` (pending_lago_debits applied), cannot reserve the freed amount before sync.
@@ -639,8 +669,10 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 - **Idempotent replay + dedup:** re-push same `transaction_id` → Lago dedups; `transaction_id_taken`
   422 → `lago_acked=true`, not dead-letter; per-layer + per-flush ids never collide.
 - **Connection-flush:** a WS session with K flushes emits K distinct `transaction_id`s → all K billed.
-- **Owner attribution:** org-member request bills the org wallet (`billing_owner_id`), not the actor;
-  legacy-path request bills the actor's personal wallet, platform-only.
+- **Owner attribution:** org-member BYOK requests bill the org wallet (`billing_owner_id`).
+  Platform-master-key requests bill the requesting person, including org-routed requests,
+  and use that person's rollout flag. An agent override retains org billing when its final
+  credential class is `AgentOverrideUserOwned`. Legacy-path requests use the personal wallet.
 - **Resale classification:** BYO key (and agent-override BYO) on a resale-billable catalog service →
   `CredentialClass != NyxidManagedMaster` → platform-only, no resale charge.
 - **Path coverage:** a billing-active service over each path (`/proxy` direct/node/WS, `/llm`,
@@ -663,14 +695,14 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 3. Durable cross-instance state → crash-after-forward + concurrency + idempotent-settle tests.
 4. Money-denominated overdraft cap + auto-suspend (cached rate card) → fail-modes test.
 5. Bill the billing owner, not the actor → owner-attribution test.
-6/8. Right number / final credential class → resale-classification test (BYO + override → platform).
-7. Integer counts to Lago (the `LagoEvent.properties.quantity` is i64, sourced only from integer
+   6/8. Right number / final credential class → resale-classification test (BYO + override → platform).
+6. Integer counts to Lago (the `LagoEvent.properties.quantity` is i64, sourced only from integer
    counts; `reported_cost` is never an input) → schema test.
-9. Anonymous incompatible (bidirectional, 11304) → write-time test on both `services.rs` and
+7. Anonymous incompatible (bidirectional, 11304) → write-time test on both `services.rs` and
    `admin_anonymous_endpoints.rs`.
-10. `BillingOwnerResolver` separate from ACL, with legacy + org defaults → unit + owner-attribution.
-11. Bidirectional reconcile + dead-letter + 422 sub-code branch → reconcile/dead-letter tests.
-12. Refuse to serve billing-active until wired → `BILLING_ENABLED` startup-invariant test.
+8. `BillingOwnerResolver` separate from ACL, with legacy + org defaults → unit + owner-attribution.
+9. Bidirectional reconcile + dead-letter + 422 sub-code branch → reconcile/dead-letter tests.
+10. Refuse to serve billing-active until wired → `BILLING_ENABLED` startup-invariant test.
 
 ## 14. Deferred / open (tracked in ADR §Open questions)
 

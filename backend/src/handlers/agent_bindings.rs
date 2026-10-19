@@ -47,7 +47,7 @@ async fn resolve_binding_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -152,9 +152,7 @@ async fn enrich_bindings(
     let services: Vec<UserService> = if service_ids.is_empty() {
         Vec::new()
     } else {
-        state
-            .db
-            .collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
             .find(doc! { "_id": { "$in": &service_ids } })
             .await?
             .try_collect()
@@ -169,9 +167,7 @@ async fn enrich_bindings(
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": &endpoint_ids } })
             .await?
             .try_collect()
@@ -180,9 +176,7 @@ async fn enrich_bindings(
     let credentials: Vec<UserApiKey> = if credential_ids.is_empty() {
         Vec::new()
     } else {
-        state
-            .db
-            .collection::<UserApiKey>(USER_API_KEYS)
+        crate::services::service_history::collection::<UserApiKey>(&state.db, USER_API_KEYS)
             .find(doc! { "_id": { "$in": &credential_ids } })
             .await?
             .try_collect()
@@ -508,15 +502,14 @@ pub async fn delete_binding(
     // Best-effort: a transient read error here must never turn a
     // successful binding load into a failed DELETE. Fall back to the
     // raw id instead.
-    let service_slug_for_telemetry: String = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": &binding.user_service_id })
-        .await
-        .ok()
-        .flatten()
-        .map(|svc| svc.slug)
-        .unwrap_or_else(|| binding.user_service_id.clone());
+    let service_slug_for_telemetry: String =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! { "_id": &binding.user_service_id })
+            .await
+            .ok()
+            .flatten()
+            .map(|svc| svc.slug)
+            .unwrap_or_else(|| binding.user_service_id.clone());
     agent_binding_service::delete_binding_with_scope_authorization(
         &state.db,
         &user_id,
@@ -660,12 +653,18 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -678,6 +677,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),

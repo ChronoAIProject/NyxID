@@ -90,6 +90,7 @@ pub enum InjectionMethod {
     Header,
     QueryParam,
     PathPrefix,
+    IftttWebhook,
 }
 
 impl InjectionMethod {
@@ -98,6 +99,7 @@ impl InjectionMethod {
             Self::Header => "header",
             Self::QueryParam => "query-param",
             Self::PathPrefix => "path-prefix",
+            Self::IftttWebhook => "ifttt-webhook",
         }
     }
 }

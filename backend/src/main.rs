@@ -86,6 +86,8 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(test)]
+    pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
@@ -108,6 +110,10 @@ pub struct AppState {
         Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
+    /// Trusted workload-ticket verification for managed Node bootstrap. The
+    /// default remains closed until a real provider is integrated and accepted.
+    pub managed_bootstrap_verifier:
+        Arc<dyn services::remote_machine_bootstrap::BootstrapTicketVerifier>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Process and address identity used to fence node ownership.
@@ -138,6 +144,11 @@ pub struct AppState {
     pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
     pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_request_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_poll_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_approve_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    pub auth_agent_key_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-creator limiter for `POST /api/v1/connect-links` (10/min).
     pub connect_link_create_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for public connect-link previews (30/min).
@@ -163,6 +174,7 @@ pub struct AppState {
     /// settings writes. Enforcement reads this in-memory snapshot, never
     /// MongoDB, so broker checks do not add per-request database work.
     pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    pub upload_retention: services::assistant_upload_retention::Cache,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -182,6 +194,8 @@ pub struct AppState {
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Per-conversation admission for unsolicited channel messages.
+    pub per_conversation_initiate_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
     /// Per-upstream-message edit limiter for progressive channel relay edits.
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Per-trigger token bucket for public trigger ingress.
@@ -201,6 +215,11 @@ pub struct AppState {
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
+    pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
+    /// Live assistant changes from this process's MongoDB change stream:
+    /// resumes chats waiting on connect links and new bots at once, and
+    /// pushes thread changes to open browsers.
+    pub assistant_live: Arc<services::assistant_live::AssistantLive>,
 }
 
 impl AppState {
@@ -308,8 +327,16 @@ enum Commands {
     CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
+        services::attachment_extraction::worker();
+        return;
+    }
+    server_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn server_main() {
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
@@ -351,6 +378,8 @@ async fn main() {
         other => other,
     };
 
+    services::assistant_engine_worker::initialize();
+
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
@@ -365,6 +394,10 @@ async fn main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    services::assistant_nyxagent::warn_at_startup(&db).await;
+    services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("Failed to read the immutable assistant skill-routing cutover");
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -415,6 +448,12 @@ async fn main() {
         Some(&jwt_private_key_pem),
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
     let internal_dispatch_hmac_key = services::internal_auth::derive_key(
         config.internal_dispatch_hmac_key.as_deref(),
@@ -536,11 +575,16 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
-    // Seed the admin-managed platform vendor provisioning templates. Existing
-    // rows are never overwritten so operators can edit or disable templates.
-    services::platform_vendor_template_service::seed_default_templates(&db, "system")
+    services::inference_service::backfill(&db)
         .await
-        .expect("Failed to seed platform vendor templates");
+        .expect("Failed to backfill inference metadata");
+    services::utility_inference_service::seed(&db)
+        .await
+        .expect("Failed to seed utility inference defaults");
+
+    services::retired_service_service::retire_legacy_vendors(&db)
+        .await
+        .expect("Failed to retire legacy vendor credential stores");
 
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
@@ -571,6 +615,16 @@ async fn main() {
         .await
         .expect("Failed to backfill stale UserService auth_method snapshots");
 
+    // Remove org-owned public platform rows created by the pre-0.26.1
+    // provisioning bug. The sweep deletes orphan resources before each row so
+    // retries work on standalone MongoDB too. Personal rows, explicit bindings,
+    // and restricted grants are untouched; cleanup failures do not stop startup.
+    if let Err(error) =
+        services::user_service_service::cleanup_public_org_auto_provisions(&db).await
+    {
+        tracing::warn!(%error, "Failed to clean up stale public platform org auto-provisions");
+    }
+
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
         .await
@@ -589,6 +643,20 @@ async fn main() {
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");
+    }
+
+    // Retire pre-upgrade owner asks in bounded pending-row batches. The sweep is
+    // idempotent; failures retry on policy writes or the next startup.
+    if services::assistant_acknowledgement_service::retire_full_access_confirmations(
+        &db, None, None,
+    )
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            code = "assistant_full_access_retirement_failed",
+            "Failed to retire obsolete Full-access confirmations; continuing startup"
+        );
     }
 
     // --- Server startup ---
@@ -725,6 +793,14 @@ async fn main() {
         config.channel_relay_edit_rate_limit_burst,
     ));
 
+    let per_conversation_initiate_limiter =
+        Arc::new(mw::rate_limit::PerChannelEventLimiter::with_db(
+            db.clone(),
+            "channel_initiate",
+            config.channel_relay_initiate_rate_limit_per_second,
+            config.channel_relay_initiate_rate_limit_burst,
+        ));
+
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
         db.clone(),
@@ -759,6 +835,14 @@ async fn main() {
             encryption_keys.clone(),
         ),
     );
+    services::channel_bot_health::install_failure_notifier(
+        services::channel_bot_health::ChannelBotFailureNotifier::new(
+            Arc::new(config.clone()),
+            http_client.clone(),
+            fcm_auth.clone(),
+            apns_auth.clone(),
+        ),
+    );
     let connection_expiry_notifier = Arc::new(
         services::connection_expiry_service::ConnectionExpiryNotifier::new(
             Arc::new(config.clone()),
@@ -769,6 +853,8 @@ async fn main() {
         ),
     );
     let state = AppState {
+        #[cfg(test)]
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -781,6 +867,8 @@ async fn main() {
         connection_expiry_notifier,
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
+        managed_bootstrap_verifier:
+            services::remote_machine_bootstrap_verifier::configured_verifier(),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -838,6 +926,36 @@ async fn main() {
             30,
             60,
         ),
+        auth_agent_key_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_request",
+            5,
+            60,
+        ),
+        auth_agent_key_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_poll",
+            60,
+            60,
+        ),
+        auth_agent_key_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_approve",
+            10,
+            60,
+        ),
+        auth_agent_key_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "auth_agent_key_approve_user",
+            10,
+            300,
+        ),
+        auth_agent_key_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_preview",
+            30,
+            60,
+        ),
         connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(
             db.clone(),
             "connect_link_create",
@@ -877,12 +995,14 @@ async fn main() {
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        upload_retention: Default::default(),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
         billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
+        per_conversation_initiate_limiter,
         per_trigger_limiter,
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
@@ -894,16 +1014,54 @@ async fn main() {
         ),
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
+        audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
     // is `None` (hard-off mode); the function logs + returns.
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
+    let _usage_rollup_worker =
+        services::billing::usage_rollup::spawn_worker(state.db.clone(), Arc::new(config.clone()));
     let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
     );
+    state.billing.spawn_refresh_worker();
+    services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
+        .await
+        .expect("Upload retention policy");
+    services::assistant_upload_retention::spawn(state.clone());
+    services::assistant_agent_learning_review::start_publication_migration(&state).await;
+    services::assistant_agent_learning::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
+
+    let lifecycle_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_pool_service::cleanup_deleted_pools(&lifecycle_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle lifecycle cleanup pass failed");
+            }
+        }
+    });
+    let login_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_login_profile_service::purge_expired(&login_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle saved login cleanup failed");
+            }
+        }
+    });
 
     // Create rate limiters
     let global_rate_limiter = mw::rate_limit::create_rate_limiter(
@@ -917,6 +1075,57 @@ async fn main() {
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
     );
+
+    // NyxBot: destroy idle subagents and retry deferred team wake-ups.
+    handlers::assistant_team::spawn_sweeps(state.clone());
+    services::call_channels::coordinator::spawn_sweep(state.clone());
+    services::platform_manager_transport::spawn_sweeps(
+        state.clone(),
+        services::platform_manager_transport::compose(
+            state.clone(),
+            handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        ),
+    );
+    handlers::trigger_scheduler::spawn(state.clone());
+    // Live assistant changes: one change stream for this process, and the
+    // NyxBot reaction to finished links and new bots.
+    handlers::nyxbot::spawn_live_dispatch(state.clone());
+    handlers::machine_update::spawn(state.clone());
+    services::machine_access_service::spawn(state.clone());
+    services::remote_machine_manager::spawn(state.clone());
+    {
+        let live = state.assistant_live.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { live.run(db).await });
+    }
+
+    // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
+    if config.agent_key_login_sweep_interval_secs > 0 {
+        let sweep_db = state.db.clone();
+        let sweep_interval = config.agent_key_login_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(sweep_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Device login expiry sweep failed"
+                    );
+                }
+                if let Err(error) =
+                    services::auth_agent_key_login_service::sweep_expired(&sweep_db).await
+                {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Agent Key login expiry sweep failed"
+                    );
+                }
+            }
+        });
+    }
 
     // Expire abandoned app-bound connect links even when their creator has
     // stopped polling. Disabled when the interval is 0.
@@ -941,6 +1150,95 @@ async fn main() {
             }
         });
     }
+
+    // Bot links use their own sweep so slow receivers cannot delay connector links.
+    if config.connect_link_expiry_sweep_interval_secs > 0 {
+        let bot_link_state = state.clone();
+        let interval_secs = config.connect_link_expiry_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::channel_connect_link_service::sweep(
+                    &bot_link_state.db,
+                    &bot_link_state.encryption_keys,
+                    &bot_link_state.developer_webhook_dispatcher,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Channel connect-link sweep failed");
+                }
+            }
+        });
+    }
+
+    // Budget holds must recover independently of external Telegram notice latency.
+    let platform_budget_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform budget recovery sweep failed"
+                );
+            }
+        }
+    });
+
+    let platform_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform conversion cleanup sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_provisioning_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup provisioning sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup status notice sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Native platform recovery sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_service::expire(&platform_cleanup_state.db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup expiry sweep failed"
+                );
+            }
+        }
+    });
 
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
@@ -1028,6 +1326,58 @@ async fn main() {
                 .await
                 {
                     tracing::warn!("OAuth refresh sweep error: {e}");
+                }
+            }
+        });
+    }
+
+    {
+        let poll_state = state.clone();
+        let poll_interval = if config.channel_poll_interval_secs > 0 {
+            config.channel_poll_interval_secs
+        } else {
+            60
+        };
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if services::channel_billing_service::sweep(&poll_state)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "Channel subscription cleanup failed; retrying on the next tick"
+                    );
+                }
+                if poll_state.config.channel_poll_interval_secs > 0
+                    && services::channel_poll_service::sweep(&poll_state)
+                        .await
+                        .is_err()
+                {
+                    tracing::warn!("Channel poll sweep failed; retrying on the next tick");
+                }
+            }
+        });
+    }
+
+    {
+        let creation_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let service = services::telegram_new_service::TelegramNewService {
+                    db: &creation_state.db,
+                    keys: &creation_state.encryption_keys,
+                    config: &creation_state.config,
+                    api: services::telegram_new_api::TelegramApi::new(&creation_state.http_client),
+                };
+                if service.complete_pending_creations().await.is_err() {
+                    tracing::warn!("Telegram creation sweep failed; retrying on the next tick");
                 }
             }
         });
@@ -1168,11 +1518,17 @@ async fn main() {
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
+        .expose_headers([axum::http::HeaderName::from_static(
+            mw::assistant_trace::TRACE_HEADER,
+        )])
         .allow_credentials(true);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
+    services::service_history::relay::start(state.db.clone());
+
     let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 
     let csrf_state = state.clone();
@@ -1187,6 +1543,8 @@ async fn main() {
         trusted_proxies: Arc::new(state.config.trusted_proxy_ips.clone()),
     };
     let trusted_proxy_ranges = Arc::new(state.config.trusted_proxy_ips.clone());
+    let rate_limit_exempt_ips =
+        mw::rate_limit::RateLimitExemptIps(Arc::new(state.config.rate_limit_exempt_ips.clone()));
 
     // Global response-header policy (security headers + the SSE
     // anti-buffering mark) wraps the FULLY MERGED router, so every route
@@ -1221,7 +1579,9 @@ async fn main() {
     .layer(Extension(per_ip_rate_limiter))
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
-    .layer(TraceLayer::new_for_http());
+    .layer(Extension(rate_limit_exempt_ips))
+    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
+    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

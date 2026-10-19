@@ -1,6 +1,24 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Dedicated, server-managed Telnyx text-chat offering. Presence requires the
+/// managed execution runner; generic proxy settlement cannot price this contract.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedExecutionContract {
+    pub model: String,
+    /// Verified complete model context ceiling, used as the input reservation
+    /// bound rather than estimating tokens from request bytes.
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
+    pub tariff_version: String,
+    pub tariff_source: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub tariff_verified_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingMetric {
@@ -8,6 +26,13 @@ pub enum BillingMetric {
     Tokens,
     Requests,
     Bytes,
+    InputTokens,
+    OutputTokens,
+    CacheReadTokens,
+    CacheWriteTokens,
+    Images,
+    VoiceSeconds,
+    MachineRunningSeconds,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -33,25 +58,117 @@ pub struct ServicePlatformPricing {
     pub sync_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LanePricing {
+    #[serde(default)]
+    pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_components")]
+    pub components: Vec<LanePriceComponent>,
+    #[serde(default, deserialize_with = "deserialize_operations")]
+    pub operations: Vec<OperationPrice>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct OperationPrice {
+    pub operation: String,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LanePriceComponent {
+    pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+}
+
+fn deserialize_operations<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<OperationPrice>, D::Error> {
+    Ok(Option::<Vec<OperationPrice>>::deserialize(d)?.unwrap_or_default())
+}
+
+fn deserialize_components<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<LanePriceComponent>, D::Error> {
+    Ok(Option::<Vec<LanePriceComponent>>::deserialize(d)?.unwrap_or_default())
+}
+
 impl BillingMetric {
-    /// Stable serde-matching name; used in ledger canonical encoding, so
-    /// variant renames must not change these strings.
-    pub fn as_str(self) -> &'static str {
+    /// Stable names enter ledger canonical encoding. Never rename existing units.
+    pub const ALL: [Self; 10] = [
+        Self::Tokens,
+        Self::Requests,
+        Self::Bytes,
+        Self::InputTokens,
+        Self::OutputTokens,
+        Self::CacheReadTokens,
+        Self::CacheWriteTokens,
+        Self::Images,
+        Self::VoiceSeconds,
+        Self::MachineRunningSeconds,
+    ];
+
+    fn metadata(self) -> (&'static str, &'static str, bool) {
         match self {
-            Self::Tokens => "tokens",
-            Self::Requests => "requests",
-            Self::Bytes => "bytes",
+            Self::Tokens => ("tokens", "Tokens", true),
+            Self::Requests => ("requests", "Requests", false),
+            Self::Bytes => ("bytes", "Bytes", false),
+            Self::InputTokens => ("input_tokens", "Input tokens", true),
+            Self::OutputTokens => ("output_tokens", "Output tokens", true),
+            Self::CacheReadTokens => ("cache_read_tokens", "Cache-read tokens", true),
+            Self::CacheWriteTokens => ("cache_write_tokens", "Cache-write tokens", true),
+            Self::Images => ("images", "Images", false),
+            Self::VoiceSeconds => ("voice_seconds", "Voice seconds", false),
+            Self::MachineRunningSeconds => {
+                ("machine_running_seconds", "Machine running seconds", false)
+            }
         }
+    }
+    pub fn as_str(self) -> &'static str {
+        self.metadata().0
+    }
+    pub fn label(self) -> &'static str {
+        self.metadata().1
+    }
+    pub fn is_token_family(self) -> bool {
+        self.metadata().2
+    }
+    pub fn is_legacy(self) -> bool {
+        matches!(self, Self::Tokens | Self::Requests | Self::Bytes)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ServiceBilling {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_execution: Option<ManagedExecutionContract>,
     /// Opt-in platform-layer charging. Services default to free (metered
     /// for observability, never charged); admins enable this on the
     /// platform-operated services that should bill wallet credits.
     #[serde(default)]
     pub platform_billable: bool,
+    /// Restrict platform charges to NyxID master credentials and shared OAuth
+    /// apps. User-owned, agent-override, node-managed and no-auth traffic stays free.
+    #[serde(default)]
+    pub platform_charge_nyxid_credentials_only: bool,
     /// Admin-selected platform metering unit. Unset falls back to the
     /// heuristic (WS/SSH meter bytes, `llm-` slugs meter tokens,
     /// everything else meters requests).
@@ -67,8 +184,19 @@ pub struct ServiceBilling {
     /// removes this metric's charge from Lago before clearing the marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_pricing_cleanup_metric_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byok_pricing: Option<LanePricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key_pricing: Option<LanePricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byok_pricing_cleanup_metric_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
     pub resale_billable: bool,
+    /// Durable cleanup for removed lane components; server-owned.
+    #[serde(default)]
+    pub component_cleanup_metric_codes: Vec<String>,
     #[serde(default)]
     pub resale_metric: BillingMetric,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,10 +206,17 @@ pub struct ServiceBilling {
 impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
+            managed_execution: None,
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -116,8 +251,8 @@ impl ServiceBilling {
 /// Provider-reported token classes for one LLM exchange. `prompt_tokens`
 /// follows each provider's own accounting: OpenAI includes cached tokens
 /// inside `prompt_tokens`, Anthropic reports cache reads and writes
-/// outside `input_tokens`. Observability only for now; billing still
-/// charges the single total-token quantity.
+/// outside `input_tokens`. The normalized PlatformUsage classes are priced;
+/// this breakdown preserves the provider accounting for observability.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct TokenBreakdown {
     pub prompt_tokens: i64,
@@ -140,14 +275,61 @@ impl TokenBreakdown {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+/// Provider-reported audio token classes (OpenAI/xAI realtime
+/// `input_token_details.audio_tokens` / `output_token_details.audio_tokens`,
+/// chat `prompt_tokens_details` / `completion_tokens_details`). Subsets of
+/// the prompt/completion counts, metered for observability only and never
+/// priced.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AudioTokens {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl AudioTokens {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+}
+
+/// Provider-reported image subsets of input/output. Observability only;
+/// already included in the token breakdown and never priced again.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ImageTokens {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl ImageTokens {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
     pub requests: i64,
     pub bytes: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub cache_write_tokens: i64,
+    #[serde(default)]
+    pub images: i64,
+    #[serde(default)]
+    pub voice_seconds: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<TokenBreakdown>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<AudioTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<ImageTokens>,
 }
 
 impl PlatformUsage {
@@ -157,6 +339,7 @@ impl PlatformUsage {
             bytes,
             tokens: 0,
             token_breakdown: None,
+            ..Default::default()
         }
     }
 
@@ -166,11 +349,22 @@ impl PlatformUsage {
             bytes,
             tokens,
             token_breakdown: None,
+            ..Default::default()
         }
     }
 
     pub fn with_token_breakdown(mut self, breakdown: Option<TokenBreakdown>) -> Self {
         self.token_breakdown = breakdown.filter(|breakdown| !breakdown.is_empty());
+        self
+    }
+
+    pub fn with_audio_tokens(mut self, audio: Option<AudioTokens>) -> Self {
+        self.audio_tokens = audio.filter(|audio| !audio.is_empty());
+        self
+    }
+
+    pub fn with_image_tokens(mut self, images: Option<ImageTokens>) -> Self {
+        self.image_tokens = images.filter(|images| !images.is_empty());
         self
     }
 }
@@ -192,6 +386,52 @@ mod tests {
     use super::{BillingMetric, ServiceBilling};
 
     #[test]
+    fn voice_duration_is_explicit_and_legacy_usage_defaults_to_zero() {
+        assert_eq!(BillingMetric::VoiceSeconds.as_str(), "voice_seconds");
+        assert!(!BillingMetric::VoiceSeconds.is_token_family());
+        assert!(!BillingMetric::VoiceSeconds.is_legacy());
+        let usage: super::PlatformUsage =
+            serde_json::from_value(serde_json::json!({"requests":1,"bytes":8000})).unwrap();
+        assert_eq!(usage.voice_seconds, 0);
+        for metric in BillingMetric::ALL {
+            assert_eq!(
+                serde_json::from_value::<BillingMetric>(serde_json::json!(metric.as_str()))
+                    .unwrap(),
+                metric
+            );
+        }
+    }
+
+    #[test]
+    fn credential_charge_restriction_defaults_off_and_round_trips() {
+        let legacy: ServiceBilling = bson::from_document(bson::doc! {
+            "platform_billable": true,
+        })
+        .unwrap();
+        assert!(!legacy.platform_charge_nyxid_credentials_only);
+        assert!(!ServiceBilling::default().platform_charge_nyxid_credentials_only);
+        let restricted = ServiceBilling {
+            platform_charge_nyxid_credentials_only: true,
+            ..legacy
+        };
+        let document = bson::to_document(&restricted).unwrap();
+        assert!(
+            document
+                .get_bool("platform_charge_nyxid_credentials_only")
+                .unwrap()
+        );
+        assert_eq!(
+            bson::from_document::<ServiceBilling>(document).unwrap(),
+            restricted
+        );
+        let json = serde_json::to_string(&restricted).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServiceBilling>(&json).unwrap(),
+            restricted
+        );
+    }
+
+    #[test]
     fn service_billing_defaults_to_not_resale_billable() {
         let billing = ServiceBilling::default();
 
@@ -204,10 +444,17 @@ mod tests {
     #[test]
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

@@ -90,12 +90,14 @@ FRONTEND_URL=http://localhost:3000
 ENVIRONMENT=development
 JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
 JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
-INVITE_CODE_REQUIRED=false
 AUTO_VERIFY_EMAIL=true
 EMAIL_AUTH_ENABLED=true
 RUST_LOG=nyxid=info,tower_http=info
 EOF
 ln -sf .env.dev .env.production
+
+# After initial admin setup, disable auth:invitation-code in Admin > Feature Flags
+# if you want public registration without invitation codes.
 
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
@@ -254,3 +256,7 @@ The Step 2 block now sets these permissions automatically; this note is for chec
 ## Production deployment
 
 For production deployment (TLS (Transport Layer Security), custom domain, email verification), see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Aurinko mailbox connections
+
+For Aurinko account-token AI Services and native email channel bots, follow [Aurinko integration](./AURINKO_INTEGRATION.md). Bot setup requires an HTTPS callback reachable during signed validation, an account token, and the separate application signing secret. Managed OAuth is not exposed until interoperable PKCE support is documented.

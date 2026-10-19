@@ -9,13 +9,16 @@ import type {
 } from "@/types/channels";
 import {
   useChannelConversations,
+  useChannelConversation,
+  useSendChannelMessage,
   useCreateChannelConversation,
   useCreateDeviceConversation,
   useDeleteChannelConversation,
   useUpdateChannelConversation,
 } from "./use-channel-conversations";
 
-const { mockDelete, mockGet, mockPost, mockPut } = vi.hoisted(() => ({
+const { mockDelete, mockGet, mockPost, mockPut, mockClientOptions } = vi.hoisted(() => ({
+  mockClientOptions: vi.fn(),
   mockDelete: vi.fn(),
   mockGet: vi.fn(),
   mockPost: vi.fn(),
@@ -28,6 +31,12 @@ vi.mock("@/lib/api-client", () => ({
     get: mockGet,
     post: mockPost,
     put: mockPut,
+  },
+  // The relay send uses apiClient for the out-of-credits opt-in; record the
+  // options so tests can assert whose credits a denial is attributed to.
+  apiClient: (endpoint: string, options: { body?: unknown } = {}) => {
+    mockClientOptions(options);
+    return mockPost(endpoint, options.body);
   },
 }));
 
@@ -80,9 +89,7 @@ describe("useChannelConversations query building", () => {
       { wrapper: createWrapper() },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(mockGet).toHaveBeenCalledWith(
-      "/channel-conversations?bot_id=bot-1",
-    );
+    expect(mockGet).toHaveBeenCalledWith("/channel-conversations?bot_id=bot-1");
   });
 });
 
@@ -135,5 +142,94 @@ describe("channel conversation mutations", () => {
     });
     await result.current.mutateAsync("c1");
     expect(mockDelete).toHaveBeenCalledWith("/channel-conversations/c1");
+  });
+});
+
+describe("initiated messages", () => {
+  it("loads owner conversation details including opt-in and capabilities", async () => {
+    mockGet.mockResolvedValue({
+      id: "c/1",
+      allow_agent_initiated: false,
+      capabilities: { initiated_send: true },
+    });
+    const { result } = renderHook(() => useChannelConversation("c/1"), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/channel-conversations/c%2F1");
+    expect(result.current.data?.allow_agent_initiated).toBe(false);
+  });
+
+  it("sends without an inbound anchor and exposes the acceptance receipt", async () => {
+    mockPost.mockResolvedValue({
+      message_id: "message",
+      platform_message_id: "receipt",
+    });
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: "org-1" }),
+      { wrapper: createWrapper() },
+    );
+    const request = {
+      conversation_id: "c1",
+      message: { text: "test" },
+      idempotency_key: "same",
+    };
+    await expect(result.current.mutateAsync(request)).resolves.toEqual({
+      message_id: "message",
+      platform_message_id: "receipt",
+    });
+    expect(mockPost).toHaveBeenCalledWith("/channel-relay/send", request);
+    // Channel sends bill the bot owner, never an unknown payer.
+    expect(mockClientOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        creditsDenial: {
+          key: "op:channel-relay-send:c1:same",
+          payer: { org: { id: "org-1" } },
+        },
+      }),
+    );
+  });
+
+  it("refuses to send before the bot owner is known", async () => {
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: undefined }),
+      { wrapper: createWrapper() },
+    );
+    await expect(
+      result.current.mutateAsync({
+        conversation_id: "c1",
+        message: { text: "test" },
+      }),
+    ).rejects.toThrow("Bot details are still loading");
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it("does not automatically retry rejected sends", async () => {
+    mockPost.mockRejectedValue(new Error("Conversation is not reachable"));
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: "org-1" }),
+      { wrapper: createWrapper() },
+    );
+    await expect(
+      result.current.mutateAsync({
+        conversation_id: "c1",
+        message: { text: "test" },
+      }),
+    ).rejects.toThrow("not reachable");
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends an explicit false to disable the human opt-in", async () => {
+    mockPut.mockResolvedValue({ id: "c1", allow_agent_initiated: false });
+    const { result } = renderHook(() => useUpdateChannelConversation(), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      id: "c1",
+      allow_agent_initiated: false,
+    });
+    expect(mockPut).toHaveBeenCalledWith("/channel-conversations/c1", {
+      allow_agent_initiated: false,
+    });
   });
 });

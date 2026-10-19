@@ -1,5 +1,6 @@
 use crate::db::DbHandle;
 use crate::errors::{AppError, AppResult};
+use crate::models::usage_meter::CredentialClass;
 use crate::services::org_service::{self, OwnerAccess};
 
 #[derive(Clone)]
@@ -41,6 +42,28 @@ impl BillingOwnerResolver {
         )
         .await?;
         Self::from_owner_access(billing_principal_user_id, resource_owner_id, &access)
+    }
+
+    /// Resolve the payer after resource authorization and final credential selection.
+    ///
+    /// A platform-key grant authorizes use of NyxID's credential; it does not
+    /// make the granting organization pay. Master-key usage always draws from
+    /// the billing principal's personal wallet and rollout. All other classes
+    /// retain resource-owner billing and its organization ACL.
+    pub async fn resolve_for_execution(
+        &self,
+        billing_principal_user_id: &str,
+        resource_owner_id: &str,
+        credential_class: CredentialClass,
+    ) -> AppResult<ResolvedBillingOwner> {
+        if credential_class == CredentialClass::NyxidManagedMaster {
+            return Ok(ResolvedBillingOwner {
+                owner_id: billing_principal_user_id.to_string(),
+                pays: PaysFrom::Personal,
+            });
+        }
+        self.resolve_for_resource(billing_principal_user_id, resource_owner_id)
+            .await
     }
 
     /// Resolve an owner selected on a billing-benefit read surface.

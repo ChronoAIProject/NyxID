@@ -30,6 +30,92 @@ pub struct ServiceCapabilities {
     pub supports_streaming: bool,
 }
 
+/// Admin-authored model-call protocol; availability is resolved per caller.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceWireProtocol {
+    AnthropicMessages,
+    OpenaiResponses,
+    OpenaiCompletions,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServiceInference {
+    pub wire_protocol: InferenceWireProtocol,
+    #[serde(default)]
+    pub model_list: bool,
+    #[serde(default)]
+    pub realtime: bool,
+    #[serde(default)]
+    pub voice: Option<VoiceInference>,
+}
+
+/// Catalog metadata only; adapter endpoints and credentials are never catalog input.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceProtocol {
+    OpenaiLive,
+    XaiRealtime,
+    /// Future protocols remain readable during rolling upgrades, but cannot execute.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceUsageSource {
+    ProviderReported,
+    ServerMeasured,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceModel {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceInference {
+    pub protocol: VoiceProtocol,
+    pub models: Vec<VoiceModel>,
+    pub voices: Vec<VoiceChoice>,
+    pub usage_source: VoiceUsageSource,
+    pub billing_metrics: Vec<crate::models::service_billing::BillingMetric>,
+}
+
+/// Catalog-controlled smart-HTTP destination. Never authored by a machine.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GitHttp {
+    pub origin: String,
+    pub username: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyAudience {
+    #[default]
+    Restricted,
+    Public,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PlatformKeyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub audience: PlatformKeyAudience,
+    #[serde(default)]
+    pub allowed_owner_ids: Vec<String>,
+}
+
 /// Declarative configuration for a server-side token exchange flow.
 ///
 /// When a service has `auth_method == "token_exchange"`, the proxy uses this
@@ -131,10 +217,24 @@ pub struct ProxyOperationPolicy {
     pub rules: Vec<ProxyOperationRule>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProxyOperationRule {
     pub method: String,
     pub path_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// Explicit value grammars for parameters that contain path punctuation.
+    /// Omit empty maps to preserve existing policy and approval digest bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub path_parameter_constraints: std::collections::BTreeMap<String, ProxyPathConstraint>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyPathConstraint {
+    SheetsA1Range,
+    /// The corresponding path parameter is encoded per segment and may span multiple segments.
+    MultiSegment,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -159,8 +259,45 @@ pub struct SshServiceConfig {
     pub ca_public_key: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OfferingKind {
+    #[default]
+    AiService,
+    Tool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogImportKind {
+    Monid,
+    VendorSpec,
+    CatalogTwin,
+    Manual,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CatalogImportSource {
+    pub kind: CatalogImportKind,
+    pub reference: String,
+    pub version: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub imported_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DownstreamService {
+    #[serde(default)]
+    pub offering_kind: OfferingKind,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub supplier: Option<String>,
+    #[serde(default)]
+    pub import_source: Option<CatalogImportSource>,
+    /// Absent policies add no concurrency work to execution paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     #[serde(rename = "_id")]
     pub id: String,
     pub name: String,
@@ -169,6 +306,8 @@ pub struct DownstreamService {
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     /// "http" | "ssh"
     #[serde(default = "default_service_type")]
     pub service_type: String,
@@ -191,12 +330,17 @@ pub struct DownstreamService {
     /// - `path`: inject credential into URL path (Telegram bot token style)
     /// - `none`: no credential injection
     pub auth_method: String,
+    /// Optional RFC 9110 bearer scheme. Absent retains `Bearer`; catalog-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scheme: Option<String>,
     /// Header name, query param name, body field name, or path placeholder
     /// for the credential (depends on `auth_method`).
     pub auth_key_name: String,
     /// Encrypted master credential for this service
     #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_encrypted: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PlatformKeyConfig>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
     /// Preserves the user's intent, while `auth_method` is the resolved injection method.
     #[serde(default)]
@@ -235,6 +379,21 @@ pub struct DownstreamService {
 
     pub is_active: bool,
     pub created_by: String,
+    /// Set when a Catalog Manager (not an Admin) created this row. Only these
+    /// rows bind their non-admin creator to the Catalog Manager limits; every
+    /// other row keeps the plain creator rule.
+    #[serde(default)]
+    pub catalog_manager_created: bool,
+    /// Server-owned provenance. Legacy rows remain Admin-only for Tool writes.
+    #[serde(default)]
+    pub tools_manager_created: bool,
+    /// Sticky after the first credential, including after an Admin clears it.
+    #[serde(default)]
+    pub tools_credential_frozen: bool,
+    /// Current catalog owner after an administrative transfer. Legacy rows use
+    /// `created_by`; creator attribution is never rewritten by a transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
 
     // --- Identity propagation config ---
     /// "none" | "headers" | "jwt" | "both"
@@ -269,6 +428,10 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_config_id: Option<String>,
 
+    /// Optional immutable static SVG asset for provider-less Tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+
     // --- Rich metadata for AI agent discovery (issue #148) ---
     /// Public product or docs landing page
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,10 +445,16 @@ pub struct DownstreamService {
     /// Structured capability flags for proxy interaction patterns
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
-    /// Resale-layer usage billing metadata. Platform billing is plan-level
-    /// and is not configured on catalog services.
+    /// Legacy platform/resale billing and optional credential-class lane prices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<ServiceInference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_http: Option<GitHttp>,
+    /// Explicit admin edits, including clearing metadata, suppress startup defaults.
+    #[serde(default)]
+    pub inference_admin_modified: bool,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -301,6 +470,11 @@ pub struct DownstreamService {
     /// Relevant skill names/paths for AI tools (e.g., "nyxid/ornn", "ornn/authoring")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    #[serde(default)]
+    pub skills_revision: i64,
 
     /// Custom User-Agent header to send to the downstream service.
     /// When set, overrides the client's User-Agent instead of forwarding it.
@@ -410,6 +584,17 @@ fn default_delegation_scope() -> String {
     "llm:proxy".to_string()
 }
 
+impl std::fmt::Debug for DownstreamService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownstreamService")
+            .field("id", &self.id)
+            .field("slug", &self.slug)
+            .field("offering_kind", &self.offering_kind)
+            .field("credential_encrypted", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
@@ -418,6 +603,14 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -428,7 +621,9 @@ pub mod test_helpers {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -438,6 +633,10 @@ pub mod test_helpers {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -451,6 +650,10 @@ pub mod test_helpers {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            git_http: None,
+            concurrency_policy: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -516,6 +719,14 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -526,7 +737,9 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
+            platform_key: None,
             auth_type: Some("bearer".to_string()),
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -536,6 +749,10 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -554,6 +771,10 @@ mod tests {
                 ..Default::default()
             }),
             billing: None,
+            inference: None,
+            git_http: None,
+            concurrency_policy: None,
+            inference_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -597,6 +818,14 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),
@@ -607,7 +836,9 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
+            platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -617,6 +848,10 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -630,6 +865,10 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            git_http: None,
+            concurrency_policy: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -650,6 +889,10 @@ mod tests {
         // Remove the fields that have #[serde(default = ...)]
         doc.remove("service_type");
         doc.remove("visibility");
+        doc.remove("offering_kind");
+        doc.remove("topics");
+        doc.remove("supplier");
+        doc.remove("import_source");
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
@@ -659,6 +902,10 @@ mod tests {
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.visibility, "public");
+        assert_eq!(restored.offering_kind, OfferingKind::AiService);
+        assert!(restored.topics.is_empty());
+        assert!(restored.supplier.is_none());
+        assert!(restored.import_source.is_none());
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);

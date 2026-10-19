@@ -12,8 +12,14 @@ pub struct BillingRateCache {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub credits_per_unit_micros: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_per_unit_pico: Option<i64>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub synced_at: DateTime<Utc>,
+    /// Set when the service price behind this code was removed. Historical
+    /// usage keeps pricing from it; new reservations refuse it.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub retired_at: Option<DateTime<Utc>>,
 }
 
 impl BillingRateCache {

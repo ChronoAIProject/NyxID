@@ -1,5 +1,6 @@
 import { SERVICE_ICONS, FallbackIcon } from "@/components/service-icons";
 import { cn } from "@/lib/utils";
+import { useEffect, useState } from "react";
 
 /**
  * Fixed icon-size scale for service brand glyphs, anchored to the app's
@@ -9,7 +10,7 @@ import { cn } from "@/lib/utils";
  * `h-[n]` on a service icon — add a token here if a new size is genuinely
  * needed.
  */
-export type ServiceIconSize = "2xs" | "xs" | "sm" | "md" | "lg";
+export type ServiceIconSize = "2xs" | "xs" | "sm" | "md" | "lg" | "xl";
 
 // Sizes are `!important` on purpose: some shadcn containers (e.g.
 // `DropdownMenuItem`, `Button`) ship a blanket `[&_svg]:h-3.5 w-3.5` that
@@ -21,7 +22,26 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
   sm: "!h-5 !w-5", // 20px — list/table rows, compact cards
   md: "!h-6 !w-6", // 24px — card headers, detail rows
   lg: "!h-8 !w-8", // 32px — page-header leading / detail hero
+  xl: "!h-9 !w-9", // 36px — connection identity circles
 };
+
+function safeIconUrl(value: string): string | null {
+  if (value.length > 2048 || value.includes("#")) return null;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The app-facing brand icon for an AI service / proxy target. Config-driven
@@ -29,28 +49,149 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
  * give it the catalog slug and a size token, e.g.
  * `<ServiceIcon slug="api-reddit" size="sm" />`.
  *
+ * - `iconUrl` → a user-selected image, with the slug glyph as fallback.
  * - Known slug (`api-reddit`, `llm-openai`, …) → its brand glyph, sized to
  *   the token (badged composites included).
  * - Unknown slug → the generic globe fallback.
- * - Null / absent slug (custom service with no catalog backing) → nothing,
- *   so rows stay clean and don't reserve space.
+ * - Null / absent slug and icon URL → nothing.
  */
 export function ServiceIcon({
   slug,
+  iconUrl,
   size = "sm",
   className,
 }: {
   readonly slug?: string | null;
+  readonly iconUrl?: string | null;
   readonly size?: ServiceIconSize;
   readonly className?: string;
 }) {
-  if (!slug) return null;
-  const Glyph = SERVICE_ICONS[slug] ?? FallbackIcon;
+  const imageUrl = iconUrl ? safeIconUrl(iconUrl) : null;
+  if (imageUrl) {
+    return (
+      <ServiceIconImage
+        key={imageUrl}
+        slug={slug}
+        iconUrl={imageUrl}
+        size={size}
+        className={className}
+      />
+    );
+  }
+  if (!slug && !iconUrl) return null;
+  const Glyph = SERVICE_ICONS[slug ?? "custom"] ?? FallbackIcon;
   return (
     <Glyph
       className={cn(
         SIZE_CLASS[size],
         "shrink-0 text-muted-foreground",
+        className,
+      )}
+    />
+  );
+}
+
+/**
+ * Whether an icon URL can be read cross-origin (needed for CSS masks),
+ * remembered per URL so lists of the same icon probe once and later mounts
+ * start directly in mask mode.
+ */
+const corsReadable = new Map<string, boolean>();
+const pendingProbes = new Map<string, Promise<boolean>>();
+
+function probeCorsReadable(url: string): Promise<boolean> {
+  const pending = pendingProbes.get(url);
+  if (pending) return pending;
+  const probe = new Promise<boolean>((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.referrerPolicy = "no-referrer";
+    image.onload = () => {
+      corsReadable.set(url, true);
+      resolve(true);
+    };
+    image.onerror = () => {
+      corsReadable.set(url, false);
+      resolve(false);
+    };
+    image.src = url;
+  });
+  pendingProbes.set(url, probe);
+  return probe;
+}
+
+function ServiceIconImage({
+  slug,
+  iconUrl,
+  size,
+  className,
+}: {
+  readonly slug?: string | null;
+  readonly iconUrl: string;
+  readonly size: ServiceIconSize;
+  readonly className?: string;
+}) {
+  // "image": greyscale <img> (works for any host, falls back on error).
+  // "mask": the image drawn as a mask in the glyph colour, so uploaded art is
+  // the same single-colour shape as the built-in glyphs in every theme.
+  // Masks need a CORS-readable image, so the upgrade waits for a probe.
+  const [mode, setMode] = useState<"image" | "mask" | "failed">(() =>
+    corsReadable.get(iconUrl) === true ? "mask" : "image",
+  );
+  useEffect(() => {
+    if (corsReadable.has(iconUrl)) return;
+    let active = true;
+    void probeCorsReadable(iconUrl).then((readable) => {
+      if (active && readable) {
+        setMode((current) => (current === "image" ? "mask" : current));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [iconUrl]);
+
+  if (mode === "failed") {
+    return <ServiceIcon slug={slug ?? "custom"} size={size} className={className} />;
+  }
+  if (mode === "mask") {
+    const mask = `url(${JSON.stringify(iconUrl)})`;
+    return (
+      <span
+        aria-hidden="true"
+        data-icon-mode="mask"
+        className={cn(
+          SIZE_CLASS[size],
+          "inline-block shrink-0 bg-current text-muted-foreground",
+          className,
+        )}
+        style={{
+          maskImage: mask,
+          WebkitMaskImage: mask,
+          maskSize: "contain",
+          WebkitMaskSize: "contain",
+          maskRepeat: "no-repeat",
+          WebkitMaskRepeat: "no-repeat",
+          maskPosition: "center",
+          WebkitMaskPosition: "center",
+        }}
+      />
+    );
+  }
+  return (
+    <img
+      src={iconUrl}
+      alt=""
+      aria-hidden="true"
+      data-icon-mode="image"
+      referrerPolicy="no-referrer"
+      onError={() => setMode("failed")}
+      // Until (or unless) the mask upgrade applies, uploaded brand art renders
+      // monochrome so it sits with the built-in glyphs; dark themes lift it so
+      // mid-tone logos stay legible.
+      className={cn(
+        SIZE_CLASS[size],
+        "shrink-0 object-contain grayscale dark:brightness-150",
         className,
       )}
     />

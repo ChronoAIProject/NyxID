@@ -1,4 +1,25 @@
-import { useState } from "react";
+import { ChannelActivities, ActivityCallbackSettings } from "@/components/channels/channel-activities";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { toast } from "sonner";
+import { useAppForm } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { DetailSection } from "@/components/shared/detail-section";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import {
+  useChannelConversation,
+  useUpdateChannelConversation,
+  useSendChannelMessage,
+} from "@/hooks/use-channel-conversations";
+import {
+  channelInitiatedSettingsSchema,
+  channelTestMessageSchema,
+  type ChannelInitiatedSettingsFormData,
+  type ChannelTestMessageFormData,
+} from "@/schemas/channels";
+import { useRef, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useChannelMessages } from "@/hooks/use-channel-messages";
 import { useChannelBot } from "@/hooks/use-channel-bots";
@@ -17,7 +38,10 @@ import {
 import { MobileNotificationIcon } from "@/components/icons/empty-state";
 import type {
   CallbackStatus,
+  ChannelConversationItem,
   ChannelMessageItem,
+  ChannelDelivery,
+  ChannelDeliveryStatus,
   ContentType,
   MessageDirection,
 } from "@/types/channels";
@@ -80,30 +104,57 @@ function directionLabel(dir: MessageDirection): string {
   return dir === "inbound" ? "Inbound" : "Outbound";
 }
 
+const receiptLabels: Record<ChannelDeliveryStatus, string> = {
+  accepted: "Platform accepted", sent: "Sent by WhatsApp", delivered: "Delivered",
+  read: "Read", played: "Played", failed: "Delivery failed", partial: "Partially accepted",
+  unknown: "Acceptance unknown", legacy_final_only: "Final part accepted",
+  recipient_only: "Recipient observations only",
+};
+
+function DeliveryDetails({ delivery }: { readonly delivery: ChannelDelivery }) {
+  const failed = delivery.status === "failed";
+  const uncertain = delivery.status === "partial" || delivery.status === "unknown";
+  return <div className="mt-2 min-w-0 space-y-2 text-11 text-muted-foreground">
+    <Badge variant={failed ? "destructive" : uncertain ? "warning" : "secondary"} className="max-w-full whitespace-normal text-10">
+      {receiptLabels[delivery.status]}
+    </Badge>
+    {delivery.status === "legacy_final_only" && <p>Only the final component ID was recorded. Delivery of the whole reply cannot be confirmed.</p>}
+    {delivery.recipient_only && <p>These observations do not confirm delivery to every group participant.</p>}
+    {uncertain && <p>{delivery.status === "partial" ? "Only part of the reply was confirmed as accepted." : "WhatsApp acceptance could not be confirmed."} Check the conversation before sending again; some components may already have arrived.</p>}
+    {failed && <p>WhatsApp reported a failure. Review the component status and provider codes below.</p>}
+    {delivery.failure_code !== null && <p>Send error code (NyxID): {delivery.failure_code}</p>}
+    {delivery.expected_components !== null && <p>{delivery.components.length} of {delivery.expected_components} component IDs recorded.{delivery.status === "accepted" && " Acceptance does not confirm recipient delivery."}</p>}
+    {delivery.components.length > 0 && <details>
+      <summary className="cursor-pointer">Component receipts</summary>
+      <ol className="mt-2 space-y-3">
+        {delivery.components.map((part, index) => <li key={part.platform_message_id} className="min-w-0 break-words">
+          <p>Component {index + 1}: {receiptLabels[part.status]}</p>
+          <p className="break-all">{part.platform_message_id}</p>
+          {([ ["Sent", part.sent_at], ["Delivered", part.delivered_at], ["Read", part.read_at], ["Played", part.played_at], ["Failed", part.failed_at] ] as const).map(([label, time]) => time && <p key={label}>{label}: <time dateTime={time}>{time}</time></p>)}
+          {part.error_codes.length > 0 && <p>WhatsApp error codes: {part.error_codes.join(", ")}</p>}
+        </li>)}
+      </ol>
+    </details>}
+  </div>;
+}
+
 // -- Message Card --
 
-function MessageCard({
-  message,
-}: {
-  readonly message: ChannelMessageItem;
-}) {
+export function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
   const isInbound = message.direction === "inbound";
   const senderName =
     message.sender_display_name ?? message.sender_platform_id ?? "Unknown";
 
   return (
     <div
-      className={cn(
-        "flex w-full",
-        isInbound ? "justify-start" : "justify-end",
-      )}
+      className={cn("flex w-full", isInbound ? "justify-start" : "justify-end")}
     >
       <div
         className={cn(
-          "max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
+          "min-w-0 max-w-[90%] sm:max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
           isInbound
             ? "bg-muted text-foreground"
-            : "bg-primary/10 text-foreground",
+            : "bg-overlay text-foreground",
         )}
       >
         {/* Header */}
@@ -126,28 +177,206 @@ function MessageCard({
 
         {/* Content type only — message bodies are no longer stored per ADR-013 */}
         <div className="mb-1">
-          <Badge variant="secondary" className="text-[9px]">
+          <Badge variant="secondary" className="text-10">
             {contentTypeLabel(message.content_type)}
           </Badge>
         </div>
-        <p className="text-[12px] italic text-muted-foreground">
+        <p className="text-12 italic text-muted-foreground">
           Content is not stored in NyxID. Ask the agent for the message body.
         </p>
 
         {/* Footer */}
-        <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-10 text-muted-foreground">
           <span>{formatMessageTime(message.created_at)}</span>
-          {!isInbound && message.callback_status && (
+          {isInbound && message.callback_status && (
             <Badge
               variant={deliveryBadgeVariant(message.callback_status)}
-              className="text-[9px]"
+              className="text-10"
             >
-              {message.callback_status.charAt(0).toUpperCase() + message.callback_status.slice(1)}
+              {message.callback_status === "delivered" ? "Callback accepted" : message.callback_status === "pending" ? "Callback pending" : message.callback_status === "timeout" ? "Callback timed out" : "Callback failed"}
             </Badge>
           )}
+          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-10">Platform accepted</Badge>}
         </div>
+        {!isInbound && message.delivery && <DeliveryDetails delivery={message.delivery} />}
+        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-11 text-muted-foreground break-all">Platform message ID: {message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
       </div>
     </div>
+  );
+}
+
+export function InitiatedMessageSettings({
+  conversation,
+  botOwnerId,
+  botOwnerError = false,
+  onRetryBotOwner,
+}: {
+  readonly conversation: ChannelConversationItem;
+  /** Owner of the backing bot, whose credits a send spends; required to send. */
+  readonly botOwnerId: string | undefined;
+  /** The bot could not be loaded, so its owner is unknown until a retry. */
+  readonly botOwnerError?: boolean;
+  readonly onRetryBotOwner?: () => void;
+}) {
+  const update = useUpdateChannelConversation();
+  const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
+  const attempt = useRef<{ text: string; key: string } | null>(null);
+  const settings = useAppForm<ChannelInitiatedSettingsFormData>({
+    resolver: zodResolver(channelInitiatedSettingsSchema),
+    values: {
+      allow_agent_initiated: conversation.allow_agent_initiated ?? false,
+    },
+  });
+  const message = useAppForm<ChannelTestMessageFormData>({
+    resolver: zodResolver(channelTestMessageSchema),
+    defaultValues: { text: "" },
+    mode: "onChange",
+  });
+  const supported = conversation.capabilities?.initiated_send ?? false;
+  const addressable =
+    conversation.platform !== "device" &&
+    Boolean(conversation.platform_conversation_id.trim()) &&
+    conversation.platform_conversation_id !== "*";
+  const unavailable = !supported
+    ? "This platform does not support agent-initiated messages."
+    : !addressable
+      ? "This route has no specific chat address. Create a route for a specific chat to enable messages."
+      : !conversation.is_active
+        ? "Enable this conversation before sending messages."
+        : null;
+
+  return (
+    <DetailSection title="Agent-initiated messages">
+      <div className="space-y-1 p-5 text-xs text-muted-foreground">
+        <p>Editing: {conversation.capabilities?.edit ? "Supported" : "Unavailable"}</p>
+        <p>Receive media: {conversation.capabilities?.media?.inbound.join(", ") || "None"}</p>
+        <p>Send media: {conversation.capabilities?.media?.outbound.join(", ") || "None"}</p>
+      </div>
+      <form
+        className="space-y-4 p-5"
+        onSubmit={settings.handleSubmit(async (values) => {
+          try {
+            await update.mutateAsync({ id: conversation.id, ...values });
+            settings.reset(values);
+            toast.success("Message settings saved");
+          } catch {
+            /* Mutation error is displayed below. */
+          }
+        })}
+      >
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+          <div className="space-y-1">
+            <Label htmlFor="allow-agent-initiated">
+              Allow unprompted messages
+            </Label>
+            <p
+              id="initiated-warning"
+              className="text-12 text-muted-foreground"
+            >
+              This lets the assigned agent message this chat without anyone
+              asking first, including alerts and scheduled updates.
+            </p>
+          </div>
+          <Switch
+            id="allow-agent-initiated"
+            aria-describedby="initiated-warning"
+            checked={settings.watch("allow_agent_initiated")}
+            disabled={Boolean(unavailable) || update.isPending}
+            onCheckedChange={(checked) =>
+              settings.setValue("allow_agent_initiated", checked)
+            }
+          />
+        </div>
+        {unavailable && (
+          <p className="text-12 text-muted-foreground">{unavailable}</p>
+        )}
+        {update.error && <ErrorBanner message={update.error.message} />}
+        <div className="flex justify-end">
+          <Button
+            type="submit"
+            variant="primary"
+            isLoading={update.isPending}
+            disabled={!settings.formState.isDirty || Boolean(unavailable)}
+          >
+            Save
+          </Button>
+        </div>
+      </form>
+      {supported && addressable && (
+        <form
+          className="space-y-3 p-5"
+          onSubmit={(event) => {
+            void message.handleSubmit(async ({ text }) => {
+              // Enter submits even while the button is disabled.
+              if (!botOwnerId) return;
+              if (attempt.current?.text !== text)
+                attempt.current = { text, key: crypto.randomUUID() };
+              try {
+                await send.mutateAsync({
+                  conversation_id: conversation.id,
+                  message: { text },
+                  idempotency_key: attempt.current.key,
+                });
+                message.reset({ text: "" });
+                attempt.current = null;
+                toast.success("Platform accepted the test message");
+              } catch {
+                /* Keep the delivery key for an explicit retry of the same message. */
+              }
+            })(event);
+          }}
+        >
+          <Label htmlFor="channel-test-message">Send test message</Label>
+          <Input
+            id="channel-test-message"
+            {...message.register("text")}
+            disabled={
+              !conversation.allow_agent_initiated ||
+              send.isPending ||
+              !conversation.is_active ||
+              !botOwnerId
+            }
+            placeholder="Your test message"
+          />
+          {!botOwnerId && botOwnerError ? (
+            <ErrorBanner
+              message="This bot's details could not be loaded, so test messages can't be sent."
+              onRetry={onRetryBotOwner}
+            />
+          ) : !conversation.allow_agent_initiated ? (
+            <p className="text-12 text-muted-foreground">
+              Save the setting above before sending a test message.
+            </p>
+          ) : (
+            !botOwnerId && (
+              <p className="text-12 text-muted-foreground">
+                Sending is available once this bot&apos;s details load.
+              </p>
+            )
+          )}
+          {message.formState.errors.text && (
+            <p role="alert" className="text-12 text-destructive">
+              {message.formState.errors.text.message}
+            </p>
+          )}
+          {send.error && <ErrorBanner message={send.error.message} />}
+          <div className="flex justify-end">
+            <Button
+              type="submit"
+              isLoading={send.isPending}
+              disabled={
+                !conversation.allow_agent_initiated ||
+                !conversation.is_active ||
+                !botOwnerId ||
+                !message.formState.isValid
+              }
+            >
+              Send test message
+            </Button>
+          </div>
+        </form>
+      )}
+    </DetailSection>
   );
 }
 
@@ -163,7 +392,17 @@ export function ChannelConversationDetailPage() {
   const [page, setPage] = useState(1);
   const perPage = 50;
 
-  const { data: bot } = useChannelBot(botId);
+  const {
+    data: bot,
+    isError: botError,
+    refetch: refetchBot,
+  } = useChannelBot(botId);
+  const { getPlatform } = useChannelPlatformViews();
+  const activities = getPlatform(bot?.platform ?? "").activities;
+  const { data: conversation, error: conversationError } =
+    useChannelConversation(conversationId);
+  useBreadcrumbLabel("Messages");
+  useBreadcrumbLabel(bot?.label, `/channel-bots/${botId}`);
   const { data, isLoading, error, refetch } = useChannelMessages(
     conversationId,
     page,
@@ -174,7 +413,7 @@ export function ChannelConversationDetailPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  if (isLoading) {
+  if (isLoading && activities.length === 0) {
     return (
       <div className="space-y-8">
         <Skeleton className="h-12 w-64" />
@@ -196,8 +435,8 @@ export function ChannelConversationDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Messages"
-        description={`Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
+        title={activities.length ? "Channel activity" : "Messages"}
+        description={activities.length ? `Conversation ${conversationId.slice(0, 12)}…` : `Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
         actions={
           <Button
             variant="outline"
@@ -212,7 +451,7 @@ export function ChannelConversationDetailPage() {
 
       {/* Conversation metadata */}
       {bot && (
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-12 text-muted-foreground">
           <Badge variant="secondary">{bot.platform}</Badge>
           <span>Conversation ID:</span>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
@@ -221,14 +460,40 @@ export function ChannelConversationDetailPage() {
         </div>
       )}
 
+      {conversationError && (
+        <ErrorBanner message="Failed to load conversation settings." />
+      )}
+      {activities.length > 0 && (
+        <>
+          <ChannelActivities scope="route" id={conversationId} descriptors={activities} />
+          <ActivityCallbackSettings id={conversationId} descriptors={activities} />
+        </>
+      )}
+      {conversation && (
+        <InitiatedMessageSettings
+          key={conversation.id}
+          conversation={conversation}
+          botOwnerId={bot?.user_id}
+          botOwnerError={botError && !bot}
+          onRetryBotOwner={() => void refetchBot()}
+        />
+      )}
+      {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
       {/* Message list */}
       {error ? (
-        <ErrorBanner message="Failed to load messages. Please try again." onRetry={refetch} />
+        <ErrorBanner
+          message="Failed to load messages. Please try again."
+          onRetry={refetch}
+        />
+      ) : isLoading ? <p className="text-xs text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
+        <p className="text-xs text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Messages</p>
+            <p className="text-12 font-medium text-muted-foreground">
+              No Messages
+            </p>
             <p className="text-xs text-muted-foreground">
               No messages in this conversation yet.
             </p>
@@ -245,7 +510,7 @@ export function ChannelConversationDetailPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -257,7 +522,7 @@ export function ChannelConversationDetailPage() {
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-[11px] text-text-tertiary">
+                <span className="text-11 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

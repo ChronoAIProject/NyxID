@@ -2,6 +2,34 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::oracle_pools::transfer_pool,
+        crate::handlers::oracle_pools::delete_pool,
+        crate::handlers::llm_gateway::pool_aliases,
+        crate::handlers::service_pools_handler::create_pool,
+        crate::handlers::service_pools_handler::list_pools,
+        crate::handlers::service_pools_handler::get_pool,
+        crate::handlers::service_pools_handler::update_pool,
+        crate::handlers::service_pools_handler::delete_pool,
+        crate::handlers::service_pools_handler::set_members,
+        crate::handlers::service_pools_handler::add_member,
+        crate::handlers::service_pools_handler::remove_member,
+        crate::handlers::service_pools_handler::candidates,
+        crate::handlers::service_pools_handler::pool_candidates,
+        crate::handlers::service_pools_handler::health,
+        crate::handlers::service_pools_handler::reset_health,
+        crate::handlers::service_history::get_history,
+        crate::handlers::service_history::get_archived,
+        crate::handlers::admin_ownership::list_resources,
+        crate::handlers::admin_ownership::authorization,
+        crate::handlers::admin_ownership::destinations,
+        crate::handlers::admin_ownership::preview,
+        crate::handlers::admin_ownership::transfer,
+        crate::handlers::admin_usage::get_usage,
+        crate::handlers::admin_usage::get_analytics,
+        crate::handlers::admin_usage::get_identities,
+        crate::handlers::admin_usage::get_workspace,
+        crate::handlers::admin_usage::save_workspace,
+        crate::handlers::options::get_options,
         crate::handlers::docs::docs_ui,
         crate::handlers::docs::catalog_ui,
         crate::handlers::docs::openapi_json,
@@ -27,10 +55,25 @@
         // AI Services (unified key management)
         crate::handlers::keys::create_key,
         crate::handlers::keys::list_keys,
+        crate::handlers::service_insights::get_insights,
+        crate::handlers::service_preference::get,
+        crate::handlers::service_preference::put_group,
+        crate::handlers::service_preference::release_hidden,
         crate::handlers::keys::get_key,
         crate::handlers::keys::get_key_authorization,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
+        // Hosted bot connection requests
+        crate::handlers::channel_connect_links::create,
+        crate::handlers::channel_connect_links::get,
+        crate::handlers::channel_connect_links::cancel,
+        crate::handlers::channel_connect_links::preview,
+        crate::handlers::channel_connect_links::decline,
+        crate::handlers::channel_connect_links::complete,
+        crate::handlers::channel_connect_links::managed_start,
+        crate::handlers::channel_connect_links::managed_complete,
+        crate::handlers::channel_connect_links::telegram_start,
+        crate::handlers::channel_connect_links::retry,
         // Hosted Connect Links
         crate::handlers::connect_links::create_connect_link,
         crate::handlers::connect_links::get_connect_link,
@@ -38,12 +81,37 @@
         crate::handlers::connect_links::preview_connect_link,
         crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
+        // Agent Key Login
+        crate::handlers::auth_agent_key::request,
+        crate::handlers::auth_agent_key::poll,
+        crate::handlers::auth_agent_key::preview,
+        crate::handlers::auth_agent_key::options,
+        crate::handlers::auth_agent_key::approve,
+        crate::handlers::auth_agent_key::deny,
+        crate::handlers::auth_agent_key::get_self,
+        crate::handlers::auth_agent_key::delete_self,
+        crate::handlers::auth_agent_key::list_credentials,
+        crate::handlers::auth_agent_key::revoke_credential,
         // Auth Device Login
         crate::handlers::auth_device::request_auth_device,
+        crate::handlers::auth_device::request_auth_device_v2,
+        crate::handlers::auth_device::poll_auth_device_v2,
+        crate::handlers::auth_device::poll_auth_device_web_v2,
+        crate::handlers::auth_device::auth_device_options,
+        crate::handlers::login_code::options,
+        crate::handlers::login_code::mint,
+        crate::handlers::login_code::redeem,
+        crate::handlers::login_code::status,
+        crate::handlers::login_code::cancel,
+        crate::handlers::login_code::revoke,
+        crate::handlers::codex_connection::status,
+        crate::handlers::codex_connection::import,
+        crate::handlers::codex_connection::verify,
         crate::handlers::auth_device::poll_auth_device,
         crate::handlers::auth_device::poll_auth_device_web,
         crate::handlers::auth_device::preview_auth_device,
         crate::handlers::auth_device::approve_auth_device,
+        crate::handlers::auth_device::approve_auth_device_agent_key,
         crate::handlers::auth_device::deny_auth_device,
         // Catalog
         crate::handlers::catalog::list_catalog,
@@ -83,6 +151,8 @@
         crate::handlers::billing::create_topup,
         crate::handlers::billing::list_topups,
         crate::handlers::billing::download_invoice,
+        crate::handlers::managed_executions::list,
+        crate::handlers::managed_executions::get,
         crate::handlers::billing_credits::issue_grant,
         crate::handlers::billing_credits::admin_list_grants,
         crate::handlers::billing_credits::revoke_grant,
@@ -90,21 +160,54 @@
         crate::handlers::billing_credits::create_allowance,
         crate::handlers::billing_credits::admin_list_allowances,
         crate::handlers::billing_credits::update_allowance,
+        crate::handlers::billing_credits::replace_allowance_bundle,
+        crate::handlers::billing_credits::set_allowance_bundle_active,
         crate::handlers::billing_credits::user_list_allowances,
         crate::handlers::billing_credit_schedules::create_schedule,
         crate::handlers::billing_credit_schedules::list_schedules,
         crate::handlers::billing_credit_schedules::update_schedule,
-        crate::handlers::billing_credit_summary::admin_credit_summary,
-        crate::handlers::billing_credit_summary::user_credit_summary,
         // Demo
         crate::handlers::demo::get_demo
     ),
     components(
         schemas(
+            crate::models::service_billing::OperationPrice,
+            crate::services::inference_service::OperationPricingView,
+            crate::services::inference_service::LanePricingView,
+            crate::handlers::services::DeclaredOperationResponse,
+            crate::services::admin_usage_service::UsageService,
+            crate::services::admin_usage_service::UsageOperation,
+            crate::handlers::service_history::HistoryResponse,
+            crate::handlers::service_history::ArchiveResponse,
+            crate::handlers::service_history::AuthorshipResponse,
+            crate::services::options_service::OptionsResponse,
+            crate::services::options_service::RegisteredOptionsResponse,
+            crate::services::options_service::HistoryOptionsResponse,
+            crate::services::options_service::OptionItem,
+            crate::services::options_service::OptionsFreshness,
             crate::errors::ErrorResponse,
+            crate::handlers::auth_agent_key::RequestBody,
+            crate::handlers::auth_agent_key::RequestResponse,
+            crate::handlers::auth_agent_key::CodeBody,
+            crate::handlers::auth_agent_key::PollBody,
+            crate::handlers::auth_agent_key::ApproveBody,
+            crate::handlers::auth_agent_key::DeliveryResponse,
+            crate::handlers::auth_agent_key::PreviewResponse,
+            crate::handlers::auth_agent_key::DecisionResponse,
+            crate::handlers::auth_agent_key::CredentialResponse,
+            crate::handlers::auth_agent_key::CredentialsResponse,
+            crate::handlers::auth_agent_key::SelfResponse,
+            crate::services::auth_agent_key_login_service::RequestOutput,
+            crate::services::auth_agent_key_login_service::NewKeyInput,
+            crate::services::auth_agent_key_login_service::Selection,
+            crate::services::auth_agent_key_login_service::KeySummary,
+            crate::services::auth_agent_key_login_service::ResourceSummary,
+            crate::services::auth_agent_key_login_service::LoginOptions,
+            crate::models::api_key_credential::CredentialRevokedReason,
             crate::handlers::services::CreateServiceRequest,
             crate::handlers::services::SshServiceConfigRequest,
             crate::handlers::services::SshServiceConfigResponse,
+            crate::handlers::services::XChannelBillingResponse,
             crate::handlers::services::UpdateServiceRequest,
             crate::handlers::services::ServiceResponse,
             crate::handlers::services::ServiceListResponse,
@@ -123,6 +226,10 @@
             crate::handlers::keys::KeyResponse,
             crate::handlers::keys::KeyAuthorizationEvidenceResponse,
             crate::handlers::keys::KeyListResponse,
+            crate::handlers::service_preference::ServicePreferenceRequest,
+            crate::handlers::service_preference::ServicePreferenceResponse,
+            crate::handlers::service_preference::ServicePreferenceGroup,
+            crate::handlers::service_preference::ReleaseHiddenPreferenceRequest,
             crate::handlers::keys::DeleteKeyResponse,
             // Hosted Connect Links
             crate::handlers::connect_links::CreateConnectLinkRequest,
@@ -214,8 +321,7 @@
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,
             crate::handlers::billing::TopUpResponse,
-            crate::models::credit_service_limit::CreditServiceLimitInput,
-            crate::handlers::billing_credits::CreditServiceLimitResponse,
+            crate::handlers::managed_executions::ExecutionStatus,
             crate::handlers::billing_credits::IssueGrantRequest,
             crate::handlers::billing_credits::IssueGrantResponse,
             crate::handlers::billing_credits::IssueGrantRecipientResponse,
@@ -223,6 +329,11 @@
             crate::handlers::billing_credits::CreditGrantResponse,
             crate::handlers::billing_credits::CreditGrantListResponse,
             crate::handlers::billing_credits::CreateAllowanceRequest,
+            crate::handlers::billing_credits::CreateAllowanceResponse,
+            crate::handlers::billing_credits::AllowanceBundleResponse,
+            crate::handlers::billing_credits::ReplaceAllowanceBundleRequest,
+            crate::handlers::billing_credits::SetAllowanceBundleActiveRequest,
+            crate::services::billing::allowances::AllowanceUnitInput,
             crate::handlers::billing_credits::UpdateAllowanceRequest,
             crate::handlers::billing_credits::UsageAllowanceResponse,
             crate::handlers::billing_credits::UsageAllowanceListResponse,
@@ -234,12 +345,6 @@
             crate::handlers::billing_credit_schedules::CreditScheduleRecipientResponse,
             crate::handlers::billing_credit_schedules::CreditScheduleResponse,
             crate::handlers::billing_credit_schedules::CreditScheduleListResponse,
-            crate::handlers::billing_credit_summary::CreditSummaryQuery,
-            crate::handlers::billing_credit_summary::AdminCreditSummaryResponse,
-            crate::handlers::billing_credit_summary::UserCreditSummaryResponse,
-            crate::handlers::billing_credit_summary::UserWalletSummaryResponse,
-            crate::handlers::billing_credit_summary::UserGrantSummaryResponse,
-            crate::handlers::billing_credit_summary::UserAllowanceSummaryResponse,
             crate::models::billing_target::BillingTargetKind,
             crate::models::billing_target::BillingServiceScope,
             crate::models::credit_grant::CreditGrantStatus,
@@ -253,6 +358,8 @@
         )
     ),
     tags(
+        (name = "Oracle", description = "Authenticated Oracle pool lifecycle; unreleased until first tagged release containing #1527/#1542"),
+        (name = "Agent Key Login", description = "Human-approved CLI enrollment and child credential management"),
         (name = "Docs", description = "NyxID API documentation endpoints"),
         (name = "Proxy Docs", description = "Downstream OpenAPI and AsyncAPI catalog endpoints"),
         (name = "Services", description = "Downstream service management (admin)"),
@@ -286,5 +393,170 @@ impl utoipa::Modify for SecurityAddon {
                 "bearer_auth",
                 SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn platform_key_and_lane_contracts_are_in_generated_openapi() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &document["components"]["schemas"];
+        for (schema, fields) in [
+            (
+                "CatalogEntryResponse",
+                vec!["inference", "platform_key", "byok_pricing"],
+            ),
+            (
+                "KeyResponse",
+                vec!["credential_binding", "platform_key_available"],
+            ),
+            ("CreateKeyRequest", vec!["use_platform_key"]),
+            ("UpdateServiceRequest", vec!["credential"]),
+            (
+                "ServiceResponse",
+                vec![
+                    "legacy_public_master",
+                    "x_channel_billing",
+                    "declared_operations",
+                ],
+            ),
+            ("DeclaredOperationResponse", vec!["operation", "label"]),
+            ("LanePricing", vec!["operations"]),
+            (
+                "OperationPrice",
+                vec![
+                    "operation",
+                    "credits_per_unit",
+                    "lago_metric_code",
+                    "sync_status",
+                ],
+            ),
+            ("LanePricingView", vec!["operations"]),
+            (
+                "OperationPricingView",
+                vec!["operation", "label", "credits_per_unit", "sync_status"],
+            ),
+            ("BillingUsageRow", vec!["operation"]),
+            ("UsageService", vec!["by_operation"]),
+            ("UsageOperation", vec!["operation"]),
+            ("UpdateKeyRequest", vec!["use_platform_key"]),
+            (
+                "ServiceBilling",
+                vec!["byok_pricing", "platform_key_pricing", "managed_execution"],
+            ),
+            ("CreateConnectLinkRequest", vec!["use_platform_key"]),
+        ] {
+            // Flattened structs render as allOf parts.
+            let parts = std::iter::once(&schemas[schema])
+                .chain(schemas[schema]["allOf"].as_array().into_iter().flatten());
+            let properties: Vec<_> = parts.map(|part| &part["properties"]).collect();
+            for field in fields {
+                assert!(
+                    properties.iter().any(|p| p.get(field).is_some()),
+                    "{schema}.{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selectable_login_and_codex_contracts_are_discoverable() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        for (path, method, authenticated) in [
+            ("/api/v1/auth/device/v2/request", "post", false),
+            ("/api/v1/auth/device/v2/poll", "post", false),
+            ("/api/v1/auth/device/v2/poll-web", "post", false),
+            ("/api/v1/auth/device/options", "post", true),
+            ("/api/v1/auth/device/approve-agent-key", "post", true),
+            ("/api/v1/auth/login-code", "post", true),
+            ("/api/v1/auth/login-code/options", "post", true),
+            ("/api/v1/auth/login-code/redeem", "post", false),
+            ("/api/v1/auth/login-code/{id}", "get", true),
+            ("/api/v1/auth/login-code/{id}", "delete", true),
+            ("/api/v1/auth/login-code/{id}/revoke", "post", true),
+            ("/api/v1/providers/codex-connection", "get", true),
+            ("/api/v1/providers/codex-connection", "post", true),
+            ("/api/v1/providers/codex-connection/verify", "post", true),
+            ("/api/v1/billing/executions", "get", true),
+            ("/api/v1/billing/executions/{id}", "get", true),
+        ] {
+            let operation = &document["paths"][path][method];
+            assert!(operation.is_object(), "missing {method} {path}");
+            assert_eq!(
+                operation.get("security").is_some(),
+                authenticated,
+                "{method} {path}"
+            );
+            assert!(
+                operation["responses"].get("200").is_some(),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_key_login_operations_and_schema_references_are_registered() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let paths = &document["paths"];
+        for (path, method, authenticated, body) in [
+            ("/api/v1/auth/agent-key/request", "post", false, true),
+            ("/api/v1/auth/agent-key/poll", "post", false, true),
+            ("/api/v1/auth/agent-key/preview", "post", false, true),
+            ("/api/v1/auth/agent-key/options", "post", true, true),
+            ("/api/v1/auth/agent-key/approve", "post", true, true),
+            ("/api/v1/auth/agent-key/deny", "post", true, true),
+            ("/api/v1/auth/agent-key/self", "get", true, false),
+            ("/api/v1/auth/agent-key/self", "delete", true, false),
+            ("/api/v1/api-keys/{key_id}/credentials", "get", true, false),
+            (
+                "/api/v1/api-keys/{key_id}/credentials/{credential_id}",
+                "delete",
+                true,
+                false,
+            ),
+        ] {
+            let operation = &paths[path][method];
+            assert_eq!(operation["tags"][0], "Agent Key Login", "{method} {path}");
+            assert_eq!(operation.get("requestBody").is_some(), body);
+            assert_eq!(operation.get("security").is_some(), authenticated);
+            for status in ["200", "400", "403", "404", "429", "500"] {
+                assert!(
+                    operation["responses"].get(status).is_some(),
+                    "{method} {path}: {status}"
+                );
+            }
+        }
+        fn verify_refs(value: &serde_json::Value, document: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if let Some(reference) = fields
+                        .get("$ref")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| v.strip_prefix('#'))
+                    {
+                        assert!(
+                            document.pointer(reference).is_some(),
+                            "unresolved {reference}"
+                        );
+                    }
+                    for value in fields.values() {
+                        verify_refs(value, document);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        verify_refs(value, document);
+                    }
+                }
+                _ => {}
+            }
+        }
+        verify_refs(&document, &document);
+        let preview = &document["components"]["schemas"]["AgentKeyLoginPreviewResponse"];
+        assert!(!preview.to_string().contains("api_key"));
     }
 }

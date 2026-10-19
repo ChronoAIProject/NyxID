@@ -4,19 +4,31 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useAdminFeatureFlags,
+  useCreateFeatureFlag,
+  useFeatureFlagTargets,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
   useUpdateAdminFeatureFlagMetadata,
 } from "./use-admin-feature-flags";
 
-const { mockGet, mockPut, mockDelete } = vi.hoisted(() => ({
-  mockGet: vi.fn(),
-  mockPut: vi.fn(),
-  mockDelete: vi.fn(),
-}));
+const { mockGet, mockPut, mockPatch, mockDelete, mockPost } = vi.hoisted(
+  () => ({
+    mockGet: vi.fn(),
+    mockPut: vi.fn(),
+    mockPatch: vi.fn(),
+    mockDelete: vi.fn(),
+    mockPost: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, put: mockPut, delete: mockDelete },
+  api: {
+    post: mockPost,
+    get: mockGet,
+    put: mockPut,
+    patch: mockPatch,
+    delete: mockDelete,
+  },
 }));
 
 function createWrapper() {
@@ -58,17 +70,17 @@ describe("admin feature-flag hooks", () => {
   });
 
   it("writes flag metadata to the encoded metadata sub-route", async () => {
-    mockPut.mockResolvedValue({});
+    mockPatch.mockResolvedValue({});
     const { result } = renderHook(() => useUpdateAdminFeatureFlagMetadata(), {
       wrapper: createWrapper(),
     });
     await result.current.mutateAsync({
       flagKey: "experimental:ai-assistant",
-      body: { description: "What it gates.", owner: "Platform team" },
+      body: { description: "What it gates." },
     });
-    expect(mockPut).toHaveBeenCalledWith(
+    expect(mockPatch).toHaveBeenCalledWith(
       "/admin/feature-flags/experimental%3Aai-assistant/metadata",
-      { description: "What it gates.", owner: "Platform team" },
+      { description: "What it gates." },
     );
   });
 
@@ -86,4 +98,153 @@ describe("admin feature-flag hooks", () => {
       "/admin/feature-flags/example_ui?target_kind=user&target_key=user-1",
     );
   });
+});
+
+it("publishes saved metadata before resolving and ignores a delayed pre-save list read", async () => {
+  const before = {
+    key: "test",
+    description: "Old",
+    code_description: "Code",
+    custom_description: "Old",
+    owner: "Owner",
+    metadata_updated_at: null,
+    metadata_updated_by: null,
+    default_enabled: false,
+    global_override: null,
+    org_overrides: [],
+    user_overrides: [],
+  };
+  const saved = {
+    ...before,
+    description: "Saved",
+    custom_description: "Saved",
+    metadata_updated_by: "admin",
+  };
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const key = ["admin", "feature-flags"];
+  client.setQueryData(key, { flags: [before] });
+  let finishRead!: (value: unknown) => void;
+  const read = client
+    .fetchQuery({
+      queryKey: key,
+      queryFn: () =>
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+    })
+    .catch(() => undefined);
+  mockPatch.mockResolvedValue(saved);
+  const { result } = renderHook(() => useUpdateAdminFeatureFlagMetadata(), {
+    wrapper: ({ children }: PropsWithChildren) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+  await result.current.mutateAsync({
+    flagKey: "test",
+    body: { description: "Saved" },
+  });
+  expect(client.getQueryData(key)).toEqual({ flags: [saved] });
+  finishRead({ flags: [before] });
+  await read;
+  expect(client.getQueryData(key)).toEqual({ flags: [saved] });
+  client.clear();
+});
+
+it("publishes rollout success before refresh and preserves unrelated target labels", async () => {
+  const flag = {
+    key: "test",
+    description: "Code",
+    code_description: "Code",
+    custom_description: null,
+    owner: null,
+    metadata_updated_at: null,
+    metadata_updated_by: null,
+    default_enabled: false,
+    global_override: null,
+    org_overrides: [],
+    user_overrides: [
+      {
+        user_id: "a",
+        user_email: "a@example.com",
+        user_display_name: "A",
+        enabled: false,
+        updated_at: "old",
+        updated_by: "a",
+      },
+    ],
+  };
+  const client = new QueryClient();
+  const key = ["admin", "feature-flags"];
+  client.setQueryData(key, { flags: [flag] });
+  mockPut.mockResolvedValue({
+    enabled: true,
+    updated_at: "new",
+    updated_by: "b",
+  });
+  const { result } = renderHook(
+    () => ({
+      set: useSetAdminFeatureFlag(),
+      clear: useClearAdminFeatureFlag(),
+    }),
+    {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    },
+  );
+  await result.current.set.mutateAsync({
+    flagKey: "test",
+    body: { target_kind: "user", target_key: "a", enabled: true },
+  });
+  expect(client.getQueryData(key)).toMatchObject({
+    flags: [
+      {
+        user_overrides: [
+          { user_email: "a@example.com", enabled: true, updated_at: "new" },
+        ],
+      },
+    ],
+  });
+  await result.current.clear.mutateAsync({
+    flagKey: "test",
+    targetKind: "user",
+    targetKey: "a",
+  });
+  expect(client.getQueryData(key)).toMatchObject({
+    flags: [{ user_overrides: [] }],
+  });
+  client.clear();
+});
+
+it("creates a runtime feature flag", async () => {
+  mockPost.mockResolvedValue({ key: "team:new" });
+  const { result } = renderHook(() => useCreateFeatureFlag(), {
+    wrapper: createWrapper(),
+  });
+  await result.current.mutateAsync({
+    key: "team:new",
+    description: "Test",
+    default_enabled: false,
+  });
+  expect(mockPost).toHaveBeenCalledWith("/admin/feature-flags", {
+    key: "team:new",
+    description: "Test",
+    default_enabled: false,
+  });
+});
+
+it("uses the flag-scoped limited directory for rollout targets", async () => {
+  mockGet.mockResolvedValue([
+    { id: "u1", email: "user@example.com", display_name: null, slug: null },
+  ]);
+  const { result } = renderHook(
+    () => useFeatureFlagTargets("team:mine", "person", "user@example.com"),
+    { wrapper: createWrapper() },
+  );
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(mockGet).toHaveBeenCalledWith(
+    "/admin/feature-flag-targets?flag_key=team%3Amine&kind=person&limit=20&search=user%40example.com",
+  );
 });

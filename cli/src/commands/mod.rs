@@ -1,9 +1,13 @@
 pub mod admin;
+pub mod admin_catalog;
+mod admin_catalog_playbook;
+pub mod admin_platform_credentials;
 pub mod ai_setup;
 pub mod api_key;
 pub mod approval;
 pub mod auth_flows;
 pub mod billing;
+pub mod billing_units;
 pub mod catalog;
 pub mod channel_bot;
 pub mod channel_event;
@@ -15,6 +19,7 @@ pub mod endpoint;
 pub mod external_key;
 pub(crate) mod grant_cascade;
 pub mod lark_permission;
+pub(crate) mod machine_native_update;
 pub mod mcp;
 pub mod mfa;
 pub mod node;
@@ -42,6 +47,18 @@ pub mod trigger;
 pub mod update;
 pub(crate) mod update_attestation;
 pub mod whoami;
+
+/// Normalize repeatable --scope values without changing their case or order.
+pub(crate) fn normalize_oauth_scopes(scopes: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    scopes
+        .iter()
+        .flat_map(|raw| raw.split(|c: char| c == ',' || c.is_whitespace()))
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty() && seen.insert((*scope).to_string()))
+        .map(str::to_string)
+        .collect()
+}
 
 /// Truncate an id to its first 8 characters for compact table display,
 /// UTF-8 safe.
@@ -126,3 +143,7 @@ mod tests {
         );
     }
 }
+
+pub mod catalog_tools;
+
+pub mod admin_tools;

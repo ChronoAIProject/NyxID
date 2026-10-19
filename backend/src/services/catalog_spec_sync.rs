@@ -24,7 +24,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::services::service_endpoint_service::{
-    EndpointInput, upsert_endpoints_additive, validate_request_content_type,
+    EndpointInput, Mutation, commit_mutation, validate_request_content_type,
     validate_response_contract,
 };
 use crate::services::{catalog_spec_registry, openapi_parser};
@@ -36,17 +36,32 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
 
     for slug in catalog_spec_registry::hydrated_slugs() {
-        let Some(service) = service_col
-            .find_one(doc! { "slug": slug, "created_by": "system" })
-            .await?
-        else {
+        // A hosted async overlay is also explicitly registered for administrator-
+        // created catalog rows. Remote specs never supply these contracts.
+        let owns_async_contract = catalog_spec_registry::spec_for_slug(slug).is_some_and(|spec| {
+            spec["paths"].as_object().is_some_and(|paths| {
+                paths.values().any(|item| {
+                    item.as_object().is_some_and(|ops| {
+                        ops.values()
+                            .any(|op| op.get("x-nyxid-async-operation").is_some())
+                    })
+                })
+            })
+        });
+        let mut filter = doc! {"slug": slug};
+        if !owns_async_contract {
+            filter.insert("created_by", "system");
+        }
+        let Some(service) = service_col.find_one(filter).await? else {
             continue; // Service not seeded on this deployment
         };
-        if is_platform_vendor_service(&service) {
+        if service.tools_manager_created
+            || crate::services::retired_service_service::is_retired(&service)
+        {
             continue;
         }
 
-        let inputs = match seeded_endpoint_inputs(slug) {
+        let inputs = match hosted_endpoint_inputs(&service) {
             Ok(inputs) => inputs,
             Err(error) => {
                 // Embedded specs are validated by unit tests; reaching this
@@ -58,7 +73,13 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
         };
 
         let count = inputs.len();
-        upsert_endpoints_additive(db, &service.id, inputs).await?;
+        commit_spec_inputs(
+            db,
+            &service,
+            inputs,
+            super::audit_service::audit_chain_hmac_key(),
+        )
+        .await?;
         tracing::debug!(
             slug,
             service_id = %service.id,
@@ -78,9 +99,9 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
 /// operations) until someone manually called
 /// `POST /services/{id}/discover-endpoints`. This sweep closes that gap for
 /// every active HTTP catalog service with a spec URL and **zero** endpoint
-/// rows. Services with any existing rows (active or soft-deleted) are left
-/// alone -- discovery already ran there, and re-running it automatically
-/// could resurrect rows an admin deliberately removed.
+/// rows. Non-tool services with existing rows are left alone. Tools also
+/// receive additive spec updates: existing publication is preserved, new
+/// operations start as drafts, and rows absent from the spec are retained.
 ///
 /// Spec fetches go through the hardened `fetch_spec_json` path (SSRF
 /// checks, size limit, cache), so spec URLs on private/internal hosts are
@@ -93,7 +114,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
         .find(doc! {
             "is_active": true,
             "service_type": "http",
-            "service_category": { "$ne": "internal" },
+            "$or": [{"service_category": {"$ne": "internal"}}, {"offering_kind": "tool"}],
             "openapi_spec_url": { "$type": "string", "$ne": "" },
         })
         .await?
@@ -107,7 +128,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
 }
 
 /// Fire-and-forget wrapper for the admin create/update handlers: re-reads
-/// the service and runs the zero-row-guarded discovery in the background so
+/// the service and syncs Tool specs or discovers empty legacy services so
 /// a slow or unreachable spec URL never delays the HTTP response.
 pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
     tokio::spawn(async move {
@@ -130,7 +151,7 @@ pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
     });
 }
 
-/// Zero-row-guarded discovery for one service. Logs and returns on any
+/// Additive Tool sync or zero-row-guarded legacy discovery. Logs and returns on any
 /// failure instead of erroring so callers (startup sweep, admin handlers)
 /// are never blocked by a broken spec URL.
 async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &DownstreamService) {
@@ -154,8 +175,9 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
             return;
         }
     };
-    if existing_rows > 0 {
-        return; // Discovery already ran (or rows were curated); leave alone.
+    let is_tool = service.offering_kind == crate::models::downstream_service::OfferingKind::Tool;
+    if existing_rows > 0 && !is_tool {
+        return; // Legacy discovery leaves existing curated services alone.
     }
 
     let spec = match crate::services::api_docs_service::fetch_spec_json(spec_url).await {
@@ -171,7 +193,20 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
         }
     };
 
-    let inputs = match endpoint_inputs_from_spec(&spec) {
+    let inputs = match if is_tool {
+        destination_endpoint_inputs(service, &spec).and_then(|mut inputs| {
+            if !super::api_docs_service::hosted_catalog_spec_for_url(spec_url)?
+                .is_some_and(|hosted| hosted.as_ref() == spec.as_ref())
+            {
+                for input in &mut inputs {
+                    input.async_operation = None;
+                }
+            }
+            Ok(inputs)
+        })
+    } else {
+        endpoint_inputs_from_spec_url(&spec, spec_url)
+    } {
         Ok(inputs) if !inputs.is_empty() => inputs,
         Ok(_) => {
             tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
@@ -184,7 +219,14 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
     };
 
     let count = inputs.len();
-    match upsert_endpoints_additive(db, &service.id, inputs).await {
+    match commit_spec_inputs(
+        db,
+        service,
+        inputs,
+        super::audit_service::audit_chain_hmac_key(),
+    )
+    .await
+    {
         Ok(_) => {
             tracing::info!(
                 slug = %service.slug,
@@ -200,36 +242,182 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
 }
 
 pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
-    service.is_active
+    !service.tools_manager_created
+        && !crate::services::retired_service_service::is_retired(service)
+        && service.is_active
         && service.service_type == "http"
-        && service.service_category != "internal"
+        && (service.service_category != "internal"
+            || service.offering_kind == crate::models::downstream_service::OfferingKind::Tool)
         && service
             .openapi_spec_url
             .as_deref()
             .is_some_and(|url| !url.is_empty())
 }
 
-/// Platform vendor rows are credential stores, not catalog surfaces. Their
-/// reserved slug namespace lets hosted catalog overlays continue to hydrate
-/// intentional internal services such as LLM catalogs without publishing
-/// tools for operator-managed vendor credentials.
-pub fn is_platform_vendor_service(service: &DownstreamService) -> bool {
-    service.service_category == "internal" && service.slug.starts_with("platform-")
+/// Background mutations require the same initialized audit key as user writes.
+async fn commit_spec_inputs(
+    db: &mongodb::Database,
+    observed: &DownstreamService,
+    inputs: Vec<EndpointInput>,
+    audit_key: Option<&[u8]>,
+) -> AppResult<()> {
+    let key = audit_key.filter(|key| key.len() == 32).ok_or_else(|| {
+        crate::errors::AppError::Internal(
+            "Catalog spec sync requires the initialized audit-chain key".into(),
+        )
+    })?;
+    commit_mutation(
+        db,
+        observed,
+        None,
+        Mutation::Reconcile {
+            inputs,
+            authoritative: false,
+        },
+        key,
+    )
+    .await?;
+    Ok(())
 }
 
-/// Parse and validate the hosted overlay for a slug into endpoint inputs.
+#[cfg(test)]
 fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(slug).ok_or_else(|| {
         crate::errors::AppError::Internal(format!("no hosted catalog spec registered for '{slug}'"))
     })?;
-    endpoint_inputs_from_spec(&spec)
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.slug = slug.into();
+    service.base_url = spec["servers"][0]["url"]
+        .as_str()
+        .unwrap_or("https://example.com")
+        .into();
+    if super::google_workspace::GoogleProduct::from_slug(slug)
+        .is_some_and(|product| product.has_editor_destinations())
+    {
+        service.destination_targets = super::destination_routing::workspace_targets();
+    }
+    hosted_endpoint_inputs(&service)
+}
+
+fn hosted_endpoint_inputs(service: &DownstreamService) -> AppResult<Vec<EndpointInput>> {
+    let spec = catalog_spec_registry::spec_for_slug(&service.slug)
+        .ok_or_else(|| crate::errors::AppError::Internal("Missing hosted catalog spec".into()))?;
+    destination_endpoint_inputs(service, &spec)
+}
+
+pub(crate) fn destination_endpoint_inputs(
+    service: &DownstreamService,
+    spec: &serde_json::Value,
+) -> AppResult<Vec<EndpointInput>> {
+    // Embedded nested servers select an exact origin. Reject invalid selectors
+    // before parsing can discard a path, credentials, or an alternative host.
+    if let Some(paths) = spec["paths"].as_object() {
+        for item in paths.values() {
+            for scope in std::iter::once(item).chain(
+                [
+                    "get", "post", "put", "patch", "delete", "head", "options", "trace",
+                ]
+                .iter()
+                .filter_map(|method| item.get(*method)),
+            ) {
+                if let Some(servers) = scope.get("servers") {
+                    let servers = servers
+                        .as_array()
+                        .filter(|values| values.len() == 1)
+                        .ok_or_else(|| {
+                            crate::errors::AppError::ValidationError(
+                                "Hosted nested servers must select one exact origin".into(),
+                            )
+                        })?;
+                    let value = servers[0]["url"].as_str().ok_or_else(|| {
+                        crate::errors::AppError::ValidationError(
+                            "Hosted server URL is required".into(),
+                        )
+                    })?;
+                    super::destination_routing::normalize_origin(value)?;
+                }
+            }
+        }
+    }
+    let parsed = openapi_parser::parse_hosted_openapi_spec_value(spec)?;
+    let mut inputs = Vec::new();
+    let root_origin = spec["servers"][0]["url"]
+        .as_str()
+        .and_then(|url| url::Url::parse(url).ok())
+        .map(|url| url.origin().ascii_serialization());
+    let product = super::google_workspace::GoogleProduct::from_slug(&service.slug)
+        .filter(|product| product.has_editor_destinations());
+    let recognized = super::destination_routing::workspace_targets();
+    let mut missing_target_ids = std::collections::BTreeSet::new();
+    let mut skipped_operation_count = 0;
+    for (mut input, parsed) in endpoint_inputs_from_spec(spec)?.into_iter().zip(parsed) {
+        if parsed.origin != root_origin {
+            let origin = parsed.origin.ok_or_else(|| {
+                crate::errors::AppError::ValidationError(
+                    "Hosted operation has no exact origin".into(),
+                )
+            })?;
+            input.target_id = service
+                .destination_targets
+                .iter()
+                .find(|(_, allowed)| **allowed == origin)
+                .map(|(id, _)| id.clone());
+            if input.target_id.is_none() {
+                if let Some((id, _)) = recognized.iter().find(|(_, allowed)| **allowed == origin)
+                    && product.is_some()
+                {
+                    missing_target_ids.insert(id);
+                    skipped_operation_count += 1;
+                    continue;
+                }
+                return Err(crate::errors::AppError::ValidationError(
+                    "Hosted operation origin is outside the service destination map".into(),
+                ));
+            }
+        }
+        input.async_operation = spec["paths"][&input.path][input.method.to_ascii_lowercase()]
+            .get("x-nyxid-async-operation")
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    crate::errors::AppError::ValidationError(
+                        "Invalid async operation contract".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        if let Some(contract) = &input.async_operation {
+            super::async_service_operation::validate_contract(contract, spec)?;
+        }
+        inputs.push(input);
+    }
+    if skipped_operation_count > 0 {
+        let product = product.expect("only recognized Google editors can be skipped");
+        let policy_state = if service.proxy_operation_policy.as_ref()
+            == Some(&product.legacy_operation_policy()?)
+        {
+            "legacy_default"
+        } else if service.proxy_operation_policy.as_ref() == Some(&product.operation_policy()?) {
+            "activated"
+        } else {
+            "custom"
+        };
+        tracing::warn!(slug = %service.slug, service_id = %service.id, skipped_operation_count,
+            ?missing_target_ids, policy_state, reason = "editor_destinations_not_activated",
+            "Google editor destinations were not activated; syncing available operations");
+    }
+    Ok(inputs)
 }
 
 /// Parse and validate an OpenAPI document into endpoint inputs, applying
 /// the same per-endpoint validation as the admin discover-endpoints route.
 fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<EndpointInput>> {
-    let parsed = openapi_parser::parse_openapi_spec_value(spec)?;
-    let mut inputs = Vec::with_capacity(parsed.len());
+    endpoint_inputs_from_parsed(openapi_parser::parse_hosted_openapi_spec_value(spec)?)
+}
+
+fn endpoint_inputs_from_parsed(
+    parsed: Vec<openapi_parser::ParsedEndpoint>,
+) -> AppResult<Vec<EndpointInput>> {
+    let mut inputs = Vec::new();
     for endpoint in parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
             validate_request_content_type(content_type)?;
@@ -237,6 +425,11 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
         validate_response_contract(&endpoint.response)?;
 
         inputs.push(EndpointInput {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            async_operation: None,
+            target_id: None,
             name: endpoint.name,
             description: endpoint.description,
             method: endpoint.method,
@@ -254,9 +447,60 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
     Ok(inputs)
 }
 
+/// Remote discovery discards async annotations. Only the compiled URL resolver
+/// may restore them, matching the operation's exact method and path.
+pub(crate) fn annotate_hosted_async_inputs(
+    spec_url: &str,
+    inputs: &mut [EndpointInput],
+) -> AppResult<()> {
+    let Some(spec) = super::api_docs_service::hosted_catalog_spec_for_url(spec_url)? else {
+        return Ok(());
+    };
+    for input in inputs {
+        if let Some(value) = spec["paths"][&input.path][input.method.to_ascii_lowercase()]
+            .get("x-nyxid-async-operation")
+        {
+            let contract = serde_json::from_value(value.clone()).map_err(|_| {
+                crate::errors::AppError::ValidationError("Invalid async operation contract".into())
+            })?;
+            super::async_service_operation::validate_contract(&contract, &spec)?;
+            input.async_operation = Some(contract);
+        }
+    }
+    Ok(())
+}
+fn endpoint_inputs_from_spec_url(
+    spec: &serde_json::Value,
+    spec_url: &str,
+) -> AppResult<Vec<EndpointInput>> {
+    // URL-aware parsing: compiled overlays honour NyxID extensions (path
+    // segments); remote documents never do. Async contracts are then restored
+    // only from the compiled overlay for this URL.
+    let mut inputs =
+        endpoint_inputs_from_parsed(openapi_parser::parse_openapi_spec_for_url(spec, spec_url)?)?;
+    // Only the exact compiled overlay may carry async contracts.
+    if super::api_docs_service::hosted_catalog_spec_for_url(spec_url)?
+        .is_some_and(|hosted| hosted.as_ref() == spec)
+    {
+        annotate_hosted_async_inputs(spec_url, &mut inputs)?;
+    }
+    Ok(inputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_manager_spec_discovery_requires_an_explicit_authorized_write() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.service_category = "internal".into();
+        service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        service.openapi_spec_url = Some("https://vendor.example/openapi.json".into());
+        assert!(should_auto_sync_service_endpoints(&service));
+        service.tools_manager_created = true;
+        assert!(!should_auto_sync_service_endpoints(&service));
+    }
 
     #[test]
     fn internal_services_are_never_auto_materialized_as_tools() {
@@ -266,7 +510,125 @@ mod tests {
         service.openapi_spec_url = Some("https://api.elevenlabs.io/openapi.json".to_string());
 
         assert!(!should_auto_sync_service_endpoints(&service));
-        assert!(is_platform_vendor_service(&service));
+        assert!(crate::services::retired_service_service::is_retired(
+            &service
+        ));
+    }
+
+    #[test]
+    fn catalog_spec_github_contents_retains_multisegment_parameter() {
+        for slug in ["api-github", "api-github-pat"] {
+            let inputs = seeded_endpoint_inputs(slug).unwrap();
+            let operation = inputs
+                .iter()
+                .find(|op| op.name == "get_file_contents")
+                .unwrap();
+            let parameters = operation.parameters.as_ref().unwrap().as_array().unwrap();
+            let path = parameters.iter().find(|p| p["name"] == "path").unwrap();
+            assert_eq!(path["x-nyxid-path-segments"], true);
+            for parameter in parameters.iter().filter(|p| p["name"] != "path") {
+                assert!(parameter.get("x-nyxid-path-segments").is_none());
+            }
+        }
+    }
+
+    /// The `google` overlay gained Drive authoring by addition only. These
+    /// operations existed before and are what deployed callers, stored
+    /// bindings, and durable approvals are bound to: a changed method or path
+    /// breaks them, and any contract edit bumps `operation_generation`, which
+    /// invalidates durable exact-service approvals. Adding operations does
+    /// neither.
+    #[test]
+    fn google_overlay_keeps_its_preexisting_operations_unchanged() {
+        const PREEXISTING: &[(&str, &str, &str)] = &[
+            ("get_userinfo", "GET", "/oauth2/v2/userinfo"),
+            ("gmail_list_messages", "GET", "/gmail/v1/users/me/messages"),
+            (
+                "gmail_get_message",
+                "GET",
+                "/gmail/v1/users/me/messages/{id}",
+            ),
+            (
+                "gmail_send_message",
+                "POST",
+                "/gmail/v1/users/me/messages/send",
+            ),
+            ("drive_list_files", "GET", "/drive/v3/files"),
+            ("drive_get_file", "GET", "/drive/v3/files/{fileId}"),
+            // Deliberately calendar-`primary`, not `{calendarId}`: switching to
+            // the templated form would add a required path parameter.
+            (
+                "calendar_list_events",
+                "GET",
+                "/calendar/v3/calendars/primary/events",
+            ),
+            (
+                "calendar_create_event",
+                "POST",
+                "/calendar/v3/calendars/primary/events",
+            ),
+        ];
+
+        let inputs = seeded_endpoint_inputs("api-google").expect("google overlay parses");
+        for (name, method, path) in PREEXISTING {
+            let endpoint = inputs
+                .iter()
+                .find(|input| input.name == *name)
+                .unwrap_or_else(|| panic!("api-google no longer publishes '{name}'"));
+            assert_eq!(&endpoint.method, method, "'{name}' changed method");
+            assert_eq!(&endpoint.path, path, "'{name}' changed path");
+        }
+    }
+
+    /// Google Docs/Sheets/Slides bodies are written by uploading Markdown and
+    /// letting Drive convert. That only works if the published operation asks
+    /// for a text body: an `application/octet-stream` contract makes the MCP
+    /// tool demand base64 bytes and send a binary Content-Type, which Drive
+    /// will not convert into a native document.
+    #[test]
+    fn google_overlay_publishes_a_markdown_drive_content_write() {
+        let inputs = seeded_endpoint_inputs("api-google").expect("google overlay parses");
+        let write = inputs
+            .iter()
+            .find(|input| input.name == "drive_upload_file_content")
+            .expect("api-google publishes drive_upload_file_content");
+        assert_eq!(write.method, "PATCH");
+        assert_eq!(write.path, "/upload/drive/v3/files/{fileId}");
+        assert_eq!(
+            write.request_content_type.as_deref(),
+            Some("text/markdown"),
+            "must request a Markdown body so Drive converts it"
+        );
+        for required in ["drive_create_file", "drive_export_file"] {
+            assert!(
+                inputs.iter().any(|input| input.name == required),
+                "api-google must publish '{required}' to complete the authoring round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn async_contract_survives_hosted_discovery_but_never_remote_discovery() {
+        let spec = catalog_spec_registry::spec_for_key("chrono-sandbox").unwrap();
+        let remote =
+            endpoint_inputs_from_spec_url(&spec, "https://sandbox.chrono-ai.fun/openapi.json")
+                .unwrap();
+        assert!(remote.iter().all(|e| e.async_operation.is_none()));
+        let hosted = endpoint_inputs_from_spec_url(
+            &spec,
+            "https://nyx.example/api/v1/catalog-specs/chrono-sandbox/openapi.json",
+        )
+        .unwrap();
+        let contract = hosted
+            .iter()
+            .find_map(|e| e.async_operation.as_ref())
+            .unwrap();
+        let mut bad = contract.clone();
+        bad.result_operation = "execute_handler".into();
+        assert!(super::super::async_service_operation::validate_contract(&bad, &spec).is_err());
+        bad = contract.clone();
+        bad.success_states = bad.failure_states.clone();
+        assert!(super::super::async_service_operation::validate_contract(&bad, &spec).is_err());
     }
 
     #[test]
@@ -294,14 +656,135 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_overlay_cannot_expand_destination_map() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "api-google-workspace".into();
+        service.destination_targets = super::super::destination_routing::workspace_targets();
+        let mut spec = (*catalog_spec_registry::spec_for_slug(&service.slug).unwrap()).clone();
+        assert_eq!(
+            destination_endpoint_inputs(&service, &spec).unwrap().len(),
+            38
+        );
+        for origin in [
+            "https://outside.test",
+            "https://docs.googleapis.com/path",
+            "https://user:secret@docs.googleapis.com",
+            "http://docs.googleapis.com",
+        ] {
+            spec["paths"]["/v1/documents/{documentId}:batchUpdate"]["servers"] =
+                serde_json::json!([{"url":origin}]);
+            assert!(
+                destination_endpoint_inputs(&service, &spec).is_err(),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn google_origin_filtering_rejects_missing_malformed_unknown_and_non_google_origins() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "api-google-drive".into();
+        service.destination_targets.clear();
+        let spec = catalog_spec_registry::spec_for_slug(&service.slug).unwrap();
+        assert_eq!(
+            destination_endpoint_inputs(&service, &spec).unwrap().len(),
+            9
+        );
+        for servers in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{}]),
+            serde_json::json!([{"url":"https://docs.googleapis.com"},{"url":"https://sheets.googleapis.com"}]),
+            serde_json::json!([{"url":"https://unknown.googleapis.com"}]),
+        ] {
+            let mut bad = (*spec).clone();
+            bad["paths"]["/v1/documents"]["servers"] = servers;
+            assert!(destination_endpoint_inputs(&service, &bad).is_err());
+        }
+        service.slug = "custom".into();
+        assert!(destination_endpoint_inputs(&service, &spec).is_err());
+    }
+
     #[tokio::test]
-    async fn spec_backed_sweep_discovers_admin_service_endpoints_once() {
+    async fn spec_sync_missing_audit_key_preserves_tool_and_appends_no_entry() {
+        let db = crate::test_utils::connect_test_database("spec_sync_key_missing")
+            .await
+            .unwrap();
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "api-lark-bot".into();
+        service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        service.service_category = "internal".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let mut inputs = hosted_endpoint_inputs(&service).unwrap();
+        let before = super::super::service_endpoint_service::endpoint_from_input(
+            &service.id,
+            inputs[0].clone(),
+            crate::models::service_endpoint::PublicationState::Published,
+        );
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(&before)
+        .await
+        .unwrap();
+        inputs[0].description = Some("changed contract".into());
+        assert!(matches!(
+            commit_spec_inputs(&db, &service, inputs, None).await,
+            Err(crate::errors::AppError::Internal(_))
+        ));
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::service_endpoint::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id":service.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get("authority_fence")
+                .is_none()
+        );
+        let after = db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&before.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.publication, before.publication);
+        assert_eq!(after.operation_generation, before.operation_generation);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spec_backed_sweep_preserves_legacy_rows_and_additively_syncs_tools() {
         let Some(db) = crate::test_utils::connect_test_database("catalog_spec_url_sweep").await
         else {
             eprintln!("skipping: no MongoDB");
             return;
         };
         let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+
+        crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
 
         const SPEC_URL: &str = "https://example.com/admin-service-openapi.json";
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
@@ -383,6 +866,46 @@ mod tests {
             after[0].name, "list_widgets",
             "existing rows must not be replaced"
         );
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"_id": &service.id},
+                doc! {"$set": {
+                    "offering_kind": "tool", "service_category": "internal"
+                }},
+            )
+            .await
+            .unwrap();
+        sync_spec_backed_service_endpoints(&db).await.unwrap();
+        let tool_rows =
+            crate::services::service_endpoint_service::list_all_endpoints(&db, &service.id)
+                .await
+                .unwrap();
+        assert_eq!(tool_rows.len(), 2);
+        let added = tool_rows
+            .iter()
+            .find(|row| row.name == "list_gadgets")
+            .unwrap();
+        assert_eq!(
+            added.publication,
+            crate::models::service_endpoint::PublicationState::Draft
+        );
+        assert!(!added.is_active);
+        assert_eq!(added.operation_generation, 1);
+        let retained = tool_rows
+            .iter()
+            .find(|row| row.name == "list_widgets")
+            .unwrap();
+        assert_eq!(retained.id, after[0].id);
+        assert_eq!(retained.publication, after[0].publication);
+        assert_eq!(retained.operation_generation, after[0].operation_generation);
+        sync_spec_backed_service_endpoints(&db).await.unwrap();
+        let repeated =
+            crate::services::service_endpoint_service::list_all_endpoints(&db, &service.id)
+                .await
+                .unwrap();
+        assert_eq!(repeated.len(), 2);
+        assert!(repeated.iter().all(|row| row.operation_generation == 1));
     }
 
     #[tokio::test]
@@ -399,6 +922,7 @@ mod tests {
             .await
             .expect("seed services");
 
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
         sync_seeded_service_endpoints(&db)
             .await
             .expect("sync endpoints");
@@ -470,7 +994,41 @@ mod tests {
             "api-twilio should publish form-encoded call creation"
         );
 
+        let twitter = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        let twitter_endpoints =
+            crate::services::service_endpoint_service::list_endpoints(&db, &twitter.id)
+                .await
+                .unwrap();
+        assert_eq!(twitter_endpoints.len(), 9);
+        for (name, method, path) in [
+            (
+                "send_dm",
+                "POST",
+                "/dm_conversations/with/{participant_id}/messages",
+            ),
+            ("list_dm_events", "GET", "/dm_events"),
+            (
+                "get_dm_conversation_with_user",
+                "GET",
+                "/dm_conversations/with/{participant_id}/dm_events",
+            ),
+        ] {
+            let endpoint = twitter_endpoints
+                .iter()
+                .find(|e| e.name == name)
+                .expect("DM operation synced");
+            assert_eq!(endpoint.method, method);
+            assert_eq!(endpoint.path, path);
+            assert!(endpoint.is_active);
+        }
+
         // Re-running must stay idempotent (same rows, no duplicates).
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
         sync_seeded_service_endpoints(&db)
             .await
             .expect("second sync");
@@ -496,6 +1054,7 @@ mod tests {
             .await
             .expect("seed services");
 
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
         sync_seeded_service_endpoints(&db)
             .await
             .expect("initial endpoint sync");
@@ -534,6 +1093,7 @@ mod tests {
         .await
         .expect("deactivate endpoint");
 
+        super::super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2; 32]));
         sync_seeded_service_endpoints(&db)
             .await
             .expect("second endpoint sync");

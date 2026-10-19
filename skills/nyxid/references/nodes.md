@@ -153,6 +153,24 @@ docker run --user "$(id -u):$(id -g)" \
 > Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed). This works for both native daemons and Docker containers (config is mounted as a volume).
 > Docker containers use the file backend (AES-GCM encrypted) -- OS keychain is not available in containers.
 
+For an existing host registration, `nyxid node docker build` and `nyxid node docker
+start` manage the image/container directly (add `--profile` to `start` for a named
+profile). `start` and `restart` validate nonempty `NYXID_CA_CERT`, `SSL_CERT_FILE`,
+and `SSL_CERT_DIR` before changing the container. They mount the files/directories
+read-only at `/etc/nyxid/tls/ca.pem`, `/etc/nyxid/tls/system.pem`, and
+`/etc/nyxid/tls/certs/<n>`, respectively, and forward only those container-local
+CA paths. Proxy variables are never forwarded. Re-run either command to replace
+CA settings; unset/empty values remove them. Spaces and colons in CA file names
+are supported; commas, double quotes, and control characters are rejected.
+`SSL_CERT_DIR` uses the host path-list separator and becomes a colon-separated
+list inside the container.
+
+The bundled Debian image defaults to root; host paths must be accessible to
+Docker. With the manual `docker run --user` examples above, provide your own
+read-only CA mounts and environment values, and ensure that UID can read them.
+Host macOS keychain trust is not available in the container; export required CAs
+to PEM and set `NYXID_CA_CERT`. See [the network guide](../../../docs/site/cli/guides/network.md#background-node-services-and-automatic-updates).
+
 ### Managing the node service
 
 ```bash

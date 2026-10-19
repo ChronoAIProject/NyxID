@@ -1,3 +1,5 @@
+import { creditsSchema } from "./credits";
+import { BILLING_METRICS } from "./billing-metrics";
 import { z } from "zod";
 
 export const BILLING_USAGE_PERIODS = [
@@ -10,7 +12,63 @@ export const BILLING_USAGE_PERIODS = [
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
-export const billingMetricSchema = z.enum(["tokens", "requests", "bytes"]);
+export const BILLING_SERVICE_FILTER_LIMIT = 50;
+const billingServiceKeySchema = z.string().trim().min(1).max(200);
+
+export const billingSearchSchema = z.object({
+  tab: z.enum(["billing", "usage"]).optional().catch(undefined),
+  period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
+  /** Legacy single-service filter; `services` wins when both are present. */
+  service: billingServiceKeySchema.optional().catch(undefined),
+  services: z
+    .array(z.unknown())
+    .transform((values) =>
+      [
+        ...new Set(
+          values.flatMap((value) => {
+            const parsed = billingServiceKeySchema.safeParse(value);
+            return parsed.success ? [parsed.data] : [];
+          }),
+        ),
+      ].slice(0, BILLING_SERVICE_FILTER_LIMIT),
+    )
+    .optional()
+    .catch(undefined),
+  /** One-shot deep link: open the Add credits dialog on arrival. */
+  action: z.enum(["topup"]).optional().catch(undefined),
+});
+
+export function normalizeBillingSearch(search: Record<string, unknown>) {
+  const parsed = billingSearchSchema.parse(search);
+  return {
+    tab: parsed.tab ?? "billing",
+    period: parsed.period ?? "30d",
+    services:
+      parsed.services ??
+      (parsed.service && parsed.service !== "all" ? [parsed.service] : []),
+    action: parsed.action,
+  };
+}
+export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
+
+// Optional for compatibility with servers predating exact settlement display.
+const fundingBreakdownShape = {
+  estimated_credits: creditsSchema.nullable().optional(),
+  wallet_credits: creditsSchema.nullable().optional(),
+  grant_credits: creditsSchema.nullable().optional(),
+  allowance_credits: creditsSchema.nullable().optional(),
+  wallet_credits_micros: z.number().int().nonnegative().nullable().optional(),
+  grant_credits_micros: z.number().int().nonnegative().nullable().optional(),
+  allowance_credits_micros: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .optional(),
+  allowance_quantity: z.number().int().nonnegative().optional(),
+};
+
+export const billingMetricSchema = z.enum(BILLING_METRICS);
 export const billingPlanKindSchema = z.enum([
   "prepaid",
   "subscription",
@@ -41,11 +99,25 @@ export const billingTokenBreakdownSchema = z.object({
   cache_creation_tokens: z.number().int().nonnegative().optional().default(0),
 });
 
+/** Verified gateway attribution of an existing service charge, not a runtime charge. */
+export const billingMachineUsageSchema = z.object({
+  node_id: z.string().min(1),
+  job_id: z.string().min(1),
+  runtime_id: z.string().min(1),
+  runtime_generation: z.number().int().nonnegative().safe().nullable(),
+  grant_id: z.string().min(1).nullable(),
+  principal_kind: z.string().min(1),
+});
+
 export const billingUsageRowSchema = z.object({
+  ...fundingBreakdownShape,
+  machine_usage: billingMachineUsageSchema.optional(),
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
-  metric: billingMetricSchema,
+  metric: z.string(),
   lago_metric_code: z.string(),
+  /** Operation price key, when one replaced the base request rate. */
+  operation: z.string().nullable().optional(),
   layer: z.string(),
   // Optional so an older backend without the model/agent breakdown still
   // parses; the UI degrades to a service-level row.
@@ -60,9 +132,12 @@ export const billingUsageRowSchema = z.object({
   billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
   token_breakdown: billingTokenBreakdownSchema.nullable().optional(),
+  /** UTC day start, only when requested with `bucket=day`. */
+  day: z.string().nullable().optional(),
 });
 
 export const billingUsageTotalsSchema = z.object({
+  ...fundingBreakdownShape,
   quantity: z.number().int(),
   requests: z.number().int(),
   bytes: z.number().int(),
@@ -71,6 +146,8 @@ export const billingUsageTotalsSchema = z.object({
 });
 
 export const billingUsageResponseSchema = z.object({
+  machine_id: z.string().uuid().nullable().optional(),
+  job_id: z.string().uuid().nullable().optional(),
   owner_id: z.string().min(1),
   period: z.string().min(1),
   rows: z.array(billingUsageRowSchema),
@@ -79,6 +156,14 @@ export const billingUsageResponseSchema = z.object({
 });
 
 export const billingWalletResponseSchema = z.object({
+  balance: creditsSchema.optional(),
+  reserved: creditsSchema.optional(),
+  pending_debits: creditsSchema.optional(),
+  pending_expiry: creditsSchema.optional(),
+  available: creditsSchema.optional(),
+  available_with_overdraft: creditsSchema.optional(),
+  overdraft_cap: creditsSchema.optional(),
+
   owner_id: z.string().min(1),
   plan_kind: billingPlanKindSchema,
   collection_state: billingCollectionStateSchema,
@@ -144,6 +229,7 @@ export const topUpHistoryEntrySchema = z.object({
   receipt_available: z.boolean(),
   paid_at: z.string().nullable().optional(),
   credits_expire_at: z.string().nullable().optional(),
+  expired_credits: creditsSchema.optional(),
   expired_credits_micros: z.number().int().nonnegative().default(0),
   credits_expired_at: z.string().nullable().optional(),
 });

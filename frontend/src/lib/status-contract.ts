@@ -80,6 +80,11 @@ export const STATUS_REGISTRY: StatusRegistry = {
     },
   },
   channel_bot: {
+    suspended: {
+      label: "Suspended",
+      variant: "destructive",
+      tooltip: "Telegram reported a management change. Delivery is stopped; open the bot details for recovery steps.",
+    },
     active: {
       label: "Active",
       variant: "success",

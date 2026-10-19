@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
@@ -16,19 +16,25 @@ use crate::models::oracle_worker_command::{
     COLLECTION_NAME as ORACLE_WORKER_COMMANDS, OracleWorkerCommand, OracleWorkerCommandKind,
     OracleWorkerCommandStatus,
 };
-use crate::services::oracle_pool_service;
+use crate::services::{oracle_pool_service, oracle_worker_enrollment_service as enrollment};
+
+mod management;
+pub use management::{
+    cancel_worker_command, enqueue_worker_command, forget_authorized_worker, list_worker_commands,
+};
 
 const LABEL_ALLOCATION_ATTEMPTS: usize = 16;
 const MAX_CAPABILITIES: usize = 32;
 const MAX_METADATA_LEN: usize = 128;
 const COMMAND_DEADLINE_HOURS: i64 = 24;
 const COMMAND_DELIVERY_LEASE_SECS: i64 = 60;
-const COMMAND_RETENTION_DAYS: i64 = 7;
+pub(crate) const COMMAND_RETENTION_DAYS: i64 = 7;
 const MAX_COMMAND_DELIVERIES: u32 = 10;
+const COMMAND_EXPIRY_BATCH_SIZE: i64 = 256;
 /// Presence newer than this counts as online for `forget` safety checks.
 const FORGET_ONLINE_WINDOW_SECS: i64 = 90;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct WorkerPresenceInput {
     pub worker_label: String,
     pub current_task_id: Option<String>,
@@ -39,6 +45,7 @@ pub struct WorkerPresenceInput {
     pub logged_in: Option<bool>,
     pub chrome_alive: Option<bool>,
     pub last_error: Option<String>,
+    pub cooldown_remaining_secs: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -109,11 +116,17 @@ pub struct AllocatedWorker {
     pub adopted: bool,
 }
 
-fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>) -> OracleWorker {
+pub(super) fn provisioned_worker(
+    pool: &OraclePool,
+    label: &str,
+    now: chrono::DateTime<Utc>,
+) -> OracleWorker {
     OracleWorker {
+        cooldown_until: None,
         id: worker_doc_id(&pool.id, label),
         pool_id: pool.id.clone(),
         worker_label: label.to_string(),
+        generation: Some(uuid::Uuid::new_v4().to_string()),
         last_seen_at: now - Duration::days(365),
         current_task_id: None,
         script_version: None,
@@ -121,6 +134,7 @@ fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>
         first_seen_at: None,
         provisioned_at: Some(now),
         instance_id: None,
+        enrollment: None,
         platform: None,
         capabilities: Vec::new(),
         desired_state: OracleWorkerDesiredState::Active,
@@ -138,11 +152,48 @@ fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>
 /// installation binds), or refused with `OracleWorkerLabelUnavailable` when it
 /// is bound to another installation. Without a request a unique random label
 /// is generated.
+#[cfg(test)]
 pub async fn allocate_worker(
     db: &mongodb::Database,
     pool: &OraclePool,
     requested_label: Option<&str>,
 ) -> AppResult<AllocatedWorker> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_requested_label = requested_label.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_requested_label,
+            ),
+            |mongo_session, (transaction_db, transaction_pool, transaction_requested_label)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let requested_label = transaction_requested_label.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        allocate_worker_in_session(db, mongo_session, pool, requested_label).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn allocate_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    requested_label: Option<&str>,
+) -> AppResult<AllocatedWorker> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     let workers = db.collection::<OracleWorker>(ORACLE_WORKERS);
     if let Some(label) = requested_label {
         super::oracle_task_service::validate_worker_label(label)?;
@@ -164,6 +215,7 @@ pub async fn allocate_worker(
                     .return_document(ReturnDocument::After)
                     .build(),
             )
+            .session(&mut *mongo_session)
             .await?;
         if let Some(worker) = adopted {
             return Ok(AllocatedWorker {
@@ -172,45 +224,146 @@ pub async fn allocate_worker(
             });
         }
         let worker = provisioned_worker(pool, label, now);
-        return match workers.insert_one(&worker).await {
-            Ok(_) => Ok(AllocatedWorker {
-                worker,
-                adopted: false,
-            }),
-            Err(error) if oracle_pool_service::is_duplicate_key(&error) => {
-                Err(AppError::OracleWorkerLabelUnavailable(format!(
-                    "worker label '{label}' is bound to another installation"
-                )))
-            }
-            Err(error) => Err(error.into()),
-        };
+        if workers
+            .find_one(doc! {"_id": &worker.id})
+            .session(&mut *mongo_session)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::OracleWorkerLabelUnavailable(format!(
+                "worker label '{label}' is bound to another installation"
+            )));
+        }
+        workers
+            .insert_one(&worker)
+            .session(&mut *mongo_session)
+            .await?;
+        return Ok(AllocatedWorker {
+            worker,
+            adopted: false,
+        });
     }
-
     for _ in 0..LABEL_ALLOCATION_ATTEMPTS {
         let label = format!("worker-{}", hex::encode(rand::random::<[u8; 5]>()));
         let worker = provisioned_worker(pool, &label, Utc::now());
-        match workers.insert_one(&worker).await {
-            Ok(_) => {
-                return Ok(AllocatedWorker {
-                    worker,
-                    adopted: false,
-                });
-            }
-            Err(error) if oracle_pool_service::is_duplicate_key(&error) => continue,
-            Err(error) => return Err(error.into()),
+        if workers
+            .find_one(doc! {"_id": &worker.id})
+            .session(&mut *mongo_session)
+            .await?
+            .is_some()
+        {
+            continue;
         }
+        workers
+            .insert_one(&worker)
+            .session(&mut *mongo_session)
+            .await?;
+        return Ok(AllocatedWorker {
+            worker,
+            adopted: false,
+        });
     }
+
     Err(AppError::OracleWorkerLabelUnavailable(
         "could not allocate a unique worker label".to_string(),
     ))
 }
 
+#[cfg(test)]
 pub async fn report_presence(
     db: &mongodb::Database,
     pool: &OraclePool,
     input: WorkerPresenceInput,
 ) -> AppResult<OracleWorker> {
-    let capabilities = normalize_capabilities(input.capabilities)?;
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, input),
+            |mongo_session, (transaction_db, transaction_pool, input)| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        report_presence_in_session(db, mongo_session, pool, input.clone()).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn report_presence_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    input: WorkerPresenceInput,
+) -> AppResult<OracleWorker> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    report_presence_for_worker_in_session(db, mongo_session, pool, input, None).await
+}
+
+pub async fn report_presence_for_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    input: WorkerPresenceInput,
+    authorized_worker: Option<&OracleWorker>,
+) -> AppResult<OracleWorker> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_authorized_worker = authorized_worker.cloned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                input,
+                transaction_authorized_worker,
+            ),
+            |mongo_session,
+             (transaction_db, transaction_pool, input, transaction_authorized_worker)| {
+                Box::pin(async move {
+                    let input = &*input;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let authorized_worker = transaction_authorized_worker.as_ref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        report_presence_for_worker_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            input.clone(),
+                            authorized_worker,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn report_presence_for_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    input: WorkerPresenceInput,
+    authorized_worker: Option<&OracleWorker>,
+) -> AppResult<OracleWorker> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    let mut capabilities = normalize_capabilities(input.capabilities)?;
     let script_version = input
         .script_version
         .map(|value| {
@@ -225,9 +378,45 @@ pub async fn report_presence(
         .transpose()?;
     let instance_id = optional_metadata(input.instance_id, "instance_id")?;
     let platform = optional_metadata(input.platform, "platform")?;
-    let last_error = optional_metadata(input.last_error, "last_error")?;
+    let last_error = input
+        .last_error
+        .map(|value| {
+            if super::oracle_task_service::valid_failure_detail(&value) || valid_metadata(&value) {
+                Ok(value)
+            } else {
+                Err(AppError::ValidationError("invalid last_error".to_string()))
+            }
+        })
+        .transpose()?;
     let current_task_id = optional_metadata(input.current_task_id, "current_task_id")?;
-    ensure_instance_matches(db, pool, &input.worker_label, instance_id.as_deref()).await?;
+    let existing = if let Some(worker) = authorized_worker {
+        if worker.worker_label != input.worker_label
+            || worker.pool_id != pool.id
+            || worker.instance_id != instance_id
+        {
+            return Err(AppError::OracleWorkerTokenInvalid);
+        }
+        enrollment::ensure_current_worker_in_session(db, mongo_session, worker).await?;
+        Some(worker.clone())
+    } else {
+        ensure_instance_matches_in_session(
+            db,
+            mongo_session,
+            pool,
+            &input.worker_label,
+            instance_id.as_deref(),
+        )
+        .await?;
+        db.collection::<OracleWorker>(ORACLE_WORKERS)
+            .find_one(doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) })
+            .session(&mut *mongo_session)
+            .await?
+    };
+    if existing.is_some_and(|worker| worker.enrollment.is_some()) {
+        capabilities.retain(|capability| {
+            capability != "saved_login_v1" && capability != "session_import_v1"
+        });
+    }
 
     let now = Utc::now();
     let mut set = doc! {
@@ -236,6 +425,23 @@ pub async fn report_presence(
         "last_seen_at": bson::DateTime::from_chrono(now),
         "capabilities": &capabilities,
     };
+    if let Some(seconds) = input.cooldown_remaining_secs {
+        if seconds > 86_400 {
+            return Err(AppError::ValidationError(
+                "cooldown exceeds one day".to_string(),
+            ));
+        }
+        set.insert(
+            "cooldown_until",
+            if seconds == 0 {
+                bson::Bson::Null
+            } else {
+                bson::Bson::DateTime(bson::DateTime::from_chrono(
+                    now + Duration::seconds(i64::from(seconds)),
+                ))
+            },
+        );
+    }
     for (key, value) in [
         ("script_version", script_version),
         ("platform", platform),
@@ -266,7 +472,9 @@ pub async fn report_presence(
         None => set.insert("chrome_alive", bson::Bson::Null),
     };
 
-    let mut filter = doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) };
+    let mut filter = authorized_worker
+        .map(enrollment::worker_filter)
+        .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) });
     if let Some(instance_id) = instance_id.as_deref() {
         filter.insert("instance_id", instance_id);
     }
@@ -275,20 +483,23 @@ pub async fn report_presence(
             filter,
             doc! {
                 "$set": set,
+                "$unset": { "page_url": "" },
                 "$setOnInsert": {
                     "first_seen_at": bson::DateTime::from_chrono(now),
+                    "generation": uuid::Uuid::new_v4().to_string(),
                     "desired_state": "active",
                 },
             },
         )
         .with_options(
             FindOneAndUpdateOptions::builder()
-                .upsert(true)
+                .upsert(authorized_worker.is_none())
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?
-        .ok_or_else(|| AppError::Internal("worker presence upsert returned no row".to_string()))
+        .ok_or(AppError::OracleWorkerTokenInvalid)
 }
 
 pub async fn ensure_instance_matches(
@@ -297,6 +508,59 @@ pub async fn ensure_instance_matches(
     worker_label: &str,
     instance_id: Option<&str>,
 ) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_instance_id = instance_id.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_instance_id,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool,
+                transaction_worker_label,
+                transaction_instance_id,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker_label = transaction_worker_label.as_str();
+                    let instance_id = transaction_instance_id.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        ensure_instance_matches_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker_label,
+                            instance_id,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn ensure_instance_matches_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker_label: &str,
+    instance_id: Option<&str>,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
     super::oracle_task_service::validate_worker_label(worker_label)?;
     let instance_id = instance_id
         .map(|value| optional_metadata(Some(value.to_string()), "instance_id"))
@@ -307,6 +571,7 @@ pub async fn ensure_instance_matches(
     let Some(instance_id) = instance_id else {
         let existing = workers
             .find_one(doc! { "_id": worker_doc_id(&pool.id, worker_label) })
+            .session(&mut *mongo_session)
             .await?;
         if existing.is_some_and(|worker| worker.instance_id.is_some()) {
             return Err(AppError::OracleWorkerLabelUnavailable(format!(
@@ -334,6 +599,7 @@ pub async fn ensure_instance_matches(
                     "worker_label": worker_label,
                     "last_seen_at": bson::DateTime::from_chrono(now),
                     "first_seen_at": bson::DateTime::from_chrono(now),
+                    "generation": uuid::Uuid::new_v4().to_string(),
                     "desired_state": "active",
                 },
             },
@@ -344,6 +610,7 @@ pub async fn ensure_instance_matches(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await;
 
     match result {
@@ -358,6 +625,47 @@ pub async fn ensure_instance_matches(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Count workers per pool whose heartbeat is newer than `window_secs`,
+/// matching the recency window `pool_status` uses for `active_workers`.
+/// One aggregation for all pools; pools with no online worker are absent.
+pub async fn count_online_workers_by_pool(
+    db: &mongodb::Database,
+    pool_ids: &[String],
+    window_secs: i64,
+) -> AppResult<HashMap<String, u32>> {
+    if pool_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cutoff = Utc::now() - Duration::seconds(window_secs);
+    let pipeline = vec![
+        doc! { "$match": {
+            "pool_id": { "$in": pool_ids },
+            "last_seen_at": { "$gte": bson::DateTime::from_chrono(cutoff) },
+        }},
+        doc! { "$group": { "_id": "$pool_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = db
+        .collection::<Document>(ORACLE_WORKERS)
+        .aggregate(pipeline)
+        .await?;
+    let mut counts = HashMap::new();
+    while let Some(row) = cursor.try_next().await? {
+        let pool_id = row.get_str("_id").unwrap_or_default().to_string();
+        let count = row.get_i32("count").map(|n| n.max(0) as u32).unwrap_or(0);
+        counts.insert(pool_id, count);
+    }
+    Ok(counts)
+}
+
+pub async fn count_online_workers(
+    db: &mongodb::Database,
+    pool_id: &str,
+    window_secs: i64,
+) -> AppResult<u32> {
+    let counts = count_online_workers_by_pool(db, &[pool_id.to_string()], window_secs).await?;
+    Ok(counts.get(pool_id).copied().unwrap_or(0))
 }
 
 pub async fn list_workers(db: &mongodb::Database, pool_id: &str) -> AppResult<Vec<OracleWorker>> {
@@ -385,6 +693,20 @@ pub async fn get_worker(
         .ok_or_else(|| AppError::OracleWorkerNotFound(label.to_string()))
 }
 
+pub(crate) async fn get_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    label: &str,
+) -> AppResult<OracleWorker> {
+    db.collection::<OracleWorker>(ORACLE_WORKERS)
+        .find_one(doc! { "_id": worker_doc_id(pool_id, label), "pool_id": pool_id })
+        .session(&mut *mongo_session)
+        .await?
+        .ok_or_else(|| AppError::OracleWorkerNotFound(label.to_string()))
+}
+
+#[cfg(test)]
 pub async fn accepts_new_tasks(
     db: &mongodb::Database,
     pool_id: &str,
@@ -394,7 +716,31 @@ pub async fn accepts_new_tasks(
         .collection::<OracleWorker>(ORACLE_WORKERS)
         .find_one(doc! { "_id": worker_doc_id(pool_id, label) })
         .await?;
-    Ok(worker.is_none_or(|worker| worker.desired_state == OracleWorkerDesiredState::Active))
+    Ok(worker.is_none_or(|worker| {
+        worker.desired_state == OracleWorkerDesiredState::Active
+            && worker
+                .cooldown_until
+                .is_none_or(|until| until <= Utc::now())
+    }))
+}
+
+pub(crate) async fn accepts_new_tasks_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    label: &str,
+) -> AppResult<bool> {
+    let worker = db
+        .collection::<OracleWorker>(ORACLE_WORKERS)
+        .find_one(doc! { "_id": worker_doc_id(pool_id, label) })
+        .session(&mut *mongo_session)
+        .await?;
+    Ok(worker.is_none_or(|worker| {
+        worker.desired_state == OracleWorkerDesiredState::Active
+            && worker
+                .cooldown_until
+                .is_none_or(|until| until <= Utc::now())
+    }))
 }
 
 fn required_capability(kind: &OracleWorkerCommandKind) -> &'static str {
@@ -405,6 +751,7 @@ fn required_capability(kind: &OracleWorkerCommandKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub async fn enqueue_command(
     db: &mongodb::Database,
     pool_id: &str,
@@ -414,155 +761,280 @@ pub async fn enqueue_command(
     snapshot_id: Option<String>,
     bundle: Option<(String, String)>,
 ) -> AppResult<OracleWorkerCommand> {
+    let pool = oracle_pool_service::get_pool(db, pool_id).await?;
     let worker = get_worker(db, pool_id, worker_label).await?;
-    let capability = required_capability(&kind);
-    if !worker.capabilities.iter().any(|value| value == capability) {
-        return Err(AppError::OracleWorkerCapabilityUnsupported(format!(
-            "worker '{}' does not advertise {capability}",
-            worker.worker_label
-        )));
-    }
-
-    let now = Utc::now();
-    let (bundle_version, bundle_sha256) = bundle.unzip();
-    let command = OracleWorkerCommand {
-        id: uuid::Uuid::new_v4().to_string(),
-        pool_id: pool_id.to_string(),
-        worker_label: worker_label.to_string(),
-        kind,
-        status: OracleWorkerCommandStatus::Queued,
-        created_by_user_id: actor_user_id.to_string(),
-        required_capability: Some(capability.to_string()),
-        delivery_count: 0,
-        result_code: None,
-        snapshot_id,
-        bundle_version,
-        bundle_sha256,
-        delivered_at: None,
-        delivery_lease_expires_at: None,
-        completed_at: None,
-        deadline_at: now + Duration::hours(COMMAND_DEADLINE_HOURS),
-        expires_at: None,
-        created_at: now,
-        updated_at: now,
-    };
-    db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-        .insert_one(&command)
-        .await?;
-    if let Err(error) = db
-        .collection::<Document>(ORACLE_WORKERS)
-        .update_one(
-            doc! { "_id": &worker.id },
-            doc! { "$set": { "desired_state": "draining" } },
-        )
-        .await
-    {
-        let _ = db
-            .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-            .delete_one(doc! { "_id": &command.id, "status": "queued" })
-            .await;
-        return Err(error.into());
-    }
-    Ok(command)
+    enqueue_worker_command(db, &pool, &worker, actor_user_id, kind, snapshot_id, bundle).await
 }
 
-async fn expire_stale_commands(
+#[cfg(test)]
+pub(super) async fn expire_stale_commands_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     pool_id: &str,
     worker_label: Option<&str>,
 ) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    expire_stale_commands_filtered_in_session(db, mongo_session, pool_id, worker_label, None).await
+}
+
+pub(super) async fn expire_stale_commands_filtered_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: Option<&str>,
+    worker_generation: Option<&Option<String>>,
+) -> AppResult<()> {
     let now = Utc::now();
+    let now_bson = bson::DateTime::from_chrono(now);
     let mut filter = doc! {
         "pool_id": pool_id,
         "status": { "$in": ["queued", "delivered"] },
-        "deadline_at": { "$lt": bson::DateTime::from_chrono(now) },
+        "$or": [
+            {"deadline_at": {"$lt": now_bson}},
+            {"delivery_count": {"$gte": i64::from(MAX_COMMAND_DELIVERIES)}},
+        ],
     };
     if let Some(label) = worker_label {
         filter.insert("worker_label", label);
     }
-    db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-        .update_many(
-            filter,
-            doc! { "$set": {
-                "status": "expired",
-                "completed_at": bson::DateTime::from_chrono(now),
-                "expires_at": bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
-                "updated_at": bson::DateTime::from_chrono(now),
-            } },
-        )
-        .await?;
-    let mut delivery_filter = doc! {
-        "pool_id": pool_id,
-        "status": { "$in": ["queued", "delivered"] },
-        "delivery_count": { "$gte": i64::from(MAX_COMMAND_DELIVERIES) },
-    };
-    if let Some(label) = worker_label {
-        delivery_filter.insert("worker_label", label);
+    if let Some(generation) = worker_generation {
+        filter.insert("worker_generation", generation);
     }
-    db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-        .update_many(
-            delivery_filter,
-            doc! { "$set": {
-                "status": "expired",
-                "result_code": "delivery_exhausted",
-                "completed_at": bson::DateTime::from_chrono(now),
-                "expires_at": bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
-                "updated_at": bson::DateTime::from_chrono(now),
-            } },
-        )
+    // Commands have no inventory cap. Each heartbeat/list settles at most one
+    // ID-only batch; delivery independently excludes dead/exhausted commands.
+    let commands = db.collection::<Document>(ORACLE_WORKER_COMMANDS);
+    let rows: Vec<Document> = commands
+        .find(filter)
+        .projection(doc! {"_id":1,"deadline_at":1,"worker_label":1})
+        .sort(doc! {"_id":1})
+        .limit(COMMAND_EXPIRY_BATCH_SIZE)
+        .session(&mut *mongo_session)
+        .await?
+        .stream(&mut *mongo_session)
+        .try_collect()
         .await?;
+    let mut deadline_ids = Vec::new();
+    let mut exhausted_ids = Vec::new();
+    let mut affected_labels = HashSet::new();
     if let Some(label) = worker_label {
+        affected_labels.insert(label.to_owned());
+    }
+    for row in rows {
+        if let Ok(label) = row.get_str("worker_label") {
+            affected_labels.insert(label.to_owned());
+        }
+        let id = row
+            .get("_id")
+            .cloned()
+            .ok_or_else(|| AppError::Internal("invalid Oracle command ID".into()))?;
+        if row
+            .get_datetime("deadline_at")
+            .is_ok_and(|deadline| *deadline < now_bson)
+        {
+            deadline_ids.push(id);
+        } else {
+            exhausted_ids.push(id);
+        }
+    }
+    for (ids, exhausted) in [(deadline_ids, false), (exhausted_ids, true)] {
+        if ids.is_empty() {
+            continue;
+        }
+        let mut set = doc! {
+            "status":"expired", "completed_at":now_bson, "updated_at":now_bson,
+            "expires_at":bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
+        };
+        if exhausted {
+            set.insert("result_code", "delivery_exhausted");
+        }
+        commands
+            .update_many(doc! {"_id":{"$in":ids}}, doc! {"$set":set})
+            .session(&mut *mongo_session)
+            .await?;
+    }
+    // Pool-wide test callers reconcile only this bounded batch's affected
+    // workers. Remaining expired commands are the durable cursor. Production
+    // label-specific callers also repair their current worker on every poll.
+    for label in affected_labels {
+        let mut latest_filter = doc! { "pool_id": pool_id, "worker_label": label };
+        if let Some(generation) = worker_generation {
+            latest_filter.insert("worker_generation", generation);
+        }
         if let Some(latest) = db
             .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-            .find_one(doc! { "pool_id": pool_id, "worker_label": label })
+            .find_one(latest_filter)
             .sort(doc! { "created_at": -1 })
+            .session(&mut *mongo_session)
             .await?
         {
-            reconcile_desired_state(db, &latest).await?;
-        }
-    } else {
-        let draining_workers: Vec<OracleWorker> = db
-            .collection::<OracleWorker>(ORACLE_WORKERS)
-            .find(doc! { "pool_id": pool_id, "desired_state": "draining" })
-            .await?
-            .try_collect()
-            .await?;
-        for worker in draining_workers {
-            if let Some(latest) = db
-                .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-                .find_one(doc! {
-                    "pool_id": pool_id,
-                    "worker_label": &worker.worker_label,
-                })
-                .sort(doc! { "created_at": -1 })
-                .await?
-            {
-                reconcile_desired_state(db, &latest).await?;
-            }
+            reconcile_desired_state_in_session(db, mongo_session, &latest).await?;
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn deliver_next_command(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     capabilities: &[String],
 ) -> AppResult<Option<OracleWorkerCommand>> {
-    expire_stale_commands(db, pool_id, Some(worker_label)).await?;
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_worker_label = worker_label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+                capabilities,
+            ),
+            |mongo_session, context| {
+                let (transaction_db, transaction_pool_id, transaction_worker_label, capabilities) =
+                    context;
+                Box::pin(async move {
+                    let capabilities = *capabilities;
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let worker_label = transaction_worker_label.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        deliver_next_command_in_session(
+                            db,
+                            mongo_session,
+                            pool_id,
+                            worker_label,
+                            capabilities,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn deliver_next_command_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: &str,
+    capabilities: &[String],
+) -> AppResult<Option<OracleWorkerCommand>> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    let worker = get_worker_in_session(db, mongo_session, pool_id, worker_label).await?;
+    let pool =
+        crate::services::oracle_mutation_service::lookup_pool(db, mongo_session, pool_id, false)
+            .await?;
+    deliver_next_command_for_worker_in_session(db, mongo_session, &pool, &worker, capabilities)
+        .await
+}
+
+pub async fn deliver_next_command_for_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+    capabilities: &[String],
+) -> AppResult<Option<OracleWorkerCommand>> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker = worker.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker,
+                capabilities,
+            ),
+            |mongo_session,
+             (transaction_db, transaction_pool, transaction_worker, capabilities)| {
+                Box::pin(async move {
+                    let capabilities = *capabilities;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker = &*transaction_worker;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        deliver_next_command_for_worker_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker,
+                            capabilities,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn deliver_next_command_for_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+    capabilities: &[String],
+) -> AppResult<Option<OracleWorkerCommand>> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    enrollment::ensure_current_worker_in_session(db, mongo_session, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
+    expire_stale_commands_filtered_in_session(
+        db,
+        mongo_session,
+        pool_id,
+        Some(worker_label),
+        Some(&worker.generation),
+    )
+    .await?;
     if !capabilities.iter().any(|value| value == "commands_v1") {
         return Ok(None);
     }
 
     let now = Utc::now();
+    let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
+    // The production unique index spans generations. Retire orphan deliveries
+    // before considering current-generation commands; never deliver them to a
+    // replacement installation.
+    commands.update_many(doc! {"pool_id":pool_id,"worker_label":worker_label,
+        "worker_generation":{"$ne":&worker.generation},"status":"delivered"},
+        doc! {"$set":{"status":"expired","result_code":"worker_replaced",
+        "completed_at":bson::DateTime::from_chrono(now),"updated_at":bson::DateTime::from_chrono(now),
+        "expires_at":bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS))}})
+        .session(&mut *mongo_session).await?;
+    let delivered = commands
+        .find_one(doc! {"pool_id":pool_id,"worker_label":worker_label,"status":"delivered"})
+        .session(&mut *mongo_session)
+        .await?;
+    if let Some(command) = &delivered
+        && command
+            .delivery_lease_expires_at
+            .is_some_and(|until| until > now)
+    {
+        return Ok(None);
+    }
     let lease = now + Duration::seconds(COMMAND_DELIVERY_LEASE_SECS);
     let result = db
         .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
         .find_one_and_update(
-            doc! {
+            { let mut filter = doc! {
                 "pool_id": pool_id,
                 "worker_label": worker_label,
+                "worker_generation": &worker.generation,
                 "deadline_at": { "$gt": bson::DateTime::from_chrono(now) },
                 "delivery_count": { "$lt": i64::from(MAX_COMMAND_DELIVERIES) },
                 "required_capability": { "$in": capabilities },
@@ -570,10 +1042,10 @@ pub async fn deliver_next_command(
                     { "status": "queued" },
                     {
                         "status": "delivered",
-                        "delivery_lease_expires_at": { "$lt": bson::DateTime::from_chrono(now) },
+                        "delivery_lease_expires_at": { "$lte": bson::DateTime::from_chrono(now) },
                     },
                 ],
-            },
+            }; if let Some(command) = &delivered { filter.insert("_id", &command.id); } filter },
             doc! {
                 "$set": {
                     "status": "delivered",
@@ -590,16 +1062,18 @@ pub async fn deliver_next_command(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await;
     match result {
         Ok(command) => Ok(command),
-        Err(error) if oracle_pool_service::is_duplicate_key(&error) => Ok(None),
+
         Err(error) => Err(error.into()),
     }
 }
 
-async fn reconcile_desired_state(
+pub(super) async fn reconcile_desired_state_in_session(
     db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
     command: &OracleWorkerCommand,
 ) -> AppResult<()> {
     let pending = db
@@ -607,9 +1081,11 @@ async fn reconcile_desired_state(
         .find_one(doc! {
             "pool_id": &command.pool_id,
             "worker_label": &command.worker_label,
+            "worker_generation": &command.worker_generation,
             "status": { "$in": ["queued", "delivered"] },
         })
         .sort(doc! { "created_at": 1 })
+        .session(&mut *mongo_session)
         .await?;
     let desired = if pending.is_some() {
         OracleWorkerDesiredState::Draining
@@ -631,19 +1107,129 @@ async fn reconcile_desired_state(
     };
     db.collection::<Document>(ORACLE_WORKERS)
         .update_one(
-            doc! { "_id": worker_doc_id(&command.pool_id, &command.worker_label) },
+            doc! { "_id": worker_doc_id(&command.pool_id, &command.worker_label), "generation": &command.worker_generation },
             doc! { "$set": { "desired_state": desired } },
         )
-        .await?;
+        .session(&mut *mongo_session).await?;
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn apply_command_reports(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     reports: Vec<CommandReport>,
 ) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_worker_label = worker_label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+                reports,
+            ),
+            |mongo_session,
+             (transaction_db, transaction_pool_id, transaction_worker_label, reports)| {
+                Box::pin(async move {
+                    let reports = &*reports;
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let worker_label = transaction_worker_label.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        apply_command_reports_in_session(
+                            db,
+                            mongo_session,
+                            pool_id,
+                            worker_label,
+                            reports.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn apply_command_reports_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: &str,
+    reports: Vec<CommandReport>,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    let worker = get_worker_in_session(db, mongo_session, pool_id, worker_label).await?;
+    let pool =
+        crate::services::oracle_mutation_service::lookup_pool(db, mongo_session, pool_id, false)
+            .await?;
+    apply_command_reports_for_worker_in_session(db, mongo_session, &pool, &worker, reports).await
+}
+
+pub async fn apply_command_reports_for_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+    reports: Vec<CommandReport>,
+) -> AppResult<()> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker = worker.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool,
+                transaction_worker,
+                reports,
+            ),
+            |mongo_session, (transaction_db, transaction_pool, transaction_worker, reports)| {
+                Box::pin(async move {
+                    let reports = &*reports;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker = &*transaction_worker;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        apply_command_reports_for_worker_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker,
+                            reports.clone(),
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn apply_command_reports_for_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+    reports: Vec<CommandReport>,
+) -> AppResult<()> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    enrollment::ensure_current_worker_in_session(db, mongo_session, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
     for report in reports.into_iter().take(16) {
         if !valid_metadata(&report.command_id) {
             return Err(AppError::ValidationError(
@@ -658,7 +1244,9 @@ pub async fn apply_command_reports(
                 "_id": &report.command_id,
                 "pool_id": pool_id,
                 "worker_label": worker_label,
+                "worker_generation": &worker.generation,
             })
+            .session(&mut *mongo_session)
             .await?
         else {
             continue;
@@ -670,7 +1258,7 @@ pub async fn apply_command_reports(
                 | OracleWorkerCommandStatus::Expired
                 | OracleWorkerCommandStatus::Cancelled
         ) {
-            reconcile_desired_state(db, &existing).await?;
+            reconcile_desired_state_in_session(db, mongo_session, &existing).await?;
             continue;
         }
         let updated = commands
@@ -679,6 +1267,7 @@ pub async fn apply_command_reports(
                     "_id": &report.command_id,
                     "pool_id": pool_id,
                     "worker_label": worker_label,
+                    "worker_generation": &worker.generation,
                     "status": "delivered",
                 },
                 doc! { "$set": {
@@ -694,9 +1283,9 @@ pub async fn apply_command_reports(
                     .return_document(ReturnDocument::After)
                     .build(),
             )
-            .await?;
+            .session(&mut *mongo_session).await?;
         if let Some(updated) = updated {
-            reconcile_desired_state(db, &updated).await?;
+            reconcile_desired_state_in_session(db, mongo_session, &updated).await?;
         }
     }
     Ok(())
@@ -710,164 +1299,308 @@ pub struct ForgetOutcome {
 }
 
 /// Remove a worker's presence row and command history. Refuses an online
-/// worker or one with a task in flight unless `force` (a live worker would
-/// simply re-register on its next heartbeat). Session affinity owned by the
+/// worker or one with a task in flight unless `force`. A pool-token worker can
+/// re-register; an enrolled worker must enroll again. Session affinity owned by the
 /// label is released so follow-ups do not wait out the grace window.
+#[cfg(test)]
 pub async fn forget_worker(
     db: &mongodb::Database,
     pool: &OraclePool,
     label: &str,
     force: bool,
 ) -> AppResult<ForgetOutcome> {
-    let worker = get_worker(db, &pool.id, label).await?;
-    let now = Utc::now();
-    if !force {
-        if (now - worker.last_seen_at).num_seconds() <= FORGET_ONLINE_WINDOW_SECS {
-            return Err(AppError::Conflict(format!(
-                "worker '{label}' is online; stop it first or pass force"
-            )));
-        }
-        let inflight = db
-            .collection::<Document>(ORACLE_TASKS)
-            .count_documents(doc! {
-                "pool_id": &pool.id,
-                "status": "dispatched",
-                "assigned_worker_id": label,
-            })
-            .await?;
-        if inflight > 0 {
-            return Err(AppError::Conflict(format!(
-                "worker '{label}' has a task in flight; wait for it to settle or pass force"
-            )));
-        }
-    }
-    let commands_removed = db
-        .collection::<Document>(ORACLE_WORKER_COMMANDS)
-        .delete_many(doc! { "pool_id": &pool.id, "worker_label": label })
-        .await?
-        .deleted_count;
-    let sessions_released = db
-        .collection::<Document>(ORACLE_SESSIONS)
-        .update_many(
-            doc! { "pool_id": &pool.id, "owner_worker_label": label },
-            doc! { "$set": { "owner_worker_label": null, "updated_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?
-        .modified_count;
-    let tasks_released = db
-        .collection::<Document>(ORACLE_TASKS)
-        .update_many(
-            doc! { "pool_id": &pool.id, "status": "queued", "required_worker_label": label },
-            doc! {
-                "$set": { "phase": "affinity_released_by_forget", "updated_at": bson::DateTime::from_chrono(now) },
-                "$unset": { "required_worker_label": "" },
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_label = label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, transaction_label, force),
+            |mongo_session, (transaction_db, transaction_pool, transaction_label, force)| {
+                Box::pin(async move {
+                    let force = *force;
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let label = transaction_label.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        forget_worker_in_session(db, mongo_session, pool, label, force).await,
+                    )
+                })
             },
         )
-        .await?
-        .modified_count;
-    db.collection::<OracleWorker>(ORACLE_WORKERS)
-        .delete_one(doc! { "_id": &worker.id })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn forget_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    label: &str,
+    force: bool,
+) -> AppResult<ForgetOutcome> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
         .await?;
-    Ok(ForgetOutcome {
-        commands_removed,
-        sessions_released,
-        tasks_released,
-    })
+
+    let worker = get_worker_in_session(db, mongo_session, &pool.id, label).await?;
+    management::forget_authorized_worker_in_session(
+        db,
+        mongo_session,
+        pool,
+        &worker,
+        &pool.user_id,
+        force,
+    )
+    .await
 }
 
 /// Withdraw a queued or delivered-but-unexecuted command. A delivered
 /// command may already sit in the worker's journal; the worker learns of the
 /// cancellation on its next heartbeat and drops it. Commands the worker has
 /// already settled cannot be cancelled.
+#[cfg(test)]
 pub async fn cancel_command(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     command_id: &str,
 ) -> AppResult<OracleWorkerCommand> {
-    if !valid_metadata(command_id) {
-        return Err(AppError::ValidationError(
-            "command_id contains unsupported characters".to_string(),
-        ));
-    }
-    let now = Utc::now();
-    let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
-    let cancelled = commands
-        .find_one_and_update(
-            doc! {
-                "_id": command_id,
-                "pool_id": pool_id,
-                "worker_label": worker_label,
-                "status": { "$in": ["queued", "delivered"] },
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_worker_label = worker_label.to_owned();
+    let transaction_command_id = command_id.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+                transaction_command_id,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+                transaction_command_id,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let worker_label = transaction_worker_label.as_str();
+                    let command_id = transaction_command_id.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        cancel_command_in_session(
+                            db,
+                            mongo_session,
+                            pool_id,
+                            worker_label,
+                            command_id,
+                        )
+                        .await,
+                    )
+                })
             },
-            doc! { "$set": {
-                "status": "cancelled",
-                "result_code": "cancelled_by_manager",
-                "completed_at": bson::DateTime::from_chrono(now),
-                "expires_at": bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
-                "updated_at": bson::DateTime::from_chrono(now),
-            } },
         )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
-    let Some(command) = cancelled else {
-        return match commands
-            .find_one(doc! { "_id": command_id, "pool_id": pool_id, "worker_label": worker_label })
-            .await?
-        {
-            Some(existing) => Err(AppError::Conflict(format!(
-                "command {command_id} is already {}",
-                match existing.status {
-                    OracleWorkerCommandStatus::Succeeded => "succeeded",
-                    OracleWorkerCommandStatus::Failed => "failed",
-                    OracleWorkerCommandStatus::Expired => "expired",
-                    OracleWorkerCommandStatus::Cancelled => "cancelled",
-                    _ => "settled",
-                }
-            ))),
-            None => Err(AppError::OracleWorkerCommandNotFound(
-                command_id.to_string(),
-            )),
-        };
-    };
-    reconcile_desired_state(db, &command).await?;
-    Ok(command)
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn cancel_command_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: &str,
+    command_id: &str,
+) -> AppResult<OracleWorkerCommand> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    let worker = get_worker_in_session(db, mongo_session, pool_id, worker_label).await?;
+    let pool =
+        crate::services::oracle_mutation_service::lookup_pool(db, mongo_session, pool_id, false)
+            .await?;
+    management::cancel_worker_command_in_session(
+        db,
+        mongo_session,
+        &pool,
+        &worker,
+        &pool.user_id,
+        command_id,
+    )
+    .await
 }
 
 /// Recently cancelled commands that had already been delivered, so a worker
 /// still holding one can drop it. Bounded and short-lived.
+#[cfg(test)]
 pub async fn recently_cancelled_delivered(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
 ) -> AppResult<Vec<String>> {
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_worker_label = worker_label.to_owned();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+            ),
+            |mongo_session, (transaction_db, transaction_pool_id, transaction_worker_label)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let worker_label = transaction_worker_label.as_str();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        recently_cancelled_delivered_in_session(
+                            db,
+                            mongo_session,
+                            pool_id,
+                            worker_label,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn recently_cancelled_delivered_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: &str,
+) -> AppResult<Vec<String>> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    let worker = get_worker_in_session(db, mongo_session, pool_id, worker_label).await?;
+    let pool =
+        crate::services::oracle_mutation_service::lookup_pool(db, mongo_session, pool_id, false)
+            .await?;
+    recently_cancelled_delivered_for_worker_in_session(db, mongo_session, &pool, &worker).await
+}
+
+pub async fn recently_cancelled_delivered_for_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+) -> AppResult<Vec<String>> {
+    let transaction_db = db.clone();
+    let transaction_pool = pool.clone();
+    let transaction_worker = worker.clone();
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (transaction_db, transaction_pool, transaction_worker),
+            |mongo_session, (transaction_db, transaction_pool, transaction_worker)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool = &*transaction_pool;
+                    let worker = &*transaction_worker;
+                    crate::services::api_key_mutation_service::transaction_result(
+                        recently_cancelled_delivered_for_worker_in_session(
+                            db,
+                            mongo_session,
+                            pool,
+                            worker,
+                        )
+                        .await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub(crate) async fn recently_cancelled_delivered_for_worker_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool: &OraclePool,
+    worker: &OracleWorker,
+) -> AppResult<Vec<String>> {
+    crate::services::oracle_mutation_service::lock_expected_pool(db, mongo_session, pool, true)
+        .await?;
+
+    enrollment::ensure_current_worker_in_session(db, mongo_session, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
     let since = Utc::now() - Duration::hours(COMMAND_DEADLINE_HOURS);
     let commands: Vec<OracleWorkerCommand> = db
         .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
         .find(doc! {
             "pool_id": pool_id,
             "worker_label": worker_label,
+            "worker_generation": &worker.generation,
             "status": "cancelled",
             "delivery_count": { "$gt": 0 },
             "completed_at": { "$gt": bson::DateTime::from_chrono(since) },
         })
         .with_options(FindOptions::builder().limit(16).build())
+        .session(&mut *mongo_session)
         .await?
+        .stream(&mut *mongo_session)
         .try_collect()
         .await?;
     Ok(commands.into_iter().map(|command| command.id).collect())
 }
 
+#[cfg(test)]
 pub async fn list_commands(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: Option<&str>,
 ) -> AppResult<Vec<OracleWorkerCommand>> {
-    expire_stale_commands(db, pool_id, worker_label).await?;
+    let transaction_db = db.clone();
+    let transaction_pool_id = pool_id.to_owned();
+    let transaction_worker_label = worker_label.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_pool_id,
+                transaction_worker_label,
+            ),
+            |mongo_session, (transaction_db, transaction_pool_id, transaction_worker_label)| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let pool_id = transaction_pool_id.as_str();
+                    let worker_label = transaction_worker_label.as_deref();
+                    crate::services::api_key_mutation_service::transaction_result(
+                        list_commands_in_session(db, mongo_session, pool_id, worker_label).await,
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+pub(crate) async fn list_commands_in_session(
+    db: &mongodb::Database,
+    mongo_session: &mut mongodb::ClientSession,
+    pool_id: &str,
+    worker_label: Option<&str>,
+) -> AppResult<Vec<OracleWorkerCommand>> {
+    crate::services::oracle_mutation_service::lock_pool(db, mongo_session, pool_id).await?;
+
+    expire_stale_commands_in_session(db, mongo_session, pool_id, worker_label).await?;
     let mut filter = doc! { "pool_id": pool_id };
     if let Some(label) = worker_label {
         filter.insert("worker_label", label);
@@ -881,9 +1614,93 @@ pub async fn list_commands(
                 .limit(100)
                 .build(),
         )
+        .session(&mut *mongo_session)
         .await?
+        .stream(&mut *mongo_session)
         .try_collect()
         .await?)
+}
+
+pub async fn allocate_worker_for_manager(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    pool: &OraclePool,
+    requested_label: Option<&str>,
+) -> AppResult<AllocatedWorker> {
+    let transaction_db = db.clone();
+    let transaction_actor_user_id = actor_user_id.to_owned();
+    let transaction_pool = pool.clone();
+    let transaction_requested_label = requested_label.map(str::to_owned);
+    let mut mongo_session = db.client().start_session().await?;
+    mongo_session
+        .start_transaction()
+        .and_run(
+            (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_requested_label,
+            ),
+            |mongo_session,
+             (
+                transaction_db,
+                transaction_actor_user_id,
+                transaction_pool,
+                transaction_requested_label,
+            )| {
+                Box::pin(async move {
+                    let db = &*transaction_db;
+                    let actor_user_id = transaction_actor_user_id.as_str();
+                    let pool = &*transaction_pool;
+                    let requested_label = transaction_requested_label.as_deref();
+                    let result = async {
+                        crate::services::oracle_mutation_service::lock_manager(
+                            db,
+                            mongo_session,
+                            actor_user_id,
+                            &pool.user_id,
+                        )
+                        .await?;
+                        allocate_worker_in_session(db, mongo_session, pool, requested_label).await
+                    }
+                    .await;
+                    crate::services::api_key_mutation_service::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+/// Use the production command uniqueness constraints in Oracle regression fixtures.
+#[cfg(test)]
+pub(crate) async fn ensure_test_command_indexes(db: &mongodb::Database) {
+    use mongodb::{IndexModel, options::IndexOptions};
+    for (keys, partial) in [
+        (
+            doc! {"pool_id":1,"worker_label":1,"status":1},
+            doc! {"status":"delivered"},
+        ),
+        (
+            doc! {"snapshot_id":1,"worker_label":1},
+            doc! {"snapshot_id":{"$type":"string"}},
+        ),
+    ] {
+        db.collection::<Document>(ORACLE_WORKER_COMMANDS)
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(partial)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -893,9 +1710,39 @@ mod tests {
     use crate::test_utils::connect_test_database;
     use mongodb::{IndexModel, options::IndexOptions};
 
-    fn pool() -> OraclePool {
+    #[tokio::test]
+    async fn oracle_presence_cooldown_preserves_detail_and_blocks_claims() {
+        let Some(db) = connect_test_database("oracle_cooldown").await else {
+            return;
+        };
+        let pool = pool(&db).await;
+        let detail = "usage_limit_reached@waiting_response";
+        let input = |seconds| WorkerPresenceInput {
+            worker_label: "limited".to_string(),
+            last_error: Some(detail.to_string()),
+            cooldown_remaining_secs: Some(seconds),
+            ..Default::default()
+        };
+        let worker = report_presence(&db, &pool, input(900)).await.unwrap();
+        assert_eq!(worker.last_error.as_deref(), Some(detail));
+        assert!(worker.cooldown_until.unwrap() > Utc::now() + Duration::minutes(14));
+        assert!(!accepts_new_tasks(&db, &pool.id, "limited").await.unwrap());
+        assert!(report_presence(&db, &pool, input(86401)).await.is_err());
+        let cleared = report_presence(&db, &pool, input(0)).await.unwrap();
+        assert!(cleared.cooldown_until.is_none());
+        assert!(accepts_new_tasks(&db, &pool.id, "limited").await.unwrap());
+        db.drop().await.unwrap();
+    }
+
+    async fn pool(db: &mongodb::Database) -> OraclePool {
+        ensure_test_command_indexes(db).await;
         let now = Utc::now();
-        OraclePool {
+        let pool = OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: format!("worker-test-{}", uuid::Uuid::new_v4()),
@@ -913,7 +1760,64 @@ mod tests {
             is_active: true,
             created_at: now,
             updated_at: now,
-        }
+        };
+        db.collection::<OraclePool>(crate::models::oracle_pool::COLLECTION_NAME)
+            .insert_one(&pool)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &pool.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn online_worker_counts_use_the_recency_window_per_pool() {
+        let Some(db) = connect_test_database("oracle_worker_online_counts").await else {
+            return;
+        };
+        let busy = pool(&db).await;
+        let idle = pool(&db).await;
+        let fresh = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        let stale = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        report_presence(
+            &db,
+            &busy,
+            WorkerPresenceInput {
+                worker_label: fresh.worker_label.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>(ORACLE_WORKERS)
+            .update_one(
+                doc! { "_id": worker_doc_id(&busy.id, &stale.worker_label) },
+                doc! { "$set": { "last_seen_at": bson::DateTime::from_chrono(
+                    Utc::now() - Duration::seconds(600)
+                ) } },
+            )
+            .await
+            .unwrap();
+
+        let counts = count_online_workers_by_pool(&db, &[busy.id.clone(), idle.id.clone()], 120)
+            .await
+            .unwrap();
+        assert_eq!(counts.get(&busy.id).copied(), Some(1));
+        assert_eq!(counts.get(&idle.id), None);
+        assert_eq!(count_online_workers(&db, &busy.id, 120).await.unwrap(), 1);
+        assert_eq!(count_online_workers(&db, &idle.id, 120).await.unwrap(), 0);
+        assert_eq!(count_online_workers(&db, &busy.id, 900).await.unwrap(), 2);
+        assert!(
+            count_online_workers_by_pool(&db, &[], 120)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -921,7 +1825,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_commands").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let first = allocate_worker(&db, &pool, None).await.unwrap().worker;
         let second = allocate_worker(&db, &pool, None).await.unwrap().worker;
         assert_ne!(first.worker_label, second.worker_label);
@@ -1063,7 +1967,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_capability").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         let error = enqueue_command(
             &db,
@@ -1088,7 +1992,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_pool_expiry").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
@@ -1137,7 +2041,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_instance_binding").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         ensure_instance_matches(&db, &pool, &worker.worker_label, Some("install-a"))
             .await
@@ -1164,7 +2068,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_delivery_capability").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
@@ -1232,7 +2136,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
@@ -1303,7 +2207,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_requested_label").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let created = allocate_worker(&db, &pool, Some("share-account-8"))
             .await
             .unwrap();
@@ -1353,7 +2257,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_forget").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, Some("stale-1"))
             .await
             .unwrap()
@@ -1416,7 +2320,7 @@ mod tests {
         let Some(db) = connect_test_database("oracle_worker_cancel").await else {
             return;
         };
-        let pool = pool();
+        let pool = pool(&db).await;
         let worker = allocate_worker(&db, &pool, Some("cancel-1"))
             .await
             .unwrap()
@@ -1527,5 +2431,168 @@ mod tests {
             .unwrap_err();
         assert!(matches!(missing, AppError::OracleWorkerCommandNotFound(_)));
         db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn oracle_command_expiry_is_bounded_and_never_delivers_dead_backlog() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("oracle_command_expiry_batches")
+                .await;
+        let pool = pool(&db).await;
+        let worker = report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: "expiry".into(),
+                capabilities: vec!["commands_v1".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let live = enqueue_worker_command(
+            &db,
+            &pool,
+            &worker,
+            &pool.user_id,
+            OracleWorkerCommandKind::Drain,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let count = COMMAND_EXPIRY_BATCH_SIZE as usize + 3;
+        let mut backlog: Vec<_> = (0..count)
+            .map(|i| {
+                let mut command = live.clone();
+                command.id = format!("expired-{i:03}");
+                command.deadline_at = Utc::now() - Duration::hours(1);
+                command
+            })
+            .collect();
+        let mut exhausted = live.clone();
+        exhausted.id = "exhausted".into();
+        exhausted.delivery_count = MAX_COMMAND_DELIVERIES;
+        backlog.push(exhausted);
+        let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
+        commands.insert_many(backlog).await.unwrap();
+        list_worker_commands(&db, &pool, &worker, &pool.user_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            commands
+                .count_documents(doc! {"status":"expired"})
+                .await
+                .unwrap(),
+            COMMAND_EXPIRY_BATCH_SIZE as u64
+        );
+        let delivered = deliver_next_command_for_worker(&db, &pool, &worker, &worker.capabilities)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.id, live.id);
+        assert_eq!(
+            commands
+                .count_documents(doc! {"status":"expired"})
+                .await
+                .unwrap(),
+            (count + 1) as u64
+        );
+        assert_eq!(
+            commands
+                .find_one(doc! {"_id":"exhausted"})
+                .await
+                .unwrap()
+                .unwrap()
+                .result_code
+                .as_deref(),
+            Some("delivery_exhausted")
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn oracle_poolwide_expiry_reconciles_only_bounded_affected_workers_and_drains() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("oracle_expiry_reconcile_batches")
+                .await;
+        let pool = pool(&db).await;
+        let template = report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: "template".into(),
+                capabilities: vec!["commands_v1".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let command = enqueue_worker_command(
+            &db,
+            &pool,
+            &template,
+            &pool.user_id,
+            OracleWorkerCommandKind::Drain,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
+            .delete_one(doc! {"_id": &command.id})
+            .await
+            .unwrap();
+        let count = COMMAND_EXPIRY_BATCH_SIZE as usize + 3;
+        let mut workers = Vec::new();
+        let mut commands = Vec::new();
+        for index in 0..count {
+            let label = format!("backlog-{index:03}");
+            let mut worker = template.clone();
+            worker.id = worker_doc_id(&pool.id, &label);
+            worker.worker_label = label.clone();
+            worker.desired_state = OracleWorkerDesiredState::Draining;
+            workers.push(worker);
+            let mut overdue = command.clone();
+            overdue.id = format!("overdue-{index:03}");
+            overdue.worker_label = label;
+            overdue.deadline_at = Utc::now() - Duration::hours(1);
+            commands.push(overdue);
+        }
+        db.collection::<OracleWorker>(ORACLE_WORKERS)
+            .insert_many(workers)
+            .await
+            .unwrap();
+        db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
+            .insert_many(commands)
+            .await
+            .unwrap();
+        for expected in [COMMAND_EXPIRY_BATCH_SIZE as u64, count as u64] {
+            list_commands(&db, &pool.id, None).await.unwrap();
+            assert_eq!(
+                db.collection::<Document>(ORACLE_WORKERS)
+                    .count_documents(
+                        doc! {"worker_label":{"$regex":"^backlog-"},"desired_state":"active"}
+                    )
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                db.collection::<Document>(ORACLE_WORKER_COMMANDS)
+                    .count_documents(doc! {"status":"expired"})
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        // Unrelated draining inventory is not scanned or rewritten by expiry.
+        assert_eq!(
+            get_worker(&db, &pool.id, "template")
+                .await
+                .unwrap()
+                .desired_state,
+            OracleWorkerDesiredState::Draining
+        );
+        db.drop().await.unwrap();
     }
 }

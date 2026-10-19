@@ -24,6 +24,10 @@ services:
       timeout: 5s
       retries: 5
 
+  mongodb-init:
+    environment:
+      MONGO_INITDB_ROOT_PASSWORD: nyxid_dev_password
+
   mailpit:
     image: axllent/mailpit:latest
     container_name: nyxid-mailpit

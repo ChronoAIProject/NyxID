@@ -1,0 +1,136 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Gmail",
+    "version": "v1-nyxid-overlay",
+    "description": "Read, search, and send Gmail messages through NyxID's OAuth proxy. Reading requires gmail.readonly; sending requires gmail.send. The connector offers no permissions to modify or delete existing mailbox messages."
+  },
+  "servers": [{ "url": "https://www.googleapis.com" }],
+  "paths": {
+    "/gmail/v1/users/me/messages": {
+      "get": {
+        "operationId": "gmail_list_messages",
+        "summary": "List or search Gmail messages",
+        "x-aevatar-tool": {
+          "name": "gmail_list_messages",
+          "description": "List message IDs and thread IDs in the authenticated Gmail mailbox.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Gmail search query, for example is:unread.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "description": "Maximum number of messages to return, from 1 to 500.",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message IDs and optional nextPageToken",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gmail/v1/users/me/messages/{id}": {
+      "get": {
+        "operationId": "gmail_get_message",
+        "summary": "Get a Gmail message",
+        "x-aevatar-tool": {
+          "name": "gmail_get_message",
+          "description": "Read a message by ID, including its headers and body.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["minimal", "full", "raw", "metadata"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gmail message",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gmail/v1/users/me/messages/send": {
+      "post": {
+        "operationId": "gmail_send_message",
+        "summary": "Send a Gmail message",
+        "x-aevatar-tool": {
+          "name": "gmail_send_message",
+          "description": "Send an RFC 2822 MIME message encoded as base64url. Requires gmail.send.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "raw": {
+                    "type": "string",
+                    "description": "Base64url-encoded RFC 2822 MIME message including To, Subject, and body."
+                  },
+                  "threadId": {
+                    "type": "string",
+                    "description": "Optional existing thread ID. Replies must also supply matching Subject, References, and In-Reply-To MIME headers."
+                  }
+                },
+                "required": ["raw"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent Gmail message",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

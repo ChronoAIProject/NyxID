@@ -1,5 +1,11 @@
 import { lazy } from "react";
 
+export const NyxbotOnboardingPage = lazy(() =>
+  import("@/pages/nyxbot-onboarding").then((m) => ({
+    default: m.NyxbotOnboardingPage,
+  })),
+);
+
 export const LandingPage = lazy(() =>
   import("@/pages/landing").then((m) => ({ default: m.LandingPage })),
 );
@@ -17,6 +23,9 @@ export const CliAuthPage = lazy(() =>
 );
 export const CliPairPage = lazy(() =>
   import("@/pages/cli-pair").then((m) => ({ default: m.CliPairPage })),
+);
+export const LoginAgentKeyPage = lazy(() =>
+  import("./login-agent-key").then((m) => ({ default: m.LoginAgentKeyPage })),
 );
 export const LoginDevicePage = lazy(() =>
   import("@/pages/login-device").then((m) => ({
@@ -174,6 +183,13 @@ export const OAuthConsentPage = lazy(() =>
     default: m.OAuthConsentPage,
   })),
 );
+export const OAuthConsentPreviewPage = import.meta.env.DEV
+  ? lazy(() =>
+      import("@/pages/oauth-consent-preview").then((m) => ({
+        default: m.OAuthConsentPreviewPage,
+      })),
+    )
+  : () => null;
 export const OAuthErrorPage = lazy(() =>
   import("@/pages/oauth-error").then((m) => ({ default: m.OAuthErrorPage })),
 );
@@ -221,6 +237,12 @@ export const AdminInviteCodesPage = lazy(() =>
     default: m.AdminInviteCodesPage,
   })),
 );
+export const AdminPlatformCredentialsPage = lazy(() =>
+  import("./admin-platform-credentials").then((m) => ({
+    default: m.AdminPlatformCredentialsPage,
+  })),
+);
+
 export const AdminFeatureFlagsPage = lazy(() =>
   import("@/pages/admin-feature-flags").then((m) => ({
     default: m.AdminFeatureFlagsPage,
@@ -231,15 +253,13 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
-export const AdminPlatformOpsPage = lazy(() =>
-  import("@/pages/admin-platform-ops").then((m) => ({
-    default: m.AdminPlatformOpsPage,
-  })),
-);
 export const AdminCreditsPage = lazy(() =>
   import("@/pages/admin-credits").then((m) => ({
     default: m.AdminCreditsPage,
   })),
+);
+export const AdminBillingPage = lazy(() =>
+  import("@/pages/admin-billing").then((m) => ({ default: m.AdminBillingPage })),
 );
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
@@ -258,6 +278,16 @@ export const KeyDetailPage = lazy(() =>
 export const ChannelBotsPage = lazy(() =>
   import("@/pages/channel-bots").then((m) => ({
     default: m.ChannelBotsPage,
+  })),
+);
+export const ChannelBotSetupPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({
+    default: m.ChannelBotSetupPage,
+  })),
+);
+export const ChannelBotSetupLinksPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({
+    default: m.ChannelBotSetupLinksPage,
   })),
 );
 export const ChannelBotDetailPage = lazy(() =>
@@ -311,3 +341,39 @@ export const DocsIndexPage = lazy(() =>
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
 );
+
+export const AdminUsagePage = lazy(() =>
+  import("@/pages/admin-usage").then((m) => ({ default: m.AdminUsagePage })),
+);
+
+export const ServiceOverviewPage = lazy(() =>
+  import("@/pages/service-overview").then((module) => ({
+    default: module.ServiceOverviewPage,
+  })),
+);
+
+export const MachineSetupPage = lazy(() =>
+  import("./machine-setup").then((m) => ({ default: m.MachineSetupPage })),
+);
+export const MachinePairPage = lazy(() =>
+  import("./machine-setup").then((m) => ({ default: m.MachinePairPage })),
+);
+export const SavedLoginsPage = lazy(() =>
+  import("./saved-logins").then((m) => ({ default: m.SavedLoginsPage })),
+);
+
+export const MachineDesktopPage = lazy(() =>
+  import("./machine-desktop").then((m) => ({ default: m.MachineDesktopPage })),
+);
+
+export const AdminUploadRetentionPage = lazy(() =>
+  import("./admin-upload-retention").then((m) => ({
+    default: m.AdminUploadRetentionPage,
+  })),
+);
+
+export const PlatformOnboardingPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformOnboardingPage})));
+export const PlatformBindingReviewPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformBindingReviewPage})));
+export const PlatformSetupsPage = lazy(() => import("./platform-onboarding").then(m => ({default: m.PlatformSetupsPage})));
+export const PlatformSetupDetailPage = lazy(() => import("./platform-setup-detail").then(m => ({default: m.PlatformSetupDetailPage})));
+export const AdminPlatformBotsPage = lazy(() => import("./admin-platform-bots").then(m => ({default: m.AdminPlatformBotsPage})));

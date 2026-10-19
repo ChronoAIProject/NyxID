@@ -38,6 +38,20 @@ function makeService(
 }
 
 describe("buildNodeCredentialCommand", () => {
+  it("uses catalog setup for IFTTT even when its provider has generic api_key metadata", () => {
+    const service = makeService({
+      slug: "api-ifttt",
+      auth_method: "ifttt_webhook",
+      auth_type: "api_key",
+      auth_key_name: "",
+    });
+
+    expect(buildNodeCredentialCommand("api-ifttt", service)).toBe(
+      "nyxid node credentials setup --service api-ifttt",
+    );
+    expect(getNodeCredentialPromptHint(service)).toContain("raw Webhooks key");
+  });
+
   it("uses secure bearer formatting for bearer services", () => {
     const service = makeService({
       auth_method: "bearer",
