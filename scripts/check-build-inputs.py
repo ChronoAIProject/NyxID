@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import subprocess
 
+from apt_inputs import check_apt_inputs
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -79,6 +81,7 @@ def check(root, plan=None):
         if re.search(r"cargo (?:auditable )?build(?![^\n]*(?:--locked|--frozen))", text):
             errors.append(str(path.relative_to(root)) + ": Rust build does not enforce lockfile")
     paths = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=root, text=True).splitlines()
+    errors.extend(check_apt_inputs(root, paths))
     for name in paths:
         path = root / name
         text = path.read_text()

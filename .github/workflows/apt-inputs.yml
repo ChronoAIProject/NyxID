@@ -1,0 +1,104 @@
+name: APT Inputs
+
+on:
+  # CI calls this on relevant pull_request changes and before publication.
+  workflow_call:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: APT Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate catalogs, callers and negative fixtures
+        run: |
+          python3 scripts/check-apt-inputs.py
+          python3 scripts/test-apt-inputs.py
+
+  snapshots:
+    name: APT Snapshots (${{ matrix.base }}, ${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [bookworm, trixie, focal, noble]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Real signed snapshot success and tamper boundaries
+        run: >-
+          python3 scripts/test-apt-snapshots.py
+          --base '${{ matrix.base }}' --platform 'linux/${{ matrix.arch }}'
+          --evidence "$RUNNER_TEMP/apt-snapshots"
+      - name: Retain logs and package inventories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: apt-snapshots-${{ matrix.base }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/apt-snapshots/
+          if-no-files-found: error
+          retention-days: 7
+
+  image-layers:
+    name: APT Dockerfile Layers (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build every actual APT stage prefix without publishing
+        run: >-
+          python3 scripts/test-apt-image-inputs.py --platform 'linux/${{ matrix.arch }}'
+          --output "$RUNNER_TEMP/apt-image-layers"
+      - name: Retain exact prefixes, build logs and installed inventories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: apt-image-layers-${{ matrix.arch }}
+          path: ${{ runner.temp }}/apt-image-layers/
+          if-no-files-found: error
+          retention-days: 7
+
+  apt-pass:
+    name: APT Inputs Passed
+    if: always()
+    needs: [policy, snapshots, image-layers]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every APT check
+        env:
+          POLICY: ${{ needs.policy.result }}
+          SNAPSHOTS: ${{ needs.snapshots.result }}
+          LAYERS: ${{ needs.image-layers.result }}
+        run: |
+          test "$POLICY" = success
+          test "$SNAPSHOTS" = success
+          test "$LAYERS" = success

@@ -31,8 +31,16 @@ class BuildPolicy(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        for directory in (".github/workflows", ".github/scripts", "security"):
+        for directory in (".github/workflows", ".github/scripts"):
             shutil.copytree(ROOT / directory, self.root / directory)
+        (self.root / "security").mkdir()
+        # Build artifacts/caches under security/ are not policy inputs.
+        for path in (ROOT / "security").iterdir():
+            if path.is_file():
+                shutil.copyfile(path, self.root / "security" / path.name)
+        (self.root / "scripts").mkdir()
+        for name in ("apt-snapshot-select.awk", "install-release-dependencies.sh"):
+            shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
         self.dockerfiles = subprocess.check_output(["git", "ls-files", "*Dockerfile*"], cwd=ROOT, text=True).splitlines()
         for name in self.dockerfiles:
             target = self.root / name
@@ -64,6 +72,13 @@ class BuildPolicy(unittest.TestCase):
 
     def test_mutable_base_rejected(self):
         self.mutate("frontend/Dockerfile", "node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85", "node:22.23.2-alpine", "unpinned base")
+
+    def test_raw_apt_rejected_in_any_dockerfile(self):
+        self.mutate("cli/Dockerfile.node", "-- ca-certificates", "-- ca-certificates && apt-get install curl",
+                    "raw APT command bypasses")
+
+    def test_missing_apt_parser_copy_rejected(self):
+        self.mutate("cli/Dockerfile.node", "scripts/apt-snapshot-select.awk ", "", "omits installer/parser/catalog COPY")
 
     def test_cargo_dist_metadata_mutable_image_rejected(self):
         self.metadata["metadata"]["dist"]["github-custom-runners"]["aarch64-unknown-linux-gnu"]["container"]["image"] = "buildpack-deps:focal"

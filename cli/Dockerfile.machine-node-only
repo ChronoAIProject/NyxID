@@ -13,10 +13,8 @@ FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288
 
 FROM toolchain AS builder
 
-RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libdbus-1-dev \
-    && rm -rf /var/lib/apt/lists/*
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- pkg-config libdbus-1-dev
 
 WORKDIR /build
 COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
@@ -53,21 +51,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NYXID_NODE_CONFIG_DIR=/var/lib/nyxid-machine/node \
     HOME=/home/agent
 
-# Bootstrap HTTPS APT using the official toolchain image's public CA bundle;
-# Ubuntu's ca-certificates package replaces it during installation below.
-COPY --from=toolchain /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-
 # Ubuntu 24.04 reserves UID 1000 for its default login account. This image
 # replaces that account with the fixed command identity, as the machine image
 # does; no existing workspace or host account is involved in this build step.
 RUN userdel -r ubuntu 2>/dev/null || true
 
-RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/ubuntu.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble -- \
         ca-certificates curl git python3 nodejs npm ripgrep build-essential \
         pkg-config tini procps libdbus-1-3 \
-    && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home --shell /bin/sh agent \
     && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \
     && mkdir -p /workspace /var/lib/nyxid-machine/node \

@@ -123,9 +123,8 @@ RUN npm run build:credential-accept
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- ca-certificates curl
 
 # Create a non-root user
 RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
