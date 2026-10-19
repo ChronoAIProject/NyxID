@@ -48,6 +48,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [User Consents](#user-consents)
   - [OIDC Discovery](#oidc-discovery)
   - [Admin](#admin)
+  - [Credit Allocations](#credit-allocations)
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
@@ -8839,3 +8840,46 @@ Provider-facing routes authenticate their own protocol instead of a human login:
 Caller messages never grant owner authority. Specialist guest grants, live
 binding/session authority and catalog operation policy remain mandatory at
 execution. Provider retries do not automatically repeat uncertain effects.
+
+
+### Credit Allocations
+
+All routes below require authentication and retain the existing admin Credits
+role boundaries. They are additive to existing `/admin/credits/grants`,
+`/admin/credits/schedules` and allowance APIs; personal billing routes are unchanged.
+
+| Route | Authority | Contract |
+| --- | --- | --- |
+| `GET /api/v1/admin/credits/allocations/summary` | Admin or Operator | `allocations_v1` authoring capability and exact decimal-string summary: remaining, unreserved, held, pending activation/reclaim, expired awaiting cleanup, restricted, generated time. Subsets are not additive funds. No financial writes. |
+| `POST /api/v1/admin/credits/allocations` | Admin or Credits Manager Operator | Issue one-time allocation using existing recipient/scope fields plus exact decimal `amount`, optional UUID `request_id`, and optional `service_limits`. |
+| `DELETE /api/v1/admin/credits/allocations/{grant_id}` | Admin or Credits Manager Operator | Reclaim only this allocation's unused funds. Held work completes; response may carry `revoke_requested_at` until final reclaim. Replays converge on the same state. |
+| `POST /api/v1/admin/credits/allocations/schedules` | Admin | Create daily/weekly/monthly policy with expiry and optional limits/request UUID. Each period freezes policy; each recipient grant has fresh counters. |
+| `PATCH /api/v1/admin/credits/allocations/schedules/{schedule_id}` | Admin | Sparse reviewed edits; changes apply to future periods. Pausing does not reclaim existing allocations. |
+
+New mutations require `BILLING_ALLOCATIONS_ENABLED`; disabled deployments reject
+new policy authoring. Never retry capped policies through legacy endpoints on a
+missing capability. An exact read field alone is not proof of exact write support.
+Legacy omitted fields remain supported; legacy immediate revoke rejects holds
+when the new capability is disabled.
+
+Creation accepts the canonical exact string `amount` without an
+`amount_credits` field, for both one-time and recurring allocations. Legacy
+whole-integer `amount_credits` requests remain valid. When both fields are
+present, `amount` takes precedence; omitting both, or providing a nonpositive,
+malformed or unrepresentable effective amount, rejects the request without
+creating an allocation or schedule. Sparse recurring updates preserve an
+omitted amount, and apply the same exact-field precedence when supplied.
+
+`service_limits` entries contain `service_refs` (one or more concrete catalog IDs
+or compatible slugs), exact decimal `amount`, and optional `label`. Canonical
+services must be disjoint across rules and within selected eligibility. Limits
+are ceilings inside a shared total, not earmarked pots; unspecified eligible
+services remain unrestricted. Returned rules include exact limit/consumed/raw
+reserved/additive held values and canonical members. Grant responses preserve
+legacy fields and add exact `held`, `terminal_amount`, `reclaimed`, pending reclaim
+and rule details. Money supports twelve fractional digits without JSON-number loss.
+
+An actor-scoped request UUID freezes payload and recipients. Retrying the same
+payload resumes safely; reusing the UUID for different settings returns conflict.
+See [exact allocation accounting](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim)
+for rollout, activation, journal and recovery guarantees.

@@ -14,6 +14,9 @@ async fn stale_schedule_update_returns_conflict_without_overwriting_winner() {
     let schedule = create_schedule(
         &db,
         CreateScheduleInput {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 25,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::EndOfPeriod,

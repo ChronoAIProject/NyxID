@@ -2581,6 +2581,7 @@ async fn private_paid_delete_consumer_preserves_uncertainty_and_first_stop_upper
     ).await.unwrap();
     let config = crate::config::AppConfig {
         billing_enabled: true,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         ..crate::test_utils::test_app_config()
@@ -3888,6 +3889,7 @@ async fn initially_absent_paid_unready_workload_closes_zero_usage_from_real_quer
     ).await.unwrap();
     let config = crate::config::AppConfig {
         billing_enabled: true,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         ..crate::test_utils::test_app_config()
