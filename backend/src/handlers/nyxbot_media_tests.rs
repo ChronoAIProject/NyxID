@@ -1441,7 +1441,7 @@ async fn channel_media_gateway_current_request_contains_all_failed_partial_and_c
         }
         if kind == "capped" {
             assert!(input.contains("post truncated"));
-            assert!(input.contains("more embedded media omitted"));
+            assert!(input.contains("1 more embedded media omitted"));
         }
         let event = state
             .db

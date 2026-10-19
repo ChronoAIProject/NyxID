@@ -169,7 +169,10 @@ pub(crate) async fn pending_receipt(
                     &event,
                     None,
                     true,
-                    "more embedded media omitted",
+                    &format!(
+                        "{} more embedded media omitted",
+                        media.declared - media.items.len()
+                    ),
                     None,
                 ));
             }
@@ -379,7 +382,10 @@ async fn collect(
                 &event,
                 None,
                 true,
-                "more embedded media omitted",
+                &format!(
+                    "{} more embedded media omitted",
+                    media.declared - media.items.len()
+                ),
                 None,
             ));
         }
