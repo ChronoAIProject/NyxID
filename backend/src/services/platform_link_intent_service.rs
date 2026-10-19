@@ -811,9 +811,6 @@ pub async fn confirm_in_session(
     {
         return Err(bindings::unavailable());
     }
-    if row.state == ChallengeState::Confirmed {
-        return row.completion.ok_or_else(bindings::unavailable);
-    }
     let controls = super::platform_bot_runtime_control_service::fence_manager_in_session(
         db,
         session,
@@ -824,6 +821,42 @@ pub async fn confirm_in_session(
     )
     .await?
     .ok_or_else(bindings::unavailable)?;
+    if row.state == ChallengeState::Confirmed {
+        if controls.retired
+            || controls.emergency_stopped
+            || !controls.personal_enabled
+            || controls.manager_authority_epoch != row.manager_authority_epoch
+            || !bindings::fence_person(db, session, &row.reviewed_user_id).await?
+            || !fence_access_mode(
+                db,
+                session,
+                &row.reviewed_user_id,
+                &row.reviewed_access_mode,
+            )
+            .await?
+        {
+            return Err(bindings::unavailable());
+        }
+        let completion = row.completion.as_ref().ok_or_else(bindings::unavailable)?;
+        let binding = bindings::latest_for_sender(
+            db,
+            session,
+            &row.platform_config_id,
+            row.manager_authority_epoch,
+            &row.sender,
+        )
+        .await?
+        .ok_or_else(bindings::unavailable)?;
+        if binding.state != PersonalBindingState::Active
+            || binding.id != completion.binding_id
+            || binding.generation != completion.binding_generation
+            || binding.user_id != row.reviewed_user_id
+            || binding.sender != row.sender
+        {
+            return Err(bindings::unavailable());
+        }
+        return Ok(completion.clone());
+    }
     if controls.retired
         || controls.emergency_stopped
         || !controls.personal_enabled

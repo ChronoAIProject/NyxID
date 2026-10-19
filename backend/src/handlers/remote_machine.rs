@@ -230,6 +230,13 @@ pub struct OperationResponse {
     pub operation: SafeMachineOperationView,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteRetryRequest {
+    pub expected_revision: i64,
+    pub expected_retry_count: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CreateResponse {
     pub machine: SafeManagedMachineView,
@@ -736,6 +743,33 @@ pub async fn operation(
     Ok(Json(OperationResponse {
         operation: machine::safe_operation_view(&row),
     }))
+}
+
+/// POST /api/v1/remote-machine-operations/{operation_id}/retry-delete
+pub async fn retry_delete(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Path(operation_id): Path<String>,
+    Json(body): Json<DeleteRetryRequest>,
+) -> AppResult<(StatusCode, Json<OperationResponse>)> {
+    let owner_id = owner(&auth)?;
+    let key = require_idempotency_key(&headers)?;
+    let row = crate::services::remote_machine_delete_retry::retry(
+        &state.db,
+        &owner_id,
+        &operation_id,
+        body.expected_revision,
+        body.expected_retry_count,
+        &key,
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(OperationResponse {
+            operation: machine::safe_operation_view(&row),
+        }),
+    ))
 }
 
 #[cfg(test)]

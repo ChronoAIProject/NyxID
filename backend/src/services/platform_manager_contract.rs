@@ -184,6 +184,7 @@ pub enum SenderResolution {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnavailableReason {
+    UnsupportedInput,
     ModeDisabled,
     ManagerUnavailable,
     EmergencyStopped,

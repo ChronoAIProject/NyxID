@@ -550,6 +550,10 @@ async fn inbound_impl(
     }
     let reply = match result {
         Ok(Inbound::Reply(reply)) => Some(reply),
+        Ok(Inbound::Queued) => {
+            late_delivery::process(state, event_key).await;
+            None
+        }
         Ok(Inbound::Silent) => None,
         Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
         Ok(Inbound::Turn(receiver)) => {
@@ -659,6 +663,9 @@ pub(crate) async fn send(
         )
         .await;
         text = super::images::append_failure(&text, &report);
+    }
+    if text.trim().is_empty() {
+        return Ok(());
     }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;

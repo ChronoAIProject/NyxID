@@ -25,6 +25,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
+pub mod assistant_resource_service;
 pub mod assistant_service;
 pub mod assistant_skill_authoring;
 pub mod assistant_turn_observability;
@@ -197,6 +198,7 @@ pub mod push_service;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub mod reporting_identity_service;
+pub mod resource_adapter;
 pub mod role_service;
 pub mod scope_catalog;
 pub mod security_readiness_service;
@@ -384,6 +386,8 @@ pub mod machine_oauth_consent_service;
 pub mod machine_external_grant_service;
 pub mod machine_external_service;
 
+pub mod remote_machine_delete_recovery;
+pub mod remote_machine_delete_retry;
 pub mod remote_machine_events;
 pub mod remote_machine_manager;
 pub mod remote_machine_native;
@@ -447,6 +451,8 @@ pub(crate) mod platform_entry_native;
 
 pub(crate) mod platform_entry_receipts;
 
+pub(crate) mod platform_bot_status_service;
 pub(crate) mod platform_entry_scope;
+pub(crate) mod platform_faq_service;
 
 pub(crate) mod platform_native_reply_service;

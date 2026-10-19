@@ -42,7 +42,12 @@ function PersonalLinkFlow({
   const preview = usePersonalLinkPreview();
   const config = usePublicConfig();
   const client = useQueryClient();
-  const [handoff] = useState(readPersonalLink);
+  const [handoff] = useState(() => {
+    const current = readPersonalLink();
+    return current
+      ? { expiresAt: current.expiresAt, challenge: current.challenge }
+      : undefined;
+  });
   const [challenge, setChallenge] = useState(() =>
     handoff?.challenge && handoff.challenge.accountId === actor
       ? handoff.challenge
@@ -103,8 +108,13 @@ function PersonalLinkFlow({
     !!challenge &&
     (challenge.expiresAt <= now || status.data?.status === "expired");
   useEffect(() => {
-    if (intentExpired) clearPersonalLink();
-  }, [intentExpired]);
+    if (intentExpired || challengeExpired) {
+      setCommand(undefined);
+      setReview(undefined);
+      if (intentExpired) clearPersonalLink();
+      else forgetPersonalChallenge();
+    }
+  }, [intentExpired, challengeExpired]);
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError(undefined);
@@ -144,7 +154,9 @@ function PersonalLinkFlow({
   }
   const chat = review?.chat ?? status.data?.chat ?? preview.data?.chat;
   const chatName = chat?.display_name ?? "chat";
-  const loginInstruction = chat?.login_command ?? "the login control shown in the original private chat";
+  const loginInstruction =
+    chat?.login_command ??
+    "the login control shown in the original private chat";
   const returnTo =
     typeof window !== "undefined"
       ? `${window.location.origin}/nyxbot/link`
@@ -160,8 +172,8 @@ function PersonalLinkFlow({
         <section className="space-y-3 rounded-xl border border-border bg-card p-5">
           <p role="status">{chatName} is linked.</p>
           <p className="text-12 text-muted-foreground">
-            {chat?.question_instruction} Your dedicated {chatName}{" "}
-            thread and approvals will be available in NyxID.
+            {chat?.question_instruction} Your dedicated {chatName} thread and
+            approvals will be available in NyxID.
           </p>
           <Button asChild variant="primary">
             <a href="/assistant?panel=nyxbot">Open NyxBot</a>
@@ -196,7 +208,9 @@ function PersonalLinkFlow({
               </p>
               <p>
                 {chatName} account:{" "}
-                {preview.data.sender.display_name ?? preview.data.sender.id}
+                {preview.data.sender.display_name
+                  ? `${preview.data.sender.display_name} (${preview.data.sender.id})`
+                  : preview.data.sender.id}
               </p>
               {!actor ? (
                 <>
@@ -267,15 +281,15 @@ function PersonalLinkFlow({
                 {ACCESS_MODE_DESCRIPTION[review.permission_mode]}
               </p>
               <p>
-                This {chatName} chat uses your existing NyxBot access
-                to connected services and account management, including existing
+                This {chatName} chat uses your existing NyxBot access to
+                connected services and account management, including existing
                 memory and persona. Changes to your NyxBot settings apply here
                 too.
               </p>
               <p>{chat?.question_instruction}</p>
               <p>
-                Send {chat?.status_command} to check this chat's live login. Send{" "}
-                {chat?.logout_command} to disconnect it or cancel pending
+                Send {chat?.status_command} to check this chat's live login.
+                Send {chat?.logout_command} to disconnect it or cancel pending
                 confirmations. Browser sign-out does not disconnect this chat.
               </p>
               <p>
@@ -304,8 +318,7 @@ function PersonalLinkFlow({
                   />
                   <span>
                     I agree to replace the existing personal link for this
-                    {chatName} account. Its previous history will not
-                    transfer.
+                    {chatName} account. Its previous history will not transfer.
                   </span>
                 </label>
               )}
@@ -351,21 +364,24 @@ function PersonalLinkFlow({
                 </Button>
               </div>
               <p className="text-muted-foreground">
-                Approve here, then confirm in the same private{" "}
-                {chatName} chat within 10 minutes.
+                Approve here, then confirm in the same private {chatName} chat
+                within 10 minutes.
               </p>
             </section>
           )}
           {!review && challenge && !challengeExpired && (
             <section className="space-y-3 rounded-xl border border-border bg-card p-5 text-12">
               <p role="status">
-                Waiting for confirmation from the same private{" "}
-                {chatName} chat. Browser approval alone does not grant
-                access.
+                Waiting for confirmation from the same private {chatName} chat.
+                Browser approval alone does not grant access.
               </p>
               {command ? (
                 <>
-                  <p>Send this one-time command in the private chat:</p>
+                  <p>
+                    {chat?.platform === "discord"
+                      ? "Choose the /nyx confirm application command in the same bot DM and enter the shown P-… value in its code option. Ordinary text does not reach this integration."
+                      : "Send this one-time command in the private chat:"}
+                  </p>
                   <code className="block select-all rounded-lg bg-muted p-3 font-mono">
                     {command}
                   </code>

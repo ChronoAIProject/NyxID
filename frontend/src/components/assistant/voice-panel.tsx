@@ -64,6 +64,25 @@ function tariff(option: VoiceOption) {
     : "Voice tariff unavailable";
 }
 
+function VoiceCreditUsage({ option }: { option: VoiceOption }) {
+  return (
+    <details className="mt-3 text-12 text-text-tertiary">
+      <summary className="cursor-pointer">Credit usage</summary>
+      <p className="mt-2">
+        {tariff(option)}. Paid by{" "}
+        {option.billing_owner === "organization" ? "the organization" : "you"}.
+      </p>
+      <p className="mt-1">
+        Assistant tasks are billed separately. Muting keeps the call running
+        and billed.{" "}
+        {option.billing_owner === "organization"
+          ? "Charges are recorded against the organization's credits."
+          : "View recorded charges in your account menu under Usage."}
+      </p>
+    </details>
+  );
+}
+
 /** Media remains mounted when minimized; starting always needs a gesture. */
 export function VoicePanel({
   threadId,
@@ -241,6 +260,15 @@ export function VoicePanel({
           useAuthStore.getState().user?.id !== startingActor
         )
           throw new Error("Your account changed. Start voice again.");
+        // The session request carries these preferences and revalidates access
+        // and funding. An unchanged saved selection needs no settings round trip.
+        if (
+          savedPreferences &&
+          (Object.keys(preferences) as (keyof VoicePreferences)[]).every(
+            (key) => preferences[key] === savedPreferences[key],
+          )
+        )
+          return;
         try {
           const settings = await nyxBotApi.updateSettings({
             voice: preferences,
@@ -309,7 +337,7 @@ export function VoicePanel({
       (!options.data && !options.isError)
     )
       return;
-    // Defer past the disclosure render; effect rehearsal cannot start two calls.
+    // Defer so effect rehearsal can cancel before starting a call.
     const timer = setTimeout(() => {
       attempted.current = preparation;
       if (preparation.isClosed) return;
@@ -557,10 +585,11 @@ export function VoicePanel({
               <p className="text-text-tertiary">
                 {isGrok ? "Grok requires Hold to talk. " : ""}Audio goes to{" "}
                 {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps the
-                transcript, never an audio recording. Muting keeps the call
-                running and billed. Use headphones if the assistant hears
-                itself.
+                transcript, never an audio recording. Use headphones if the
+                assistant hears itself. Calls end after 30 minutes or 3 minutes
+                without user speech.
               </p>
+              {option && <VoiceCreditUsage option={option} />}
               {active && (
                 <Button
                   size="sm"
@@ -593,15 +622,6 @@ export function VoicePanel({
             <PhoneOff />
           </Button>
         </div>
-        {option && (
-          <p className="mt-1 text-11 text-text-tertiary">
-            {option.model_label} · {tariff(option)} · Paid by{" "}
-            {option.billing_owner === "organization"
-              ? "the organization"
-              : "you"}
-            . Tasks billed separately.
-          </p>
-        )}
         {!active && !option && !options.isPending && !options.isError && (
           <p role="alert" className="mt-1 text-destructive">
             Your selected voice source is unavailable. Choose a source in Voice
@@ -768,8 +788,8 @@ export function VoicePanel({
       {!active && (
         <p className="mt-2 text-muted-foreground">
           Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps
-          the transcript, never an audio recording. Muting keeps the call
-          running and billed.
+          the transcript, never an audio recording. Calls end after 30 minutes
+          or 3 minutes without user speech.
         </p>
       )}
       {voice.conflictSession && !active && (
@@ -875,14 +895,7 @@ export function VoicePanel({
           Notify when tasks finish after this call (no message preview)
         </label>
       )}
-      {option && (
-        <p className="mt-3 text-muted-foreground">
-          {tariff(option)}. Paid by{" "}
-          {option.billing_owner === "organization" ? "the organization" : "you"}
-          . Assistant tasks are billed separately. Calls end after 30 minutes or
-          3 minutes without user speech.
-        </p>
-      )}
+      {!active && option && <VoiceCreditUsage option={option} />}
       {settingsError && (
         <p role="alert" className="mt-3 text-destructive">
           {settingsError}

@@ -595,6 +595,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
             origin: "tool".into(),
             pages: None,
             id: "att".into(),
@@ -655,6 +656,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
             chat_delivery: None,
             image_input: None,
+            image_inspection: None,
             origin: "tool".into(),
             pages: None,
             id: "owner-attachment".into(),
@@ -953,6 +955,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             channel_adapter_origin: None,
+            resource_refs: Vec::new(),
             platform_reply: None,
             execution_started: false,
             machine_scopes: Vec::new(),
@@ -4356,6 +4359,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     pages: Some(1),
                     origin: "user_upload".into(),
                     image_input: None,
+                    image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
                 .insert_one(doc! {"_id":upload_id,"user_id":"owner","conversation_id":&row.id})

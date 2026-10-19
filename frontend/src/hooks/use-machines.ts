@@ -26,6 +26,7 @@ import {
   remoteMachineJobsSchema,
   remoteMachineJobOutputSchema,
   remoteMachineOperationResponseSchema,
+  remoteMachineDeleteRetryRequestSchema,
   remoteMachineQuoteRequestSchema,
   remoteMachineQuoteSchema,
   remoteMachineResponseSchema,
@@ -350,6 +351,68 @@ export function useRemoteMachineAction() {
         void client.invalidateQueries({
           queryKey: remoteMachineKey(owner, machineId),
         });
+    },
+  });
+}
+
+export function useRetryRemoteMachineDelete() {
+  const client = useQueryClient();
+  return useRemoteMachineOwnerMutation({
+    mutationFn: async ({
+      machineId,
+      operationId,
+      body,
+      idempotencyKey,
+      owner,
+    }: {
+      readonly machineId: string;
+      readonly operationId: string;
+      readonly body: z.infer<typeof remoteMachineDeleteRetryRequestSchema>;
+      readonly idempotencyKey: string;
+      readonly owner: string;
+    }) => {
+      const response = remoteMachineOperationResponseSchema.parse(
+        await apiClient<unknown>(
+          `/remote-machine-operations/${encodeURIComponent(operationId)}/retry-delete`,
+          {
+            method: "POST",
+            body: remoteMachineDeleteRetryRequestSchema.parse(body),
+            headers: idempotencyHeaders(idempotencyKey),
+            ...remoteMachineAuthority(owner),
+          },
+        ),
+      );
+      if (
+        response.operation.id !== operationId ||
+        response.operation.machine_id !== machineId ||
+        response.operation.action !== "delete"
+      ) {
+        throw new Error(
+          "Deletion retry returned a different operation or Machine",
+        );
+      }
+      return response;
+    },
+    retry: false,
+    onSuccess: (response, { machineId, owner }) => {
+      if (useAuthStore.getState().user?.id !== owner) return;
+      client.setQueryData(
+        remoteMachineOperationKey(owner, response.operation.id),
+        response.operation,
+      );
+      void client.invalidateQueries({
+        queryKey: remoteMachineKey(owner, machineId),
+      });
+      void client.invalidateQueries({ queryKey: remoteMachineOwnerKey(owner) });
+    },
+    onError: (_error, { machineId, operationId, owner }) => {
+      if (useAuthStore.getState().user?.id !== owner) return;
+      void client.invalidateQueries({
+        queryKey: remoteMachineKey(owner, machineId),
+      });
+      void client.invalidateQueries({
+        queryKey: remoteMachineOperationKey(owner, operationId),
+      });
     },
   });
 }
@@ -826,7 +889,8 @@ export function useMachineDesktops(conversation: string, turnActive = false) {
         `/assistant/nyxagent/machines?${new URLSearchParams({ conversation_id: conversation })}`,
       ),
     enabled: Boolean(conversation),
-    refetchInterval: (query) => (turnActive || query.state.data?.length ? 5000 : false),
+    refetchInterval: (query) =>
+      turnActive || query.state.data?.length ? 5000 : false,
   });
 }
 

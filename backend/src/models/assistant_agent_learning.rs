@@ -24,6 +24,9 @@ pub struct AuthoredDraftClaim {
     pub api_key_id: String,
     pub turn_id: String,
     pub requested_turn_id: Option<String>,
+    /// Presentation only; never used to authorize or retry an action.
+    #[serde(default)]
+    pub creation_turn_id: Option<String>,
     pub voice_request_id: Option<String>,
     pub trigger_run_id: Option<String>,
     /// Absent on claims written before the snapshot existed: unproven.

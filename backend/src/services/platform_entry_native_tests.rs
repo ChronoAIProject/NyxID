@@ -95,6 +95,32 @@ async fn slack_authenticated_dm_controls_and_questions_have_positive_provenance(
             "Slack B bot identity is not its U authorization identity"
         );
     }
+    // Real adapter-parsed file_share events retain human provenance only for
+    // fixed help. Even proof-shaped captions cannot become controls or turns.
+    for caption in [Some("confirm P-ABCD-EFGH"), None] {
+        let mut media = slack_message("");
+        media["event"]["subtype"] = json!("file_share");
+        media["event"]["files"] = json!([{"id":"F-file","mimetype":"image/png","url_private":"https://files.slack.com/private","name":"image.png"}]);
+        if let Some(caption) = caption {
+            media["event"]["text"] = json!(caption);
+        } else {
+            media["event"].as_object_mut().unwrap().remove("text");
+        }
+        let payload = serde_json::to_vec(&media).unwrap();
+        let batch = prepare_with_secrets(
+            &adapter,
+            &bot,
+            Some(&secrets),
+            &slack_headers(&payload),
+            &payload,
+            &config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.messages().len(), 1);
+        assert_eq!(batch.fact(0).unwrap().text(), "/unsupported");
+        assert_eq!(batch.messages()[0].text.as_deref(), Some("/unsupported"));
+    }
     let payload = serde_json::to_vec(&slack_message("login")).unwrap();
     let mut headers = slack_headers(&payload);
     headers.insert("x-slack-signature", "v0=invalid".parse().unwrap());
@@ -1209,5 +1235,29 @@ pub(crate) fn bot() -> ChannelBot {
         is_active: true,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+#[test]
+fn faq_alias_uses_the_same_trimmed_unicode_boundary() {
+    for text in [
+        "faq unlink",
+        "   faq unlink",
+        "\u{2003}faq unlink",
+        "\u{2003}  faq unlink",
+    ] {
+        assert_eq!(super::text_controls(text), "/faq unlink");
+    }
+    for question in [
+        "/logout",
+        "/confirm P-AAAA-BBBB",
+        "/faq unlink",
+        "confirm p-aaaa-bbbb",
+    ] {
+        let payload = discord_message("ask", Some(("question", question)));
+        assert_eq!(
+            super::discord_command_text(&payload["data"]).unwrap(),
+            "/unsupported"
+        );
     }
 }

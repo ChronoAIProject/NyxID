@@ -408,7 +408,7 @@ async fn materialize_and_send(
         || body.trim().is_empty()
         || body.encode_utf16().count()
             > text_limit(authority.receipt.configuration.identity.platform)
-        || !state
+        || state
             .db
             .collection::<mongodb::bson::Document>(DELIVERIES)
             .find_one(doc! {
@@ -416,7 +416,7 @@ async fn materialize_and_send(
                 "expires_at":{"$gt":mongodb::bson::DateTime::now()}
             })
             .await?
-            .is_some()
+            .is_none()
     {
         return Ok(NativeSendOutcome::Refused);
     }

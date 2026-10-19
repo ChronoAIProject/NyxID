@@ -976,6 +976,8 @@ mod tests {
             personal_enabled: false,
             public_enabled: true,
             emergency_stopped: false,
+            remembered_personal_enabled: None,
+            remembered_public_enabled: None,
             retired: false,
             public_policy: Some(PublicRuntimePolicy {
                 sponsor_owner_user_id: row.sponsor_owner_user_id.clone(),

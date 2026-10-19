@@ -5,6 +5,12 @@ use std::collections::HashSet;
 
 const MAX_IMAGE_ROUNDS: u32 = 2;
 
+fn requests_inspection(attachment: &crate::models::assistant_conversation::TurnAttachment) -> bool {
+    attachment.origin == "tool"
+        && attachment.image_inspection != Some(false)
+        && attachment.content_type.starts_with("image/")
+}
+
 #[derive(Default)]
 pub(crate) struct ToolImages {
     pub rounds: u32,
@@ -47,11 +53,7 @@ impl ToolImages {
         let items: Vec<_> = active
             .attachments
             .iter()
-            .filter(|a| {
-                a.origin == "tool"
-                    && a.content_type.starts_with("image/")
-                    && !self.seen.contains(&a.id)
-            })
+            .filter(|a| requests_inspection(a) && !self.seen.contains(&a.id))
             .cloned()
             .collect();
         // Credential recovery binds its successor at settlement. Until then,
@@ -160,4 +162,27 @@ pub(crate) async fn renew(
         json!({"turn_id":turn.turn_id,"continuation":round,"reason":"tool_images","image_round":round}),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod resource_intent_tests {
+    use super::*;
+    #[test]
+    fn display_only_resources_skip_inspection_and_legacy_images_keep_it() {
+        let mut attachment: crate::models::assistant_conversation::TurnAttachment =
+            serde_json::from_value(json!({
+                "id":"image","origin":"tool","content_type":"image/png","size":12,"label":"tool"
+            }))
+            .unwrap();
+        assert!(requests_inspection(&attachment));
+        attachment.image_inspection = Some(false);
+        attachment.chat_delivery = Some(true);
+        assert!(!requests_inspection(&attachment));
+        attachment.image_inspection = Some(true);
+        assert!(requests_inspection(&attachment));
+        attachment.chat_delivery = Some(false);
+        assert!(requests_inspection(&attachment));
+        attachment.origin = "user_upload".into();
+        assert!(!requests_inspection(&attachment));
+    }
 }

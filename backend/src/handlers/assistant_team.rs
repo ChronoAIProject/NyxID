@@ -207,13 +207,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
-        if row
-            .pending_events
-            .iter()
-            .any(|e| e.reply_to.iter().any(|o| o.thread.is_some()))
-            && crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id)
-                .await?
-                == 0
+        if crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id).await?
+            == 0
         {
             return Ok(());
         }
@@ -440,6 +435,11 @@ pub(crate) async fn after_turn(
     };
     if let Some(event_id) = turn.channel_event_id.as_deref() {
         super::nyxbot::late_delivery::settled(state, event_id).await;
+    }
+    for source in turn.events.iter().flat_map(|e| &e.source_event_ids) {
+        if Some(source.as_str()) != turn.channel_event_id.as_deref() {
+            super::nyxbot::late_delivery::process(state, source).await;
+        }
     }
     let owner = row.user_id.as_str();
     if let Some(run_id) = turn.trigger_run_id.as_deref()
@@ -1241,7 +1241,8 @@ fn dispatch<'a>(
             Box::pin(dispatch_groups(state, chat, name, args))
         }
         "update_settings" | "settings_link" => Box::pin(dispatch_settings(state, chat, name, args)),
-        "channel_bot_setup_link"
+        "channel_setup_guide"
+        | "channel_bot_setup_link"
         | "connect_channel_bot"
         | "link_channel_bot"
         | "list_channel_agents"
@@ -2376,6 +2377,10 @@ async fn dispatch_channels(
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
     Ok(match name {
+        "channel_setup_guide" => (
+            json!({"contract_version": 1, "source_verified_at": "2026-10-19", "live_provider_verified": false, "guide": include_str!("../../../docs/assistant/CHANNEL_SETUP_GUIDE.md")}),
+            false,
+        ),
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
             super::nyxbot::setup_link_tool(

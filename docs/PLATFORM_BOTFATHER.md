@@ -25,15 +25,24 @@ opt-in retain their personal behavior. Converted manager and installation marker
 survive setup/profile retention or deletion. There is no personal-route fallback
 for an opted-in manager or child.
 
-Public FAQ execution and the legacy guide use no personal assistant key,
-connection, inventory, tools, private context or upstream session, including when
-an administrator chats with them. Public FAQ execution uses a dedicated public
-credential, three approved tools and the validated runtime's signed limits.
+The default public answer source is the approved, deterministic FAQ corpus in
+`backend/content/platform-public-faq.json`. It makes no inference call and uses no
+personal assistant key, connection, inventory, tool, memory or upstream session,
+including for a linked person or administrator. It needs no model or sponsor.
+
+An explicitly selected public AI configuration uses the working public runtime
+contract from #1914/#1925: a dedicated public credential, approved public tools,
+validated signed limits and an authorized organization sponsor. Existing saved
+AI policies retain that selection; choosing built-in FAQ explicitly clears the
+policy. Public AI never borrows a visitor's personal credentials or context.
 
 Personal chat uses the currently confirmed personal binding, its live owner and
 binding generation. It reuses that person's NyxBot, ordinary account tools,
 permissions, memories, conversation credentials and billing. The conversation is
-available in NyxID for web continuation. A legacy onboarding binding, a website
+available in NyxID for web continuation as a separate saved channel thread. The
+old home transcript is not automatically replayed into that thread. Each bot and
+provider needs its own browser consent and same-conversation proof, even for the
+same owner; disconnecting one leaves other verified channels usable. A legacy onboarding binding, a website
 login or signup alone never establishes personal chat authority. Web and the
 legacy Telegram guide edit the same encrypted onboarding draft; anonymous drafts
 require explicit adoption.
@@ -53,44 +62,70 @@ operator does not acquire client-resource ownership. Public child inference
 ignores the specialist's private grants, persona, skills, keys and home context;
 it separately checks that the owned specialist still exists.
 
-## Local workflow
+## Shared FAQ and personal setup
 
-1. An admin converts an existing manager channel and chooses a dedicated sponsor
-   organization they can administer. Conversion starts paused, revokes old route
-   and assistant keys, and queues exact old-turn/transport cleanup. It leaves the
-   shared native creation webhook intact.
-2. Save a paused guide configuration in `/admin/platform-bots`, discover its live
-   advertised models, then explicitly validate and enable the selected exact
-   model. Readiness/discovery use sponsor funding and can consume sponsor credits.
-3. Clients use `/login`, complete first-party signup/sign-in and account review,
-   then send the provided confirmation in the original private chat. The same
-   chat becomes their personal NyxBot. `/onboarding` offers account-bound native
-   creation and guided setup; `/setups` lists their drafts. Legacy guide-only
-   profiles retain their bounded onboarding flow and confirmation protocol.
-4. The client publishes and reviews the exact saved facts, limits and resource
-   plan. Approval binds the owner, revision, digest, profile/binding generations,
-   planned stable IDs and zero-capability policy.
-5. Open the native creation link. After Telegram creation is observed, review the
-   exact child identity and management revision in NyxID. Observation alone does
-   not authorize registration. Existing native workers enforce the setup scope,
-   request generation and claimed-step lease inside resource transactions.
-6. Once ready, an independent customer sends `/test` to the child and replies to
-   the exact observed test message with its challenge. The owner's chat and
-   `sendMessage` success alone cannot establish customer delivery.
-7. The client explicitly activates the reviewed installation. Public execution
-   remains fenced on installation/setup generations, live ownership, manager
-   observation, child management, funding and approved publication.
+1. Open **Admin → Platform bots**. Existing bots and their access controls appear
+   first. Open **Prepare another shared bot** only to create another entry.
+2. Select an eligible connected bot. Telegram uses the existing `telegram_manager`
+   channel; the other providers use one NativeV2 conversion path. Native setup
+   reviews the exact bot and delivery transport. No funding organization, model
+   discovery or AI readiness check is required for basic FAQ/personal access.
+3. After preparation, the new bot stays visible even if it is outside the current
+   profile page. Its heading shows the saved label and provider. Select **Public
+   FAQ**, **Personal NyxBot**, or both, then choose **Enable bot**. A live transport
+   is required. Optional public AI configuration is under its own disclosure.
+4. In the bot's private conversation, request public help or use the provider's
+   login control below. An ordinary first-party NyxID sign-in/signup (including
+   email verification and MFA when configured) is followed by explicit consent.
+   Review the exact provider, bot, external account and private conversation.
+5. Return to that same bot conversation and submit the one-time confirmation.
+   Browser login and consent alone do not link it. On Discord choose **/nyx
+   confirm**, then enter the displayed `P-…` value in its **code** option. Other
+   native providers accept `confirm P-…` as a plain private message; Telegram
+   accepts `/confirm P-…`. Lost or expired proof requires a fresh review/login.
+6. Once linked, ordinary private text uses the person's existing NyxBot; Discord
+   uses **/nyx ask** and its **question** option. Permissions, memory, tools,
+   account credits and existing organization billing rules are the normal personal
+   ones. Public FAQ/help remains a public answer even for a linked person.
 
-Pending pages refresh at bounded intervals and have manual refresh. Metadata-only
-status notices and interrupted-delivery notices use bounded durable retries;
-browser status is authoritative if a Telegram notice is lost. Message bodies are
-not a durable delivery queue, and interrupted model work is not replayed.
+**Pause bot** stops FAQ/AI and personal work, including legacy confirmation
+handoffs. Safe status, help or disconnect notices may still be sent. Pause retains
+chosen modes. **Resume bot** makes one conditional update restoring the selected
+modes; there is no separate clear-stop step. If both are off, select at least one.
+A status refresh can show a connection blocker while the remembered choices stay
+intact. Repair that blocker first, refresh, then Resume.
+
+An expired native OAuth connection without a refresh credential shows **Repair
+required** and its saved personal binding is shown as disconnected. Reconnect
+that account through the reviewed repair flow. A refreshable connection retains
+its entry identity. Atomic Resume validates the saved owner, connection and
+refresh authority without contacting the provider. Authenticated ingress or
+reviewed repair uses the existing OAuth refresh producer before admitting work.
+Reading status or Linked channels does not refresh tokens or contact the
+provider. Message admission and delivery still require a live token.
+
+A public request commits metadata-only article IDs, live mode guidance and its
+settled receipt in one transaction. No raw FAQ question/body is retained in that
+queue. Sender (20/minute) and profile (200/minute) server-clock windows bound FAQ
+admission before a receipt is recorded. Rejected events can retry after the window
+resets; there is no lifetime visitor cap. Duplicate events retain their original
+audience. Pending FAQ deliveries recover through the normal sweeper, public pacing
+and exact receipt/transport fences. A control change after admission refuses the
+old send. Partial or uncertain provider effects are not automatically replayed.
+
+Telegram's optional child-bot workflow remains separate. `/onboarding`, `/setups`
+and `/bots` use the linked account and existing reviewed setup/provisioning
+contracts. The legacy guide and public child inference retain their own funding,
+model, owner review and independent-customer activation requirements. Those are
+not prerequisites for a shared FAQ entry.
 
 ## Native chat entries and operator recovery
 
 In `/admin/platform-bots`, an administrator can convert an existing channel into
-a shared native entry. Select the channel, a sponsor organization you administer,
-and an explicit delivery transport. The UI loads the supported choices from
+a shared native entry. Select the channel and an explicit delivery transport.
+An optional setup-funding organization is available for existing advanced policies;
+basic setup defaults its administrative metadata to the acting platform admin.
+This does not change the existing channel owner or transport payer. The UI loads the supported choices from
 `GET /api/v1/admin/platform-bots/native/transports`:
 
 | Platform | Supported transports | Private chat surface |
@@ -99,7 +134,7 @@ and an explicit delivery transport. The UI loads the supported choices from
 | Slack | Direct or gateway | Authenticated direct messages |
 | WhatsApp | Direct or gateway | Authenticated private messages |
 | Lark / Feishu | Direct | Authenticated private messages with raw event verification |
-| X | Direct | Authenticated private messages |
+| X | Direct | Signed activity webhook private messages; paid X transport policies apply |
 
 An unsupported gateway choice is refused before setup or provider work. Select a
 supported transport explicitly; losing a selected gateway makes the entry
@@ -109,16 +144,21 @@ creation workflow described above.
 
 Discord uses `/nyx help`, `/nyx login`, `/nyx status`, `/nyx logout`, `/nyx confirm`
 and `/nyx ask`. Use `/nyx ask` for questions and personal action-card replies.
-Other native private-message surfaces accept the supported text controls such as
-`/help`, `/login`, `/status` and `/logout`. Follow the exact confirmation command
+Other native private-message surfaces accept exact plain-text controls `help`,
+`faq [topic]`, `login`, `status`, `logout` and `confirm P-…`. Slack uses those plain
+messages because its slash commands are a different integration. Discord ordinary
+DM text does not reach this integration: choose the installed `/nyx` command and
+its named options. Conversion installs/reviews the exact known `/nyx` command
+without replacing unrelated application commands. Follow the exact confirmation command
 returned after browser account review in the original private chat; browser
 approval alone does not sign the chat in. Forwarded, group and mismatched sender
 events cannot establish personal authority. Telegram's `/onboarding`, `/setups`
 and `/bots` management controls remain Telegram-only.
 
 Conversion and updates start with both public and personal access paused. Finish
-verification, review the runtime funding/model configuration, and explicitly
-enable each intended audience. The runtime panel reports readiness and access
+verification and explicitly enable each intended audience. Built-in FAQ is the
+default; only an explicitly selected public AI deployment needs sponsor/model
+readiness. The runtime panel reports readiness and access
 state; the legacy guide's enabled flag does not describe native availability.
 
 If setup fails or its outcome is uncertain, the channel keeps a durable pending
@@ -133,12 +173,17 @@ Use **Review failed or changed native setup**, or **Review current native entry*
 on an existing profile, when credentials, the configuring administrator, funding
 authorization or selected transport need a new review. Select replacement
 credentials belonging to the channel's existing owner, confirm the review, then
-choose **Update reviewed native entry and pause**. A successor administrator must
-have live platform-admin and sponsor access; review does not transfer the channel
+choose **Update reviewed native entry and pause**. A successor administrator needs live platform-admin access and can use their own
+basic setup authority without sponsor membership. An explicitly selected setup
+organization still requires its live administration rights. Public AI separately
+requires an authorized organization sponsor. Review does not transfer the channel
 owner or its transport payer. Reservation pauses the entry and revokes old chat
 receipts, confirmations and turns before provider work. A failed verification
 retains a recoverable reservation. A successful update also stays paused until
-explicit re-enablement, and prior authority remains invalid afterward.
+explicit Resume, and prior authority remains invalid afterward. The Linked
+channels view shows old bindings as disconnected and requiring reconnection.
+A fresh proof creates current authority; deferred cleanup is bound to old
+revisions and cannot stop a new turn admitted after Resume.
 
 The corresponding authenticated API is `POST /api/v1/admin/platform-bots/native`
 for conversion or a reviewed update, with the server-returned review from
@@ -148,9 +193,25 @@ returned recovery review. Retirement uses the existing platform-profile retire
 control and retains routing/credential tombstones. Native repair uses this review
 workflow; the Telegram repair endpoint refuses native profiles.
 
+Ordinary token-based Telegram channels and `telegram-new` managed children keep
+their existing owner/child workflows; they are not a second shared-entry setup.
+Aurinko email's claimed From address is insufficient same-channel account proof.
+OpenClaw has no usable reply transport. Neither is offered as a shared entry.
+The ordinary X adapter can poll DMs, but NativeV2 shared entry uses authenticated
+activity webhook provenance; polling is not an alternative shared login route.
+Groups, bots/self, edits and forwarded controls cannot establish personal proof.
+Slack human uploads and control-shaped Discord question arguments receive fixed
+supported-input help and admit no model, FAQ queue or personal media work.
+
+Native delivery retains main's short receipt-bound deadline and encrypted reply
+handles. A result that outlives that authority is refused for the chat and remains
+available in its saved NyxID thread; it cannot adopt a later credential or newer
+receipt. Inspect the actual runtime and delivery state when recovering a failure.
+No live provider setup or production activation is implied by local tests.
+
 ## Funding and limits
 
-Guide, discovery and readiness use a purpose-confined catalog-platform inference
+Optional public AI, the legacy guide, paid model discovery and readiness use a purpose-confined catalog-platform inference
 path billed to the explicitly authorized sponsor organization. The configured
 admin is never supplied as a personal payer. Ordinary platform-key execution
 continues to use `BillingOwnerResolver::resolve_for_execution` and bill the acting

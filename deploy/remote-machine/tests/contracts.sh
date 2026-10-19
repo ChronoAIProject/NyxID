@@ -35,11 +35,16 @@ import json, re, sys
 from pathlib import Path
 role = Path(sys.argv[1]).read_text().split("---", 1)[0]
 rules = re.split(r"(?m)^  - apiGroups: ", role)[1:]
-storage = [rule for rule in rules if json.loads(rule.splitlines()[0]) == ["storage.k8s.io"]]
+storage = [rule for rule in rules if json.loads(rule.splitlines()[0]) == ["storage.k8s.io"]
+           and json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1)) == ["storageclasses"]]
 assert len(storage) == 1, "one explicit StorageClass read rule required"
 for field, expected in (("resources", ["storageclasses"]), ("verbs", ["get", "list"])):
     value = re.search(r"(?m)^    " + field + r": (.+)$", storage[0])
     assert value and json.loads(value.group(1)) == expected, "StorageClass rule must grant only get/list"
+attachments = [rule for rule in rules if json.loads(rule.splitlines()[0]) == ["storage.k8s.io"]
+               and json.loads(re.search(r"(?m)^    resources: (.+)$", rule).group(1)) == ["volumeattachments"]]
+assert len(attachments) == 1, "one explicit VolumeAttachment read rule required"
+assert json.loads(re.search(r"(?m)^    verbs: (.+)$", attachments[0]).group(1)) == ["get", "list"]
 PYROLE
 grep -F 'failurePolicy: Fail' "$root/admission.yaml" >/dev/null
 grep -F 'podTemplate.spec.automountServiceAccountToken == false' "$root/admission.yaml" >/dev/null

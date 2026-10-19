@@ -193,14 +193,15 @@ pub(crate) async fn decide_personal_reply_in_session(
             ),
         );
         event.id = ack.id.clone();
-        let queued = db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
-            .update_one(doc! {"_id":conversation_id,"user_id":&authority.user_id,
-                "platform_thread.binding_id":&authority.binding_id,"platform_thread.binding_generation":authority.binding_generation,
-                "pending_events.id":{"$ne":&event.id}},
-                doc! {"$push":{"pending_events":mongodb::bson::to_bson(&event)
-                    .map_err(|_| AppError::Internal("Assistant event serialization failed".into()))?}})
-            .session(&mut *session).await?;
-        if queued.matched_count != 1 {
+        if !engine::append_events_in_session(
+            db,
+            &authority.user_id,
+            conversation_id,
+            std::slice::from_ref(&event),
+            session,
+        )
+        .await?
+        {
             return Err(AppError::AssistantTurnRequired);
         }
     }

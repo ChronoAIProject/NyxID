@@ -211,6 +211,42 @@ pub fn check<'a>(
         target,
         model_consent,
         semantic_input,
+        false,
+    ))
+}
+
+/// Source replay is a new action, so it never borrows the initial read's
+/// implicit continuation. An explicit resource card still requires exact
+/// consumption and live authority, including the current access mode.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_source_resource<'a>(
+    db: &'a Database,
+    nodes: &'a super::node_ws_manager::NodeWsManager,
+    chat: &'a acks::ChatAuthority,
+    connection_id: &'a str,
+    effective_owner: &'a str,
+    operation: &'a Value,
+    facts: acks::ActionFacts,
+    acknowledgement: Option<&'a str>,
+    summary: &'a str,
+    target: &'a super::proxy_service::ProxyTarget,
+    semantic_input: Option<(&'a [u8], Option<&'a str>)>,
+) -> futures::future::BoxFuture<'a, AppResult<Decision>> {
+    Box::pin(check_inner(
+        db,
+        nodes,
+        chat,
+        connection_id,
+        effective_owner,
+        operation,
+        facts,
+        acknowledgement,
+        summary,
+        false,
+        Some(target),
+        false,
+        semantic_input,
+        true,
     ))
 }
 
@@ -240,6 +276,7 @@ async fn check_inner(
     target: Option<&super::proxy_service::ProxyTarget>,
     model_consent: bool,
     semantic_input: Option<(&[u8], Option<&str>)>,
+    resource_replay: bool,
 ) -> AppResult<Decision> {
     chat.ensure_live_turn(db, None, None, "assistant.service_execution")
         .await?;
@@ -296,7 +333,7 @@ async fn check_inner(
     let mut args = json!({"connection_id": connection_id, "effective_owner_id": effective_owner,
         "execution_binding": binding, "operation": operation});
     let mut continuation = None;
-    if acknowledgement.is_none() && !model_consent {
+    if acknowledgement.is_none() && !model_consent && !resource_replay {
         // Only a server-validated owner continuation may present a card implicitly
         // (model bootstrap has no opportunity to add an acknowledgement header).
         if let Some(turn) = chat.turn_id.as_deref() {
@@ -599,7 +636,9 @@ async fn check_inner(
         } else {
             summary.to_owned()
         };
-        let gate = acks::confirmation_needed(db, chat, facts, org && !model_consent).await?;
+        let gate = if resource_replay && acknowledgement.is_some() {
+            acks::Gate::Ask(acks::ConfirmationNeed { class: facts.class, mode: None, webhook: false, policy: true })
+        } else { acks::confirmation_needed(db, chat, facts, org && !model_consent).await? };
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
             // cannot mint or redeem turn-bound consent without an admitted turn.

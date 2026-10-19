@@ -39,7 +39,7 @@ export const publicSetupSchema = z
 export type PublicSetup = z.infer<typeof publicSetupSchema>;
 export const publicReadinessSchema = z
   .object({
-    status: z.enum(["ready", "unavailable"]),
+    status: z.enum(["ready", "faq_ready", "unavailable"]),
     reason: z
       .enum([
         "mode_disabled",
@@ -51,6 +51,7 @@ export const publicReadinessSchema = z
         "transport_unavailable",
         "origin_revoked",
         "engine_unavailable",
+        "unsupported_input",
         "insufficient_funds",
         "capacity_limited",
         "public_not_ready",
@@ -95,6 +96,15 @@ export const managerRuntimeSchema = z
   .object({
     contract_version: z.literal(1),
     supported: z.boolean(),
+    state: z
+      .enum([
+        "setup_incomplete",
+        "connection_repair_required",
+        "paused",
+        "active",
+        "retired",
+      ])
+      .optional(),
     runtime: z
       .object({
         activated_policy_digest: z.string().nullable().optional(),
@@ -104,6 +114,8 @@ export const managerRuntimeSchema = z
         personal_enabled: z.boolean(),
         public_enabled: z.boolean(),
         emergency_stopped: z.boolean(),
+        remembered_personal_enabled: z.boolean().nullable().optional(),
+        remembered_public_enabled: z.boolean().nullable().optional(),
         public_policy: publicSetupSchema.nullable(),
       })
       .nullable(),

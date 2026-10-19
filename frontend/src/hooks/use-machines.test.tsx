@@ -19,6 +19,7 @@ import {
   useRemoteMachineQuote,
   useRemoteMachineEntitlement,
   useRemoteMachineAction,
+  useRetryRemoteMachineDelete,
   useRemoteMachineJobs,
   useRemoteMachineEvents,
   useRemoteMachineRuntimeBilling,
@@ -72,6 +73,135 @@ beforeEach(() => {
     isAuthenticated: true,
     isLoading: false,
   });
+});
+
+it("manually resumes the original delete without new-machine admission or automatic HTTP retries", async () => {
+  useAuthStore.setState({
+    user: {
+      id: "owner-one",
+      capabilities: { enabled_features: [] },
+    } as unknown as User,
+  });
+  transport.mockResolvedValueOnce(
+    json({ operation: { ...remoteMachineOperationFixture, action: "delete" } }),
+  );
+  const client = makeClient();
+  const { result, unmount } = renderHook(useRetryRemoteMachineDelete, {
+    wrapper: wrapper(client),
+  });
+  await act(async () => {
+    await result.current.mutateAsync({
+      machineId: "machine-1",
+      operationId: "operation-1",
+      body: { expected_revision: 5, expected_retry_count: 15639 },
+      idempotencyKey: "manual-delete-round",
+    });
+  });
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(transport.mock.calls[0]?.[0]).toBe(
+    "/api/v1/remote-machine-operations/operation-1/retry-delete",
+  );
+  expect(transport.mock.calls[0]?.[1]?.method).toBe("POST");
+  expect(JSON.parse(String(transport.mock.calls[0]?.[1]?.body))).toEqual({
+    expected_revision: 5,
+    expected_retry_count: 15639,
+  });
+  expect(
+    client.getQueryData([
+      "remote-machine-operations",
+      "owner-one",
+      "operation-1",
+    ]),
+  ).toMatchObject({ action: "delete" });
+  unmount();
+  client.clear();
+});
+
+it("rejects a retry response for another operation without automatic retries", async () => {
+  transport.mockResolvedValueOnce(
+    json({
+      operation: {
+        ...remoteMachineOperationFixture,
+        action: "delete",
+        id: "other-operation",
+      },
+    }),
+  );
+  const client = makeClient();
+  client.setDefaultOptions({ mutations: { retry: 3 } });
+  const { result, unmount } = renderHook(useRetryRemoteMachineDelete, {
+    wrapper: wrapper(client),
+  });
+  await act(async () => {
+    await expect(
+      result.current.mutateAsync({
+        machineId: "machine-1",
+        operationId: "operation-1",
+        body: { expected_revision: 5, expected_retry_count: 10 },
+        idempotencyKey: "manual-delete-round",
+      }),
+    ).rejects.toThrow(
+      "Deletion retry returned a different operation or Machine",
+    );
+  });
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(
+    client.getQueryData([
+      "remote-machine-operations",
+      "owner-one",
+      "other-operation",
+    ]),
+  ).toBeUndefined();
+  unmount();
+  client.clear();
+});
+
+it("does not cache a manual retry result after the human owner changes", async () => {
+  let resolveResponse!: (response: Response) => void;
+  transport.mockReturnValueOnce(
+    new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    }),
+  );
+  const client = makeClient();
+  const { result, unmount } = renderHook(useRetryRemoteMachineDelete, {
+    wrapper: wrapper(client),
+  });
+  let pending!: Promise<unknown>;
+  act(() => {
+    pending = result.current.mutateAsync({
+      machineId: "machine-1",
+      operationId: "operation-1",
+      body: { expected_revision: 5, expected_retry_count: 10 },
+      idempotencyKey: "manual-delete-round",
+    });
+  });
+  await waitFor(() => expect(transport).toHaveBeenCalledTimes(1));
+  await act(async () => {
+    useAuthStore.setState({ user: { id: "owner-two" } as User });
+    resolveResponse(
+      json({
+        operation: { ...remoteMachineOperationFixture, action: "delete" },
+      }),
+    );
+    await expect(pending).rejects.toThrow("Your account changed.");
+  });
+  expect(
+    client.getQueryData([
+      "remote-machine-operations",
+      "owner-one",
+      "operation-1",
+    ]),
+  ).toBeUndefined();
+  expect(
+    client.getQueryData([
+      "remote-machine-operations",
+      "owner-two",
+      "operation-1",
+    ]),
+  ).toBeUndefined();
+  unmount();
+  client.clear();
 });
 afterEach(() => {
   vi.unstubAllGlobals();

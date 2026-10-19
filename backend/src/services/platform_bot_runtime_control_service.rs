@@ -289,12 +289,39 @@ async fn check_manager_in_session(
     })
 }
 
+#[derive(Clone, Copy)]
+enum NativeTransportCheck {
+    ReadOnly,
+    LiveEffect,
+    RuntimeControls,
+}
+
 pub(super) async fn native_transport_ready(
     db: &Database,
     session: &mut ClientSession,
     profile: &PlatformBotConfig,
     write_fence: bool,
 ) -> AppResult<bool> {
+    check_native_transport(
+        db,
+        session,
+        profile,
+        if write_fence {
+            NativeTransportCheck::LiveEffect
+        } else {
+            NativeTransportCheck::ReadOnly
+        },
+    )
+    .await
+}
+
+async fn check_native_transport(
+    db: &Database,
+    session: &mut ClientSession,
+    profile: &PlatformBotConfig,
+    check: NativeTransportCheck,
+) -> AppResult<bool> {
+    let write_fence = !matches!(check, NativeTransportCheck::ReadOnly);
     if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
         .find_one(doc! {"_id":&profile.channel_bot_id,"platform_profile_id":&profile.id,"platform_entry_pending":{"$exists":false}})
         .session(&mut *session).await?.is_none() {return Ok(false);}
@@ -312,27 +339,53 @@ pub(super) async fn native_transport_ready(
     {
         return Ok(false);
     }
-    let bot = super::channel_bot_service::get_bot(db, &profile.channel_bot_id).await?;
+    let bot = match super::channel_bot_service::get_bot(db, &profile.channel_bot_id).await {
+        Ok(bot) => bot,
+        Err(AppError::ChannelBotNotFound(_) | AppError::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if bot.platform != super::platform_entry_native::platform_name(configuration.identity.platform)
         || bot.platform_bot_id != configuration.identity.platform_bot_id
         || !bot.is_active
         || bot.status != "active"
+        || (bot.platform == "x" && !bot.webhook_registered)
     {
         return Ok(false);
     }
     let cache =
         std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
     let adapter = super::channel_adapters::resolve_adapter(&bot.platform, &cache)?;
-    let credentials = super::platform_entry_credentials::EntryCredentialSnapshot::load(
+    let credentials = match super::platform_entry_credentials::EntryCredentialSnapshot::load(
         db,
         adapter.as_ref(),
         &bot,
     )
-    .await?;
-    Ok(
-        credentials.fingerprint()? == configuration.credential_fingerprint
-            && (!write_fence || credentials.fence_in_session(db, session).await?),
-    )
+    .await
+    {
+        Ok(value) => value,
+        Err(AppError::Conflict(_) | AppError::ValidationError(_) | AppError::NotFound(_)) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if !credentials.token_usable_or_refreshable()
+        || credentials.fingerprint()? != configuration.credential_fingerprint
+    {
+        return Ok(false);
+    }
+    match check {
+        NativeTransportCheck::ReadOnly => {
+            credentials
+                .validate_runtime_controls_in_session(db, session)
+                .await
+        }
+        NativeTransportCheck::LiveEffect => credentials.fence_in_session(db, session).await,
+        NativeTransportCheck::RuntimeControls => {
+            credentials
+                .fence_runtime_controls_in_session(db, session)
+                .await
+        }
+    }
 }
 
 pub(crate) fn profile_identity(profile: &PlatformBotConfig) -> AppResult<EntryIdentity> {
@@ -408,6 +461,8 @@ fn candidate_for_review(
             personal_enabled: false,
             public_enabled: false,
             emergency_stopped: false,
+            remembered_personal_enabled: None,
+            remembered_public_enabled: None,
             retired: false,
             public_policy: None,
             effect_revision: 0,
@@ -419,6 +474,7 @@ fn candidate_for_review(
     let old_personal = row.personal_enabled;
     let old_public = row.public_enabled;
     let old_policy = row.public_policy.clone();
+    let old_stopped = row.emergency_stopped;
     // The UI explicitly requests both lanes for Enable bot. Missing lane fields
     // remain off on creation; personal-only opt-in needs no public readiness.
     if let Some(enabled) = change.personal_enabled {
@@ -428,28 +484,28 @@ fn candidate_for_review(
         row.public_enabled = enabled;
     }
     if let Some(value) = &change.public_policy {
-        if value.is_none() && change.public_enabled != Some(false) {
-            return Err(AppError::ValidationError(
-                "Disable public routing before clearing public policy".into(),
-            ));
-        }
         row.public_policy = value.clone();
     }
     if change.emergency_stopped == Some(false) {
-        return Err(AppError::ValidationError(
-            "Use explicit emergency-stop clearing".into(),
-        ));
+        if change.personal_enabled.is_none()
+            || change.public_enabled.is_none()
+            || !(row.personal_enabled || row.public_enabled)
+        {
+            return Err(AppError::ValidationError(
+                "Select at least one mode to resume".into(),
+            ));
+        }
+        row.emergency_stopped = false;
     }
     if change.emergency_stopped == Some(true) {
+        if !old_stopped {
+            row.remembered_personal_enabled = Some(old_personal);
+            row.remembered_public_enabled = Some(old_public);
+        }
         row.emergency_stopped = true;
         row.personal_enabled = false;
         row.public_enabled = false;
         row.cleanup_pending = true;
-    }
-    if row.public_enabled && row.public_policy.is_none() {
-        return Err(AppError::ValidationError(
-            "Public runtime configuration is required".into(),
-        ));
     }
     if row.emergency_stopped && (row.personal_enabled || row.public_enabled) {
         return Err(AppError::Conflict(
@@ -474,13 +530,16 @@ fn candidate_for_review(
         }
     }
     if !initializing {
-        if row.personal_enabled != old_personal {
+        if row.personal_enabled != old_personal || row.emergency_stopped != old_stopped {
             row.personal_control_revision = row
                 .personal_control_revision
                 .checked_add(1)
                 .ok_or_else(changed)?;
         }
-        if row.public_enabled != old_public || row.public_policy != old_policy {
+        if row.public_enabled != old_public
+            || row.public_policy != old_policy
+            || row.emergency_stopped != old_stopped
+        {
             row.public_policy_revision = row
                 .public_policy_revision
                 .checked_add(1)
@@ -523,6 +582,7 @@ pub async fn update(
         r.public_enabled != proposed.public_enabled || r.public_policy != proposed.public_policy
     });
     let needs_probe = proposed.public_enabled
+        && proposed.public_policy.is_some()
         && (change.public_enabled == Some(true)
             || previous
                 .as_ref()
@@ -587,7 +647,7 @@ pub async fn update(
                         if proposed.personal_enabled || proposed.public_enabled {
                             let native=matches!(profile_identity(&live)?,EntryIdentity::NativeV2 {..});
                             if native {
-                                if !native_transport_ready(db,session,&live,true).await? {return Err(changed());}
+                                if !check_native_transport(db,session,&live,NativeTransportCheck::RuntimeControls).await? {return Err(changed());}
                             } else if db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME)
                                 .update_one(doc! {"provider":"telegram-new","fields.manager_bot_id":&live.manager_bot_id,"fields.webhook_ready":"true"},doc! {"$inc":{"runtime_configuration_revision":1_i64}})
                                 .session(&mut *session).await?.matched_count != 1 {
@@ -601,7 +661,7 @@ pub async fn update(
                         }
                         let old_activation = db.collection::<PublicDeploymentActivation>(ACTIVATIONS)
                             .find_one(doc! {"_id": &*profile_id}).session(&mut *session).await?;
-                        if proposed.public_enabled && (*public_changed || *needs_probe) {
+                        if proposed.public_enabled && proposed.public_policy.is_some() && (*public_changed || *needs_probe) {
                             let sponsor = proposed.public_policy.as_ref().ok_or_else(changed)?;
                             for (collection, filter) in [
                                 (crate::models::user::COLLECTION_NAME,
@@ -623,7 +683,7 @@ pub async fn update(
                             old_activation.as_ref().is_none_or(|old| old.policy_digest != proof.policy_digest)
                         });
                         if let Some(old) = &current
-                            && old.public_enabled
+                            && old.public_enabled && old.public_policy.is_some()
                             && (!proposed.public_enabled || old.public_policy != proposed.public_policy || deployment_changed)
                         {
                             // Activation and revocation share the controls/manager fence.
@@ -696,7 +756,10 @@ pub async fn emergency_stop_in_session(
     db.collection::<PlatformBotRuntimeControls>(COLLECTION_NAME)
         .update_one(
             doc! {"platform_config_id":profile_id,"retired":false},
-            doc! {"$set":set,"$inc":increments},
+            vec![doc! {"$set": {
+                "remembered_personal_enabled":{"$cond":["$emergency_stopped", {"$ifNull":["$remembered_personal_enabled",false]}, "$personal_enabled"]},
+                "remembered_public_enabled":{"$cond":["$emergency_stopped", {"$ifNull":["$remembered_public_enabled",false]}, "$public_enabled"]}
+            }}, doc! {"$set":set}, doc! {"$set":increments.into_iter().map(|(key,value)| (key.clone(),bson::Bson::Document(doc! {"$add":[format!("${key}"),value]}))).collect::<Document>()}],
         )
         .session(session)
         .await?;
@@ -1015,7 +1078,7 @@ mod tests {
     use super::*;
     use crate::services::platform_personal_binding_service::tests::fixture;
 
-    struct NoPublic;
+    pub(super) struct NoPublic;
     #[async_trait]
     impl PublicControlReadiness for NoPublic {
         async fn probe(
@@ -1043,7 +1106,7 @@ mod tests {
             panic!("no public session exists in this fixture")
         }
     }
-    async fn admin_fixture(name: &str) -> (Database, String, AuditActor) {
+    pub(super) async fn admin_fixture(name: &str) -> (Database, String, AuditActor) {
         let (db, update, owner) = fixture(name).await;
         super::super::role_service::seed_system_roles(&db)
             .await
@@ -1074,7 +1137,7 @@ mod tests {
             },
         )
     }
-    fn initialize() -> RuntimeChange {
+    pub(super) fn initialize() -> RuntimeChange {
         RuntimeChange {
             public_deployment_digest: None,
             initialize: true,
@@ -1380,4 +1443,271 @@ pub(crate) async fn record_stop_progress(
         .await?
         .matched_count
         == 1)
+}
+
+#[cfg(test)]
+mod faq_lifecycle_tests {
+    use super::tests::{NoPublic, admin_fixture, initialize};
+    use super::*;
+    #[tokio::test]
+    async fn deferred_pause_cleanup_preserves_a_turn_admitted_after_resume() {
+        use crate::models::platform_personal_binding::{
+            PersonalActiveTurn, PlatformPersonalBinding,
+        };
+        use crate::services::{
+            platform_manager_contract::*, platform_personal_binding_service as bindings,
+        };
+        struct Stops(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl bindings::PersonalLifecycleEffects for Stops {
+            async fn capture_stop(
+                &self,
+                _: &Database,
+                _: &mut ClientSession,
+                active: &PersonalActiveTurn,
+            ) -> AppResult<Option<bindings::CapturedPersonalStop>> {
+                self.0.lock().unwrap().push(active.turn_id.clone());
+                Ok(Some(bindings::CapturedPersonalStop {
+                    active_turn: active.clone(),
+                    stop_requested_at: Utc::now(),
+                    machine_jobs: vec![],
+                    machine_scopes: vec![],
+                }))
+            }
+            async fn revoke_public_sender(
+                &self,
+                _: &Database,
+                _: &mut ClientSession,
+                _: &PlatformPersonalBinding,
+            ) -> AppResult<()> {
+                Ok(())
+            }
+        }
+        async fn admit_turn(
+            db: &Database,
+            update: &VerifiedManagerUpdate,
+            owner: &str,
+        ) -> (String, PersonalActiveTurn) {
+            let mut binding = bindings::tests::binding(update, owner);
+            let agent = uuid::Uuid::new_v4().to_string();
+            let conversation = uuid::Uuid::new_v4().to_string();
+            binding.nyxbot_agent_id = Some(agent.clone());
+            binding.conversation_id = Some(conversation.clone());
+            db.collection::<PlatformPersonalBinding>(
+                crate::models::platform_personal_binding::COLLECTION_NAME,
+            )
+            .insert_one(&binding)
+            .await
+            .unwrap();
+            let admission = super::super::platform_manager_dispatch_service::admit_manager_update(
+                db,
+                &bindings::IdentityProducer,
+                update,
+            )
+            .await
+            .unwrap();
+            let IngressAdmission::Claimed {
+                audience: ManagerAudience::Personal(admitted),
+                ..
+            } = admission
+            else {
+                panic!("expected real personal admission")
+            };
+            let active = PersonalActiveTurn {
+                conversation_id: conversation,
+                turn_id: uuid::Uuid::new_v4().to_string(),
+                origin: bindings::stored_origin(&PlatformTurnOrigin {
+                    authority: admitted.authority,
+                    nyxbot_agent_id: agent,
+                    source: PlatformOriginSource::Ingress(admitted.ingress),
+                }),
+            };
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            bindings::claim_turn_in_session(db, &mut session, &binding, &active)
+                .await
+                .unwrap();
+            session.commit_transaction().await.unwrap();
+            (binding.id, active)
+        }
+        let (db, id, actor) = admin_fixture("deferred_pause_resume_cleanup").await;
+        super::super::platform_manager_ingress_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let before = update(
+            &db,
+            &actor,
+            b"test-audit-key",
+            &id,
+            &initialize(),
+            &NoPublic,
+        )
+        .await
+        .unwrap();
+        let profile = super::super::platform_bot_config_service::get(&db, &id)
+            .await
+            .unwrap();
+        let mut verified = VerifiedManagerUpdate {
+            profile_id: id.clone(),
+            manager_bot_id: profile.manager_bot_id,
+            entry: before.entry.clone(),
+            observation_id: profile.observation_id,
+            sender: SenderIdentity::TelegramV1 {
+                telegram_sender_id: 123,
+                telegram_chat_id: 123,
+            },
+            chat_kind: ManagerChatKind::Private,
+            event: EventIdentity::TelegramV1 {
+                update_id: 1,
+                message_id: 1,
+            },
+            command_eligibility: ManagerCommandEligibility::OriginalPrivateMessage,
+        };
+        let (old_id, old_turn) = admit_turn(&db, &verified, &actor.user_id).await;
+        let mut patch = RuntimeChange {
+            public_deployment_digest: None,
+            initialize: false,
+            expected_profile_generation: None,
+            expected_manager_authority_epoch: before.manager_authority_epoch,
+            expected_personal_control_revision: before.personal_control_revision,
+            expected_public_policy_revision: before.public_policy_revision,
+            personal_enabled: None,
+            public_enabled: None,
+            emergency_stopped: Some(true),
+            public_policy: None,
+        };
+        let paused = update(&db, &actor, b"test-audit-key", &id, &patch, &NoPublic)
+            .await
+            .unwrap();
+        assert!(paused.cleanup_pending);
+        patch.expected_personal_control_revision = paused.personal_control_revision;
+        patch.expected_public_policy_revision = paused.public_policy_revision;
+        patch.personal_enabled = Some(true);
+        patch.public_enabled = Some(false);
+        patch.emergency_stopped = Some(false);
+        let resumed = update(&db, &actor, b"test-audit-key", &id, &patch, &NoPublic)
+            .await
+            .unwrap();
+        verified.sender = SenderIdentity::TelegramV1 {
+            telegram_sender_id: 124,
+            telegram_chat_id: 124,
+        };
+        verified.event = EventIdentity::TelegramV1 {
+            update_id: 2,
+            message_id: 2,
+        };
+        let (new_id, new_turn) = admit_turn(&db, &verified, &actor.user_id).await;
+        assert_eq!(
+            new_turn.origin.personal_control_revision,
+            resumed.personal_control_revision
+        );
+        assert_ne!(
+            old_turn.origin.personal_control_revision,
+            new_turn.origin.personal_control_revision
+        );
+        let stops = Stops(std::sync::Mutex::new(vec![]));
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bindings::stop_manager_batch_in_session(&db, &mut session, &id, None, false, &stops)
+            .await
+            .unwrap();
+        session.commit_transaction().await.unwrap();
+        let rows = db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        );
+        assert!(
+            rows.find_one(doc! {"_id":old_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn
+                .is_none()
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id":new_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .active_turn,
+            Some(new_turn)
+        );
+        assert_eq!(*stops.0.lock().unwrap(), vec![old_turn.turn_id]);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn faq_enable_pause_atomic_resume_and_stop_only_cas_need_no_ai_sponsor() {
+        let (db, id, actor) = admin_fixture("faq_atomic_modes").await;
+        let mut enable = initialize();
+        enable.public_enabled = Some(true);
+        enable.personal_enabled = Some(false);
+        let active = update(&db, &actor, b"test-audit-key", &id, &enable, &NoPublic)
+            .await
+            .unwrap();
+        assert!(active.public_enabled && active.public_policy.is_none());
+        let mut change = RuntimeChange {
+            initialize: false,
+            expected_profile_generation: None,
+            expected_manager_authority_epoch: active.manager_authority_epoch,
+            expected_personal_control_revision: active.personal_control_revision,
+            expected_public_policy_revision: active.public_policy_revision,
+            personal_enabled: None,
+            public_enabled: None,
+            public_policy: None,
+            public_deployment_digest: None,
+            emergency_stopped: Some(true),
+        };
+        let paused = update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+            .await
+            .unwrap();
+        assert_eq!(paused.remembered_public_enabled, Some(true));
+        assert_eq!(paused.remembered_personal_enabled, Some(false));
+        change.emergency_stopped = Some(false);
+        change.personal_enabled = Some(false);
+        change.public_enabled = Some(true);
+        assert!(
+            update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+                .await
+                .is_err()
+        );
+        change.expected_personal_control_revision = paused.personal_control_revision;
+        change.expected_public_policy_revision = paused.public_policy_revision;
+        let resumed = update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+            .await
+            .unwrap();
+        assert!(resumed.public_enabled && !resumed.personal_enabled && !resumed.emergency_stopped);
+        change.expected_personal_control_revision = resumed.personal_control_revision;
+        change.expected_public_policy_revision = resumed.public_policy_revision;
+        change.emergency_stopped = None;
+        change.public_enabled = Some(false);
+        let off = update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+            .await
+            .unwrap();
+        change.expected_personal_control_revision = off.personal_control_revision;
+        change.expected_public_policy_revision = off.public_policy_revision;
+        change.emergency_stopped = Some(true);
+        let stopped = update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+            .await
+            .unwrap();
+        assert!(
+            stopped.personal_control_revision > off.personal_control_revision
+                && stopped.public_policy_revision > off.public_policy_revision
+        );
+        change.emergency_stopped = Some(false);
+        change.public_enabled = Some(true);
+        assert!(
+            update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+                .await
+                .is_err()
+        );
+        change.expected_personal_control_revision = stopped.personal_control_revision;
+        change.expected_public_policy_revision = stopped.public_policy_revision;
+        assert!(
+            update(&db, &actor, b"test-audit-key", &id, &change, &NoPublic)
+                .await
+                .unwrap()
+                .public_enabled
+        );
+        db.drop().await.unwrap();
+    }
 }

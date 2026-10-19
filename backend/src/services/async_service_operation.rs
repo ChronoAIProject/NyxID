@@ -294,6 +294,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 agent_id: Some(w.agent_id.clone()),
                 question_key: None,
                 reply_to: Vec::new(),
+                source_event_ids: Vec::new(),
                 bound: w.delivery.report_provenance == REPORT_PROVENANCE_V1,
                 report_to: carried_report_to(w.delivery.report_to.as_deref(), w.delivery.report_provenance),
                 created_at: Utc::now(),
@@ -359,6 +360,10 @@ pub fn event_id(row: &AssistantConversation) -> Option<&str> {
         .find(|e| e.kind == EVENT_KIND)
         .map(|e| e.id.as_str())
 }
+fn channel_question(event: &AgentEvent) -> bool {
+    !event.source_event_ids.is_empty() || (event.kind == "message" && !event.reply_to.is_empty())
+}
+
 /// Async results wait for their own event turn. Never redirect a web turn or
 /// coalesce results from different delivery places into a single reply.
 pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec<AgentEvent> {
@@ -367,10 +372,17 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
     {
         return vec![row.pending_events.remove(index)];
     }
-    let (async_events, ordinary) = std::mem::take(&mut row.pending_events)
+    // One accepted source question per event turn. App/channel turns leave
+    // these questions queued; system events retain their existing coalescing.
+    if origin == TurnOrigin::Event
+        && let Some(index) = row.pending_events.iter().position(channel_question)
+    {
+        return vec![row.pending_events.remove(index)];
+    }
+    let (deferred, ordinary) = std::mem::take(&mut row.pending_events)
         .into_iter()
-        .partition(|e: &AgentEvent| e.kind == EVENT_KIND);
-    row.pending_events = async_events;
+        .partition(|e: &AgentEvent| e.kind == EVENT_KIND || channel_question(e));
+    row.pending_events = deferred;
     ordinary
 }
 pub async fn bound(
