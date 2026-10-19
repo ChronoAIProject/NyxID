@@ -159,6 +159,11 @@ pub async fn run(command: McpCommands) -> Result<()> {
                 {
                     Ok(result) => result?,
                     Err(_) => {
+                        if !client.call_dispatched() {
+                            bail!(
+                                "MCP call timed out before tools/call was dispatched; nothing was executed"
+                            );
+                        }
                         let finished_at = super::billing_support::rfc3339(chrono::Utc::now());
                         let value = json!({
                             "error": "managed_outcome_uncertain",

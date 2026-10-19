@@ -291,9 +291,10 @@ matching the called service and creation time between the envelope's `started_at
 and `finished_at` bounds. The client enumerates all service operations from
 `/mcp/config`, obtains their server-built input schemas, and uses the universal
 dispatcher for calls. Calls wait indefinitely by default, matching proxy requests;
-`--timeout-secs` bounds the whole MCP exchange. A timeout exits 2 with
-`managed_outcome_uncertain` and correlation bounds: inspect executions before
-retrying because a paid call may have completed.
+`--timeout-secs` bounds the whole MCP exchange. A timeout before `tools/call`
+dispatch exits 1 and reports that nothing was executed. After dispatch, a timeout
+exits 2 with `managed_outcome_uncertain` and correlation bounds: inspect
+executions before retrying because a paid call may have completed.
 
 Execution reads expose state and reservation ceilings. Compare admin usage in
 the tight attended window with provider usage: input = prompt minus cached,

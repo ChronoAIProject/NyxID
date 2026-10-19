@@ -986,10 +986,7 @@ async fn apply_with_access_change(
         let row = match current {
             None if dry_run => ApplyRow::new("service", &slug, "create"),
             None => match create_service(api, &body).await {
-                Ok(created) => ApplyRow {
-                    id: created["id"].as_str().map(str::to_string),
-                    ..ApplyRow::new("service", &slug, "created")
-                },
+                Ok(created) => created,
                 Err(error) => ApplyRow::failed("service", &slug, error),
             },
             Some(current) if current["is_active"] == false => ApplyRow {
@@ -1016,7 +1013,10 @@ async fn apply_with_access_change(
                 .await
             }
         };
-        if !["failed", "inactive"].contains(&row.action) && desired.get("operations").is_some() {
+        if !["failed", "inactive"].contains(&row.action)
+            && row.error.is_none()
+            && desired.get("operations").is_some()
+        {
             rows.extend(reconcile_operations(api, desired, row.id.as_deref(), dry_run).await?);
         }
         rows.push(row);
@@ -1122,40 +1122,56 @@ async fn list_operations(api: &mut ApiClient, service_id: &str) -> Result<Vec<Va
         .unwrap_or_default())
 }
 
-async fn create_service(api: &mut ApiClient, desired: &Value) -> Result<Value> {
-    // CreateServiceRequest derives credential requirements from the category;
-    // identity propagation and delegation injection are update-only fields.
+async fn create_service(api: &mut ApiClient, desired: &Value) -> Result<ApplyRow> {
     let mut body = desired.clone();
     let fields = body.as_object_mut().context("Service must be an object")?;
-    let requires = fields.remove("requires_user_credential");
     let update_only = ["identity_propagation_mode", "inject_delegation_token"];
+    fields.remove("requires_user_credential");
     for key in update_only {
         fields.remove(key);
     }
-    let category = if body["auth_method"] == "none" {
-        "internal"
-    } else if body["auth_method"] == "oidc" {
-        "provider"
-    } else {
-        body["service_category"].as_str().unwrap_or("connection")
+    let created: Value = api.post("/services", &body).await?;
+    let mut row = ApplyRow {
+        id: created["id"].as_str().map(str::to_owned),
+        ..ApplyRow::new("service", &text(desired, "slug"), "created")
     };
-    if requires.is_some_and(|value| value != json!(category == "connection")) {
-        bail!("requires_user_credential is derived from service_category");
+    let mut errors = Vec::new();
+    if let Some(error) = credential_requirement_error(desired, &created) {
+        errors.push(format!("created; {error}"));
     }
-    let mut created: Value = api.post("/services", &body).await?;
-    let update = pick(
-        desired,
-        &changed_fields(desired, &created, &[])
-            .into_iter()
-            .filter(|key| update_only.contains(&key.as_str()))
-            .collect::<Vec<_>>(),
-    );
-    if update.as_object().is_some_and(|fields| !fields.is_empty()) {
-        created = api
-            .put(&format!("/services/{}", text(&created, "id")), &update)
-            .await?;
+    let changed: Vec<_> = changed_fields(desired, &created, &[])
+        .into_iter()
+        .filter(|key| update_only.contains(&key.as_str()))
+        .collect();
+    if !changed.is_empty() {
+        let result = match row.id.as_deref() {
+            Some(id) => api
+                .put::<Value, _>(&format!("/services/{id}"), &pick(desired, &changed))
+                .await
+                .map(|_| ()),
+            None => Err(anyhow!("created response has no service id")),
+        };
+        if let Err(error) = result {
+            errors.push(format!(
+                "created; follow-up update of {} failed: {error}; rerun apply",
+                changed.join(", ")
+            ));
+        }
     }
-    Ok(created)
+    if !errors.is_empty() {
+        row.error = Some(errors.join("; "));
+    }
+    Ok(row)
+}
+
+fn credential_requirement_error(desired: &Value, actual: &Value) -> Option<String> {
+    desired
+        .get("requires_user_credential")
+        .filter(|value| *value != &actual["requires_user_credential"])
+        .map(|_| {
+            "requires_user_credential differs from the server response and cannot be set directly; correct the manifest"
+                .to_string()
+        })
 }
 
 async fn apply_service_update(
@@ -1189,7 +1205,7 @@ async fn apply_service_update(
             ),
         );
     }
-    let mut skip = vec!["slug", "provider_config_id"];
+    let mut skip = vec!["slug", "provider_config_id", "requires_user_credential"];
     skip.extend_from_slice(SERVICE_CREATE_ONLY);
     let mut changed = changed_fields(body, current, &skip);
     let relink = new_provider
@@ -1200,16 +1216,20 @@ async fn apply_service_update(
     if changed.is_empty() && !relink {
         return ApplyRow {
             id: Some(id),
+            error: credential_requirement_error(body, current),
             ..ApplyRow::new("service", slug, "unchanged")
         };
     }
+    let mut actual = current.clone();
     if !dry_run {
-        if !changed.is_empty()
-            && let Err(error) = api
+        if !changed.is_empty() {
+            match api
                 .put::<Value, _>(&format!("/services/{id}"), &pick(body, &changed))
                 .await
-        {
-            return ApplyRow::failed("service", slug, error);
+            {
+                Ok(updated) => actual = updated,
+                Err(error) => return ApplyRow::failed("service", slug, error),
+            }
         }
         if let (true, Some(provider_id)) = (relink, provider_id)
             && let Err(error) = api
@@ -1228,6 +1248,11 @@ async fn apply_service_update(
     ApplyRow {
         id: Some(id),
         changed,
+        error: if dry_run {
+            None
+        } else {
+            credential_requirement_error(body, &actual)
+        },
         ..ApplyRow::new("service", slug, if dry_run { "update" } else { "updated" })
     }
 }
@@ -1249,7 +1274,7 @@ fn authorize_access_changes(
         return Ok(());
     }
     bail!(
-        "Live platform access change requires confirmation; pass --allow-access-change to admin catalog apply"
+        "Live platform access change requires confirmation; use `nyxid admin catalog apply --allow-access-change --file <manifest>`"
     );
 }
 
@@ -1325,7 +1350,7 @@ fn pick(source: &Value, fields: &[String]) -> Value {
 fn fail_on_errors(rows: &[ApplyRow]) -> Result<()> {
     let failed = rows
         .iter()
-        .filter(|row| ["failed", "inactive"].contains(&row.action))
+        .filter(|row| row.error.is_some() || ["failed", "inactive"].contains(&row.action))
         .count();
     if failed > 0 {
         bail!("{failed} manifest row(s) failed");
@@ -1345,14 +1370,20 @@ fn print_apply(rows: &[ApplyRow], dry_run: bool, output: OutputFormat) -> Result
             }
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["Kind", "Slug", "Action", "Details"]);
+            table.set_header(["Kind", "Slug", "Action", "ID", "Details"]);
             for row in rows {
                 let details = row
                     .error
                     .clone()
                     .or_else(|| row.note.clone())
                     .unwrap_or_else(|| row.changed.join(", "));
-                table.add_row([row.kind, row.slug.as_str(), row.action, details.as_str()]);
+                table.add_row([
+                    row.kind,
+                    row.slug.as_str(),
+                    row.action,
+                    row.id.as_deref().unwrap_or("-"),
+                    details.as_str(),
+                ]);
             }
             eprintln!("{table}");
         }
@@ -3453,7 +3484,14 @@ mod tests {
         assert_eq!(manifest.services.len(), 1);
         let service = &manifest.services[0];
         assert_eq!(service["service_category"], "internal");
-        assert_eq!(service["requires_user_credential"], false);
+        for field in [
+            "requires_user_credential",
+            "identity_propagation_mode",
+            "inject_delegation_token",
+        ] {
+            assert!(service.get(field).is_none(), "{field} uses server defaults");
+        }
+        assert_eq!(service["forward_access_token"], false);
         assert_eq!(
             service["platform_key"],
             json!({"enabled":false,"audience":"restricted","allowed_owner_ids":[]})

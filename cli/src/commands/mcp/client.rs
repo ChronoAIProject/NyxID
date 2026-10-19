@@ -14,6 +14,7 @@ pub(super) struct Client {
     next_id: u64,
     initialized: bool,
     discovery: bool,
+    call_dispatched: bool,
 }
 
 enum Reply {
@@ -30,6 +31,7 @@ impl Client {
             next_id: 0,
             initialized: false,
             discovery: false,
+            call_dispatched: false,
         }
     }
 
@@ -38,6 +40,10 @@ impl Client {
             discovery: true,
             ..Self::new(api)
         }
+    }
+
+    pub(super) fn call_dispatched(&self) -> bool {
+        self.call_dispatched
     }
 
     async fn send(&mut self, method: &str, params: Value, notification: bool) -> Result<Reply> {
@@ -52,6 +58,9 @@ impl Client {
         }
         let read = method != "tools/call"
             || (self.discovery && body["params"]["name"] == "nyx__search_tools");
+        if method == "tools/call" {
+            self.call_dispatched = true;
+        }
         let response = self
             .api
             .mcp_request(self.session.as_deref(), &self.version, &body, read)

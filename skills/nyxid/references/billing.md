@@ -55,8 +55,8 @@ environment value. Existing wallet caps are unaffected.
 A billing file is either a bare billing object or `{"billing": {...}}`.
 Omitted fields retain their current values; explicit null clears optional
 fields. The CLI strips server-owned sync and cleanup fields and warns. A dry
-run prints the merged request body and field diff without a PUT. Write requests
-are never automatically replayed. Resync runs once and prints row status;
+run prints the merged request body and field diff without a PUT. Billing
+configuration writes are never automatically replayed. Resync runs once and prints row status;
 its `synced` flag means something changed, and exit 2 reports remaining unsynced
 rows. Inspect state before deciding to retry.
 
@@ -120,7 +120,12 @@ nyxid admin credits grant revoke "$GRANT_UUID"
 
 Wallet `--owner-id` always uses POST `/billing/wallet` with the owner in its JSON body,
 even without `--provision`. This provisions the selected wallet if missing, as
-the personal GET does. The server checks org access. Grants accept
+the personal GET does. The server checks org access. Wallet provisioning and
+top-up checkout POSTs retain saved-session 401 refresh and one replay:
+provisioning is idempotent, and checkout reuses the same idempotency key in both
+`topup` and `verify-topup-flow`.
+
+Grants accept
 1..=1,000,000 whole credits. Repeat `--service` for
 multiple catalog services or use `--all-services`. Optional `--expires-at` is an
 RFC3339 instant. A nonblank `--reason` and confirmation (or `--yes`) are required.
@@ -174,9 +179,10 @@ do not prove vendor invoice parity.
 
 MCP calls wait indefinitely by default, matching `proxy request` (the transport
 still has a 10-second connection timeout). Set `--timeout-secs` to bound the
-entire handshake and result stream. Expiry of `--timeout-secs` exits 2 with
-`managed_outcome_uncertain`, the tool and timestamp bounds. Check execution state
-before retrying: the provider may have completed and charged the call. Reads
+entire handshake and result stream. A timeout before `tools/call` is dispatched
+exits 1 and reports that nothing was executed. After dispatch, a timeout exits 2
+with `managed_outcome_uncertain`, the tool and timestamp bounds. Check execution
+state before retrying: the provider may have completed and charged the call. Reads
 refresh expired saved sessions; non-idempotent writes never replay after a 401.
 
 `mcp tools --service` enumerates every visible operation through `/mcp/config`
@@ -187,3 +193,8 @@ Applying a manifest that disables platform access or empties a live service's
 owner allowlist requires an interactive confirmation or
 `admin catalog apply --allow-access-change`. Dry-run only warns. Review the
 Telnyx template's disabled access defaults before reapplying it to a pilot.
+
+If catalog creation succeeds but a follow-up update fails, apply reports
+`created`, the service ID and the failed fields, then exits 1. Rerun apply to
+reconcile the existing service. `requires_user_credential` is compared with the
+server response and cannot be set directly.

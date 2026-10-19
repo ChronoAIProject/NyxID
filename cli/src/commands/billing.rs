@@ -167,7 +167,8 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             owner_id,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth).await?;
+            super::billing_support::require_human(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let wallet: BillingWalletResponse = if provision || owner_id.is_some() {
                 api.post(
                     "/billing/wallet",
@@ -193,7 +194,8 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             open,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth).await?;
+            super::billing_support::require_human(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let key =
                 idempotency_key.unwrap_or_else(|| format!("nyxid-cli-topup-{}", Uuid::new_v4()));
             let response: TopUpResponse = api
@@ -220,7 +222,8 @@ pub async fn run(command: BillingCommands) -> Result<()> {
             poll_interval_secs,
             auth,
         } => {
-            let mut api = super::billing_support::human_api(&auth).await?;
+            super::billing_support::require_human(&auth)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response = verify_topup_flow(
                 &mut api,
                 amount_credits,

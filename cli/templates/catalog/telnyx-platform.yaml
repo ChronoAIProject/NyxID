@@ -15,13 +15,10 @@ services:
     description: Verified fixed-model text chat paid with NyxID credits
     service_type: http
     service_category: internal
-    requires_user_credential: false
     visibility: public
     base_url: https://api.telnyx.com/v2
     auth_method: bearer
-    identity_propagation_mode: none
     forward_access_token: false
-    inject_delegation_token: false
     platform_key:
       enabled: false
       audience: restricted

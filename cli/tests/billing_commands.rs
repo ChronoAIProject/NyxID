@@ -1045,8 +1045,6 @@ async fn non_idempotent_commands_refresh_before_work_and_never_replay_a_401_writ
             "--default-overdraft-cap-credits",
             "5",
         ],
-        vec!["billing", "wallet", "--owner-id", ID],
-        vec!["billing", "topup", "--amount-credits", "1"],
         vec!["admin", "credits", "grant", "revoke", ID],
         vec!["proxy", "request", "test", "ping", "--method", "POST"],
         vec!["mcp", "call", "test__call", "--args", "{}"],
@@ -1917,4 +1915,458 @@ async fn mcp_timeout_also_bounds_a_stalled_sse_response_body() {
     assert_eq!(json(&out)["error"], "managed_outcome_uncertain");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     server.abort();
+}
+
+#[tokio::test]
+async fn catalog_create_uses_server_truth_for_derived_credential_requirements() {
+    for requires in [false, true] {
+        let server = MockServer::start().await;
+        get(&server, "/providers", json!({"providers":[]})).await;
+        get(&server, "/services", json!({"services":[]})).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/services"))
+            .respond_with(|request: &Request| {
+                let mut body: Value = serde_json::from_slice(&request.body).unwrap();
+                for field in [
+                    "requires_user_credential",
+                    "identity_propagation_mode",
+                    "inject_delegation_token",
+                ] {
+                    assert!(
+                        body.get(field).is_none(),
+                        "{field} is not accepted on create"
+                    );
+                }
+                // The client must compare this response rather than derive its
+                // own answer from auth_method or service_category.
+                body["id"] = json!(ID);
+                body["requires_user_credential"] = json!(false);
+                body["identity_propagation_mode"] = json!("none");
+                body["inject_delegation_token"] = json!(false);
+                ResponseTemplate::new(200).set_body_json(body)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        let desired = json!({"services":[{
+            "slug":"server-truth", "name":"Server truth", "auth_method":"bearer",
+            "service_category":"connection", "base_url":"https://example.test",
+            "requires_user_credential":requires,
+            "identity_propagation_mode":"none", "inject_delegation_token":false
+        }]});
+        std::fs::write(manifest.path(), desired.to_string()).unwrap();
+        let out = run(
+            &server,
+            &[
+                "admin",
+                "catalog",
+                "apply",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--output",
+                "json",
+            ],
+        )
+        .await;
+        assert_eq!(
+            out.status.code(),
+            Some(i32::from(requires)),
+            "{}",
+            output_text(&out)
+        );
+        let result = json(&out);
+        let row = &result["results"][0];
+        assert_eq!(row["action"], "created");
+        assert_eq!(row["id"], ID);
+        if requires {
+            let error = row["error"].as_str().unwrap();
+            assert!(error.contains("requires_user_credential"));
+            assert!(error.contains("cannot be set directly"));
+        } else {
+            assert!(row.get("error").is_none());
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method != "PUT")
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalog_updates_check_derived_requirement_against_the_update_response() {
+    for server_requires in [false, true] {
+        let server = MockServer::start().await;
+        get(&server, "/providers", json!({"providers":[]})).await;
+        get(
+            &server,
+            "/services",
+            json!({"services":[{
+                "id":ID, "slug":"server-truth", "is_active":true,
+                "service_category":"connection", "requires_user_credential":true
+            }]}),
+        )
+        .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/services/{ID}")))
+            .and(wiremock::matchers::body_json(
+                json!({"service_category":"internal"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id":ID, "service_category":"internal", "requires_user_credential":server_requires
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        let desired = json!({"services":[{
+            "slug":"server-truth", "service_category":"internal", "requires_user_credential":false
+        }]});
+        std::fs::write(manifest.path(), desired.to_string()).unwrap();
+        let out = run(
+            &server,
+            &[
+                "admin",
+                "catalog",
+                "apply",
+                "--file",
+                manifest.path().to_str().unwrap(),
+                "--output",
+                "json",
+            ],
+        )
+        .await;
+        assert_eq!(
+            out.status.code(),
+            Some(i32::from(server_requires)),
+            "{}",
+            output_text(&out)
+        );
+        let result = json(&out);
+        let row = &result["results"][0];
+        assert_eq!(row["action"], "updated");
+        assert_eq!(row["id"], ID);
+        assert_eq!(row.get("error").is_some(), server_requires);
+        if server_requires {
+            assert!(
+                row["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("requires_user_credential")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn partial_service_creation_preserves_id_and_rerun_updates_without_recreating() {
+    for format in ["json", "table"] {
+        let server = MockServer::start().await;
+        let state = std::sync::Arc::new(std::sync::Mutex::new((None::<Value>, 0)));
+        let mock_state = state.clone();
+        Mock::given(|_: &Request| true)
+            .respond_with(move |request: &Request| {
+                let mut state = mock_state.lock().unwrap();
+                let route = request.url.path();
+                let value = match (request.method.as_str(), route) {
+                    ("GET", "/api/v1/providers") => json!({"providers":[]}),
+                    ("GET", "/api/v1/services") => {
+                        json!({"services":state.0.iter().collect::<Vec<_>>()})
+                    }
+                    ("POST", "/api/v1/services") => {
+                        assert!(state.0.is_none(), "a rerun must not recreate the service");
+                        let mut body: Value = serde_json::from_slice(&request.body).unwrap();
+                        for field in [
+                            "requires_user_credential",
+                            "identity_propagation_mode",
+                            "inject_delegation_token",
+                        ] {
+                            assert!(body.get(field).is_none());
+                        }
+                        body["id"] = json!(ID);
+                        body["is_active"] = json!(true);
+                        body["requires_user_credential"] = json!(false);
+                        body["identity_propagation_mode"] = json!("none");
+                        body["inject_delegation_token"] = json!(false);
+                        state.0 = Some(body.clone());
+                        body
+                    }
+                    ("PUT", route) if route == format!("/api/v1/services/{ID}") => {
+                        let body: Value = serde_json::from_slice(&request.body).unwrap();
+                        assert_eq!(body, json!({
+                            "identity_propagation_mode":"headers", "inject_delegation_token":true
+                        }));
+                        state.1 += 1;
+                        if state.1 == 1 {
+                            return ResponseTemplate::new(503).set_body_string("follow-up unavailable");
+                        }
+                        let created = state.0.as_mut().unwrap();
+                        for (key, value) in body.as_object().unwrap() {
+                            created[key] = value.clone();
+                        }
+                        created.clone()
+                    }
+                    _ => panic!("Unexpected request: {} {route}", request.method),
+                };
+                ResponseTemplate::new(200).set_body_json(value)
+            })
+            .mount(&server)
+            .await;
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        let desired = json!({"services":[{
+            "slug":"partial-create", "name":"Partial create", "auth_method":"bearer",
+            "service_category":"internal", "base_url":"https://example.test",
+            "requires_user_credential":false,
+            "identity_propagation_mode":"headers", "inject_delegation_token":true
+        }]});
+        std::fs::write(manifest.path(), desired.to_string()).unwrap();
+        let args = [
+            "admin",
+            "catalog",
+            "apply",
+            "--file",
+            manifest.path().to_str().unwrap(),
+            "--output",
+            format,
+        ];
+        let out = run(&server, &args).await;
+        assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+        let text = output_text(&out);
+        for expected in [
+            ID,
+            "created",
+            "follow-up update of",
+            "identity_propagation_mode",
+            "inject_delegation_token",
+            "failed",
+            "rerun apply",
+        ] {
+            assert!(text.contains(expected), "Missing {expected}: {text}");
+        }
+        if format == "json" {
+            let value = json(&out);
+            assert_eq!(value["results"][0]["action"], "created");
+            assert_eq!(value["results"][0]["id"], ID);
+        }
+        let out = run(&server, &args).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        assert!(output_text(&out).contains("updated"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+        assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 2);
+    }
+}
+
+#[tokio::test]
+async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_once() {
+    for args in [
+        vec!["billing", "wallet", "--provision"],
+        vec!["billing", "wallet", "--owner-id", ID],
+        vec!["billing", "topup", "--amount-credits", "1"],
+        vec![
+            "billing",
+            "topup",
+            "--amount-credits",
+            "1",
+            "--idempotency-key",
+            "provided-key",
+        ],
+        vec!["billing", "verify-topup-flow", "--amount-credits", "1"],
+        vec![
+            "billing",
+            "verify-topup-flow",
+            "--amount-credits",
+            "1",
+            "--idempotency-key",
+            "provided-key",
+        ],
+    ] {
+        let server = MockServer::start().await;
+        let wallet: Value =
+            serde_json::from_str(include_str!("fixtures/billing/wallet.json")).unwrap();
+        let route = if args[1] == "wallet" {
+            "/api/v1/billing/wallet"
+        } else {
+            "/api/v1/billing/topup"
+        };
+        if args[1] == "verify-topup-flow" {
+            let reads = std::sync::atomic::AtomicUsize::new(0);
+            let wallet = wallet.clone();
+            Mock::given(method("GET"))
+                .and(path("/api/v1/billing/wallet"))
+                .respond_with(move |_: &Request| {
+                    let balance = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut wallet = wallet.clone();
+                    wallet["balance_credits"] = json!(balance);
+                    ResponseTemplate::new(200).set_body_json(wallet)
+                })
+                .expect(2)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path(route))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer stale-session-fixture",
+            ))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(route))
+            .and(wiremock::matchers::header("authorization", "Bearer fresh-session-fixture"))
+            .respond_with(move |request: &Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let response = if request.url.path().ends_with("/wallet") {
+                    wallet.clone()
+                } else {
+                    json!({
+                        "owner_id":ID, "amount_credits":1, "idempotency_key":body["idempotency_key"],
+                        "checkout_url":"https://checkout.stripe.test/fixture", "payment_provider":"stripe",
+                        "lago_wallet_transaction_id":"fixture", "lago_invoice_id":null,
+                        "status":"checkout_created", "reused":true
+                    })
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let refreshed = json!({
+            "access_token":"fresh-session-fixture", "refresh_token":"rotated-refresh-fixture"
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(refreshed))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = run_saved_session(&server, &args, "stale-session-fixture").await;
+        assert!(out.status.success(), "{args:?}: {}", output_text(&out));
+        let requests = server.received_requests().await.unwrap();
+        let posts: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.path() == route)
+            .collect();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(
+            posts[0].body, posts[1].body,
+            "replay must preserve the complete body"
+        );
+        if args[1] != "wallet" {
+            let body: Value = serde_json::from_slice(&posts[0].body).unwrap();
+            let key = body["idempotency_key"].as_str().unwrap();
+            assert!(!key.is_empty());
+            if args.contains(&"provided-key") {
+                assert_eq!(key, "provided-key");
+            }
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn mcp_timeout_before_call_dispatch_exits_one_without_uncertain_outcome() {
+    for stalled_method in ["initialize", "notifications/initialized"] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(move |request: &Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                let method = body["method"].as_str().unwrap();
+                assert_ne!(
+                    method, "tools/call",
+                    "a timed-out handshake cannot execute a tool"
+                );
+                let response = if method == "notifications/initialized" {
+                    ResponseTemplate::new(202)
+                } else {
+                    let result =
+                        json!({"protocolVersion":"2025-06-18", "capabilities":{"tools":{}}});
+                    ResponseTemplate::new(200)
+                        .insert_header("Mcp-Session-Id", "session")
+                        .set_body_json(json!({"jsonrpc":"2.0", "id":body["id"], "result":result}))
+                };
+                if method == stalled_method {
+                    response.set_delay(std::time::Duration::from_secs(3))
+                } else {
+                    response
+                }
+            })
+            .expect(if stalled_method == "initialize" { 1 } else { 2 })
+            .mount(&server)
+            .await;
+        let out = run(
+            &server,
+            &[
+                "mcp",
+                "call",
+                "test__call",
+                "--args",
+                "{}",
+                "--timeout-secs",
+                "1",
+                "--output",
+                "json",
+            ],
+        )
+        .await;
+        assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+        let text = output_text(&out);
+        assert!(text.contains("before tools/call was dispatched; nothing was executed"));
+        assert!(!text.contains("managed_outcome_uncertain"));
+        assert!(!text.contains("may have completed and charged"));
+    }
+}
+
+#[tokio::test]
+async fn catalog_add_live_access_refusal_names_the_apply_command_and_its_flag() {
+    let server = MockServer::start().await;
+    let mut service = raw_service();
+    service["platform_key"] =
+        json!({"enabled":true, "audience":"restricted", "allowed_owner_ids":[ID]});
+    get(&server, "/providers", json!({"providers":[]})).await;
+    get(&server, "/services", json!({"services":[service]})).await;
+    get(
+        &server,
+        &format!("/services/{ID}/endpoints"),
+        json!({"endpoints":[]}),
+    )
+    .await;
+    let out = run(
+        &server,
+        &[
+            "admin",
+            "catalog",
+            "add",
+            "--template",
+            "telnyx-platform",
+            "--set",
+            "model=org/model:1",
+            "--set",
+            "max_output_tokens=1024",
+            "--yes",
+            "--skip-credentials",
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+    assert!(
+        output_text(&out)
+            .contains("use `nyxid admin catalog apply --allow-access-change --file <manifest>`")
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET")
+    );
 }
