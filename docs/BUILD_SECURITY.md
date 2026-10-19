@@ -47,19 +47,62 @@ directly. Registry receipts also cover the already-pinned Mongo8 test image and
 context-spike base. `check-build-inputs.py` validates these inputs and Cargo's
 parsed dist container metadata, including an actual generated plan supplied by
 `--dist-plan`. Both release workflows check the plan before consuming its matrix.
-Workflow checks cover both .yml and .yaml. The guard has eleven regressions;
-it checks the inventoried image definitions, rather than claiming to statically
+Workflow checks cover both .yml and .yaml. The guard checks the inventoried
+image definitions, rather than claiming to statically
 resolve arbitrary image construction in application code.
 
-The reproducibility contract currently fixes source revision, language tools,
-dependency locks, Actions, base image indices and explicit downloaded tool
-checksums. **Bit-for-bit image reproducibility is not claimed**: Ubuntu/Debian/
-Alpine package installation and hosted runner images still resolve signed
-distribution repositories at build time. Their exact installed package versions
-must be recorded in the shipped image SBOM, scanned and bound to its digest.
-Rebuilding an earlier image with the same OS package bytes additionally requires
-the retained distribution snapshot or original staged image digest. A source
-lockfile by itself is never the shipped-artifact SBOM.
+Ubuntu/Debian additions use `scripts/apt-snapshot-install.sh` and the reviewed
+`security/apt-snapshots.tsv` catalog. Each root has base, updates and security
+suites at one timestamp, with an exact signed InRelease SHA-256 per suite.
+The portable selector rejects absent requested roots, duplicate suites/roots,
+mixed timestamps, unexpected origins/components and malformed hashes before
+APT runs. Every Dockerfile stage that installs APT packages copies the same
+installer, selector and catalog. Hosted Chromium selects both noble and
+bookworm, retaining its Debian package preference rules.
+
+The installer isolates sources, indexes and archive caches from mutable base
+configuration. Distro keyrings verify signatures; pinned metadata authenticates
+native-architecture indexes and package archives. Fixed snapshots disable only
+Release.Valid-Until freshness, retaining signature and checksum enforcement.
+HTTP bootstraps minimal images without CA packages; distro signatures and the
+independent catalog hash authenticate those bytes. Every selected component's
+native Packages index must exist even when older APT reports acquisition errors
+as warnings. Only amd64/arm64 without foreign architectures are admitted.
+
+Image builds upgrade inherited packages and install explicit additions from
+downloaded archives using `--no-download`. Hosted development runners use
+`--install-only` for their requested dependencies, with the same authentication
+and offline installation; their existing OS is not a shipped image root.
+Dockerfile admission requires the image-upgrade invocation. Package records
+under `/usr/share/nyxid/build-inputs/apt/` retain snapshot metadata, requested
+packages, base/final inventories and downloaded archive hashes. Each record
+binds its prior package state and request so inherited image installs preserve
+earlier records.
+
+On relevant pull requests, `CI / APT Inputs` calls `apt-inputs.yml`; its result
+is required by `CI Pipeline`. The same reusable workflow runs weekly. `APT
+Policy` validates catalogs/callers and portable negative tests. Eight `APT
+Snapshots (base, arch)` jobs exercise bookworm/trixie/focal/noble on native
+amd64/arm64: success, catalog digest mismatch, malformed/bad/absent signatures,
+missing/corrupted indexes, corrupted packages and a removed downloaded archive.
+Failure cases require unchanged dpkg state; metadata rejection must precede all
+package downloads. Success also verifies repeat/install-only calls preserve
+earlier package records. Two `APT Dockerfile Layers (arch)` jobs build all twelve
+actual package-stage prefixes without cache, then inspect records in containers
+with no network. These projections preserve package instructions and source
+inputs but stop before application compilation; they are not evidence of final
+application image behavior. Logs, exact prefixes and inventories are retained
+as seven-day workflow artifacts. These jobs need no repository secrets, OIDC,
+registry login or remote publication permissions.
+
+The reproducibility contract fixes source revision, language tools, dependency
+locks, Actions, base image indices, explicit downloaded tool checksums and APT
+snapshots. **Bit-for-bit image reproducibility is not claimed.** APK closure
+catalogs and wiring remain the next batch, and hosted runner OS images remain
+variable. Shipped package inventories must still be scanned, included in actual
+artifact SBOMs and bound to final subject digests. A source lockfile by itself
+is never the shipped-artifact SBOM. Linux execution of the new APT jobs remains
+an acceptance prerequisite until the PR run passes.
 
 The proc-macro-error2 2.0.1 vendor directory preserves the authenticated original
 crate/license and documents the one-line E0365 visibility correction. The

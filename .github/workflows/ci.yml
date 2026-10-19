@@ -64,6 +64,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       backend_image: ${{ steps.filter.outputs.backend_image }}
+      apt: ${{ steps.filter.outputs.apt }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
       permissions: ${{ steps.filter.outputs.permissions }}
@@ -91,6 +92,17 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            apt:
+              - '**/Dockerfile*'
+              - 'Dockerfile*'
+              - 'scripts/*apt*'
+              - 'scripts/check-build-inputs.py'
+              - 'scripts/test-build-inputs.py'
+              - 'scripts/install-release-dependencies.sh'
+              - '.github/scripts/install-linux-build-deps.sh'
+              - 'security/apt-snapshots.tsv'
+              - 'security/build-input-pins.json'
+              - '.dockerignore'
             backend_image:
               - 'backend/Dockerfile'
               - 'build-support/**'
@@ -244,6 +256,15 @@ jobs:
               - '.github/scripts/**'
               - '.github/tools/**'
               - 'security/**'
+
+  # Run the same package-boundary matrix on PRs, weekly and in publication CI.
+  apt-inputs:
+    name: APT Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apt == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/apt-inputs.yml
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -1423,6 +1444,7 @@ jobs:
     needs:
       - changes
       - workflow-permissions
+      - apt-inputs
       - cursor-plugin-validate
       - codex-plugin-validate
       - claude-plugin-validate
@@ -1455,6 +1477,7 @@ jobs:
           RESULTS: |
             changes=${{ needs.changes.result }}
             workflow-permissions=${{ needs.workflow-permissions.result }}
+            apt-inputs=${{ needs.apt-inputs.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
             claude-plugin-validate=${{ needs.claude-plugin-validate.result }}
