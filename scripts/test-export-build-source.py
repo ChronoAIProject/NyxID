@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("export_build_source", ROOT / "scripts/export-build-source.py")
@@ -62,6 +63,43 @@ class SourceExport(unittest.TestCase):
         again, repeated = self.exported("again")
         self.assertEqual((destination / "source.tar").read_bytes(), (again / "source.tar").read_bytes())
         self.assertEqual(receipt, repeated)
+
+    def test_container_ownership_trust_is_exact_and_config_stays_isolated(self):
+        hostile = self.directory / "hostile-config"
+        hostile.write_text("[safe]\n\tdirectory = *\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile),
+                                         "GIT_DIR": str(self.root / ".git"),
+                                         "GIT_CONFIG_COUNT": "1",
+                                         "GIT_CONFIG_KEY_0": "safe.directory",
+                                         "GIT_CONFIG_VALUE_0": "*"}):
+            env = exporter.git_environment()
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertFalse({"GIT_DIR", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
+                          "GIT_CONFIG_VALUE_0"}.intersection(env))
+        # Git's own test switch exercises the ownership check without chown or
+        # elevated permissions. The exporter never inherits this variable.
+        env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
+        denied = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"],
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("dubious ownership", denied.stderr)
+        with mock.patch.object(exporter, "git_environment", return_value=env):
+            destination, receipt = self.exported()
+            self.assertEqual(exporter.verify(destination, self.commit_id), receipt)
+            other = self.directory / "unrelated"
+            subprocess.run(["git", "init", str(other)], env=env, check=True, capture_output=True)
+            denied = subprocess.run(exporter.git_command(self.root, "-C", str(other),
+                                                        "status", "--porcelain"),
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("dubious ownership", denied.stderr)
+            # Trusting a candidate subdirectory must not silently classify its
+            # differently owned parent repository as a successful no-Git check.
+            nested = other / "nested"
+            nested.mkdir()
+            with self.assertRaisesRegex(ValueError, "Git boundary"):
+                exporter.has_git_tree(nested)
 
     def test_dirty_untracked_and_wrong_commit_fail(self):
         with self.assertRaisesRegex(ValueError, "full commit"):

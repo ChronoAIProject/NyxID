@@ -29,14 +29,23 @@ def git_environment():
 
 
 def git_command(root, *arguments):
-    return ["git", "--no-replace-objects", "-C", str(root), *arguments]
+    # Container checkouts may be owned by the runner outside the container.
+    # Global config remains isolated; trust only this caller-selected physical
+    # path for this command, never every repository or an inherited config.
+    return ["git", "--no-replace-objects", "-c", "safe.directory=" + str(Path(root).resolve()),
+            "-C", str(root), *arguments]
 
 
 def has_git_tree(tree):
     result = subprocess.run(git_command(tree, "rev-parse", "--show-toplevel"),
-                            env=git_environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            env={**git_environment(), "LC_ALL": "C"},
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # An export must not inherit any Git working tree from its parent.
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    if result.returncode == 128 and b"not a git repository" in result.stderr:
+        return False
+    raise ValueError("cannot establish source Git boundary")
 
 
 def digest(path):

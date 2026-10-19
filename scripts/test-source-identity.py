@@ -130,8 +130,11 @@ class SourceIdentity(unittest.TestCase):
 
     def assert_fresh(self, root, target, expected):
         self.assertEqual(self.build(root, target), expected)
-        self.assertIn("Fresh identity-fixture", self.last_stderr)
-        self.assertNotIn("build-script-build`", self.last_stderr)
+        # CI enables Cargo colors, including an SGR reset between Fresh and
+        # the package name. Preserve raw diagnostics and assert on plain text.
+        plain_stderr = re.sub(r"\x1b\[[0-9;]*m", "", self.last_stderr)
+        self.assertIn("Fresh identity-fixture", plain_stderr)
+        self.assertNotIn("build-script-build`", plain_stderr)
 
     def test_sibling_dependency_edits_invalidate_identity_and_unchanged_builds_are_fresh(self):
         for relative_helper in (False, True):

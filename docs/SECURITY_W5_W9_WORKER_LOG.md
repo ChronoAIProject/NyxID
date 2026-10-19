@@ -901,3 +901,76 @@ boundaries and resumable full secret migration; W8 strict attribution, complete
 critical-operation durability, independent protected witness, prefix retention,
 key lifecycle and scoped API/UI. Major W8 code follows a concrete operation and
 architecture proposal sent to PM. No scope row is closed by this log.
+
+
+## 2026-10-19 hosted CI regression corrections
+
+Draft PR 1944 CI exposed three tooling/test-environment failures while the
+separate W9.3 frozen backend runtime matrix remained active. This bounded batch
+changes four CI/source-tool files and this worker log; all 1,293 frozen backend
+and CLI compilation inputs remain byte-equal. Original hosted logs are retained
+under the validation directory's `pr-1944-ci/`: identity job 117900846543
+(dbee19558e0b61c7458c5f6688abc58c35eee9d68e7b0563db57e933558f573b), ARM cache
+job 117900985981
+(f9f110f5c355311ae1367044ec3ee71bcd38c4a71077094ffa93dc7eb79f8f91), and Detect
+Changes job 117900846695
+(ef2d0f51a37db5d2008b668fdcd772ad51e5ca3921bcc4d9360b6ccfc4c1cf52).
+The cache failure actually ran against PR merge commit
+448139ac6ce6e04c3575caadc91a882244fec552, distinct from head 473eccf1.
+
+Cargo's `CARGO_TERM_COLOR=always` inserts an ANSI SGR reset between `Fresh` and
+the package name. The original assertion was reproduced locally with the same
+color setting and failed both sibling-helper variants. Freshness assertions now
+strip only SGR formatting for comparison, retain raw stderr, and still require
+the expected package to be Fresh with no build-script invocation. All seven
+identity controls pass under that actual color environment. No artifact
+extractor was supplied for these focused runs; earlier parser/application
+boundaries remain separate.
+
+The exact exporter intentionally ignores inherited Git configuration, which
+also removed checkout's global safe.directory allowance for a container-owned
+checkout. Git commands now trust only the caller-selected resolved directory
+for that command. Global/system/alternate-index/replacement isolation remains.
+Git's own different-owner test control reproduces an untrusted checkout, then
+passes full exact export/verify with the narrow trust. An unrelated repository
+is still rejected, and an ownership error checking a nested candidate fails
+closed instead of becoming a successful no-Git assertion. Eleven exporter
+controls pass, including all existing dirty/untracked, committed-tree/blob,
+attribute, archive, symlink, and generated-path rejection cases. The dependent
+exported-runner seven and source-hook four controls also pass.
+
+The cancellation fixture's ready deadline was 15 seconds, while four optional
+metadata probes can take five seconds each before child spawn. A forced local
+control with four four-second probe shims reproduces the exact ready failure at
+15.035 seconds and records the probe start times. Both cancellation fixtures
+now use deterministic metadata/snapshots in their test subprocess only;
+production resource collection is byte-unchanged. The original ready deadline,
+return-143 requirement, bounded cancellation/grace, and descendant-stopped
+assertions remain. Both fixtures and a separate metadata probe/whitelist test
+pass under the same slow-probe PATH (three tests); all 21 Detect Changes Python
+unit tests then pass. The local forced cause is supported; the hosted log does
+not contain individual probe timings, so no exact hosted timing is invented.
+
+Exact argv, cwd, selected environment, exit, elapsed time, source maps and log
+hashes are in validation receipts `w7-ci-identity-color-final`,
+`w7-ci-export-boundary-final`, `w7-ci-exported-runner`, `w7-ci-source-hook`,
+`w7-ci-cancellation-isolated`, `w7-ci-cancellation-exact-env-final`, and
+`w7-ci-detect-changes-final`. The unchanged three-case final control also
+records the exact slow-probe PATH, PYTHONPATH, and trace-file environment; the
+first three-case receipt recorded only selected Cargo fields. The two
+preliminary forced-failure commands retain raw logs/tool exits but did not have
+separate outer timing receipts; that limitation is explicit. Frozen handoffs
+`w7-ci-color-and-export-v1` and `w7-ci-cancellation-v1` preserve their exact
+source/evidence boundaries. PM independently verifies the three-file
+color/export snapshot and passes seven identity plus eleven exporter controls
+in scratch; its receipt is
+`P/w7-ci-color-export-review/completed-review.json`
+(3aad574aab2d57a7196e14386b51d5c4a646e5f3c752baf4c031c41bf6dc1292).
+
+These are local CI-tooling corrections, not hosted ARM cache/producer execution,
+application release identity, final artifacts/images/scans, W9.3 acceptance,
+or a CodeQL zero-finding result. Telegram vendor bytes and CodeQL policies are
+unchanged; precise consumer/alert disposition remains separate. No remote
+workflow, publication, signing, merge, guest, live credentials, or blocked
+R1-05/R1-06 probe was invoked by this batch. The original W9.3 failures/matrix
+continue under their frozen earlier executable and source attribution.

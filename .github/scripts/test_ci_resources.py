@@ -111,8 +111,15 @@ class ResourceWrapperTests(unittest.TestCase):
             "(Path(sys.argv[2]).write_text('stopped') if pid == 0 else None, sys.exit(0))); "
             "Path(sys.argv[1]).write_text('ready') if pid == 0 else None; time.sleep(120)"
         )
+        # Exercise process groups independently of installed tool discovery.
+        # Four live metadata probes can consume 20s before the child starts.
+        wrapper = (
+            "import sys; sys.path.insert(0,sys.argv.pop(1)); import ci_resources; "
+            "ci_resources.metadata=lambda: {}; ci_resources.snapshot=lambda: {}; "
+            "sys.exit(ci_resources.main())"
+        )
         child = subprocess.Popen(
-            [sys.executable, str(SCRIPT), "cancel", sys.executable, "-c", source,
+            [sys.executable, "-c", wrapper, str(SCRIPT.parent), "cancel", sys.executable, "-c", source,
              str(ready), str(terminated)], env=self.environment, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
@@ -138,8 +145,9 @@ class ResourceWrapperTests(unittest.TestCase):
             "Path(sys.argv[1]).write_text(str(os.getpid())) if pid == 0 else None; time.sleep(120)"
         )
         wrapper = (
-            "import sys; sys.path.insert(0,sys.argv[1]); from ci_resources import run; "
-            "sys.exit(run('ignore', [sys.executable, '-c', sys.argv[2], sys.argv[3]], cancellation_grace=.1))"
+            "import sys; sys.path.insert(0,sys.argv[1]); import ci_resources; "
+            "ci_resources.metadata=lambda: {}; ci_resources.snapshot=lambda: {}; "
+            "sys.exit(ci_resources.run('ignore', [sys.executable, '-c', sys.argv[2], sys.argv[3]], cancellation_grace=.1))"
         )
         child = subprocess.Popen(
             [sys.executable, "-c", wrapper, str(SCRIPT.parent), source, str(ready)],
@@ -170,6 +178,23 @@ class ResourceWrapperTests(unittest.TestCase):
                     os.kill(int(ready.read_text()), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def test_metadata_probes_and_environment_are_explicit(self):
+        values = {"GITHUB_RUN_ID": "fixture-run", "UNRELATED_SECRET": "must-not-be-reported"}
+        with patch.dict(os.environ, values, clear=True), \
+             patch.object(ci_resources, "command_output", return_value="fixture-tool") as probe:
+            result = ci_resources.metadata()
+        self.assertEqual(result["environment"], {"GITHUB_RUN_ID": "fixture-run"})
+        self.assertEqual(probe.call_args_list, [
+            unittest.mock.call(["git", "rev-parse", "HEAD", "HEAD^{tree}"]),
+            unittest.mock.call(["rustc", "-Vv"]),
+            unittest.mock.call(["cargo", "llvm-cov", "--version"]),
+            unittest.mock.call(["cargo", "nextest", "--version"]),
+        ])
+        self.assertEqual(result["checkout_commit_and_tree"], "fixture-tool")
+        self.assertEqual(result["rust"], "fixture-tool")
+        self.assertEqual(result["coverage_tool"], "fixture-tool")
+        self.assertEqual(result["test_runner"], "fixture-tool")
 
 
 if __name__ == "__main__":
