@@ -6,6 +6,7 @@ tree. Environment variables alone never certify a Git working-tree build.
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -14,32 +15,67 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tarfile
+import tempfile
 
 
 def git(root, *arguments):
-    return subprocess.check_output(git_command(root, *arguments), env=git_environment())
+    with trusted_git_environment(root) as env:
+        return subprocess.check_output(git_command(root, *arguments), env=env)
 
 
 def git_environment():
     # The caller's alternate index/worktree/object replacement/config cannot
     # change which committed objects the official export contains.
-    return {**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+    return {**{key: value for key, value in os.environ.items()
+               if not key.startswith("GIT_") and key not in ("HOME", "XDG_CONFIG_HOME", "SUDO_UID")},
             "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull}
+
+
+@contextmanager
+def trusted_git_environment(root):
+    # Focal's Git 2.25 security backport accepts safe.directory only from a
+    # global file, and does not implement GIT_CONFIG_GLOBAL. Its XDG lookup is
+    # supported. Supply the same private file through both interfaces and omit
+    # HOME from this subprocess so older Git cannot also read ~/.gitconfig.
+    # No caller/user configuration or ownership is changed.
+    root = trusted_git_root(root)
+    with tempfile.TemporaryDirectory(prefix="nyxid-export-git-config-") as temporary:
+        config = Path(temporary) / "git/config"
+        config.parent.mkdir()
+        path = str(root).replace("\\", "\\\\").replace('"', '\\"')
+        path = path.replace("\n", "\\n").replace("\t", "\\t")
+        config.write_text('[safe]\n\tdirectory = "' + path + '"\n')
+        yield {**git_environment(), "GIT_CONFIG_GLOBAL": str(config),
+               "XDG_CONFIG_HOME": temporary}
+
+
+def trusted_git_root(root):
+    root = Path(root).resolve()
+    # Git interprets a terminal /* as subtree trust even in a quoted config
+    # value. A literal-star checkout cannot be represented as exact trust.
+    if str(root).endswith("/*"):
+        raise ValueError("source root cannot end in Git's safe.directory wildcard /*")
+    # Git config has escapes for newline and tab, but not carriage return.
+    # Refuse other controls before writing config or constructing command trust.
+    if any((ord(char) < 32 and char not in "\n\t") or ord(char) == 127 for char in str(root)):
+        raise ValueError("source root contains an unsupported Git config control character")
+    return root
 
 
 def git_command(root, *arguments):
     # Container checkouts may be owned by the runner outside the container.
     # Global config remains isolated; trust only this caller-selected physical
     # path for this command, never every repository or an inherited config.
-    return ["git", "--no-replace-objects", "-c", "safe.directory=" + str(Path(root).resolve()),
+    return ["git", "--no-replace-objects", "-c", "safe.directory=" + str(trusted_git_root(root)),
             "-C", str(root), *arguments]
 
 
 def has_git_tree(tree):
-    result = subprocess.run(git_command(tree, "rev-parse", "--show-toplevel"),
-                            env={**git_environment(), "LC_ALL": "C"},
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with trusted_git_environment(tree) as env:
+        result = subprocess.run(git_command(tree, "rev-parse", "--show-toplevel"),
+                                env={**env, "LC_ALL": "C"},
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # An export must not inherit any Git working tree from its parent.
     if result.returncode == 0:
         return True
@@ -235,9 +271,9 @@ def write_archive(root, archive, entries, epoch):
     # Read raw committed blobs, deliberately applying no export-ignore,
     # export-subst, working-tree filters, or local/global attributes. The exact
     # tree is the build input; transformations require a new explicit protocol.
-    with subprocess.Popen(git_command(root, "cat-file", "--batch"),
+    with trusted_git_environment(root) as env, subprocess.Popen(git_command(root, "cat-file", "--batch"),
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, env=git_environment()) as process:
+                          stderr=subprocess.DEVNULL, env=env) as process:
         try:
             with tarfile.open(archive, "x", format=tarfile.PAX_FORMAT) as tar:
                 for entry in entries:

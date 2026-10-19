@@ -974,3 +974,55 @@ unchanged; precise consumer/alert disposition remains separate. No remote
 workflow, publication, signing, merge, guest, live credentials, or blocked
 R1-05/R1-06 probe was invoked by this batch. The original W9.3 failures/matrix
 continue under their frozen earlier executable and source attribution.
+
+
+## W7 bounded hosted CI followup: old Git trust and exact Rust Action setup
+
+The next hosted PR merge checkout (adf10b1865ed032174b70c45e95acd2aab8b7764,
+head574800f0 plus main3fc6386a) retained two distinct failures. Focal Git2.25.1
+still rejected the container checkout despite command-local safe.directory;
+its security backport accepts the setting from global files but does not
+implement GIT_CONFIG_GLOBAL. The other job installed minimal Rust1.98.1 and
+then hit a clippy-preview cargo-clippy conflict when the repository override
+downloaded missing components. The pinned version-specific Rust Action warns
+that toolchain is unsupported: its implementation hardcodes1.98.1 and accepts
+only target, targets, components. Original hosted logs remain in validation
+pr-1944-ci/117905729002-download.log and117905569623-download.log with hashes
+1d449fc5471155f30a7c11ead9530d9ad3f87b7f82660238fb610fdef4f1115d and
+dd2bfad52d6475b88a75cb62292623d39786ef80955632c37979d6dc1a88e187.
+
+The exporter supplies a private XDG git/config and the same modern global
+config file, containing only the exact resolved checkout safe.directory.
+Git subprocesses omit inherited HOME, XDG, GIT overrides and SUDO_UID; no user
+config or checkout ownership changes. Terminal literal-star roots and symlink
+aliases resolving to them fail before either trust form can interpret /* as
+subtree trust. Newline/tab and quoted/backslash/space/injection-text values
+parse to exactly one intended config value. CR and other unsupported controls
+fail early. Hostile HOME/XDG includes are not read; private config is removed
+after body or Git errors. The modern different-owner control and actual
+differently-owned Focal fixture still reject unrelated repositories.
+
+All15 reviewed Action invocations remove unsupported toolchain and explicitly
+install repository rustfmt/clippy during setup, retaining extra components and
+targets. The narrow workflow guard requires the exact reviewed Action SHA,
+supported inputs and repository components. Workflow triggers, permission and
+publishing conditions are unchanged. Native clean-Rustup probes establish the
+setup contract but do not reproduce the hosted Linux component conflict.
+
+Final local checks: host Git2.50.1 exporter15 and offline cached Focal
+Git2.25.1/Python3.8.10 exporter15; exported-runner7; source-hook4; strict YAML6;
+build-inputs15; workflow and reusable-permission guards pass. Exact source,
+commands, environments, exits, elapsed times and log hashes are bound in
+validation w7-ci-oldgit-action-subset-v2.json (a22139af608633475898ea1e1a999628b4e363570445d5c7b386bca1acb98b11),
+archivebc674fc8f4b1d0d48aa8a8961d7d9a4c7246aae1b354809775a440cb096cd99a.
+PM independently reviewed all eight frozen code paths and ran exporter15/YAML6
+in scratch at P/w7-ci-oldgit-review/completed-v2-review.json.
+Earlier snapshots, failures and carried validator input attribution remain
+distinct; build-inputs has15 tests (an earlier message's5 was shorthand error).
+
+This commit is bounded to eight CI/tool paths and this worker log. It provides
+local compatibility and regression evidence; hosted ARM export/component
+execution, full producer/final artifact/image/scan gates remain open. The W9.3
+compiled sources, CodeQL consumer WIP/vendor bytes, unrelated package/mobile
+work and PM ledgers are excluded. No merge, push, release/signing, alert
+disposition or blocked R1-05/R1-06 probe is performed by this commit.

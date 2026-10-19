@@ -263,7 +263,7 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - name: Install integrity-locked workflow and SBOM validators
         run: |
           pip install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
@@ -305,8 +305,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: rustfmt, clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt -p nyxid-permissions --check
       - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
@@ -412,8 +411,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: rustfmt
+          components: clippy, rustfmt
       - run: cargo fmt --all -- --check
       - run: cargo fmt --manifest-path security/artifact-tools/Cargo.toml -- --check
 
@@ -438,8 +436,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check Clippy with resource samples
         run: python3 .github/scripts/ci_resources.py clippy cargo clippy --locked --workspace --all-targets --features nyxid/aws-kms,nyxid/gcp-kms -- -D warnings
@@ -475,7 +472,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: backend
@@ -540,7 +537,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: backend-billing-smoke
@@ -585,7 +582,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: backend-image-inputs
@@ -720,7 +717,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: cli
@@ -787,7 +784,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: features-${{ matrix.cache-suffix }}
@@ -888,7 +885,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: wizard-freshness
@@ -989,8 +986,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: llvm-tools-preview
+          components: clippy, llvm-tools-preview, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: coverage-backend
@@ -1103,8 +1099,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: llvm-tools-preview
+          components: clippy, llvm-tools-preview, rustfmt
         if: steps.base-cache.outputs.cache-hit != 'true'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: steps.base-cache.outputs.cache-hit != 'true'
@@ -1208,8 +1203,7 @@ jobs:
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          toolchain: 1.98.1
-          components: llvm-tools-preview
+          components: clippy, llvm-tools-preview, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: coverage-cli

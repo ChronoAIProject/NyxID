@@ -25,7 +25,8 @@ class SourceExport(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.root = self.directory / "repo"
         self.root.mkdir()
-        self.git("init", "-b", "main")
+        self.git("init")
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
         (self.root / "source.txt").write_text("exact committed source\n$Format:%H$\n")
         (self.root / "app").mkdir()
         (self.root / "app/run.sh").write_text("#!/bin/sh\nexit 0\n")
@@ -34,9 +35,10 @@ class SourceExport(unittest.TestCase):
         self.commit()
 
     def git(self, *args):
-        return subprocess.check_output(
-            exporter.git_command(self.root, *args), env=exporter.git_environment(),
-            stderr=subprocess.PIPE).decode().strip()
+        with exporter.trusted_git_environment(self.root) as env:
+            return subprocess.check_output(
+                exporter.git_command(self.root, *args), env=env,
+                stderr=subprocess.PIPE).decode().strip()
 
     def commit(self):
         self.git("add", ".")
@@ -68,6 +70,8 @@ class SourceExport(unittest.TestCase):
         hostile = self.directory / "hostile-config"
         hostile.write_text("[safe]\n\tdirectory = *\n")
         with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(hostile),
+                                         "XDG_CONFIG_HOME": str(self.directory),
+                                         "SUDO_UID": "1001",
                                          "GIT_DIR": str(self.root / ".git"),
                                          "GIT_CONFIG_COUNT": "1",
                                          "GIT_CONFIG_KEY_0": "safe.directory",
@@ -75,6 +79,9 @@ class SourceExport(unittest.TestCase):
             env = exporter.git_environment()
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertNotIn("HOME", env)
+        self.assertNotIn("XDG_CONFIG_HOME", env)
+        self.assertNotIn("SUDO_UID", env)
         self.assertFalse({"GIT_DIR", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0",
                           "GIT_CONFIG_VALUE_0"}.intersection(env))
         # Git's own test switch exercises the ownership check without chown or
@@ -82,6 +89,15 @@ class SourceExport(unittest.TestCase):
         env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = "1"
         denied = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"],
                                 env=env, capture_output=True, text=True)
+        actual_ownership = denied.returncode == 0
+        if actual_ownership:
+            # Git 2.25 lacks the test switch. The offline container control
+            # runs as root and exercises the real ownership check instead.
+            self.assertEqual(os.geteuid(), 0, "ownership control needs Git's test switch or container root")
+            for path in [self.root, *self.root.rglob("*")]:
+                os.lchown(path, 1001, 1001)
+            denied = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain"],
+                                    env=env, capture_output=True, text=True)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("dubious ownership", denied.stderr)
         with mock.patch.object(exporter, "git_environment", return_value=env):
@@ -89,9 +105,18 @@ class SourceExport(unittest.TestCase):
             self.assertEqual(exporter.verify(destination, self.commit_id), receipt)
             other = self.directory / "unrelated"
             subprocess.run(["git", "init", str(other)], env=env, check=True, capture_output=True)
-            denied = subprocess.run(exporter.git_command(self.root, "-C", str(other),
-                                                        "status", "--porcelain"),
-                                    env=env, capture_output=True, text=True)
+            if actual_ownership:
+                for path in [other, *other.rglob("*")]:
+                    os.lchown(path, 1001, 1001)
+            with exporter.trusted_git_environment(self.root) as trusted:
+                config = Path(trusted["GIT_CONFIG_GLOBAL"])
+                self.assertEqual(config, Path(trusted["XDG_CONFIG_HOME"]) / "git/config")
+                self.assertEqual(subprocess.check_output(
+                    ["git", "config", "--file", str(config), "--get-all", "safe.directory"],
+                    env=env, text=True).splitlines(), [str(self.root.resolve())])
+                denied = subprocess.run(exporter.git_command(self.root, "-C", str(other),
+                                                            "status", "--porcelain"),
+                                        env=trusted, capture_output=True, text=True)
             self.assertNotEqual(denied.returncode, 0)
             self.assertIn("dubious ownership", denied.stderr)
             # Trusting a candidate subdirectory must not silently classify its
@@ -100,6 +125,91 @@ class SourceExport(unittest.TestCase):
             nested.mkdir()
             with self.assertRaisesRegex(ValueError, "Git boundary"):
                 exporter.has_git_tree(nested)
+
+    def test_literal_star_root_cannot_expand_trust_to_sibling_repositories(self):
+        star = self.directory / "*"
+        self.root.rename(star)
+        other = self.directory / "unrelated"
+        subprocess.run(["git", "init", str(other)], env=exporter.git_environment(),
+                       check=True, capture_output=True)
+        # Refuse both trust representations before any Git command/config can
+        # use /parent/* to authorize this unrelated sibling. Resolving a symlink
+        # alias must retain the same refusal.
+        alias = self.directory / "star-alias"
+        alias.symlink_to(star, target_is_directory=True)
+        for root in (star, alias):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "wildcard"):
+                    exporter.git_command(root, "-C", str(other), "status", "--porcelain")
+                with self.assertRaisesRegex(ValueError, "wildcard"):
+                    with exporter.trusted_git_environment(root):
+                        self.fail("literal-star root received Git trust")
+                with self.assertRaisesRegex(ValueError, "wildcard"):
+                    exporter.export(root, self.directory / "export", self.commit_id)
+
+    def test_trust_config_paths_preserve_exact_value_without_injection(self):
+        original = self.root
+        for name in ('has space', 'has"quote', 'has\\backslash', 'has\nnewline',
+                     'has\ttab', 'injection"\n[safe]\n directory = *'):
+            with self.subTest(name=name):
+                selected = self.directory / name
+                self.root.rename(selected)
+                self.root = selected
+                try:
+                    with exporter.trusted_git_environment(selected) as env:
+                        values = subprocess.check_output(
+                            ["git", "config", "--file", env["GIT_CONFIG_GLOBAL"],
+                             "--null", "--get-all", "safe.directory"], env=env)
+                        self.assertEqual(values, str(selected.resolve()).encode() + b"\0")
+                        self.assertEqual(subprocess.check_output(
+                            exporter.git_command(selected, "rev-parse", "HEAD"),
+                            env=env).decode().strip(), self.commit_id)
+                finally:
+                    self.root.rename(original)
+                    self.root = original
+        for name in ('has\rcarriage-return', 'has\x01control', 'has\x7fdelete'):
+            selected = self.directory / name
+            selected.mkdir()
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "control character"):
+                    exporter.git_command(selected, "status")
+                with self.assertRaisesRegex(ValueError, "control character"):
+                    with exporter.trusted_git_environment(selected):
+                        self.fail("unsupported control received Git trust")
+
+    def test_inherited_home_xdg_includes_are_never_read(self):
+        home = self.directory / "hostile-home"
+        xdg = self.directory / "hostile-xdg"
+        home.mkdir()
+        (xdg / "git").mkdir(parents=True)
+        # Reading either include would fail with invalid config syntax.
+        invalid = self.directory / "invalid-include"
+        invalid.write_text("[invalid\n")
+        include = '[include]\n path = "' + str(invalid) + '"\n'
+        (home / ".gitconfig").write_text(include)
+        (xdg / "git/config").write_text(include)
+        with mock.patch.dict(os.environ, {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg),
+                                         "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+                                         "SUDO_UID": "1001", "GIT_CONFIG_COUNT": "1",
+                                         "GIT_CONFIG_KEY_0": "include.path",
+                                         "GIT_CONFIG_VALUE_0": str(invalid)}):
+            self.assertEqual(exporter.git(self.root, "rev-parse", "HEAD").decode().strip(),
+                             self.commit_id)
+
+    def test_private_config_is_removed_on_body_and_git_errors(self):
+        for git_error in (False, True):
+            with self.subTest(git_error=git_error):
+                with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                    with exporter.trusted_git_environment(self.root) as env:
+                        config = Path(env["GIT_CONFIG_GLOBAL"])
+                        directory = Path(env["XDG_CONFIG_HOME"])
+                        self.assertTrue(config.is_file())
+                        if git_error:
+                            subprocess.check_output(exporter.git_command(self.root, "not-a-command"),
+                                                    env=env, stderr=subprocess.PIPE)
+                        raise RuntimeError("fixture body error")
+                self.assertFalse(config.exists())
+                self.assertFalse(directory.exists())
 
     def test_dirty_untracked_and_wrong_commit_fail(self):
         with self.assertRaisesRegex(ValueError, "full commit"):

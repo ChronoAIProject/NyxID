@@ -17,4 +17,4 @@ load_unique((root / ".github/dependabot.yml").read_text())
 if errors:
     raise SystemExit("\n".join(errors))
 print(f"{len(paths)} workflows and Dependabot have unique mappings; "
-      f"all {rust_steps} pinned Rust Actions explicitly select toolchain 1.98.1")
+      f"all {rust_steps} Rust Actions pin 1.98.1 and install repository components with supported inputs")

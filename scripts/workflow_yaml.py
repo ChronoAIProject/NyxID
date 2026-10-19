@@ -1,6 +1,12 @@
 """Strict YAML parsing for GitHub workflow contracts (including nested maps)."""
 import yaml
 
+RUST_ACTION = "dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7"
+# This version-specific Action hardcodes 1.98.1 in its parse step. Its only
+# inputs are targets, target and components; `toolchain` is not an input.
+RUST_ACTION_INPUTS = {"targets", "target", "components"}
+RUST_COMPONENTS = {"rustfmt", "clippy"}
+
 
 class UniqueKeyLoader(yaml.SafeLoader):
     pass
@@ -30,6 +36,14 @@ def validate_rust_steps(workflow):
     for job_name, job in workflow.get("jobs", {}).items():
         for index, step in enumerate(job.get("steps", [])):
             if step.get("uses", "").startswith("dtolnay/rust-toolchain@"):
-                if step.get("with", {}).get("toolchain") != "1.98.1":
-                    errors.append(f"{job_name} step {index}: pinned Rust Action must select toolchain 1.98.1 explicitly")
+                where = f"{job_name} step {index}"
+                if step["uses"] != RUST_ACTION:
+                    errors.append(where + ": Rust Action must pin the reviewed 1.98.1 implementation")
+                inputs = step.get("with", {})
+                if set(inputs) - RUST_ACTION_INPUTS:
+                    errors.append(where + ": unsupported input for the version-specific Rust Action")
+                components = inputs.get("components", "")
+                if not isinstance(components, str) or not RUST_COMPONENTS.issubset(
+                        {part.strip() for part in components.split(",")}):
+                    errors.append(where + ": install repository rustfmt and clippy requirements during setup")
     return errors
