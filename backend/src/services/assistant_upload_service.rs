@@ -134,6 +134,39 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
+    store_authorized(db, keys, user, scope, name, bytes, access, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_channel_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    store_authorized(db, keys, user, scope, name, bytes, None, Some(source)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+    source: Option<crate::models::assistant_channel_media::UploadSource>,
+) -> AppResult<TurnAttachment> {
+    use sha2::{Digest, Sha256};
+    let content_sha256 = source
+        .as_ref()
+        .map(|_| format!("{:x}", Sha256::digest(&bytes)));
+    let channel_upload = source.is_some();
     let label = safe_name(name);
     let extension = label
         .rsplit_once('.')
@@ -143,6 +176,8 @@ pub(crate) async fn upload_authorized(
     // A bounded copy is retained for encrypted storage; the parser receives its own process.
     let extracted = attachment_extraction::extract(bytes.clone(), extension).await?;
     let row = AssistantUpload {
+        source,
+        content_sha256,
         id: Uuid::new_v4().to_string(),
         origin: "user_upload".into(),
         user_id: user.into(),
@@ -210,7 +245,40 @@ pub(crate) async fn upload_authorized(
         .insert_many(documents)
         .session(&mut session)
         .await?;
-    session.commit_transaction().await?;
+    #[cfg(test)]
+    if let Some(source) = &row.source {
+        super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_before_commit",
+        )
+        .await;
+    }
+    let mut retries = 0;
+    loop {
+        match session.commit_transaction().await {
+            Ok(()) => break,
+            Err(error)
+                if channel_upload
+                    && error.contains_label("UnknownTransactionCommitResult")
+                    && retries < 3 =>
+            {
+                retries += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    #[cfg(test)]
+    if let Some(source) = &row.source
+        && super::assistant_channel_media::test_hooks::reach(
+            db,
+            &source.turn_id,
+            "upload_after_commit",
+        )
+        .await
+    {
+        return Err(AppError::Internal("Channel upload commit uncertain".into()));
+    }
     Ok(metadata(&row))
 }
 

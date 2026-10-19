@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        media_event_ids: Vec::new(),
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
@@ -884,6 +885,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            media_event_ids: Vec::new(),
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
@@ -3239,6 +3241,12 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::assistant_channel_media::queue::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel media finalization deferred");
+            }
             if crate::services::channel_media_events::sweep(&state.db)
                 .await
                 .is_err()

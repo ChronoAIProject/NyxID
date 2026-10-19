@@ -280,6 +280,8 @@ impl std::fmt::Debug for NyxbotThread {
 /// Authorized source selectors only. Provider keys stay on ChannelMessage.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventMediaItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<super::assistant_channel_media::MediaOutcome>,
     /// Index into the source row's standalone or embedded attachments.
     pub index: usize,
     /// Selects the embedded attachment list when true.
@@ -292,6 +294,9 @@ pub struct EventMediaItem {
 /// Native media admission identity, selectors and interruption notice lifecycle.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventMedia {
+    /// Captured route identity; no credential material is retained here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<MediaAuthority>,
     /// v1 native media identity shared by deliveries of the same provider message.
     pub key: String,
     /// Declared attachment count, including items omitted by the parser's cap.
@@ -313,6 +318,14 @@ pub struct EventMedia {
     #[serde(default)]
     pub noted: bool,
 }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MediaAuthority {
+    pub route_api_key_id: String,
+    pub route_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub bot_owner_id: Option<String>,
+    pub follow_binding_generation: i64,
+}
 impl std::fmt::Debug for EventMedia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("EventMedia([REDACTED])")
@@ -324,6 +337,9 @@ impl std::fmt::Debug for EventMedia {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    /// Trusted presence for every sender; independent of owner-only media claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_media_declared: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<EventMedia>,
     /// Atomic native bot budget/source-event claim. Never cleared on retries.

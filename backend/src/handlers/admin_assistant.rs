@@ -17,6 +17,24 @@ pub struct AnalyticsQuery {
     pub to: Option<DateTime<Utc>>,
 }
 
+#[derive(Serialize)]
+pub struct MediaDrainResponse {
+    pub converted: u64,
+}
+
+/// Early queue conversion for a rollback drain; repeat until converted is zero.
+pub async fn drain_channel_media(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<MediaDrainResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    let converted =
+        crate::services::assistant_channel_media::queue::convert_queued(&state.db, Utc::now())
+            .await?;
+    Ok(Json(MediaDrainResponse { converted }))
+}
+
 impl AnalyticsQuery {
     fn window(&self, now: DateTime<Utc>) -> AppResult<(DateTime<Utc>, DateTime<Utc>)> {
         let to = self.to.unwrap_or(now);

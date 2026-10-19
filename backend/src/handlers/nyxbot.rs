@@ -3124,6 +3124,7 @@ async fn start_chat_turn(
     };
     late_delivery::prepare(state, event_key, row, &origin, sender, guest, addressed).await?;
     let start = TurnStart {
+        media_event_ids: Vec::new(),
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: Some(event_key.to_owned()),
@@ -4034,6 +4035,7 @@ async fn responses_with_producers_impl(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
+        source_media_declared: None,
         media,
         native_bot_budget_claimed: false,
         retry_request_sha256: Some(retry_digest.clone()),
@@ -4802,6 +4804,7 @@ pub async fn relay_callback(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
+        source_media_declared: None,
         media,
         native_bot_budget_claimed: false,
         retry_request_sha256: None,

@@ -566,6 +566,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub media_event_ids: Vec<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
@@ -732,6 +733,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            media_event_ids: Vec::new(),
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
             channel_event_id: None,
@@ -1010,6 +1012,7 @@ pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Resul
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::channel_media_events::ensure_indexes(db).await?;
+    super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
@@ -2095,6 +2098,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     // queued): a guest turn leaves them for the owner's next turn.
     // A chat app thread's queued messages wait for a turn that
     // answers in that chat, never one the owner starts in the app.
+    let had_queued_media = row
+        .pending_events
+        .iter()
+        .any(|event| !event.media_event_ids.is_empty());
     let events = if start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -2110,6 +2117,14 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?
     };
+    if had_queued_media
+        && let Some(fresh) = collection
+            .find_one(owner_filter(user_id, &id)?)
+            .session(&mut *session)
+            .await?
+    {
+        row.message_count = row.message_count.max(fresh.message_count);
+    }
     if start.origin == TurnOrigin::Event && events.is_empty() {
         collection
             .update_one(
@@ -2271,6 +2286,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.context_reset_reason = Some("credential_replaced".into());
     }
     let reclaimed = row.active_turn.clone();
+    if let Some(old) = &reclaimed {
+        Box::pin(super::assistant_channel_media::finalize_in_session(
+            db,
+            session,
+            user_id,
+            &id,
+            &old.turn_id,
+            "failed",
+        ))
+        .await?;
+        super::assistant_upload_retention::settled_in_session(
+            db,
+            session,
+            user_id,
+            &id,
+            &old.turn_id,
+        )
+        .await?;
+    }
     if let Some(lost) = row.active_turn.take() {
         let lost_turn = lost.clone();
         let lost_metadata = super::assistant_turn_observability::metadata(&lost_turn, now);
@@ -2295,6 +2329,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            media_event_ids: Vec::new(),
+            media_queue_notice_id: None,
+            media_pending: None,
+            media_bound: None,
             platform_delivery_recovery_queued: false,
             platform_reply: lost.platform_reply.clone(),
             platform_origin: lost.platform_origin.clone(),
@@ -2694,7 +2732,50 @@ pub(crate) async fn begin_owner_turn_in_session(
             ));
         }
     }
+    let mut media_event_ids = if start.guest || start.origin == TurnOrigin::Trigger {
+        Vec::new()
+    } else {
+        start.media_event_ids.clone()
+    };
+    if let Some(turn) = &row.active_turn {
+        for event in &turn.events {
+            for id in &event.media_event_ids {
+                if !media_event_ids.contains(id) {
+                    media_event_ids.push(id.clone());
+                }
+            }
+        }
+    }
+    let mut media_declared = 0usize;
+    for event in &media_event_ids {
+        if let Some(event) = db
+            .collection::<crate::models::nyxbot_channel::NyxbotEvent>(
+                crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":event,"user_id":user_id,"conversation_id":&id,"turn_id":turn_id})
+            .session(&mut *session)
+            .await?
+        {
+            media_declared = media_declared.saturating_add(event.media.map_or(0, |m| m.declared));
+        }
+    }
+    if !media_event_ids.is_empty() {
+        if let Some(turn) = row.active_turn.as_mut() {
+            turn.question_key = None;
+        }
+        collection
+            .update_one(
+                doc! {"_id":&id,"user_id":user_id,"active_turn.turn_id":turn_id},
+                doc! {"$set":{"active_turn.question_key":bson::Bson::Null}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     let message = AssistantMessage {
+        media_event_ids,
+        media_queue_notice_id: None,
+        media_pending: (media_declared > 0).then_some(media_declared),
+        media_bound: None,
         turn_metadata: None,
         platform_delivery_recovery_queued: false,
         platform_reply: row
@@ -3361,6 +3442,12 @@ async fn finish_turn_inner(
                             update)
                         .session(&mut *session).await?;
                 }
+                let media_reason = match error.as_ref().map(|e| e.code) {
+                    Some("cancelled") => "stopped",
+                    Some("timeout" | "turn_timeout") => "timeout",
+                    _ => "failed",
+                };
+                Box::pin(super::assistant_channel_media::finalize_in_session(&db,session,&row.user_id,&row.id,&turn_id,media_reason)).await?;
                 let continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations);
                 super::trigger_run_images::accumulate_in_session(&db, session, &current).await?;
                 let settled_turn = current.active_turn.take();
@@ -3390,6 +3477,10 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let message = AssistantMessage {
+                    media_event_ids: Vec::new(),
+                    media_queue_notice_id: None,
+                    media_pending: None,
+                    media_bound: None,
                     platform_delivery_recovery_queued: false,
                     platform_reply: settled_turn.as_ref().and_then(|turn| turn.platform_reply.clone()),
                     platform_origin: settled_turn.as_ref().and_then(|turn| turn.platform_origin.clone()),

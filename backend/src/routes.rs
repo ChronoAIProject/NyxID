@@ -1186,6 +1186,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_assistant::analytics),
         )
         .route(
+            "/assistant/channel-media/drain",
+            post(handlers::admin_assistant::drain_channel_media),
+        )
+        .route(
             "/assistant/feedback",
             get(handlers::assistant_feedback::admin),
         )

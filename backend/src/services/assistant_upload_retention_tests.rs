@@ -63,6 +63,8 @@ async fn root(
         sections: Vec::new(),
     };
     let row = AssistantUpload {
+        source: None,
+        content_sha256: None,
         extracted_chars: None,
         id: id.clone(),
         origin: "user_upload".into(),

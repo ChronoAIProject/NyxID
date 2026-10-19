@@ -300,6 +300,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        media_event_ids: Vec::new(),
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,

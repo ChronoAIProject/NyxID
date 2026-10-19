@@ -339,6 +339,7 @@ mod agent_operation_scope_tests;
 pub mod permission_policy_service;
 
 pub mod agent_skill_service;
+pub mod assistant_channel_media;
 pub mod assistant_upload_retention;
 pub mod assistant_upload_service;
 pub mod attachment_extraction;

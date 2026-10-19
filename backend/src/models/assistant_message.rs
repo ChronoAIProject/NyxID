@@ -12,6 +12,14 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_queue_notice_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_pending: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_bound: Option<super::assistant_channel_media::MediaBound>,
     /// Metadata-only handoff to manager delivery, including fresh event replies.
     #[serde(default)]
     pub platform_delivery_recovery_queued: bool,

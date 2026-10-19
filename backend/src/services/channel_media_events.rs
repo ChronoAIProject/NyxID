@@ -102,6 +102,7 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
             .iter()
             .enumerate()
             .map(move |(index, item)| EventMediaItem {
+                outcome: None,
                 index,
                 embedded,
                 kind: item.content_type.clone(),
@@ -111,6 +112,13 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     .take(10)
     .collect();
     Ok(Some(EventMedia {
+        authority: Some(crate::models::nyxbot_channel::MediaAuthority {
+            route_api_key_id: request.channel.route_api_key_id.clone(),
+            route_id: request.channel.route_id.clone(),
+            agent_id: request.channel.agent_id.clone(),
+            bot_owner_id: request.channel.bot_owner_id.clone(),
+            follow_binding_generation: request.channel.follow_binding_generation,
+        }),
         key,
         declared,
         items,

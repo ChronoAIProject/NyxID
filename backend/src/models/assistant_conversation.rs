@@ -48,6 +48,16 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_declared: Option<usize>,
+    #[serde(
+        default,
+        with = "super::bson_datetime::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub media_sent_at: Option<DateTime<Utc>>,
     pub id: String,
     /// `subagent_settled`, `permission_requested`, `permission_decided`, `skill_request_allowed`,
     /// `permission_expired`, `message`.

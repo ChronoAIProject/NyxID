@@ -229,6 +229,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     ))
     .await
     .map_err(|_| mongodb::error::Error::custom("Attachment retention index migration failed"))?;
+    crate::services::assistant_channel_media::ensure_indexes(db).await?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;

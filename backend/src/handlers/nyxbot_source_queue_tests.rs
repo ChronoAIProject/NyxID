@@ -1040,6 +1040,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     let f = fixture("media_committed_sources").await;
     let mut queued = source(&f, "media-queued").await;
     queued.media = Some(EventMedia {
+        authority: None,
         key: "a".repeat(64),
         declared: 1,
         items: vec![],
@@ -1060,6 +1061,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     assert!(queue(&f, &queued, "media question").await);
     let mut bound = source(&f, "media-bound").await;
     bound.media = Some(EventMedia {
+        authority: None,
         key: "b".repeat(64),
         declared: 1,
         items: vec![],

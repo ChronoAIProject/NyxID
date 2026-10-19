@@ -260,6 +260,16 @@ pub async fn filter_events(
                     sources.push(source.clone());
                     origins.push(origin);
                 } else {
+                    if event.media_event_ids.contains(source) {
+                        super::super::assistant_channel_media::queue::notice_in_session(
+                            db,
+                            session,
+                            owner,
+                            conversation,
+                            &event,
+                        )
+                        .await?;
+                    }
                     db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
                         .update_one(doc! {"_id": source, "user_id": owner,
                             "delivery.state": {"$in": ["waiting", "pending"]}},
@@ -268,6 +278,7 @@ pub async fn filter_events(
                         .session(&mut *session).await?;
                 }
             }
+            event.media_event_ids.retain(|id| sources.contains(id));
             event.source_event_ids = sources;
             event.reply_to = origins;
             if !event.source_event_ids.is_empty() {
