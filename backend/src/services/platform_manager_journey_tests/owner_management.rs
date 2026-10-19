@@ -392,11 +392,10 @@ async fn management_fixture(
         "status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Specialist completed the assigned notes task"}]}]}});
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(format!("data: {frame}\n\n")),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!("data: {frame}\n\n").into_bytes(),
+            "text/event-stream",
+        ))
         .expect(1)
         .mount(provider)
         .await;
@@ -527,9 +526,22 @@ async fn assert_managed(inspected: &ManagementEgress, provider: &MockServer) {
         && m.origin == Some(TurnOrigin::Orchestrator)
         && m.turn_id == assigned_turn
         && m.text == "Summarize the notes for this channel owner"));
-    assert!(messages.iter().any(|m| m.role == "assistant"
-        && m.turn_id == assigned_turn
-        && m.text == "Specialist completed the assigned notes task"));
+    let reply = messages
+        .iter()
+        .find(|m| m.role == "assistant" && m.turn_id == assigned_turn)
+        .expect("assigned specialist reply persisted");
+    assert_eq!(
+        reply.status,
+        "completed",
+        "specialist error_code={:?}, stage={:?}",
+        reply.error_code,
+        reply
+            .error_detail
+            .as_ref()
+            .map(|detail| detail.stage.as_str())
+    );
+    assert!(reply.error_code.is_none());
+    assert_eq!(reply.text, "Specialist completed the assigned notes task");
     let calls: Vec<_> = provider
         .received_requests()
         .await
