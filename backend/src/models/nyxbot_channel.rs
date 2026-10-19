@@ -280,23 +280,36 @@ impl std::fmt::Debug for NyxbotThread {
 /// Authorized source selectors only. Provider keys stay on ChannelMessage.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventMediaItem {
+    /// Index into the source row's standalone or embedded attachments.
     pub index: usize,
+    /// Selects the embedded attachment list when true.
     pub embedded: bool,
+    /// Declared media kind, such as image or file.
     pub kind: String,
+    /// Provider-declared size, when known.
     pub size_bytes: Option<u64>,
 }
+/// Native media admission identity, selectors and interruption notice lifecycle.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventMedia {
+    /// v1 native media identity shared by deliveries of the same provider message.
     pub key: String,
+    /// Declared attachment count, including items omitted by the parser's cap.
     pub declared: usize,
+    /// Authorized selectors retained from the source message.
     pub items: Vec<EventMediaItem>,
+    /// Bot component of the native chat scope for notices across channel rebuilds.
     #[serde(default)]
     pub channel_bot_id: String,
+    /// Platform component of the native chat scope for notices across channel rebuilds.
     #[serde(default)]
     pub platform: String,
+    /// Provider chat component of the notice scope, stable across channel rebuilds.
     pub platform_chat_id: String,
+    /// Set after five minutes without a source binding to a turn or queue.
     #[serde(default)]
     pub interrupted: bool,
+    /// Set when the interruption notice is consumed by the next owner turn.
     #[serde(default)]
     pub noted: bool,
 }
@@ -340,10 +353,11 @@ pub struct NyxbotEvent {
     pub relay_message_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
-    /// `running`, `queued`, `completed`, `failed`, or `refused`. Queued work is
+    /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is
     /// accepted with its original source before it is bound to an execution turn.
     /// A proven no-turn human Busy attempt may be `retryable`, atomically
     /// claimed as `resuming`.
+    /// Relay media events also terminalize as `completed` after intentional silence.
     pub status: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
