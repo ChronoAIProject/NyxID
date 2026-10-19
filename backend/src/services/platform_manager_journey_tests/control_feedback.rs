@@ -1,0 +1,106 @@
+//! Verified controls use durable bounded replies; proof bytes never enter them.
+use super::*;
+
+async fn assert_fixed(state: &AppState, reason: UnavailableReason) {
+    let row = state
+        .db
+        .collection::<PlatformManagerDelivery>(
+            crate::models::platform_manager_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {"reference.kind":"fixed"})
+        .sort(doc! {"created_at":-1})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, DeliveryState::Sent);
+    assert!(matches!(row.reference,
+        crate::models::platform_manager_delivery::DeliveryReference::Fixed {reason: stored}
+        if stored == format!("{reason:?}")));
+}
+
+#[test]
+fn rejected_native_confirmation_has_actionable_provider_correct_durable_feedback() {
+    crate::test_utils::run_native_journey_test("native_control_feedback", || async {
+        let j = NativeJourney::new().await;
+        j.dispatch(
+            j.admission(701, "confirm", Some(("code", "P-AAAA-BBBB")))
+                .await,
+        )
+        .await;
+        let calls = j.server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&calls.last().unwrap().body).unwrap();
+        let text = body["content"].as_str().unwrap();
+        assert!(text.contains("confirmation could not be accepted"));
+        assert!(text.contains("/nyx login") && text.contains("same private chat"));
+        assert!(!text.contains("P-AAAA-BBBB") && !text.contains("unavailable request"));
+        assert_fixed(&j.state, UnavailableReason::ConfirmationRejected).await;
+        assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+        j.state.db.drop().await.unwrap();
+    });
+}
+
+#[tokio::test]
+async fn malformed_and_rate_limited_telegram_controls_get_help_without_execution() {
+    let j = Journey::new().await;
+    j.webhook(&j.update(710, "/login unexpected-argument", false))
+        .await;
+    assert!(
+        j.sends().await.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("command could not be completed")
+    );
+    assert_fixed(&j.state, UnavailableReason::ControlInvalid).await;
+    for _ in 0..10 {
+        assert!(
+            crate::services::coordination_service::RateWindowStore::admit(
+                &j.state.db,
+                "personal_intent_sender",
+                &format!("{}:700", j.profile.id),
+                10,
+                std::time::Duration::from_secs(3600)
+            )
+            .await
+            .unwrap()
+            .allowed
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(711, "/login", false)).await;
+    let sends = j.sends().await;
+    let text = sends.last().unwrap()["text"].as_str().unwrap();
+    assert!(text.contains("Wait a moment") && text.contains("/help"));
+    assert!(!text.contains("NyxBot is busy") && !text.contains("nyx_pli_"));
+    assert_fixed(&j.state, UnavailableReason::ControlRateLimited).await;
+    assert_eq!(j.egress.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        j.state
+            .db
+            .collection::<Document>(crate::models::platform_link_intent::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    // Runtime context overrides bad-code guidance while linking is paused.
+    j.state
+        .db
+        .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME)
+        .update_one(
+            doc! {"platform_config_id":&j.profile.id},
+            doc! {"$set":{"personal_enabled":false}},
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    j.webhook(&j.update(712, "/confirm P-AAAA-BBBB", false))
+        .await;
+    assert_fixed(&j.state, UnavailableReason::PersonalDisabled).await;
+    assert!(
+        j.sends().await.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("Personal NyxBot is paused")
+    );
+    j.state.db.drop().await.unwrap();
+}

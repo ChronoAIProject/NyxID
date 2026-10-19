@@ -1553,12 +1553,13 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             "disabled credential owner"
         );
         assert_eq!(
-            super::super::platform_personal_binding_service::inventory_state(
+            super::super::platform_personal_binding_service::inventory_status(
                 &fixture.state.db,
                 &binding
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .state,
             crate::models::platform_personal_binding::PersonalBindingState::Revoked,
             "disabled credential owner"
         );
@@ -1569,6 +1570,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             )
             .await
             .unwrap();
+        let requests_before_inventory = fixture.server.received_requests().await.unwrap().len();
         for (cause, change) in [
             ("revoked", doc! {"status":"revoked"}),
             ("missing scopes", doc! {"token_scopes":""}),
@@ -1589,15 +1591,22 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
                     .unwrap();
             assert_eq!(status.state, "connection_repair_required", "{cause}");
             assert!(!status.faq_ready);
+            let inventory = super::super::platform_personal_binding_service::inventory_status(
+                &fixture.state.db,
+                &binding,
+            )
+            .await
+            .unwrap();
             assert_eq!(
-                super::super::platform_personal_binding_service::inventory_state(
-                    &fixture.state.db,
-                    &binding
-                )
-                .await
-                .unwrap(),
+                inventory.state,
                 crate::models::platform_personal_binding::PersonalBindingState::Revoked,
                 "{cause}"
+            );
+            assert_eq!(inventory.availability, super::super::platform_personal_binding_service::BindingAvailability::TemporarilyUnavailable, "{cause}");
+            assert_eq!(
+                fixture.server.received_requests().await.unwrap().len(),
+                requests_before_inventory,
+                "{cause}: inventory is read-only and makes no provider request"
             );
             assert!(
                 super::super::platform_personal_binding_service::native_manager_display(
@@ -1645,12 +1654,13 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
         );
         assert!(refreshable.faq_ready);
         assert_eq!(
-            super::super::platform_personal_binding_service::inventory_state(
+            super::super::platform_personal_binding_service::inventory_status(
                 &fixture.state.db,
                 &binding
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .state,
             crate::models::platform_personal_binding::PersonalBindingState::Active
         );
         assert_eq!(
@@ -1805,12 +1815,13 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .await
             .unwrap();
         assert_eq!(
-            super::super::platform_personal_binding_service::inventory_state(
+            super::super::platform_personal_binding_service::inventory_status(
                 &fixture.state.db,
                 &binding
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .state,
             crate::models::platform_personal_binding::PersonalBindingState::Revoked
         );
         fixture.state.db.drop().await.unwrap();

@@ -42,6 +42,7 @@ beforeEach(() => {
   query.data = managerRuntimeSchema.parse({
     contract_version: 1,
     supported: true,
+    state: "setup_incomplete",
     runtime: {
       manager_authority_epoch: 1,
       personal_control_revision: 2,
@@ -62,21 +63,58 @@ beforeEach(() => {
   mutateAsync.mockReset();
 });
 
-it.each([false, true])(
-  "native access badges follow runtime flags %s despite legacy enabled=false",
-  (enabled) => {
-    query.data.runtime!.public_enabled = enabled;
-    query.data.runtime!.personal_enabled = enabled;
-    render(<ManagerRuntimeSettings profile={profile} />);
-    expect(
-      screen.getByText(`Public ${enabled ? "enabled" : "paused"}`),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(`Personal ${enabled ? "enabled" : "paused"}`),
-    ).toBeInTheDocument();
-    expect(mutateAsync).not.toHaveBeenCalled();
-  },
-);
+it("shows healthy personal-only operation without a public AI blocker", () => {
+  query.data.state = "active";
+  query.data.runtime!.personal_enabled = true;
+  query.data.public_readiness.reason = "public_disabled";
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByText("Bot active")).toBeVisible();
+  expect(screen.getByText("Personal enabled")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "Personal NyxBot is active. Public answers are off.",
+  );
+  expect(
+    screen.queryByText(/restricted public runtime|Public access is paused/),
+  ).not.toBeInTheDocument();
+  expect(mutateAsync).not.toHaveBeenCalled();
+});
+
+it("gives initialized both-off controls an initial Enable action", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByText("Setup required")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent(/choose Enable bot/);
+  expect(
+    screen.queryByText(/restricted public runtime/),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Enable bot" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /Personal NyxBot/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Enable bot" }));
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledOnce());
+  expect(mutateAsync.mock.calls[0]![0].body).toMatchObject({
+    personal_enabled: true,
+    public_enabled: false,
+  });
+});
+
+it("shows enabled built-in FAQ independently of public AI evidence", () => {
+  query.data.state = "active";
+  query.data.runtime!.public_enabled = true;
+  query.data.public_readiness = {
+    ...query.data.public_readiness,
+    status: "faq_ready",
+    reason: null,
+  };
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByText("Public enabled")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "Public answers are enabled. Personal NyxBot is off.",
+  );
+  expect(screen.getByText(/Built-in FAQ is ready/)).toBeVisible();
+  expect(
+    screen.queryByText(/restricted public runtime/),
+  ).not.toBeInTheDocument();
+});
 
 it("native loading does not claim runtime is paused", () => {
   query.isPending = true;
@@ -84,7 +122,7 @@ it("native loading does not claim runtime is paused", () => {
   expect(screen.getByRole("status")).toHaveTextContent(
     "Loading bot access settings",
   );
-  expect(screen.queryByText("Public paused")).not.toBeInTheDocument();
+  expect(screen.queryByText("Public off")).not.toBeInTheDocument();
   expect(mutateAsync).not.toHaveBeenCalled();
 });
 
@@ -94,13 +132,21 @@ it("native unavailable query is reported without claiming a runtime state", () =
   expect(
     screen.getByText(/Public and personal bot access is unavailable/),
   ).toBeInTheDocument();
-  expect(screen.queryByText("Public paused")).not.toBeInTheDocument();
+  expect(screen.queryByText("Public off")).not.toBeInTheDocument();
   expect(mutateAsync).not.toHaveBeenCalled();
 });
 
 it("native transport failure does not blame Telegram", () => {
+  query.data.state = "connection_repair_required";
+  query.data.runtime!.public_enabled = true;
+  query.data.runtime!.personal_enabled = true;
   query.data.public_readiness.reason = "transport_unavailable";
   render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByText("Repair required")).toBeVisible();
+  expect(screen.getByText("Public configured")).toBeVisible();
+  expect(screen.getByText("Personal configured")).toBeVisible();
+  expect(screen.queryByText("Public enabled")).not.toBeInTheDocument();
+  expect(screen.queryByText("Personal enabled")).not.toBeInTheDocument();
   expect(screen.getByRole("status")).not.toHaveTextContent("Telegram");
   expect(screen.getByRole("status")).toHaveTextContent(
     /Connection repair required/i,
@@ -110,6 +156,7 @@ it("native transport failure does not blame Telegram", () => {
 
 it("resumes remembered FAQ-only modes atomically without public AI setup", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
+  query.data.state = "paused";
   query.data.runtime!.emergency_stopped = true;
   query.data.runtime!.remembered_public_enabled = true;
   query.data.runtime!.remembered_personal_enabled = false;
@@ -134,13 +181,13 @@ it("resumes remembered FAQ-only modes atomically without public AI setup", async
       personal_enabled: false,
       public_enabled: true,
       emergency_stopped: false,
-      public_policy: null,
     },
   });
 });
 
 it("explains both-off Resume and permits an explicit FAQ selection", async () => {
   const { fireEvent, waitFor } = await import("@testing-library/react");
+  query.data.state = "paused";
   query.data.runtime!.emergency_stopped = true;
   render(<ManagerRuntimeSettings profile={profile} />);
   expect(
@@ -178,3 +225,89 @@ it("keeps a single access flow when optional AI is expanded and requires an org 
   ).not.toBeInTheDocument();
   expect(mutateAsync).not.toHaveBeenCalled();
 });
+
+it("keeps saved public AI readiness visible through unsaved source and mode edits", async () => {
+  const { fireEvent } = await import("@testing-library/react");
+  query.data.state = "active";
+  query.data.runtime!.public_enabled = true;
+  query.data.runtime!.public_policy = {
+    source: "nyxagent",
+    profile: "saved-ai",
+    sponsor_owner_user_id: profile.funding_owner_user_id,
+    total_daily_credits: "1",
+    sender_daily_credits: "0.1",
+  };
+  query.data.public_readiness.reason = "public_not_ready";
+  render(<ManagerRuntimeSettings profile={profile} />);
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "Public answers are enabled.",
+  );
+  expect(screen.getByRole("status")).not.toHaveTextContent(
+    "Public answers are active",
+  );
+  expect(
+    screen.getByText("The restricted public runtime is not ready."),
+  ).toBeVisible();
+  fireEvent.change(screen.getByRole("combobox", { name: "Public answers" }), {
+    target: { value: "faq" },
+  });
+  fireEvent.click(screen.getByRole("checkbox", { name: /Public FAQ/ }));
+  expect(
+    screen.getByText("The restricted public runtime is not ready."),
+  ).toBeVisible();
+  expect(screen.queryByText(/Built-in FAQ is ready/)).not.toBeInTheDocument();
+  expect(screen.getByText("Public enabled")).toBeVisible();
+  expect(mutateAsync).not.toHaveBeenCalled();
+});
+
+it("sends only changed lanes on a normal save with saved public AI", async () => {
+  const { fireEvent, waitFor } = await import("@testing-library/react");
+  query.data.state = "active";
+  query.data.runtime!.personal_enabled = true;
+  query.data.runtime!.public_enabled = true;
+  query.data.runtime!.public_policy = {
+    source: "nyxagent",
+    profile: "saved-ai",
+    sponsor_owner_user_id: profile.funding_owner_user_id,
+    total_daily_credits: "1",
+    sender_daily_credits: "0.1",
+  };
+  render(<ManagerRuntimeSettings profile={profile} />);
+  fireEvent.click(screen.getByRole("checkbox", { name: /Personal NyxBot/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Save modes" }));
+  await waitFor(() => expect(mutateAsync).toHaveBeenCalledOnce());
+  const body = mutateAsync.mock.calls[0]![0].body;
+  expect(body.personal_enabled).toBe(false);
+  expect(body).not.toHaveProperty("public_enabled");
+  expect(body).not.toHaveProperty("public_policy");
+  expect(body).not.toHaveProperty("emergency_stopped");
+});
+
+it.each([
+  ["Public deployment is not ready", true],
+  ["Runtime controls changed; refresh before deciding", false],
+  ["Connection transport changed", false],
+])(
+  "preserves the save error %s and adds only relevant AI recovery guidance",
+  async (message, hint) => {
+    const { fireEvent } = await import("@testing-library/react");
+    query.data.state = "paused";
+    query.data.runtime!.emergency_stopped = true;
+    query.data.runtime!.remembered_personal_enabled = true;
+    query.data.runtime!.remembered_public_enabled = true;
+    query.data.runtime!.public_policy = {
+      source: "nyxagent",
+      profile: "saved-ai",
+      sponsor_owner_user_id: profile.funding_owner_user_id,
+      total_daily_credits: "1",
+      sender_daily_credits: "0.1",
+    };
+    mutateAsync.mockRejectedValue(new Error(message));
+    render(<ManagerRuntimeSettings profile={profile} />);
+    fireEvent.click(screen.getByRole("button", { name: "Resume bot" }));
+    expect(await screen.findByText(message)).toBeVisible();
+    const guidance = screen.queryByText(/To continue without public AI/);
+    if (hint) expect(guidance).toBeVisible();
+    else expect(guidance).not.toBeInTheDocument();
+  },
+);
