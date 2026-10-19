@@ -1353,3 +1353,68 @@ publication; no worker push/merge/deploy or remote mutation occurred.
   PM candidate/runtime/Clippy receipts and unchanged references. Earlier failed
   diagnostic preflights remain retained separately; no hosted rerun or final
   artifact, node transaction, W8, merge, deployment or release claim is made.
+
+### Hosted076 backend caller-policy fixture correction (2026-10-19)
+
+The actual a577/generated076 backend and coverage jobs were cancelled at90m.
+Their partial raw results remain separate: nextest2838PASS/10FAIL/38TIMEOUT,
+9473scheduled+11skipped; coverage4383ok/52FAILED/two observed ignored, without
+final JUnit/summary. The exact union54 names is retained; two billing cases
+were already corrected by d289. Focused original52 diagnostics first captured
+50 actual Pending300, one security_readiness_unavailable12900, and one25s
+incomplete case. A longer bounded observation captured that case's Pending.
+Terminated diagnostic children are incomplete observations, never pass results.
+API-key requester IDs are credential IDs: requester_id_equals_policy_owner
+alone does not establish actor equality; source/auth binds each actual caller.
+
+Only20 selected test/helper paths change. Explicit approval preferences are
+set for evidenced execution actors/effective owners, including later org and
+non-admin branches. The shared helper updates the actual settings row and
+asserts effective readback; generic fixture/user/database defaults do not opt
+out. Targeted org-team setup uses real test readiness/roster/heartbeat, retaining
+missing/old-roster controls. Production prefixes and default-required policy
+remain byte-identical. No timeout increase or production bypass was added.
+
+REST denial retains its allowed POST prelude and both blocked GET assertions.
+MCP denial retains explicit per-service true, denied zero-persistence and the
+allowed branch's one actual persisted approval. It joins an actual web reject,
+asserts rejected/web state, HTTP200 and parsed isError/rejection text. Exact
+redemption, no-settings assistant dispatch, required/reconnect, auto-provision,
+org policy and live scope/downstream/body/wire-log assertions remain covered.
+
+Validation uses an isolated detached exact GitHub-generated076 checkout plus
+the d289 billing test delta and candidate20; node and unrelated WIP are absent.
+Natural first build101/232.509s with two unqualified Json test errors remains;
+only those two sites were qualified. Intermediate4c selected54 results remain
+53pass/one natural301.743s failure from a later independent non-admin caller.
+The exact source/actor/defaulttrue observation justifies its one-line explicit
+preference. The remaining27 ran unchanged4c before that correction. Historical
+4c and focused diagnostics are not combined into a final passing matrix.
+
+Consistent final locked both-KMS no-run build passes644.220s with actual
+BuildFinished/compiler artifact, copied6313da949a09933e650d38bd5b81726376566dbc1fe629d3c9666373f8b84c4e.
+All4,281 recorded input path entries match before/after/current for each
+successful command; two existing documentation symlink aliases yield4,279
+resolved targets. These are not an exhaustive compiler/build-hook identity
+or environment tree. Selected20 main/isolated source hashes match exactly.
+Rustfmt check passes; locked scoped nyxid-server bin/tests Clippy with both
+KMS features and -D warnings passes289.480s. All28 successful command/log
+pairs are retained (build, format, Clippy, exact27,16groups,eight controls).
+
+Final copied-executable exact27 passes1/0/0, overlapping full group9. Actual
+16 full groups contain515 distinct top-level names:512pass/0fail/three existing
+ignored. Eight disjoint required/default/org/auto-provision approval controls
+pass8/0/0:520 distinct passes total. All original54 map to actual passing final
+group names. Every runtime test command enforces exact names/cardinality/ignored parity and
+no skip diagnostics, with unchanged binary/maps and Mongo returned idle.
+Two tools-manager local CLI E2E ignored entries are not executed by this batch.
+The ignored readiness child is explicitly invoked twice by its passing parent;
+those child invocations overlap the parent and are not additional coverage.
+
+The proposed local commit is exactly20 test sources plus this log on d289.
+Only selected20 blobs are bound to that tip; the entire4281 integrated snapshot
+is detached076, not the local branch or final release embedding. Original
+hosted failures, compile failure and4c natural failure remain retained. Node
+transaction/runtime/OS/Linux, W8, full new hosted CI, final artifacts/scans and
+publication gates remain open. Coordinator owns normal draft-PR publication;
+no worker push, merge/rebase, deploy, key-service or guest action occurred.

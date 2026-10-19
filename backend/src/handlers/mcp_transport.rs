@@ -7232,9 +7232,81 @@ mod tests {
                 crate::services::billing::BillingIngress::Mcp,
             )
             .expect("MCP billing route classification");
-        let response =
-            handle_tools_call(&state, &auth, None, &cancellation_request, false, permit).await;
+        let cancellation = Box::pin(handle_tools_call(
+            &state,
+            &auth,
+            None,
+            &cancellation_request,
+            false,
+            permit,
+        ));
+        // The allowlisted operation must persist its required approval. Resolve
+        // it through the web handler so this ordering control does not wait for
+        // the production 300-second expiry or disable the explicit policy.
+        let web_rejection = async {
+            let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(pending) = state
+                        .db
+                        .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                        .find_one(doc! {
+                            "user_id": &actor_id,
+                            "service_id": &service.id,
+                            "status": "pending",
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break pending;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("allowlisted MCP cancellation must reach required approval");
+            assert_eq!((pending.expires_at - pending.created_at).num_seconds(), 300);
+            assert_eq!(pending.approval_mode, ApprovalMode::PerRequest);
+            let axum::Json(decision) = crate::handlers::approvals::decide_request(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&actor_id),
+                Path(pending.id.clone()),
+                Default::default(),
+                axum::http::HeaderMap::new(),
+                axum::Json(crate::handlers::approvals::DecideRequest {
+                    approved: false,
+                    duration_sec: None,
+                }),
+            )
+            .await
+            .expect("reject allowlisted MCP request through the web handler");
+            assert_eq!(decision.status, "rejected");
+            let persisted = state
+                .db
+                .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .find_one(doc! { "_id": &pending.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(persisted.decision_channel.as_deref(), Some("web"));
+        };
+        let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(cancellation, web_rejection)
+        })
+        .await
+        .expect("web rejection must release the allowlisted MCP request");
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["result"]["isError"], true);
+        assert!(
+            result["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Approval request was rejected"),
+            "the MCP result must honor the web rejection"
+        );
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })

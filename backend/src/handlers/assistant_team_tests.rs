@@ -483,6 +483,8 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
     use crate::services::{feature_flag_service as flags, org_agent_service as org_agents};
     let (state, calls, server) = setup("team_org_delegation_report").await;
     let db = &state.db;
+    crate::services::security_readiness_service::ready_test_replica(db).await;
+
     let org = Uuid::new_v4().to_string();
     let mut org_user = test_user(&org, UserType::Org);
     org_user.slug = Some("delegation-team".into());

@@ -452,6 +452,9 @@ async fn finish(f: Fixture) {
 #[tokio::test]
 async fn local_journey_external_http_node_and_oauth_refresh() {
     let mut f = fixture("local_journey_external_http").await;
+    // The external credential journey keeps the owner generic preference explicit.
+    crate::test_utils::set_test_approval_preference(&f.state.db, &f.owner, false).await;
+
     let (child_id, secret) = child(&f).await;
     let (status, listed) = rpc(&f, &secret, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK, "Agent Key MCP discovery transport");

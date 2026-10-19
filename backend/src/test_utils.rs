@@ -225,6 +225,33 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(db)
 }
 
+/// Explicit actor preference for fixtures exercising execution independently
+/// of generic approval. Database/user constructors keep the production default;
+/// callers opt in at the request setup and per-service required policies still
+/// take precedence over this global preference.
+pub(crate) async fn set_test_approval_preference(
+    db: &mongodb::Database,
+    user_id: &str,
+    approval_required: bool,
+) {
+    let channel = crate::services::notification_service::get_or_create_channel(db, user_id)
+        .await
+        .expect("create explicit fixture approval preference");
+    db.collection::<mongodb::bson::Document>(crate::models::notification_channel::COLLECTION_NAME)
+        .update_one(
+            mongodb::bson::doc! { "_id": &channel.id },
+            mongodb::bson::doc! { "$set": { "approval_required": approval_required } },
+        )
+        .await
+        .expect("store fixture approval preference");
+    assert_eq!(
+        crate::services::approval_service::user_requires_approval(db, user_id)
+            .await
+            .expect("read effective fixture approval preference"),
+        approval_required,
+    );
+}
+
 /// Connect to a fresh test database through a client with MongoDB command
 /// monitoring enabled. Tests use this to prove read-only handler boundaries;
 /// setup commands are observable too, so callers should clear their recorder

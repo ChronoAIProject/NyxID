@@ -11274,6 +11274,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -12146,6 +12148,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &org_id, false).await;
+
         let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
@@ -12187,6 +12191,8 @@ mod proxy_resolution_integration_tests {
             .unwrap();
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
         let state = test_app_state(db.clone());
         let (base_url, echo_server) = start_node_echo_downstream().await;
@@ -12307,6 +12313,8 @@ mod proxy_resolution_integration_tests {
                 .unwrap();
             let state = test_app_state(db.clone());
             let owner = Uuid::new_v4().to_string();
+            crate::test_utils::set_test_approval_preference(&db, &owner, false).await;
+
             db.collection::<crate::models::user::User>(USERS)
                 .insert_one(test_user(&owner, UserType::Person))
                 .await
@@ -12443,6 +12451,8 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12531,6 +12541,8 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_auth_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12591,6 +12603,8 @@ mod proxy_resolution_integration_tests {
 
         let org_id = Uuid::new_v4().to_string();
         let member_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &member_id, false).await;
+
         seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
 
         let state = test_app_state(db.clone());
@@ -12645,6 +12659,8 @@ mod proxy_resolution_integration_tests {
         };
 
         let owner_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
             .await
@@ -12748,6 +12764,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &owner_id, false).await;
+
         let sa_id = insert_general_service_account(&db, &owner_id).await;
         let catalog_service_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
@@ -12930,6 +12948,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13083,6 +13103,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13174,6 +13196,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13233,6 +13257,8 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -13441,6 +13467,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         crate::services::role_service::seed_system_roles(&db)
             .await
             .expect("seed platform roles");
@@ -14087,6 +14115,7 @@ mod proxy_resolution_integration_tests {
 
         enable_wire_log_flag(&db).await;
         let non_admin_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &non_admin_id, false).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&non_admin_id, UserType::Person))
             .await
@@ -14259,6 +14288,8 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::test_utils::set_test_approval_preference(&db, &user_id, false).await;
+
         crate::services::role_service::seed_system_roles(&db)
             .await
             .expect("seed platform roles");
