@@ -1257,7 +1257,7 @@ mod tests {
         assert_eq!(reduced.public_policy, Some(saved));
         patch.expected_personal_control_revision = reduced.personal_control_revision;
         patch.expected_public_policy_revision = reduced.public_policy_revision;
-        patch.public_deployment_digest = Some("explicit-revalidation".into());
+        patch.public_deployment_digest = Some("ab".repeat(32));
         assert!(
             matches!(update(&db, &actor, b"audit", &id, &patch, &NoPublic).await,
             Err(AppError::Conflict(message)) if message == "public proof unavailable")
