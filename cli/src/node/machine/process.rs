@@ -334,6 +334,86 @@ fn deny_agent_namespaces() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Probe in disposable children: never install filters or enter namespaces in
+/// the supervisor. No browser, listener, account or persistent file is created.
+#[cfg(target_os = "linux")]
+async fn probe_status(mut command: Command) -> Result<()> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    anyhow::ensure!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), command.status())
+            .await??
+            .success(),
+        "separated_mechanism_probe_failed"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn probe_command_seccomp(identity: &Identity) -> Result<()> {
+    let mut command = Command::new("/bin/true");
+    identity.prepare_agent(&mut command)?;
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1
+                || libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0)
+                    != libc::SECCOMP_MODE_FILTER as libc::c_int
+                || libc::syscall(libc::SYS_unshare, 0) != -1
+                || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+            {
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            Ok(())
+        });
+    }
+    probe_status(command).await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn probe_browser_namespaces(identity: &Identity) -> Result<()> {
+    let mut command = Command::new("/bin/true");
+    // Browser children deliberately retain namespace access. Applying the
+    // command filter here would manufacture an unsupported-host result.
+    identity.prepare(&mut command)?;
+    let uid_map = format!("0 {} 1\n", identity.uid);
+    let gid_map = format!("0 {} 1\n", identity.gid);
+    unsafe {
+        command.pre_exec(move || {
+            // Only syscalls and preallocated bytes after fork. Mapping happens
+            // after the real UID/GID/group drop, with NNP already installed.
+            let write_map = |path: &std::ffi::CStr, bytes: &[u8]| -> std::io::Result<()> {
+                let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let count = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                let error = std::io::Error::last_os_error();
+                libc::close(fd);
+                if count < 0 {
+                    return Err(error);
+                }
+                if count as usize != bytes.len() {
+                    return Err(std::io::Error::from_raw_os_error(libc::EIO));
+                }
+                Ok(())
+            };
+            if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            write_map(c"/proc/self/setgroups", b"deny")?;
+            write_map(c"/proc/self/uid_map", uid_map.as_bytes())?;
+            write_map(c"/proc/self/gid_map", gid_map.as_bytes())?;
+            if libc::unshare(libc::CLONE_NEWPID | libc::CLONE_NEWNET) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    probe_status(command).await
+}
+
 pub fn request_env(command: &mut Command, values: &BTreeMap<String, String>) -> Result<()> {
     if values.len() > 64 || values.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > 16384 {
         bail!("environment limit exceeded");

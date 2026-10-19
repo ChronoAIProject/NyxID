@@ -25,6 +25,7 @@ mod memory_capture;
 mod native_desktop;
 mod owner_job;
 mod process;
+mod separation;
 pub mod transfer;
 pub mod update;
 mod usage;
@@ -873,6 +874,7 @@ impl Runtime {
             } else {
                 false
             };
+        let separation_evidence = self.separation_evidence().await;
         let profile = MachineProfile {
             authority_timing_v1: true,
             installation: Some(update::installation(&self.config)),
@@ -886,7 +888,8 @@ impl Runtime {
             browser: self.config.browser,
             authority_versions: vec![2, 3],
             exact_cancel: true,
-            separated: Some(self.context_support().await),
+            separated: Some(separation_evidence.support()),
+            separation_evidence: Some(separation_evidence),
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self
@@ -956,13 +959,19 @@ impl Runtime {
             .and_then(|i| i.desktop.as_ref())
             .map(|d| (d.display.clone(), d.authority.clone()))
     }
-    #[cfg(not(target_os = "linux"))]
+    async fn separation_evidence(&self) -> nyxid_machine::context::Evidence {
+        separation::observe(
+            &self.config,
+            &self.identity,
+            &self.browser_identity,
+            self.dev_identity.as_ref(),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
     async fn context_support(&self) -> nyxid_machine::context::Support {
-        nyxid_machine::context::Support {
-            available: false,
-            landlock_abi: None,
-            reason: Some("separated_requires_linux".into()),
-        }
+        self.separation_evidence().await.support()
     }
 
     fn desktop_for(&self, display: nyxid_machine::desktop::Display) -> &desktop::Desktop {
