@@ -2733,6 +2733,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::remote_machine::operation),
         )
         .route(
+            "/remote-machine-operations/{operation_id}/retry-delete",
+            post(handlers::remote_machine::retry_delete),
+        )
+        .route(
             "/onboarding/setups/{id}/binding",
             post(handlers::platform_setups::attach_binding),
         )

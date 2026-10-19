@@ -174,6 +174,7 @@ pub async fn finalize_stop(
     db.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
         let result:AppResult<ManagedMachine>=async {
             if deleting && !super::remote_machine_service::deletion_authorized_in_session(&db,session,&machine.node_id).await? {return Err(pending());}
+            if deleting && !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(AppError::Conflict("creation_result_unknown".into()));}
             super::remote_machine_runtime::require_accounting_final_in_session(&db,session,&machine).await?;
             let now=bson::DateTime::now();
             let updated=db.collection::<ManagedMachine>(MACHINES).find_one_and_update(
@@ -187,6 +188,48 @@ pub async fn finalize_stop(
                 ).session(&mut *session).await?;
                 if machine.free_slot && released.matched_count!=1{return Err(pending());}
             }
+            Ok(updated)
+        }.await;super::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+/// Private delete-only finality. No ordinary observation or uncertainty field
+/// is changed, and the same persisted evidence is checked by stop settlement.
+pub(crate) async fn finalize_persisted_delete(
+    db: &Database,
+    machine: &ManagedMachine,
+) -> AppResult<ManagedMachine> {
+    let progress = machine.delete_recovery.as_ref().ok_or_else(pending)?;
+    if !super::remote_machine_delete_recovery::finality_ready(machine, progress) {
+        return Err(pending());
+    }
+    let db = db.clone();
+    let machine = machine.clone();
+    let progress = progress.clone();
+    db.client().start_session().await?.start_transaction().write_concern(mongodb::options::WriteConcern::majority()).and_run2(async move |session| {
+        let result:AppResult<ManagedMachine>=async {
+            if !super::remote_machine_service::deletion_authorized_in_session(&db,session,&machine.node_id).await?
+                || !super::remote_machine_operation_service::creation_responsibilities_terminal_in_session(&db,session,&machine).await? {return Err(pending());}
+            super::remote_machine_runtime::require_accounting_final_in_session(&db,session,&machine).await?;
+            let now=bson::DateTime::now();
+            let updated=db.collection::<ManagedMachine>(MACHINES).find_one_and_update(doc!{
+                "_id":&machine.node_id,"owner_id":&machine.owner_id,"revision":machine.revision,"resource_state":"deleting",
+                "active_operation_id":&progress.operation_id,"runtime_generation":progress.runtime_generation,"credential_epoch":progress.credential_epoch,
+                "writer_fence":&progress.writer_fence,"native_uncertainty":&progress.original_uncertainty,"delete_recovery.evidence_version":super::remote_machine_delete_recovery::EVIDENCE_VERSION,"delete_recovery":bson::to_bson(&progress).map_err(|_|pending())?,
+                "deletion_basis":bson::to_bson(&machine.deletion_basis).map_err(|_|pending())?,"writer_admitted":false,
+            },doc!{"$set":{"resource_state":"deleted","billing_state":"closed","authorization_state":"revoked","writer_admitted":false,
+                "cleanup_state":"complete","cleanup_evidence_digest":&progress.evidence_id,"updated_at":now},"$inc":{"revision":1_i64}})
+                .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(pending)?;
+            let changed=db.collection::<Document>(super::remote_machine_service::FREE_SLOTS).update_one(doc!{"_id":&machine.owner_id,"machine_id":&machine.node_id,"state":{"$in":["reserved","active","releasing"]}},
+                doc!{"$set":{"state":"released","release_evidence_digest":&progress.evidence_id,"released_at":now,"updated_at":now},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
+            if machine.free_slot && changed.matched_count!=1{return Err(pending());}
+            let changed=db.collection::<Document>(crate::models::remote_machine_operation::COLLECTION_NAME).update_one(doc!{"_id":&progress.operation_id,"machine_id":&machine.node_id,"owner_id":&machine.owner_id,"action":"delete","state":{"$in":["accepted","applying","reconciling"]}},
+                doc!{"$set":{"state":"succeeded","cleanup_state":"complete","evidence_digest":&progress.evidence_id,"terminal_at":now,"updated_at":now,"error_code":bson::Bson::Null,"error_message":bson::Bson::Null}}).session(&mut *session).await?;
+            if changed.matched_count!=1{return Err(pending());}
+            db.collection::<Document>(crate::models::node::COLLECTION_NAME).update_one(doc!{"_id":&machine.node_id,"user_id":&machine.owner_id},
+                doc!{"$set":{"is_active":false,"status":"offline","signing_secret_encrypted":bson::Bson::Null,
+                "auth_token_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),"signing_secret_hash":crate::crypto::token::hash_token(&uuid::Uuid::new_v4().to_string()),"connection_owner":bson::Bson::Null},"$inc":{"machine_authority_admission_fence":1_i64}}).session(&mut *session).await?;
+            super::remote_machine_service::append_owner_audit(&db,session,&machine.owner_id,"machine_delete_recovery_completed",&machine.node_id,&progress.operation_id).await?;
             Ok(updated)
         }.await;super::api_key_mutation_service::transaction_result(result)
     }).await.map_err(super::api_key_mutation_service::map_transaction_error)

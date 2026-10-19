@@ -517,8 +517,16 @@ async fn previously_queued_unconsented_delete_cannot_finalize_or_release_slot() 
         .delete_one(doc! {"_id":&owner})
         .await
         .unwrap();
+    let result = lifecycle::finalize_unallocated_delete(&db, id).await;
+    let outcome = match &result {
+        Ok(Some(_)) => "finalized",
+        Ok(None) => "pending",
+        Err(crate::errors::AppError::Conflict(code)) => code,
+        Err(_) => "other_error",
+    };
     assert!(
-        matches!(lifecycle::finalize_unallocated_delete(&db,id).await,Err(crate::errors::AppError::Conflict(code)) if code=="machine_owner_deletion_basis_required")
+        matches!(&result, Err(crate::errors::AppError::Conflict(code)) if code=="machine_owner_deletion_basis_required"),
+        "unconsented deletion must report its authorization failure: {outcome}"
     );
     assert_eq!(
         Box::pin(lifecycle::suspend_ineligible(&db)).await.unwrap(),
@@ -1370,6 +1378,49 @@ async fn remote_machine_never_submitted_delete_finalizes_without_provider_assump
         .await
         .unwrap()
         .is_none()
+    );
+    assert!(
+        !lifecycle::entitlement(&db, &owner)
+            .await
+            .unwrap()
+            .free_slot_available
+    );
+}
+
+#[tokio::test]
+async fn remote_machine_unallocated_delete_rejects_unresolved_submission_responsibility() {
+    let (db, owner) = lifecycle_fixture("delete_unresolved_submission").await;
+    let created = lifecycle::create_machine(&db, creation(&owner, "create"))
+        .await
+        .unwrap();
+    let deletion = lifecycle::request_action(
+        &db,
+        action(&created.machine, LifecycleAction::Delete, "delete"),
+    )
+    .await
+    .unwrap();
+    db.collection::<mongodb::bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &created.machine.node_id},
+            doc! {"$set": {"runtime_submission_started_at": mongodb::bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        lifecycle::finalize_unallocated_delete(&db, &created.machine.node_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "generation zero must not erase a persisted in-flight submission obligation"
+    );
+    let stored = lifecycle::get_machine(&db, &owner, &created.machine.node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.resource_state, ResourceState::Deleting);
+    assert_eq!(
+        stored.active_operation_id.as_deref(),
+        Some(deletion.operation.id.as_str())
     );
     assert!(
         !lifecycle::entitlement(&db, &owner)

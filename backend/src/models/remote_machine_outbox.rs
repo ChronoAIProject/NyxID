@@ -70,14 +70,76 @@ pub struct MachineEffectOutbox {
     pub attempts: i64,
     #[serde(default)]
     pub claim_id: Option<String>,
+    /// Set only when claiming a genuinely pending, never attempted effect.
+    /// Delivery bookkeeping on legacy claims cannot recreate this authority.
+    #[serde(default)]
+    pub undispatched_claim_id: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub claimed_until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub available_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub submission: Option<MachineSubmission>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+/// A timeout or worker lease expiry leaves this original request unresolved.
+/// The immutable outbox id retains the original responsibility. Each dispatch
+/// has its own result so a retry cannot hide an older request still in flight.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct MachineSubmission {
+    pub request_id: String,
+    pub runtime_generation: i64,
+    pub credential_epoch: i64,
+    pub writer_fence: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub started_at: DateTime<Utc>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cancelled_before_dispatch: bool,
+    pub result_sandbox_uid: Option<String>,
+    pub result_resource_version: Option<String>,
+    #[serde(default)]
+    pub dispatches: Vec<MachineSubmissionDispatch>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct MachineSubmissionDispatch {
+    pub id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub started_at: DateTime<Utc>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub cancelled_before_dispatch: bool,
+    pub result_sandbox_uid: Option<String>,
+    pub result_resource_version: Option<String>,
+}
+
+impl std::fmt::Debug for MachineSubmissionDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineSubmissionDispatch")
+            .field("identity", &"[REDACTED]")
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field("cancelled_before_dispatch", &self.cancelled_before_dispatch)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MachineSubmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineSubmission")
+            .field("identity", &"[REDACTED]")
+            .field("started_at", &self.started_at)
+            .field("completed_at", &self.completed_at)
+            .field("cancelled_before_dispatch", &self.cancelled_before_dispatch)
+            .finish()
+    }
 }

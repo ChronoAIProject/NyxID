@@ -9,11 +9,17 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
-import type { RemoteMachineEvent } from "@/schemas/machines";
+import type {
+  RemoteMachineEvent,
+  RemoteMachineOperation,
+} from "@/schemas/machines";
 import type { NodeInfo } from "@/types/nodes";
 import { useAuthStore } from "@/stores/auth-store";
 import { RemoteMachineDetail } from "./remote-machine-detail";
-import { remoteMachinePaidQuoteFixture } from "@/test/remote-machine-fixture";
+import {
+  remoteMachineOperationFixture,
+  remoteMachinePaidQuoteFixture,
+} from "@/test/remote-machine-fixture";
 
 const fixture = vi.hoisted(() => ({
   machine: {
@@ -49,6 +55,9 @@ const fixture = vi.hoisted(() => ({
   action: vi.fn(),
   refetch: vi.fn(),
   quote: vi.fn(),
+  operation: undefined as RemoteMachineOperation | undefined,
+  retryDelete: vi.fn(),
+  retryPending: false,
 }));
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -79,7 +88,14 @@ vi.mock("@/hooks/use-machines", () => ({
     isPending: false,
     refetch: fixture.refetch,
   }),
-  useRemoteMachineOperation: () => ({ data: undefined, isPending: false }),
+  useRemoteMachineOperation: () => ({
+    data: fixture.operation,
+    isPending: false,
+  }),
+  useRetryRemoteMachineDelete: () => ({
+    mutateAsync: fixture.retryDelete,
+    isPending: fixture.retryPending,
+  }),
   useRemoteMachineEvents: () => ({
     data: { events: fixture.events, next_cursor: null },
     isPending: false,
@@ -138,6 +154,9 @@ afterEach(() => {
   Reflect.deleteProperty(fixture.machine, "funded_until");
   fixture.events = [];
   fixture.error = undefined;
+  fixture.operation = undefined;
+  fixture.retryPending = false;
+  fixture.machine.active_operation_id = null;
   for (const key of [
     "name",
     "capabilities",
@@ -146,6 +165,95 @@ afterEach(() => {
     "specialist_assignment_error",
   ])
     Reflect.deleteProperty(fixture.machine, key);
+});
+
+function stoppedDelete() {
+  Object.assign(fixture.machine, {
+    resource_state: "deleting",
+    active_operation_id: "operation-1",
+  });
+  fixture.operation = {
+    ...remoteMachineOperationFixture,
+    machine_id: fixture.machine.node_id,
+    action: "delete",
+    state: "reconciling",
+    cleanup_state: "pending",
+    retry_count: 15639,
+    delete_retry_attempts: 10,
+    delete_retry_limit: 10,
+    delete_retry_stopped: true,
+  };
+}
+
+it("offers a manual retry of the same exhausted delete and preserves the cumulative count", async () => {
+  stoppedDelete();
+  fixture.retryDelete.mockResolvedValueOnce({ operation: fixture.operation });
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(
+    screen.getByText(/Automatic deletion attempts stopped/),
+  ).toBeInTheDocument();
+  expect(screen.getByText("15639")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(1));
+  expect(fixture.retryDelete).toHaveBeenCalledWith(
+    expect.objectContaining({
+      machineId: fixture.machine.node_id,
+      operationId: "operation-1",
+      body: { expected_revision: 5, expected_retry_count: 15639 },
+      idempotencyKey: expect.any(String),
+    }),
+  );
+  expect(fixture.action).not.toHaveBeenCalled();
+});
+
+it("disables the manual delete retry while submitting and shows a failed retry", async () => {
+  stoppedDelete();
+  fixture.retryPending = true;
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  expect(
+    screen.getByRole("button", { name: "Retrying deletion…" }),
+  ).toBeDisabled();
+  fixture.retryPending = false;
+  fixture.retryDelete.mockRejectedValueOnce(
+    new Error("Reload the latest operation."),
+  );
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  expect(
+    await screen.findByText("Reload the latest operation."),
+  ).toBeInTheDocument();
+});
+
+it("reuses the same manual retry request after an unknown network result", async () => {
+  stoppedDelete();
+  fixture.retryDelete.mockRejectedValueOnce(new Error("Connection lost"));
+  fixture.retryDelete.mockResolvedValueOnce({ operation: fixture.operation });
+  render(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  expect(await screen.findByText("Connection lost")).toBeInTheDocument();
+  const first = fixture.retryDelete.mock.calls[0]?.[0];
+  await userEvent.click(screen.getByRole("button", { name: "Retry deletion" }));
+  await waitFor(() => expect(fixture.retryDelete).toHaveBeenCalledTimes(2));
+  expect(fixture.retryDelete.mock.calls[1]?.[0]).toEqual(first);
+});
+
+it("does not offer retry for another Machine or an active automatic round", () => {
+  stoppedDelete();
+  fixture.operation!.delete_retry_stopped = false;
+  const view = render(
+    <RemoteMachineDetail machineId={fixture.machine.node_id} />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "Retry deletion" }),
+  ).not.toBeInTheDocument();
+  fixture.operation!.delete_retry_stopped = true;
+  fixture.operation!.machine_id = "other-machine";
+  view.rerender(<RemoteMachineDetail machineId={fixture.machine.node_id} />);
+  expect(
+    screen.queryByRole("button", { name: "Retry deletion" }),
+  ).not.toBeInTheDocument();
 });
 
 it("keeps resource, billing, authorization and unknown measurements distinct", () => {

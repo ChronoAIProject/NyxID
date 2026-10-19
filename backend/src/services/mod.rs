@@ -385,6 +385,8 @@ pub mod machine_oauth_consent_service;
 pub mod machine_external_grant_service;
 pub mod machine_external_service;
 
+pub mod remote_machine_delete_recovery;
+pub mod remote_machine_delete_retry;
 pub mod remote_machine_events;
 pub mod remote_machine_manager;
 pub mod remote_machine_native;
