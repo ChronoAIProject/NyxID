@@ -9,6 +9,10 @@ use crate::{
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
 
+static INGESTION_ORIGINS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
 async fn media_source(
     state: &AppState,
     row: &NyxbotChannel,
@@ -16,6 +20,12 @@ async fn media_source(
     native: &str,
     text: &str,
 ) -> ChannelMessage {
+    let origin = INGESTION_ORIGINS
+        .lock()
+        .unwrap()
+        .get(&row.channel_bot_id)
+        .cloned()
+        .unwrap_or_else(|| "https://open.larksuite.com".into());
     let inbound = InboundMessage {
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
@@ -29,7 +39,7 @@ async fn media_source(
         attachments: vec![InboundAttachment {
             content_type: "image".into(),
             url: format!(
-                "https://open.larksuite.com/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image"
+                "{origin}/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image"
             ),
             platform_message_id: Some(native.into()),
             image_key: Some("img_receipt".into()),
@@ -1189,6 +1199,10 @@ pub(super) async fn ingestion_provider(
     bytes: Vec<u8>,
 ) -> MockServer {
     let provider = MockServer::start().await;
+    INGESTION_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), provider.uri());
     Mock::given(method("POST"))
         .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
         .respond_with(
@@ -1234,7 +1248,7 @@ async fn gateway_ready(state: &AppState, key: &str) {
     assert_eq!(
         put_binding(
             State(state.clone()),
-            Path("bnd_media".into()),
+            Path("bnd_chats".into()),
             bearer(key),
             Json(binding_body(key, OWNER))
         )
@@ -1475,7 +1489,11 @@ async fn channel_media_gateway_closed_shape_compatibility_forged_sources_and_mis
             }
             "text" => body["event_context"]["activity"]["kind"]["attachments"] = json!([]),
             "telegram" => {
-                body["event_context"]["activity"]["source"]["platform"] = json!("telegram")
+                body["event_context"]["activity"]["source"] =
+                    json!({"type":"telegram","platform":"telegram","bot_id":"77"});
+                body["event_context"]["activity"]["kind"]["attachments"] = json!([
+                    {"kind":"image","source":{"type":"telegram","file_id":"fixture_file","file_unique_id":"fixture_unique"}}
+                ]);
             }
             _ => {}
         }
@@ -1591,6 +1609,10 @@ async fn streaming_ingestion_provider(
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
+    INGESTION_ORIGINS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), origin.clone());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

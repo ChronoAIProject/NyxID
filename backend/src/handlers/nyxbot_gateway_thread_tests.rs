@@ -986,7 +986,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
         let (mut b, id_b) = f
             .input("receipt with caption", ThreadAddress::Mention, false, true)
             .await;
-        let _provider = super::media_tests::ingestion_provider(
+        let provider = super::media_tests::ingestion_provider(
             &f.state,
             &f.row,
             super::media_tests::native_png(),
@@ -996,7 +996,19 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
             body["event_context"]["activity"]["kind"]["attachments"] =
                 json!([{"kind":"image","source":{"type":"nyxid_relay","index":0}}]);
             body["event_context"]["activity"]["thread"]["message_id"] = json!("om_native_receipt");
-            let item=StoredAttachment{content_type:"image".into(),provider_ref:"https://open.larksuite.com/open-apis/im/v1/messages/om_native_receipt/resources/img_receipt?type=image".into(),platform_message_id:Some("om_native_receipt".into()),image_key:Some("img_receipt".into()),file_key:None,filename:None,mime_type:None,size_bytes:Some(42)};
+            let item = StoredAttachment {
+                content_type: "image".into(),
+                provider_ref: format!(
+                    "{}/open-apis/im/v1/messages/om_native_receipt/resources/img_receipt?type=image",
+                    provider.uri()
+                ),
+                platform_message_id: Some("om_native_receipt".into()),
+                image_key: Some("img_receipt".into()),
+                file_key: None,
+                filename: None,
+                mime_type: None,
+                size_bytes: Some(42),
+            };
             let facts: ChannelThreadFacts =
                 serde_json::from_value(body["event_context"]["activity"]["thread"].clone())
                     .unwrap();
@@ -1044,6 +1056,7 @@ async fn channel_media_relay_and_gateway_follow_share_one_native_barrier_and_aut
             wait_for_calls(&f.calls, 1).await;
         }
         assert_eq!(f.calls.lock().await.len(), 1, "gateway={gateway}");
+        assert!(f.calls.lock().await[0].to_string().contains("input_image"));
         let events: Vec<NyxbotEvent> = f
             .state
             .db
@@ -1175,7 +1188,8 @@ async fn channel_media_gateway_follow_post_text_flags_guest_and_unaddressed_firs
             let item = StoredAttachment {
                 content_type: "image".into(),
                 provider_ref: format!(
-                    "https://open.larksuite.com/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image"
+                    "{}/open-apis/im/v1/messages/{native}/resources/img_receipt?type=image",
+                    provider.uri()
                 ),
                 platform_message_id: Some(native.into()),
                 image_key: Some("img_receipt".into()),
