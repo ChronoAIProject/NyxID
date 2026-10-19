@@ -4854,29 +4854,6 @@ pub async fn relay_callback(
         .as_str()
         .map(str::to_owned);
     let raw = payload["raw_platform_data"].clone();
-    let text = if matches!(row.platform.as_str(), "lark" | "feishu")
-        && raw
-            .pointer("/event/message/message_type")
-            .and_then(Value::as_str)
-            == Some("post")
-        && feature_flag_service::personal_flag_enabled(
-            &state.db,
-            &row.user_id,
-            feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
-        )
-        .await
-        .unwrap_or(false)
-    {
-        let bot_id = match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
-            Ok(bot) => own_user_id(&state, &bot).await,
-            Err(_) => None,
-        };
-        crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
-            .map(|post| post.text)
-            .unwrap_or_default()
-    } else {
-        chats::named_mentions(&text, &raw)
-    };
     let raw_title = ["message", "edited_message", "channel_post"]
         .iter()
         .find_map(|key| raw.get(*key))
@@ -4904,6 +4881,30 @@ pub async fn relay_callback(
                     return Ok(());
                 }
             }
+            let text = if matches!(row.platform.as_str(), "lark" | "feishu")
+                && raw
+                    .pointer("/event/message/message_type")
+                    .and_then(Value::as_str)
+                    == Some("post")
+                && feature_flag_service::personal_flag_enabled(
+                    &state.db,
+                    &row.user_id,
+                    feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                let bot_id =
+                    match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+                        Ok(bot) => own_user_id(&state, &bot).await,
+                        Err(_) => None,
+                    };
+                crate::services::channel_adapters::lark::post_from_raw(&raw, bot_id.as_deref())
+                    .map(|post| post.text)
+                    .unwrap_or_default()
+            } else {
+                chats::named_mentions(&text, &raw)
+            };
             if Box::pin(thread_follow::inbound(
                 &state,
                 &row,

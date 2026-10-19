@@ -957,3 +957,153 @@ async fn channel_media_embedded_selectors_fetch_from_lark_feishu_adapter_origin(
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn channel_media_relay_post_recomputes_after_ack_and_flag_off_keeps_empty_input() {
+    use crate::services::channel_platform::PlatformAdapter;
+    let (state, row, _, calls, server) = media_fixture("media_relay_post_ack", "direct").await;
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let identity_key = (bot.id.clone(), bot.app_id.clone().unwrap_or_default());
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), "ou_own_bot".into());
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"tenant_access_token":"test-token","expire":7200})),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code":0,"data":{"message_id":"om_reply"}})),
+        )
+        .mount(&provider)
+        .await;
+    let adapter = std::sync::Arc::new(
+        crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+            &provider.uri(),
+            "lark",
+        ),
+    );
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), adapter.clone());
+    for enabled in [false, true] {
+        if enabled {
+            enable_media(&state).await;
+        }
+        let id = if enabled { "post-on" } else { "post-off" };
+        let raw = json!({
+            "header":{"event_type":"im.message.receive_v1","event_id":id},
+            "event":{
+                "sender":{"sender_type":"user","sender_id":{"open_id":"human"}},
+                "message":{
+                    "message_id":id,"chat_id":"oc_human","chat_type":"p2p","message_type":"post",
+                    "mentions":[{"key":"@_user_1","id":{"open_id":"ou_own_bot"},"name":"Receipt helper"}],
+                    "content":json!({"title":"Receipt","content":[[
+                        {"tag":"at","user_id":"@_user_1"},
+                        {"tag":"text","text":"Dinner"},
+                        {"tag":"img","image_key":"img_receipt"}
+                    ]]}).to_string()
+                }
+            }
+        });
+        let inbound = adapter
+            .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+            .await
+            .unwrap();
+        assert!(inbound[0].text.is_none(), "callback post text stays empty");
+        let source = crate::services::channel_relay_service::inbound_metadata(
+            &row.channel_bot_id,
+            row.route_id.as_deref().unwrap(),
+            OWNER,
+            "lark",
+            &inbound[0],
+            &row.route_api_key_id,
+            id,
+        );
+        state
+            .db
+            .collection::<ChannelMessage>(MESSAGES)
+            .insert_one(source)
+            .await
+            .unwrap();
+        let body = json!({
+            "message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
+            "conversation":{"id":row.route_id,"platform_id":"oc_human","type":"private"},
+            "sender":{"platform_id":"human","display_name":"Alice"},
+            "content":{"type":"unknown","text":null,"attachments":[]},
+            "raw_platform_data":raw,
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let token = crate::crypto::jwt::generate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            &format!("jti-{id}"),
+            &row.route_api_key_id,
+            id,
+            "lark",
+            &sha256_hex(&bytes),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+        let (_watch, done) = watch_relay_callback(&row.id, id);
+        assert_eq!(
+            relay_callback(
+                State(state.clone()),
+                Path(row.id.clone()),
+                headers,
+                Bytes::from(bytes)
+            )
+            .await
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        // On this current-thread runtime, newly spawned work cannot run until we yield.
+        // An identity cache entry here would mean lookup still preceded the acknowledgement.
+        assert!(!OWN_USER_IDS.lock().unwrap().contains_key(&identity_key));
+        tokio::time::timeout(Duration::from_secs(20), done)
+            .await
+            .unwrap()
+            .unwrap();
+        if enabled {
+            let calls = calls.lock().await;
+            assert_eq!(calls.len(), 1);
+            let input = calls[0]["input"].as_str().unwrap();
+            assert!(input.ends_with("Receipt\nDinner"), "{input}");
+            assert!(!input.contains("@Receipt helper"), "{input}");
+            assert_eq!(
+                OWN_USER_IDS.lock().unwrap()[&identity_key].0.as_deref(),
+                Some("ou_own_bot")
+            );
+        } else {
+            assert!(calls.lock().await.is_empty());
+            let event = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"event_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(event.turn_id.is_none());
+            assert!(!OWN_USER_IDS.lock().unwrap().contains_key(&identity_key));
+        }
+    }
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&bot.id);
+    TEST_BOT_USER_IDS.lock().unwrap().remove(&bot.id);
+    OWN_USER_IDS.lock().unwrap().remove(&identity_key);
+    server.abort();
+}
