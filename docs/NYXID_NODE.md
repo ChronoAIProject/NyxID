@@ -640,19 +640,28 @@ AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
 
 | Setup option | New-assignment intent |
 |---|---|
-| Omitted on a new setup, or `--separation automatic` | Choose separated only after every supported mechanism is confirmed; otherwise stop with a reason. |
+| Omitted on a new setup, or `--separation automatic` | Choose separated only after every supported mechanism is confirmed; otherwise explain the reason and offer an informed legacy choice when stdin and stderr are terminals. |
 | `--separation require-separated` | Require confirmed separation; never fall back to shared access. |
 | `--separation shared-legacy` | Explicitly accept shared legacy access after reviewing the warning below. |
 
-On macOS or another unsupported configuration, automatic/required setup stops
-before pairing when the missing prerequisite is already known. To deliberately
-use a single-user host, run `nyxid node setup --machine --computer --separation
+On macOS or another unsupported configuration, automatic setup prints the
+observed reason and the full warning below, then asks
+`Continue with shared legacy mode? [y/N]` when stdin **and** stderr are terminals.
+Only `y` records an explicit `shared_legacy` owner choice. No, an empty answer
+or EOF stops setup with a nonzero exit and retains automatic intent.
+`require-separated` never prompts. Noninteractive automatic setup also stops;
+its error names the reason and the exact `--separation shared-legacy` flag.
+Known missing prerequisites are handled before pairing. To deliberately
+use a single-user host in a script, run `nyxid node setup --machine --computer --separation
 shared-legacy`. **Shared legacy access gives agent commands the full access of
 their OS user. A misbehaving or prompt-injected agent may read node tokens,
 signing secrets and stored credentials accessible to that user, including the
 node config and local credential store. Workspace roots constrain file tools
-and working directories, not the shell.** Use a separate machine container or VM
-per agent for full isolation. Supported `separated` mode retains the residual
+and working directories, not the shell. Supported separated contexts still
+share the host kernel and retain kernel-exploit and supervisor-compromise risks;
+they are not a VM boundary.** Use a separate machine container or VM per agent
+for stronger isolation; containers also share their host kernel.
+Supported `separated` mode retains the residual
 risks in [MACHINE_AGENT_ISOLATION.md](MACHINE_AGENT_ISOLATION.md).
 
 Probes have a five-second bound. `separated_probe_timeout` means the host did not
@@ -660,7 +669,9 @@ confirm support in time; a cold Chromium start can cause this. Rerun setup when
 the host is less busy. Setup kills probe helpers and reaps the parent after
 success, failure or timeout. Failed automatic/required intent remains recorded
 so a retry cannot silently become legacy consent, and setup does not start the
-daemon after failed verification.
+daemon after failed verification. Before registration, the private
+`machine-separation-choice.json` file retains pending intent without creating
+registration credentials. After registration, intent lives in `config.toml`.
 
 Rerunning setup against an enabled older machine preserves its absent intent
 unless `--separation` is supplied. Stored agent assignments always retain their
@@ -897,6 +908,28 @@ docker run --rm --shm-size=1g \
 
 The setup page downloads this profile in its single copyable command, and
 `nyxid node docker start --machine` writes the embedded profile automatically.
+It accepts `--separation automatic|require-separated|shared-legacy` and forwards
+the choice as `NYXID_MACHINE_SEPARATION` to setup in the container. An omitted
+choice on a new container means automatic. Before creating a new container, the
+CLI runs the real probes in a disposable copy of the machine image with the
+same seccomp settings and no node identity or workspace volumes. Failed
+automatic selection offers the same default-No prompt on a terminal; scripts
+must explicitly pass `--separation shared-legacy` to accept the warning.
+Required separation always fails if support is unavailable. Setup checks again
+after provisioning. Existing containers and stored assignments keep their
+recorded choice; change an existing container's intent through `node setup`
+inside it rather than passing a new choice to Docker start/restart.
+
+For a self-hosted browserless node-only image, explicitly set
+`NYXID_MACHINE_MANAGED=0` and `NYXID_MACHINE_SEPARATION=shared-legacy` after
+reviewing the warning above. Missing selection defaults to automatic and
+refuses before registration because this image has no managed Chromium;
+`require-separated` also refuses. Unknown or empty selections are rejected.
+Existing node-only config volumes retain their stored intent. **A separate
+container per agent is the recommended isolation model for node-only
+containers**; containers share the host kernel and do not provide a VM boundary.
+Full machine images also read `NYXID_MACHINE_SEPARATION` during first setup.
+
 The profile adds clone/unshare/setns to the Moby default; no additional
 capabilities are needed. Agent commands, file workers, cua and Chromium inherit
 NoNewPrivs. The container test verifies nested renderer namespaces, seccomp and

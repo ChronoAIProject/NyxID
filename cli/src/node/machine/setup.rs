@@ -5,6 +5,7 @@ use nyxid_machine::context::{Choice, Mode};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
+    io::{BufRead, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -44,8 +45,12 @@ pub struct Setup {
     pub separate_users: bool,
     /// Intent for new agent assignments. New setups default to automatic and
     /// require confirmed support; shared-legacy explicitly accepts shared access.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, env = "NYXID_MACHINE_SEPARATION")]
     pub separation: Option<Separation>,
+    /// Disposable Docker preflight: report real capabilities without pairing,
+    /// registration, persistent volumes or service startup.
+    #[arg(long, hide = true, requires = "container")]
+    pub probe_separation: bool,
     /// Used by the machine image, which supplies the two users and display.
     #[arg(long, hide = true)]
     pub container: bool,
@@ -65,7 +70,7 @@ pub struct Setup {
     pub profile: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Separation {
     Automatic,
     RequireSeparated,
@@ -78,6 +83,16 @@ impl From<Separation> for Choice {
             Separation::Automatic => Self::Automatic,
             Separation::RequireSeparated => Self::RequireSeparated,
             Separation::SharedLegacy => Self::SharedLegacy,
+        }
+    }
+}
+
+impl Separation {
+    pub(crate) fn as_cli_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::RequireSeparated => "require-separated",
+            Self::SharedLegacy => "shared-legacy",
         }
     }
 }
@@ -102,10 +117,105 @@ fn setup_choice(
 
 fn selection_error(reason: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{reason}: {} To explicitly accept shared legacy access, rerun setup with --separation shared-legacy after reviewing this warning: {}",
+        "{reason}: {} To explicitly accept shared legacy access, rerun this command with --separation shared-legacy after reviewing this warning: {}",
         nyxid_machine::context::unavailable_message(reason),
         nyxid_machine::context::SHARED_LEGACY_WARNING,
     )
+}
+
+/// Match the CLI's login/prompt convention: both input and diagnostic output
+/// must be terminals. A required choice must never read input or offer fallback.
+pub(crate) fn offer_shared_legacy(choice: Choice, reason: &str) -> Result<Choice> {
+    let input = std::io::stdin();
+    let output = std::io::stderr();
+    offer_shared_legacy_with(
+        choice,
+        reason,
+        input.is_terminal(),
+        output.is_terminal(),
+        &mut input.lock(),
+        &mut output.lock(),
+    )
+}
+
+fn offer_shared_legacy_with(
+    choice: Choice,
+    reason: &str,
+    input_tty: bool,
+    output_tty: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<Choice> {
+    if choice != Choice::Automatic || !input_tty || !output_tty {
+        return Err(selection_error(reason));
+    }
+    writeln!(
+        output,
+        "{reason}: {}",
+        nyxid_machine::context::unavailable_message(reason)
+    )?;
+    writeln!(output, "{}", nyxid_machine::context::SHARED_LEGACY_WARNING)?;
+    write!(output, "Continue with shared legacy mode? [y/N] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        return Ok(Choice::SharedLegacy);
+    }
+    Err(selection_error(reason)
+        .context("Shared legacy mode was not selected; automatic intent is retained"))
+}
+
+const PENDING_CHOICE: &str = "machine-separation-choice.json";
+
+fn pending_choice(directory: &Path) -> Result<Option<Choice>> {
+    use std::os::unix::{fs::MetadataExt, fs::OpenOptionsExt};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(directory.join(PENDING_CHOICE))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0
+            && metadata.len() <= 128,
+        "Invalid pending machine separation choice; expected a private owner-controlled file"
+    );
+    let mut encoded = String::new();
+    file.take(129).read_to_string(&mut encoded)?;
+    Ok(Some(serde_json::from_str(&encoded)?))
+}
+
+/// No registration-shaped config is created before owner consent. Retain a
+/// failed or accepted pre-pairing choice in a small private, atomic sidecar.
+fn persist_setup_choice(
+    directory: &Path,
+    existing: &mut Option<crate::node::config::NodeConfig>,
+    choice: Option<Choice>,
+) -> Result<()> {
+    if let Some(config) = existing {
+        if config.machine.separation_choice != choice {
+            config.machine.separation_choice = choice;
+            config.save(&directory.join("config.toml"))?;
+        }
+    } else if let Some(choice) = choice {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer(&mut file, &choice)?;
+        file.as_file().sync_all()?;
+        file.persist(directory.join(PENDING_CHOICE))?;
+    }
+    Ok(())
 }
 
 /// Reject known unsupported configurations before pairing/registration. The
@@ -117,7 +227,7 @@ fn preflight_selection(
     separate_users_requested: bool,
     managed_browser_requested: bool,
     existing: Option<&nyxid_machine::config::Config>,
-) -> Result<()> {
+) -> std::result::Result<(), &'static str> {
     if choice.is_none() || choice == Some(Choice::SharedLegacy) {
         return Ok(());
     }
@@ -140,12 +250,14 @@ fn preflight_selection(
         None
     };
     if let Some(reason) = reason {
-        return Err(selection_error(reason));
+        return Err(reason);
     }
     Ok(())
 }
 
-async fn verify_selection(config: &nyxid_machine::config::Config) -> Result<Option<Mode>> {
+async fn verify_selection(
+    config: &nyxid_machine::config::Config,
+) -> std::result::Result<Option<Mode>, &'static str> {
     let Some(choice) = config.separation_choice else {
         return Ok(None);
     };
@@ -153,8 +265,7 @@ async fn verify_selection(config: &nyxid_machine::config::Config) -> Result<Opti
         return Ok(Some(Mode::SharedLegacy));
     }
     let identity = |name| {
-        super::process::Identity::resolve(name)
-            .map_err(|_| selection_error("separated_requires_separate_users"))
+        super::process::Identity::resolve(name).map_err(|_| "separated_requires_separate_users")
     };
     let command = identity(config.agent_user.as_deref())?;
     let secure = identity(config.browser_user.as_deref())?;
@@ -163,9 +274,27 @@ async fn verify_selection(config: &nyxid_machine::config::Config) -> Result<Opti
         .map(|name| identity(Some(name)))
         .transpose()?;
     let evidence = super::separation::observe(config, &command, &secure, developer.as_ref()).await;
-    nyxid_machine::context::select_new(choice, Some(&evidence))
-        .map(Some)
-        .map_err(selection_error)
+    nyxid_machine::context::select_new(choice, Some(&evidence)).map(Some)
+}
+
+async fn container_evidence() -> Result<nyxid_machine::context::Evidence> {
+    use super::process::Identity;
+    let command = Identity::resolve(Some("agent")).or_else(|_| Identity::resolve(None))?;
+    let secure = Identity::resolve(Some("browser")).or_else(|_| Identity::resolve(None))?;
+    let developer = Identity::resolve(Some("devbrowser")).ok();
+    let temporary = tempfile::tempdir()?;
+    let config = nyxid_machine::config::Config {
+        managed_browser: browser_binary().ok().map(|binary| {
+            nyxid_machine::config::ManagedBrowserConfig {
+                binary,
+                data_dir: temporary.path().to_path_buf(),
+                update_port: 32248,
+                container: true,
+            }
+        }),
+        ..Default::default()
+    };
+    Ok(super::separation::observe(&config, &command, &secure, developer.as_ref()).await)
 }
 
 #[derive(Deserialize)]
@@ -209,6 +338,12 @@ fn http_base(ws: &str) -> Result<url::Url> {
 }
 
 pub async fn run(mut args: Setup) -> Result<()> {
+    if args.probe_separation {
+        // The Docker caller uses the same image, identities and seccomp policy
+        // as startup. Setup will probe again after actual provisioning.
+        println!("{}", serde_json::to_string(&container_evidence().await?)?);
+        return Ok(());
+    }
     if args.node_only_machine_preset {
         args.machine = true;
         args.shell = true;
@@ -250,22 +385,32 @@ pub async fn run(mut args: Setup) -> Result<()> {
             "This profile is already registered. Use machine enable or choose another --profile."
         );
     }
-    let existing = config_path
+    let mut existing = config_path
         .exists()
         .then(|| crate::node::config::NodeConfig::load(&config_path))
         .transpose()?;
-    let choice = setup_choice(
+    let mut choice = setup_choice(
         args.separation,
         existing.as_ref().map(|config| &config.machine),
     );
-    preflight_selection(
+    if existing.is_none() && args.separation.is_none() {
+        choice = pending_choice(&directory)?.or(choice);
+    }
+    persist_setup_choice(&directory, &mut existing, choice)?;
+    if let Err(reason) = preflight_selection(
         choice,
         cfg!(target_os = "linux"),
         unsafe { libc::geteuid() },
         separated,
         args.browser.unwrap_or(args.computer) && !args.skip_browser_policy,
         existing.as_ref().map(|config| &config.machine),
-    )?;
+    ) {
+        choice = Some(offer_shared_legacy(
+            choice.context("missing separation choice")?,
+            reason,
+        )?);
+        persist_setup_choice(&directory, &mut existing, choice)?;
+    }
     eprintln!(
         "Agents act with their OS user's access; prompt injection is possible. Use a separate machine container or VM per agent for full isolation."
     );
@@ -295,6 +440,11 @@ pub async fn run(mut args: Setup) -> Result<()> {
         // or probes fail, so retrying cannot reinterpret it as legacy consent.
         config.machine.separation_choice = choice;
         config.save(&config_path)?;
+    }
+    match std::fs::remove_file(directory.join(PENDING_CHOICE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let data_dir = if separated {
         let (agent, browser) = if args.container {
@@ -411,11 +561,23 @@ pub async fn run(mut args: Setup) -> Result<()> {
             );
         }
     }
-    let config = crate::node::config::NodeConfig::load(&config_path)?;
-    match (
-        config.machine.separation_choice,
-        verify_selection(&config.machine).await?,
-    ) {
+    let mut config = crate::node::config::NodeConfig::load(&config_path)?;
+    let mode = match verify_selection(&config.machine).await {
+        Ok(mode) => mode,
+        Err(reason) => {
+            let choice = offer_shared_legacy(
+                config
+                    .machine
+                    .separation_choice
+                    .context("missing separation choice")?,
+                reason,
+            )?;
+            config.machine.separation_choice = Some(choice);
+            config.save(&config_path)?;
+            Some(Mode::SharedLegacy)
+        }
+    };
+    match (config.machine.separation_choice, mode) {
         (Some(choice), Some(mode)) => eprintln!(
             "New-assignment selection: {} ({}). Existing assignments retain their stored mode; owner authorization is still required.",
             choice.as_str(),
@@ -846,6 +1008,7 @@ mod tests {
                 (true, 0, true, false, "separated_requires_managed_browser"),
             ] {
                 let error = preflight_selection(choice, linux, uid, users, browser, None)
+                    .map_err(selection_error)
                     .unwrap_err()
                     .to_string();
                 assert!(error.starts_with(reason));
@@ -879,6 +1042,226 @@ mod tests {
             "{error}"
         );
         assert!(!directory.path().join("config.toml").exists());
+        assert_eq!(
+            pending_choice(directory.path()).unwrap(),
+            Some(Choice::Automatic)
+        );
+    }
+
+    #[test]
+    fn automatic_tty_yes_requires_the_full_warning_and_records_explicit_legacy() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut existing = None;
+        persist_setup_choice(directory.path(), &mut existing, Some(Choice::Automatic)).unwrap();
+        let mut output = Vec::new();
+        let selected = offer_shared_legacy_with(
+            Choice::Automatic,
+            "separated_requires_linux",
+            true,
+            true,
+            &mut std::io::Cursor::new(b"y\n"),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(selected, Choice::SharedLegacy);
+        persist_setup_choice(directory.path(), &mut existing, Some(selected)).unwrap();
+        assert_eq!(
+            pending_choice(directory.path()).unwrap(),
+            Some(Choice::SharedLegacy)
+        );
+        assert!(!directory.path().join("config.toml").exists());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("separated_requires_linux:"));
+        assert!(output.contains(nyxid_machine::context::SHARED_LEGACY_WARNING));
+        for text in [
+            "node tokens",
+            "signing secrets",
+            "stored credentials",
+            "share the host kernel",
+            "container or VM per agent",
+        ] {
+            assert!(output.contains(text));
+        }
+        assert!(output.ends_with("Continue with shared legacy mode? [y/N] "));
+    }
+
+    #[test]
+    fn automatic_tty_no_empty_or_eof_preserves_automatic() {
+        for answer in ["n\n", "\n", "", "yes\n"] {
+            let directory = tempfile::tempdir().unwrap();
+            persist_setup_choice(directory.path(), &mut None, Some(Choice::Automatic)).unwrap();
+            let mut output = Vec::new();
+            assert!(
+                offer_shared_legacy_with(
+                    Choice::Automatic,
+                    "separated_probe_timeout",
+                    true,
+                    true,
+                    &mut std::io::Cursor::new(answer),
+                    &mut output,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                pending_choice(directory.path()).unwrap(),
+                Some(Choice::Automatic)
+            );
+            assert!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .contains("separated_probe_timeout")
+            );
+        }
+    }
+
+    struct MustNotRead;
+    impl Read for MustNotRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("noninteractive or required selection must never read input")
+        }
+    }
+
+    #[test]
+    fn automatic_non_tty_never_prompts_and_names_exact_flag_and_reason() {
+        for (input_tty, output_tty) in [(false, false), (true, false), (false, true)] {
+            let mut output = Vec::new();
+            let error = offer_shared_legacy_with(
+                Choice::Automatic,
+                "separated_requires_managed_browser",
+                input_tty,
+                output_tty,
+                &mut std::io::BufReader::new(MustNotRead),
+                &mut output,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(output.is_empty());
+            assert!(error.contains("--separation shared-legacy"));
+            assert!(error.contains("separated_requires_managed_browser"));
+        }
+    }
+
+    #[test]
+    fn required_never_prompts_even_with_both_terminals() {
+        let mut output = Vec::new();
+        let error = offer_shared_legacy_with(
+            Choice::RequireSeparated,
+            "separated_requires_linux",
+            true,
+            true,
+            &mut std::io::BufReader::new(MustNotRead),
+            &mut output,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(output.is_empty());
+        assert!(error.starts_with("separated_requires_linux"));
+    }
+
+    #[test]
+    fn pending_selection_rejects_symlinks_and_non_private_or_invalid_state() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(PENDING_CHOICE);
+        let target = directory.path().join("target");
+        std::fs::write(&target, "\"shared_legacy\"").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(pending_choice(directory.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "\"shared_legacy\"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(pending_choice(directory.path()).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            pending_choice(directory.path()).unwrap(),
+            Some(Choice::SharedLegacy)
+        );
+        std::fs::write(&path, "\"unknown\"").unwrap();
+        assert!(pending_choice(directory.path()).is_err());
+    }
+
+    #[test]
+    fn node_only_entrypoint_forwards_selection_and_preserves_existing_profile() {
+        use std::os::unix::fs::PermissionsExt;
+        for (choice, setup_status, existing) in [
+            (None, 23, false),
+            (Some("automatic"), 23, false),
+            (Some("require-separated"), 23, false),
+            (Some("shared-legacy"), 0, false),
+            (Some("unknown"), 0, false),
+            (Some(""), 0, false),
+            (None, 0, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let state = directory.path().join("state");
+            let node = state.join("node");
+            std::fs::create_dir_all(&node).unwrap();
+            let config = node.join("config.toml");
+            if existing {
+                std::fs::write(&config, "shell = true\n").unwrap();
+            }
+            let source = include_str!("../../../container/machine-node-only-entrypoint.sh")
+                .replace("/var/lib/nyxid-machine", state.to_str().unwrap())
+                .replace(
+                    "/workspace",
+                    directory.path().join("workspace").to_str().unwrap(),
+                )
+                .replace(
+                    "/home/agent",
+                    directory.path().join("home").to_str().unwrap(),
+                );
+            let script = directory.path().join("entrypoint.sh");
+            std::fs::write(&script, source).unwrap();
+            let bin = directory.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            for (name, source) in [
+                ("chown", "#!/bin/sh\nexit 0\n"),
+                (
+                    "nyxid",
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$TEST_CALLS\"\nif [ \"$2\" = setup ]; then\n  [ \"$TEST_SETUP_STATUS\" = 0 ] || exit \"$TEST_SETUP_STATUS\"\n  printf 'shell = true\\n' > \"$TEST_CONFIG\"\nfi\n",
+                ),
+            ] {
+                let path = bin.join(name);
+                std::fs::write(&path, source).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let calls = directory.path().join("calls");
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .arg(script)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("NYXID_MACHINE_MANAGED", "0")
+                .env("NYXID_NODE_TOKEN", "fixture")
+                .env("NYXID_NODE_URL", "wss://example.test/api/v1/nodes/ws")
+                .env("TEST_CALLS", &calls)
+                .env("TEST_CONFIG", &config)
+                .env("TEST_SETUP_STATUS", setup_status.to_string())
+                .env_remove("NYXID_MACHINE_SEPARATION");
+            if let Some(choice) = choice {
+                command.env("NYXID_MACHINE_SEPARATION", choice);
+            }
+            let output = command.output().unwrap();
+            let calls = std::fs::read_to_string(calls).unwrap_or_default();
+            if matches!(choice, Some("unknown" | "")) {
+                assert_eq!(output.status.code(), Some(2));
+                assert!(calls.is_empty());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("NYXID_MACHINE_SEPARATION must be")
+                );
+            } else if existing {
+                assert!(output.status.success());
+                assert!(!calls.contains("setup"));
+                assert_eq!(std::fs::read_to_string(config).unwrap(), "shell = true\n");
+            } else {
+                assert!(calls.contains(&format!(
+                    "--separation\n{}\n",
+                    choice.unwrap_or("automatic")
+                )));
+                assert_eq!(output.status.code(), Some(setup_status));
+                assert_eq!(calls.contains("start"), setup_status == 0);
+            }
+        }
     }
 
     #[tokio::test]

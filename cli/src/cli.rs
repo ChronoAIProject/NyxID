@@ -3104,6 +3104,14 @@ pub enum NodeDockerCommands {
     Start {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; omission defaults to automatic.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
     /// Stop and remove the node agent container
     Stop {
@@ -3114,6 +3122,14 @@ pub enum NodeDockerCommands {
     Restart {
         #[command(flatten)]
         args: NodeDockerArgs,
+        /// New machine container intent; existing containers retain their choice.
+        #[arg(
+            long,
+            value_enum,
+            env = "NYXID_MACHINE_SEPARATION",
+            requires = "machine"
+        )]
+        separation: Option<crate::node::machine::setup::Separation>,
     },
     /// Show Docker container status
     Status {
@@ -3196,6 +3212,47 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_machine_start_and_restart_parse_explicit_separation_only_for_machine() {
+        for verb in ["start", "restart"] {
+            for selection in ["automatic", "require-separated", "shared-legacy"] {
+                let parsed = Cli::try_parse_from([
+                    "nyxid",
+                    "node",
+                    "docker",
+                    verb,
+                    "--machine",
+                    "--separation",
+                    selection,
+                ])
+                .unwrap();
+                let Commands::Node {
+                    command: NodeCommands::Docker { command },
+                } = parsed.command
+                else {
+                    panic!("expected Docker command")
+                };
+                let (NodeDockerCommands::Start { separation, .. }
+                | NodeDockerCommands::Restart { separation, .. }) = command
+                else {
+                    panic!("expected Docker start/restart")
+                };
+                assert_eq!(separation.unwrap().as_cli_str(), selection);
+                assert!(
+                    Cli::try_parse_from([
+                        "nyxid",
+                        "node",
+                        "docker",
+                        verb,
+                        "--separation",
+                        selection
+                    ])
+                    .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn notification_approval_modes_parse_and_refuse_ambiguous_legacy_toggle() {

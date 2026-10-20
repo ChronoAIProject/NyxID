@@ -107,7 +107,7 @@ impl Choice {
     }
 }
 
-pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Use a separate machine container or VM per agent for full isolation.";
+pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Supported separated contexts still share the host kernel and retain kernel-exploit and supervisor-compromise risks; they are not a VM boundary. Use a separate machine container or VM per agent for stronger isolation; containers also share their host kernel.";
 
 /// Fixed, actionable text suitable for CLI, API and tool responses. Never
 /// include probe output, browser contents or a node-supplied diagnostic here.
