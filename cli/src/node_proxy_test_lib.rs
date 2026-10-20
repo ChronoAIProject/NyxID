@@ -108,5 +108,7 @@ mod test_support {
 }
 
 pub mod node {
-    pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
+    pub use crate::{
+        config, encryption, machine, managed_config, managed_deadline, proxy_upload, ws_client,
+    };
 }
