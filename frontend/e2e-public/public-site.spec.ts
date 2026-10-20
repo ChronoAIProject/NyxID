@@ -353,8 +353,20 @@ test("F03 retries a failed Docs fetch and recovers a failed route import by expl
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toBeVisible();
   const rejected = imports;
+  await page.evaluate(() => {
+    (window as unknown as { retryDocument: string }).retryDocument =
+      "failed-import-document";
+  });
   allow = true;
+  const reloaded = page.waitForEvent("domcontentloaded");
   await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await reloaded;
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
   await expect(page.locator("h1")).toContainText("passwords");
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { retryDocument?: string }).retryDocument,
+    ),
+  ).toBeUndefined();
   expect(imports).toBeGreaterThan(rejected);
 });
