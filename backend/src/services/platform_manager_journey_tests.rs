@@ -2562,7 +2562,9 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 .0,
                 StatusCode::UNAUTHORIZED
             );
-            let code = totp.generate_current().unwrap();
+            // Enrollment consumed the current step and TOTP counters are single
+            // use, so log in with the next step (inside the one-step skew).
+            let code = totp.generate((Utc::now().timestamp() as u64 / 30 + 1) * 30);
             let (_, Json(verified)) = crate::handlers::mfa::verify(
                 State(j.state.clone()),
                 peer,
