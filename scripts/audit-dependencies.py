@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Audit every committed dependency lock, including development dependencies.
 
-No dependency is installed and no lifecycle hook runs. Registry errors, audit
-errors, lock mutation, missing roots and vulnerabilities fail the gate.
+Audits run in isolated roots with no lifecycle hooks. Reviewed mobile patches
+add a clean frozen install and executable source/regression verification. Registry
+errors, lock mutation, missing roots and unresolved vulnerabilities fail the gate.
 """
 import argparse
 from collections import Counter
@@ -15,11 +16,16 @@ import shutil
 import tempfile
 
 from dependency_roots import discover
+import dependency_patches
+import dependency_dispositions
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def audit(root, output, cargo_audit, npm, pnpm):
+    records = dependency_patches.load_policy(root)
+    dependency_patches.validate_inputs(root, records)
+    risks = dependency_dispositions.load_policy(root)
     roots = discover(root)
     output.mkdir(parents=True, exist_ok=True)
     failed = []
@@ -28,6 +34,7 @@ def audit(root, output, cargo_audit, npm, pnpm):
                    if not key.startswith(('npm_config_', 'NPM_CONFIG_', 'CARGO_AUDIT_'))}
     environment.pop('NODE_ENV', None)
     environment.update(NPM_CONFIG_IGNORE_SCRIPTS='true', NPM_CONFIG_REGISTRY='https://registry.npmjs.org/')
+    rsa_verified = dependency_dispositions.verify_rsa(root, risks, environment) if risks else False
     with tempfile.TemporaryDirectory(prefix='nyxid-dependency-audits-') as temporary:
         stage = Path(temporary).resolve()
         environment['CARGO_HOME'] = str(stage / 'cargo-home')
@@ -52,6 +59,11 @@ def audit(root, output, cargo_audit, npm, pnpm):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(root / name, destination)
             manager = item['manager']
+            applicable = [r for r in records if r['lock'] == item['lock']]
+            proofs = dependency_patches.install_and_verify(root, directory, applicable, pnpm, environment) if applicable else []
+            tooling = [r for r in risks['dispositions'] if r['package'] == 'braces' and r['lock'] == item['lock']] if risks else []
+            if tooling and not applicable: raise ValueError('tooling proof requires the verified clean frozen mobile install')
+            tooling_verified = all(dependency_dispositions.verify_tooling(root, directory, r, environment) for r in tooling) if tooling else False
             command = ([str(cargo_audit), 'audit', '--file', str(copied_lock), '--json'] if manager == 'cargo' else
                        [str(npm if manager == 'npm' else pnpm), 'audit', '--json', '--audit-level=low'])
             result = subprocess.run(command, cwd=directory, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -82,11 +94,22 @@ def audit(root, output, cargo_audit, npm, pnpm):
                 raise ValueError('audit API/error/exit mismatch: ' + item['lock'])
             name = item['lock'].replace('/', '__') + '.audit.json'
             (output / name).write_text(json.dumps(report, indent=2) + '\n')
-            item = dict(item, vulnerabilities=count, lock_sha256=before, status='failed' if count else 'passed')
+            reviewed = dependency_patches.classify(report, item['lock'], applicable, proofs)
+            if manager == 'cargo':
+                reviewed += dependency_dispositions.classify_cargo(report, item['lock'], risks, rsa_verified)
+            elif tooling:
+                reviewed += dependency_dispositions.classify_tooling(report, item['lock'], risks, tooling_verified)
+            if manager == 'pnpm' and reviewed and len(report.get('advisories', {})) != count:
+                raise ValueError('pnpm advisory/count mismatch')
+            unresolved = count - len(reviewed)
+            if unresolved < 0: raise ValueError('reviewed finding count exceeds raw audit count')
+            item = dict(item, vulnerabilities=count, reviewed_dispositions=reviewed, unresolved=unresolved,
+                        lock_sha256=before, status='failed' if unresolved else 'passed')
             results.append(item)
-            print(f"{item['lock']}: {count} vulnerabilities; {len(item['manifests'])} manifest(s)")
-            if count:
+            print(f"{item['lock']}: {count} registry findings, {len(reviewed)} exact reviewed, {unresolved} unresolved; {len(item['manifests'])} manifest(s)")
+            if unresolved:
                 failed.append(item['lock'])
+        if risks: dependency_dispositions.validate_rsa_surface(root, risks)
         (output / 'dependency-audits.json').write_text(json.dumps(dict(roots=results), indent=2) + '\n')
         print('Audited roots: ' + json.dumps(dict(Counter(item['manager'] for item in roots))))
         if failed:

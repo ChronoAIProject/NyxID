@@ -19,8 +19,9 @@ and accounts for every package/workspace manifest. This includes backend, CLI,
 machine and updater in the main Cargo workspace; the independent machine spike
 and artifact-tools Cargo locks; frontend, SDK and mobile; hosted/npm tool locks;
 the independent CLI test, Claude, OpenClaw and oracle worker npm roots. Missing
-locks, orphan locks and unaccounted manifests fail. Audits run without installing
-dependencies or hooks and include development dependencies. Isolated directories
+locks, orphan locks and unaccounted manifests fail. Raw audits include development dependencies. Mobile also receives a clean
+frozen install without lifecycle hooks for executable patch and production-bundle
+verification. Isolated directories
 and configuration prevent local audit ignores or npm configuration from hiding
 findings. Every reported dependency severity blocks this gate.
 
@@ -102,19 +103,36 @@ For a new historical finding, review present redeemability, backing-record
 retention and provenance. A redeemable value of unverified provenance requires
 the user's rotation decision before any exception is written.
 
-The first isolated local dependency audit covered twelve roots: ten clean, the
-main Cargo lock with twelve advisory occurrences, and mobile with six. The main
-lock contains crossbeam-epoch/RUSTSEC-2026-0204, h2/RUSTSEC-2026-0258,
-quick-xml/RUSTSEC-2026-0194 and 0195 through self_update, zip/RUSTSEC-2026-0367,
-0368 and 0369 through Swagger/self_update/backend, and both RSA versions under
-RUSTSEC-2023-0071. RSA has no published fixed version in that audit database.
-Dependency changes need separate manifest/lock review and consuming tests.
+## Exact dependency dispositions
 
-Mobile reports GHSA-vcc3-ghjq-m6fr, GHSA-5p2g-fcmc-qvqq,
-GHSA-w3rx-r6r6-pgpr and GHSA-86w9-cpqp-85rv for the three packages with existing
-reviewed source patches. Registry audit still reports their upstream versions;
-there is no blanket exception for patched packages. The existing eight patch
-regressions and exact patch/lock binding must support any future narrow
-disposition. GHSA-vfj7-8cjw-p6xm (braces) and GHSA-hp3w-g68c-fv3c (sprintf-js)
-are additional unresolved findings. These results are discovery evidence; they
-do not establish a clean dependency or final-image scan.
+The initial twelve-root audit found twelve Cargo advisory occurrences and six
+mobile advisory occurrences. The approved upgrades and Swagger UI removal
+eliminate crossbeam-epoch, h2, quick-xml and zip findings; the scoped
+js-yaml/argparse override removes sprintf-js. Registry reports remain unchanged
+by dispositions and are retained with raw and unresolved counts.
+
+`security/dependency-patches.json` binds the four upstream findings on the three
+already patched mobile packages to exact advisory/package/version, normalized
+lock and patch paths, full lock/patch/source/regression hashes, original npm
+archive integrity, owner, rationale and monthly expiry. A clean frozen install,
+complete installed-source comparison, eight existing regressions and failing
+vulnerable-original probes must all pass in the same audit process. New
+advisories or unreviewed duplicate/unpatched sources remain blocking.
+
+`security/dependency-dispositions.json` contains the PM's separate use decisions.
+The monthly braces 3.0.3 disposition requires exact Metro/Jest parent chains,
+lock/archive identity and a real production app export proving no braces or
+micromatch module ships. A new braces release forces review. The two RSA
+RUSTSEC-2023-0071 records expire within 90 days and bind exact registry checksums,
+resolved parent chains/features and reviewed source. Machine bootstrap private
+operations moved to AWS-LC. Remaining backend public/generation and pinned
+owner-selected SSH client-signing uses are described in
+[the remediation record](RELEASE_DEPENDENCY_REMEDIATION.md). A new RSA reference,
+private-operation spelling or changed reviewed context fails the source guard;
+review must establish the use before updating that baseline.
+
+Every expired record fails globally, including unused entries. Failed or missing
+proof never becomes a warning. Scanner Policy tests tamper, scope, new-use and
+expiry negatives; Every Dependency Root Audit runs the actual proofs on PRs and
+schedules. Mobile independently runs the production export and YAML consumer
+compatibility probes.

@@ -193,3 +193,16 @@
 - Local: locked pnpm10.34.7 clean frozen install without hooks passes; actual consumer/CLI compatibility5/5.
 - Full production bundle proof is implemented separately; a pre-existing undeclared Babel preset requires the pending per-change PM manifest approval.
 - Required PR jobs: Mobile; Every Dependency Root Audit.
+
+## C-5 dependency decisions — executable dispositions
+- Implement exact monthly patch records for decode-uri-component, image-size and node-forge; retain complete raw audits.
+- Prove all 119 installed source files against authenticated npm archives plus reviewed patches; 8 patched regressions and 4 vulnerable-original probes passed.
+- Add monthly braces graph/archive/lock bindings and a real production iOS export proving no braces/micromatch modules; exact direct Babel preset 55.0.16 is committed as c55934a62 (minimal importer change).
+- Bind 90-day RSA decisions to exact versions/checksums, Linux/KMS features, parent chains and reviewed source; new private-operation/import/context changes fail.
+- Recommend Ed25519 for node SSH keys; rewrite remediation/scanner docs around the final PM decisions.
+- Local: patch policy 21/21, use policy 12/12, audit 7/7, workflow 7/7, bundle negatives 5/5, secret policy 17/17.
+- AWS-LC bootstrap 16/16 passed under the exact shared-target Cargo environment.
+- Urgent zip 9 compatibility commit 53a10a33c maps invalid names to existing sanitized errors and adds a non-UTF-8 regression per site; locked workspace check with both KMS features passed (exit 0).
+- Clean committed-source audit: all 12 roots passed (8 npm/3 Cargo/1 pnpm); 7 raw findings retained, 7 exact reviewed, 0 unresolved; bundle 1 map/3691 modules/0 forbidden.
+- Full committed-history/tree scan: 215 history + 111 tree findings, 326 reviewed, 0 unresolved; build-input policy passed.
+- Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Mobile, CLI Test, Rust Features/KMS and Artifact Packaging.

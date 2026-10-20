@@ -35,6 +35,9 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/scanner-policy"
           "$RUNNER_TEMP/scanner-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
           "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-scanner-workflows.py
+          "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-dependency-patches.py
+          "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-dependency-dispositions.py
+          node scripts/test-mobile-bundle-policy.cjs
 
   history:
     name: Full History Secret Scan
@@ -71,14 +74,19 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
       - name: Install checksummed audit/bootstrap executables and existing locked npm/pnpm tools
         run: |
           python3 scripts/bootstrap-build-tool.py cargo-audit --bin-dir "$RUNNER_TEMP/scan-tools"
           python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/scan-tools"
           "$RUNNER_TEMP/scan-tools/npm" ci --ignore-scripts --prefix security/npm-tools
+          python3 -m venv "$RUNNER_TEMP/dependency-policy"
+          "$RUNNER_TEMP/dependency-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
       - name: Audit all Cargo/npm/pnpm roots including independent locks and workspace members
         run: |
-          python3 scripts/audit-dependencies.py --output "$RUNNER_TEMP/dependency-audits" \
+          "$RUNNER_TEMP/dependency-policy/bin/python" scripts/audit-dependencies.py --output "$RUNNER_TEMP/dependency-audits" \
             --cargo-audit "$RUNNER_TEMP/scan-tools/cargo-audit" \
             --npm "$GITHUB_WORKSPACE/security/npm-tools/node_modules/.bin/npm" \
             --pnpm "$GITHUB_WORKSPACE/security/npm-tools/node_modules/.bin/pnpm"

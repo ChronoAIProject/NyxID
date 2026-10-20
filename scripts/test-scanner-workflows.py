@@ -47,6 +47,10 @@ def require(data):
         raise ValueError('full-history secret checkout required')
     required_step(history, 'scripts/scan-secrets.py')
     required_step(jobs['dependencies']['steps'], 'scripts/audit-dependencies.py')
+    for script in ('scripts/test-dependency-patches.py', 'scripts/test-dependency-dispositions.py', 'scripts/test-mobile-bundle-policy.cjs'):
+        required_step(jobs['policy']['steps'], script)
+    required_step(ci['jobs']['mobile']['steps'], 'scripts/check-mobile-bundle.cjs')
+    required_step(ci['jobs']['mobile']['steps'], 'scripts/test-mobile-yaml-compat.cjs')
     required_step(jobs['freshness']['steps'], 'scripts/check-build-input-freshness.py')
     packaging = data['artifact-packaging']
     if 'schedule' not in packaging.get('on', packaging.get(True, {})) or packaging['permissions'] != {'contents': 'read'}:
@@ -99,7 +103,9 @@ class ScannerWorkflows(unittest.TestCase):
         for name in ('security-scans', 'dependency', 'freshness'):
             data = workflows()
             if name == 'security-scans': data['ci']['jobs']['ci-pass']['needs'].remove(name)
-            elif name == 'dependency': data['security-scans']['jobs']['dependencies']['steps'].pop(3)
+            elif name == 'dependency':
+                steps = data['security-scans']['jobs']['dependencies']['steps']
+                steps.remove(next(step for step in steps if 'scripts/audit-dependencies.py' in step.get('run', '')))
             else: data['artifact-packaging']['jobs']['packaging-pass']['needs'].remove('scan-freshness')
             with self.subTest(name=name), self.assertRaises(ValueError): require(data)
 
@@ -126,6 +132,16 @@ class ScannerWorkflows(unittest.TestCase):
                         if 'scripts/check-image-vulnerabilities.py' in step.get('run', ''))
             step['if'] = 'false'
             with self.subTest(name=name), self.assertRaises(ValueError): require(data)
+
+    def test_mobile_bundle_or_exact_disposition_negatives_cannot_be_optional(self):
+        for job, script in [('mobile', 'scripts/check-mobile-bundle.cjs'),
+                            ('policy', 'scripts/test-dependency-dispositions.py'),
+                            ('policy', 'scripts/test-dependency-patches.py')]:
+            data = workflows()
+            steps = data['ci']['jobs']['mobile']['steps'] if job == 'mobile' else data['security-scans']['jobs'][job]['steps']
+            step = next(step for step in steps if script in step.get('run', ''))
+            step['continue-on-error'] = True
+            with self.subTest(job=job, script=script), self.assertRaises(ValueError): require(data)
 
     def test_release_gate_cannot_be_omitted(self):
         data = workflows()
