@@ -4,7 +4,47 @@
 
 Delivery targets `aelf-hzz780/NyxID:codex/website-a-delivery`, based on `942a64b2d9af35aea01448c1ba6c3a62697472a2`. This records implementation and actual checks, not deployment, indexing or independent acceptance. The organization PR remains a human action.
 
-## Commit 分工 / Commit breakdown
+## Round 1 修复状态 / Round 1 remediation
+
+`b8dfa7bdf` 的首次独立验收未通过：F01–F06 为 P2，D02 为 P3。下方旧 CI 与旧工程 SHA 是历史证据，不能用于声明新修复通过独立验收。本轮追加 Commit，不 squash/amend；新产物仍需主聊天重新提交独立验收。
+
+The first independent acceptance of `b8dfa7bdf` failed with six P2 findings and D02/P3. Prior CI and source identifiers below are historical, not acceptance of these fixes. This round appends commits without rewriting history; the main chat must submit the new artifact for independent re-acceptance.
+
+| 项目 / Finding | 处理 / Disposition | 回归依据 / Evidence | Commit |
+|---|---|---|---|
+| F01 | SSR 禁用完整 fieldset/submit，hydration 后启用；显式 mailto POST fallback / Inert SSR form and explicit email fallback | SSR 单测；CI no-JS、entry 失败/延迟与真实 Enter，断言同源无个人数据请求 / SSR and isolated browser cases | `0f213232e; 644d380f3` |
+| F02 | 仅公共 Router 使用 opaque raw-query codec，保留重复项顺序与字符串；私有 app 不更改 / Public-only lossless query codec | 真实 Router 连续导航/locale；CI document identity、history、login 参数 / Real router and browser assertions | `0f213232e; 644d380f3` |
+| F03 | 数据错误 invalidate 后 reset；asset 错误显式刷新；Docs 错误保留导航 / Reload failed data or explicitly reload failed assets | 首败恢复单测；CI Docs 503 恢复和 import 失败恢复 / Recovery regressions | `0f213232e; 644d380f3; 01ae02df6` |
+| F04 | onResolved、matches 全成功且切换成功 URL 时关闭菜单，清理订阅 / Close menu only after successful resolution | 真实 Router；CI mobile navigation、locale、history、Ctrl click / Current-document and modified-click checks | `0f213232e; bd6580039; 644d380f3` |
+| F05 | 仅批准 audience/code 面板进入 Markdown，保留各组代码/受众正文 / Expand approved panel types only | 独立 CommonMark AST、分组 markers、hidden/draft 哨兵；最终产物同样执行契约 / Independent AST and artifact gates | `e6bb020c8` |
+| F06 | 整卡标题转为合法链接，段落独立，保留 inline code 与特殊字符 / Parseable card links with block and inline semantics | EN/ZH 真实页面目标与合成反例的 CommonMark AST / Bilingual link AST cases | `e6bb020c8` |
+| D02 | 两类平台×三次、品牌分组、逐次/聚合/owner/crawler 模板，各指标有效分母 / Executable sampling and access templates | CSV 列数与 20 题/双语/10+10 分组检查；真实采样 not-run / Template validation; external sampling not run | `a6dd64490` |
+
+本轮验证源码 **`01ae02df63ec740f61c6bf2a7c8f4bad038c7300`**，content revision **`013bb5daf762126c4439ec7109629405a23e56aa7cabeee29e2bc21ce4c70fad`**。[最终 CI](https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393) 全部通过：23 文件 / 176 项单测（包含 Login/Register/AuthFlow/MFA/return-url）、完整 TypeScript/生产构建、90 页产物门禁、219 项 HTTP、日志隐私、8 项单 worker 浏览器回归；8 passed / 0 skipped / 0 flaky。新文档 Commit 只记录交接证据，交付 HEAD 以包含本文件的最终 Commit 为准。
+
+This round validates source **`01ae02df63ec740f61c6bf2a7c8f4bad038c7300`** with content revision **`013bb5daf762126c4439ec7109629405a23e56aa7cabeee29e2bc21ce4c70fad`**. [Final CI](https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393) passed 176 tests across 23 files including authentication regressions, the full build, 90-page artifact gate, 219 HTTP checks, log privacy and eight single-worker browser tests without skips or flakes. The final documentation commit records evidence only; delivery HEAD is the final commit containing this handoff.
+
+[完整产物](https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393/artifacts/12261168854) ZIP digest **`sha256:972d31a4978ea5ea2b9e1ac9a011b066bf2a606bf7a65aa7c8a922661f2ea10d`** 已下载核对；manifest 源码 SHA/content revision、90 页和浏览器结果一致。[round1-verification.json](website-seo-evidence/round1-verification.json) 保留本轮证据和失败修正记录，[round1-ci-proof.txt](website-seo-evidence/round1-ci-proof.txt) 为精简日志。前三次失败均未发布 release artifact，旧验证文件保留为历史证据。
+
+The [complete artifact](https://github.com/aelf-hzz780/NyxID/actions/runs/39416790393/artifacts/12261168854) was downloaded and its ZIP digest **`sha256:972d31a4978ea5ea2b9e1ac9a011b066bf2a606bf7a65aa7c8a922661f2ea10d`** verified. Manifest SHA/revision, page count and browser results agree. The linked round-1 evidence records failed attempts and fixes; failed runs produced no release artifact. Earlier verification files remain historical.
+
+最新 `/security` lab 实测 reduced-motion=true，69 resources、542354 transfer bytes、LCP 84ms、CLS≈1.952。CLS 仍值得单独排查；没有可比前后基线，不据此判定回归或 field CWV，不把 CI 通过当成性能门槛通过。
+
+The latest `/security` lab sample measured reduced-motion=true, 69 resources, 542354 transfer bytes, LCP 84ms and CLS≈1.952. The high CLS merits separate investigation. Without a comparable baseline it establishes neither regression nor field CWV; CI success is not a performance-threshold assertion.
+
+产品/历史依赖仍未确认，不把工程状态当成 owner 审批：5 个历史 mock article slug 的 404 决策缺乏正式 URL 历史依据；原 Docs `.md` 的 noindex 影响待 owner 核查；19 页逐页发布依据目前仅有此前 v4.1/v4.2 总体授权；首页 “minutes”等可用性措辞待产品核对。现有保守发布边界保留，未扩大文章批准范围。权限 owner 记录均为 unassigned/unknown。
+
+Product/history decisions remain unconfirmed: historical URL evidence for the five mock-article 404 decisions; indexing impact of original Docs Markdown noindex; individual approval evidence for 19 pages beyond prior broad v4.1/v4.2 authorization; and product review of availability wording such as “minutes.” Conservative publication boundaries remain in place without approving additional articles. Access owners remain unassigned/unknown.
+
+旧 CI 的 reduced-motion 标签原为硬编码；本轮 trace 与锁定 Playwright 代码证明该顶层配置未传入 context，现改用 contextOptions 并断言实际 matchMedia，lab 标签也改取实测值。旧 lab CLS≈1.374 只是单次 CI 观察，没有前后可比证据，不能判为回归或 field 结论；没有扩大运行性能矩阵。本轮继续不在本机运行完整构建或浏览器，不启动/停止既有服务，不触碰 4180。真实 OAuth provider 测试和外部采集均 not-run。
+
+The old reduced-motion label was hardcoded; this round’s trace and installed Playwright code show the top-level setting never reached the context. The fixture now uses contextOptions, asserts actual matchMedia, and records the measured setting. The previous lab CLS≈1.374 is a single CI observation without a comparable baseline, not a proven regression or field result. No performance matrix was added. This round runs no local full build or browser and does not alter existing services or access 4180. Live OAuth and external measurement remain unrun.
+
+本轮定向检查不覆盖全部 90 页 hydration、完整动态 head/schema、consent 生命周期/实际 telemetry payload、真实 OAuth、生产环境路由、回滚演练或正常动效模式的性能分布；这些保持 not-run/blocked。没有把 CI fixture 的协议 echo 当成真实第三方集成。
+
+Targeted checks do not cover hydration of all 90 pages, complete dynamic head/schema assertions, consent/telemetry runtime payloads, live OAuth, production routing, rollback exercises or normal-motion performance distributions. These remain unrun/blocked. Fixture protocol echoes do not establish live third-party integration.
+
+## 历史 Commit 分工 / Historical commit breakdown
 
 | Commit | 内容 / Change |
 |---|---|
@@ -70,9 +110,9 @@ The final engineering source is **`5fc812e9df18da1d1c2b9538535c6c4f57840813`**, 
 
 The [complete artifact](https://github.com/aelf-hzz780/NyxID/actions/runs/39409952720/artifacts/12259545591) has GitHub artifact digest `sha256:90b28b34272d467a24756c02f91f9741f2371f44bd83f1c89cf3a20300df7449`. Machine evidence and concise log excerpts are stored alongside this document. The third run exposed a router Suspense mismatch; native SSR-marker alignment passed both subsequent runs. Failed runs never produced a release artifact.
 
-独立验收尚未运行；登录回归使用 CI backend fixture，未实测真实 OAuth provider。lab 样本不代表 field CWV；GSC/Bing/AI 引用/人工咨询均未采集。测量准备见 [README](website-seo-measurement/README.md)、[baseline.csv](website-seo-measurement/baseline.csv) 与 [20题双语问题](website-seo-measurement/ai-questions.json)。原有本机未跟踪方案输入保持原状，未混入本次 Commit。
+此前独立验收尚未运行（现已首轮失败，见上方修复记录）；登录回归使用 CI backend fixture，未实测真实 OAuth provider。lab 样本不代表 field CWV；GSC/Bing/AI 引用/人工咨询均未采集。测量准备见 [README](website-seo-measurement/README.md)、[baseline.csv](website-seo-measurement/baseline.csv) 与 [20题双语问题](website-seo-measurement/ai-questions.json)。原有本机未跟踪方案输入保持原状，未混入本次 Commit。
 
-Independent acceptance and live OAuth-provider testing have not run; authentication checks use a CI backend fixture. The lab sample does not establish field CWV, and external search, AI-citation and inquiry results remain uncollected. Measurement templates are linked above. Existing untracked planning inputs were preserved and excluded from these commits.
+At the prior handoff independent acceptance had not run; round 1 has since failed as recorded above. Live OAuth-provider testing remains unrun; authentication checks use a CI backend fixture. The lab sample does not establish field CWV, and external search, AI-citation and inquiry results remain uncollected. Measurement templates are linked above. Existing untracked planning inputs were preserved and excluded from these commits.
 
 ## 独立验收入口 / Independent acceptance inputs
 
