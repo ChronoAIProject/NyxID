@@ -69,6 +69,23 @@ impl SecretBackend {
         Self::reader_with_keychain(config, config_dir, KeychainBackend::new(&config.node.id))
     }
 
+    pub(crate) fn reader_in(
+        config: &NodeConfig,
+        path: &Path,
+        directory: super::storage::Directory,
+    ) -> Result<Self> {
+        let operation = SecretOperation::open_in(
+            config,
+            path,
+            directory,
+            KeychainBackend::new(&config.node.id),
+        )?;
+        Ok(Self::Observed(Box::new(ObservedSecrets {
+            operation,
+            baseline: config.clone(),
+        })))
+    }
+
     pub(crate) fn reader_with_keychain(
         config: &NodeConfig,
         config_dir: &Path,

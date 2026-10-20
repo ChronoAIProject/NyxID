@@ -1017,12 +1017,14 @@ fn read_pid_if_running(pid_file: &Path) -> Option<u32> {
     }
 }
 
-/// The migration engine must never mistake a free new lock for proof that an
-/// old binary stopped. Activation is intentionally refused until the explicit
-/// service-manager/manual cutover boundary is installed.
-pub(crate) fn require_migration_quiescence(_directory: &super::storage::Directory) -> Result<()> {
-    Err(super::error::Error::Config("node_migration_quiescence_required: stop and verify every launchd/systemd, foreground and externally supervised node process; migration activation awaits the enforced first-upgrade cutover boundary".into()))
-}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod cutover;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[path = "daemon/cutover_unsupported.rs"]
+mod cutover;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod processes;
+pub(crate) use cutover::{Cutover, require_migration_quiescence};
 
 #[cfg(test)]
 mod tests {

@@ -569,12 +569,22 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             to,
             dry_run,
             status,
+            confirm_legacy_cutover,
             config,
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
-            crate::node::agent::cmd_migrate(&to, effective_config.as_deref(), dry_run, status)
-                .map_err(anyhow::Error::from)
+            crate::node::agent::cmd_migrate(
+                &to,
+                effective_config.as_deref(),
+                dry_run,
+                status,
+                crate::node::daemon::Cutover {
+                    profile: profile.as_deref(),
+                    confirm_legacy_cutover,
+                },
+            )
+            .map_err(anyhow::Error::from)
         }
 
         NodeCommands::NodeOpenclaw {
@@ -1347,6 +1357,24 @@ mod tests {
             ],
             vec!["nyxid", "node", "migrate", "--to", "other"],
             vec!["nyxid", "node", "migrate", "--status"],
+            vec![
+                "nyxid",
+                "node",
+                "migrate",
+                "--to",
+                "file",
+                "--dry-run",
+                "--confirm-legacy-cutover",
+            ],
+            vec![
+                "nyxid",
+                "node",
+                "migrate",
+                "--to",
+                "file",
+                "--status",
+                "--confirm-legacy-cutover",
+            ],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }
@@ -1358,6 +1386,20 @@ mod tests {
             error
                 .to_string()
                 .contains("requires stopped daemons and verified quiescence")
+        );
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "migrate",
+            "--to",
+            "file",
+            "--profile",
+            "migration-fixture",
+            "--confirm-legacy-cutover",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, crate::cli::Commands::Node { command: NodeCommands::Migrate { confirm_legacy_cutover: true, profile: Some(ref name), .. } } if name == "migration-fixture")
         );
         let profile = resolve_effective_config(None, Some("migration-fixture"))
             .unwrap()

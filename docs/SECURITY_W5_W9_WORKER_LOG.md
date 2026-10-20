@@ -1708,3 +1708,17 @@ Exact shared Cargo policy used: all-target/node-proxy-test check exit0/zero warn
 Feature-library263/0/3 existing ignored in25.45s; final all-target/node-proxy-test CLI Clippy exit0/zero diagnostics in9m08s including target-lock wait. Totals overlap; owned rustfmt/diff checks pass.
 Docs explain key lifecycle, unreleased v1 refusal and flags. EXECUTION/REVIEW stay untracked. C's zbus switch has not landed at this checkpoint; repeat rebuilt keychain/migration tests once it does, with Linux real secret-service evidence owned by C.
 Logs:/tmp/nyxid-w96-r1-*.log. Namespace stays within .nyxid-storage-* and object/v1/*; no host keyring/service action, guest use or push. Actual daemon stop/status/wait/manual cutover, OS custody and W9.5 remain open.
+
+## W9.6 checkpoint 8 — enforced daemon cutover, 2026-10-20 (review pending)
+
+PM accepted86068742c. Every mutating migrate/resume requires fresh --confirm-legacy-cutover; no acknowledgement persists as proof that old binaries cannot restart.
+Selected launchd/systemd definition binds pinned config; absolute bounded manager calls stop/status/wait for job state and observed/historical PIDs, refusing malformed/unavailable managers and changed definitions.
+Kernel inventory refuses visible supervisor-identity node processes; privileged/other-UID/disguised historical binaries and external restart prevention remain the explicit manual maintenance boundary.
+Startup takes a shared lifetime lease before secret reads; migration holds exclusive custody and revalidates path/service/processes at journal phases. New artifact .nyxid-storage-runtime.lock stays within existing patterns.
+Initial daemon47/1/0 failed on protected other-UID metadata; kernel UID selection fixes scope while unreadable live in-scope processes still refuse. Two cutover Clippy lints fixed in code, without allows.
+Initial native probe reached the unchanged120s supervision bound after file→keychain; one reusable Zeroizing argv buffer replaces per-PID megabyte allocation/wipes. No test bounds or denials weakened.
+Host reboot erased /tmp target/logs/probe data; final logs and disposable native data persist at ~/.cache/nyxid-stream-a-evidence/w96-cutover. Shared Cargo environment used exactly; one rebuild, target locks honored.
+Rebuilt after C zbus031c0bf96: cargo test --locked -p nyxid-cli --features node-proxy-test --bin nyxid node::daemon -- --test-threads=2:48/0/0 in1.72s; cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0/zero diagnostics.
+Same rebuilt binary: migration25/0/0 in49.77s; keychain5/0/0; storage13/0/1 existing ignore; command2/0/0; startup-lease1/0/0. Ordinary discovery's native helper is inert; explicitly invoked real macOS file→keychain→file1/0/0 in9.95s validates complete typed values and retired legacy custody.
+Owned rustfmt/diff checks pass; all owned jobs finished. No observed macOS keychain behavior difference from zbus manifest switch; Linux Secret Service evidence belongs to C, not this run.
+PRE-08 remains open pending PM verdict and supported Linux/separate-identity validation; W9.5 code not started. EXECUTION/REVIEW stay local/untracked. No push, guest use or real installed service stop; native probe used a fresh absent service label.

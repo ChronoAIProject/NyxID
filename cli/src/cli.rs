@@ -2910,6 +2910,11 @@ pub enum NodeCommands {
         /// Show migration state and counts without printing secrets
         #[arg(long, conflicts_with = "dry_run")]
         status: bool,
+        /// Confirm all legacy foreground nodes and external supervisors are stopped
+        /// and will remain stopped during migration; never restart old binaries afterward.
+        /// The selected launchd/systemd service is stopped and verified by this command.
+        #[arg(long, conflicts_with_all = ["dry_run", "status"])]
+        confirm_legacy_cutover: bool,
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,

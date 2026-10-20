@@ -100,8 +100,13 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     let config_dir = config::resolve_config_dir(config_path);
     let config_file = config_dir.join("config.toml");
 
-    let node_config = NodeConfig::load(&config_file)?;
-    let backend = SecretBackend::reader(&node_config, &config_dir)?;
+    let directory = super::storage::Directory::open(&config_dir)?;
+    // Acquire before reading secrets and retain through the runtime and OAuth
+    // shutdown. OS inventory also refuses this process until it exits; a free
+    // lease alone never proves that detached or legacy workers have stopped.
+    let _runtime_lease = directory.runtime_lease(false)?;
+    let node_config = NodeConfig::load_in(&directory, &config_file)?;
+    let backend = SecretBackend::reader_in(&node_config, &config_file, directory)?;
     oauth::storage::recover_pending(&backend)?;
     let (node_config, backend) = backend.current_reader()?;
 
@@ -198,13 +203,14 @@ pub fn cmd_version() {
     println!("nyxid node agent {}", env!("CARGO_PKG_VERSION"));
 }
 
-pub fn cmd_migrate(
+pub(crate) fn cmd_migrate(
     target_backend: &str,
     config_path: Option<&str>,
     dry_run: bool,
     status: bool,
+    cutover: super::daemon::Cutover<'_>,
 ) -> Result<()> {
-    super::migration::command(target_backend, config_path, dry_run, status)
+    super::migration::command_with_cutover(target_backend, config_path, dry_run, status, cutover)
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,6 +2453,29 @@ mod tests {
     use super::super::secret_fields::{self, CredentialPart, SecretField};
     use super::super::secret_transaction::Attempt;
     use super::super::storage::Directory;
+
+    #[test]
+    fn startup_refuses_migration_lease_before_config_or_secret_reads() {
+        let _serial = crate::test_support::env_lock().lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let directory = Directory::open(root.path()).unwrap();
+        let lease = directory.runtime_lease(true).unwrap();
+        let before = directory.names().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(cmd_start(root.path().to_str(), Some("error")))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("node_storage_runtime_busy"));
+        assert_eq!(directory.names().unwrap(), before);
+        assert!(!root.path().join(".keyfile").exists());
+        assert!(!root.path().join("config.toml").exists());
+        drop(lease);
+        assert!(directory.runtime_lease(false).is_ok());
+    }
 
     struct ModernFixture {
         directory: tempfile::TempDir,

@@ -26,6 +26,56 @@ pub(crate) struct Directory(File);
 pub(crate) const MIGRATION_NAME: &str = ".nyxid-storage-migration.json";
 
 impl Directory {
+    /// Lifetime coordination for upgraded runtimes and explicit migration.
+    /// Never unlink this inode, and never infer legacy-process absence from it.
+    pub(crate) fn runtime_lease(&self, migration: bool) -> Result<File> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let file = open_at(
+                &self.0,
+                std::ffi::OsStr::new(".nyxid-storage-runtime.lock"),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NONBLOCK,
+                0o600,
+            )?;
+            validate(&file)?;
+            let mode = if migration {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_SH
+            };
+            if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
+                return Err(Error::Config("node_storage_runtime_busy: stop every node runtime and finish any active migration before retrying".into()));
+            }
+            self.sync()?;
+            Ok(file)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = migration;
+            Err(invalid())
+        }
+    }
+
+    pub(crate) fn check_path(&self, path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let selected = Self::open(path)?;
+            let original = self.0.metadata()?;
+            let current = selected.0.metadata()?;
+            if original.dev() != current.dev() || original.ino() != current.ino() {
+                return Err(invalid());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Err(invalid())
+        }
+    }
+
     /// A partial backend switch is never a usable runtime generation. Only
     /// explicit migration recovery may read or publish while this marker exists.
     pub(crate) fn require_idle(&self) -> Result<()> {

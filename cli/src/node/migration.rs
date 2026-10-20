@@ -504,11 +504,28 @@ impl Journal {
 }
 
 /// Output contains fixed states, validated backend names and counts only.
+#[cfg(test)]
 pub(crate) fn command(
     target: &str,
     config_path: Option<&str>,
     dry_run: bool,
     status: bool,
+) -> Result<()> {
+    command_with_cutover(
+        target,
+        config_path,
+        dry_run,
+        status,
+        super::daemon::Cutover::default(),
+    )
+}
+
+pub(crate) fn command_with_cutover(
+    target: &str,
+    config_path: Option<&str>,
+    dry_run: bool,
+    status: bool,
+    cutover: super::daemon::Cutover<'_>,
 ) -> Result<()> {
     validate_target(target)?;
     let dir = super::config::resolve_config_dir(config_path);
@@ -592,11 +609,10 @@ pub(crate) fn command(
             Ok(())
         }
         (false, false) => {
-            // A new lock/PID file cannot prove an old binary has stopped. The
-            // service-manager/manual cutover step supplies this gate; until
-            // then production migration refuses before staging or key init.
-            super::daemon::require_migration_quiescence(&directory)?;
-            run(&directory, &path, target, &keychain, |_| Ok(()))?;
+            let mut quiescence =
+                super::daemon::require_migration_quiescence(&directory, &dir, cutover)?;
+            quiescence.check()?;
+            run(&directory, &path, target, &keychain, |_| quiescence.check())?;
             println!("Migration complete; backend: {target}. Restart the node explicitly.");
             Ok(())
         }
@@ -1908,6 +1924,62 @@ mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), installed);
             assert!(values(&directory, &path, &store) == expected);
         }
+    }
+
+    /// Explicit native probe, invoked separately with a disposable directory.
+    /// Normal test discovery never contacts the host keychain/service manager.
+    #[test]
+    fn os_custody_process_child() {
+        let Some(root) = std::env::var_os("NYXID_TEST_NODE_OS_CUSTODY_DIR") else {
+            return;
+        };
+        let root = Path::new(&root);
+        assert!(
+            std::fs::read_dir(root).unwrap().next().is_none(),
+            "native probe requires a fresh disposable directory; retain existing recovery data"
+        );
+        let path = root.join("config.toml");
+        let id = format!("nyxid-custody-probe-{}", Uuid::new_v4());
+        fixture(&path);
+        let mut config = NodeConfig::load(&path).unwrap();
+        config.node.id = id.clone();
+        config.save(&path).unwrap();
+        let directory = Directory::open(root).unwrap();
+        let store = KeychainBackend::new(&id);
+        let before = values(&directory, &path, &store);
+        for target in ["keychain", "file"] {
+            let result = command_with_cutover(
+                target,
+                root.to_str(),
+                false,
+                false,
+                super::super::daemon::Cutover {
+                    profile: Some(&id),
+                    confirm_legacy_cutover: true,
+                },
+            );
+            if let Err(error) = result {
+                // Fixed errors only; never print the OS provider response or
+                // node/key identifiers. Keep the caller-owned directory intact.
+                assert!(!error.to_string().contains("SENTINEL"));
+                let reason = match &error {
+                    Error::Keychain(_) => "key_service",
+                    Error::Config(message) if message.starts_with("node_migration_") => {
+                        "native_quiescence"
+                    }
+                    Error::Config(_) => "custody_or_projection",
+                    _ => "storage",
+                };
+                panic!(
+                    "native custody/migration probe refused ({reason}); retain its disposable recovery directory"
+                );
+            }
+            assert!(values(&directory, &path, &store) == before);
+        }
+        assert!(directory.require_idle().is_ok());
+        assert!(store.get_optional("vault").unwrap().is_none());
+        assert!(store.get_optional("auth_token").unwrap().is_none());
+        assert!(store.get_optional("signing_secret").unwrap().is_none());
     }
 
     #[test]

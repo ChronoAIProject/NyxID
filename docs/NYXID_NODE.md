@@ -237,13 +237,21 @@ Secrets are stored in the OS keychain:
 - **Windows**: Credential Manager
 - **Linux**: Secret Service D-Bus API (GNOME Keyring, KDE Wallet)
 
-The TOML config file retains only non-secret metadata (server URL, node ID, injection method, header/param names). No encrypted values are written to disk.
+The TOML config file retains metadata and opaque immutable object references;
+secret values remain in the OS keychain. Optional absent values stay absent,
+while a present empty secret has its own object. Normal reads do not discover
+legacy entries or create replacement keys.
 
 ```bash
 nyxid node register --token nyx_nreg_... --keychain
 ```
 
-Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_token`, `{node_id}/signing_secret`, and `{node_id}/cred/{service_slug}` as account identifiers. Multiple nodes on the same machine do not collide.
+Keychain entries use `nyxid-node` as the service name. New configurations use
+`keychain_format = "immutable_v1"` and `{node_id}/object/v1/*` accounts. Legacy
+`{node_id}/auth_token`, `{node_id}/signing_secret`, `{node_id}/vault` and
+`{node_id}/cred/*` accounts remain readable only through their original format
+until explicit stopped-daemon migration. Multiple nodes on the same machine
+have distinct namespaces.
 
 > **Note:** The keychain backend requires an active keychain daemon. On headless Linux servers without GNOME Keyring or KDE Wallet, use the file backend (the default).
 
@@ -254,25 +262,62 @@ Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_toke
 To migrate an existing node from file-based storage to OS keychain (or vice versa):
 
 ```bash
-# Migrate from file to keychain
-nyxid node migrate --to keychain
+# First stop foreground nodes and disable containers/custom supervisors.
+# Keep every old node binary stopped throughout the cutover.
+# Stop/verify the selected native service, then migrate file -> keychain:
+nyxid node migrate --to keychain --confirm-legacy-cutover
 
-# Migrate from keychain back to file
-nyxid node migrate --to file
+# Migrate keychain -> file under the same maintenance boundary:
+nyxid node migrate --to file --confirm-legacy-cutover
 
 # Inspect without staging secrets (select the same target/profile/config on resume)
 nyxid node migrate --to keychain --dry-run --profile work
 nyxid node migrate --to keychain --status --profile work
 ```
 
-This unreleased branch currently refuses a mutating migration with
-`node_migration_quiescence_required`. The resumable engine is being reviewed
-before activation of the enforced launchd/systemd stop, status and wait boundary.
-A free registration lock or a missing PID file cannot prove that an older daemon
-has stopped. Keep existing node processes stopped and retain their original
-configuration and custody; do not remove lock or recovery files to bypass this
-refusal. Legacy keychain writers continue to direct you to the explicit migration
-command, rather than converting the backend implicitly.
+A mutating migration requires `--confirm-legacy-cutover` on **every invocation,
+including crash recovery**. Without it, `node_migration_quiescence_required`
+refuses before service actions, key initialization or journal creation. This is
+an explicit maintenance acknowledgement: stop all foreground nodes, disable
+container/custom/system supervisors and restart triggers, and keep old node
+executables stopped throughout migration. After cutover, restart only the
+upgraded executable. A new lock, a missing PID file or an earlier acknowledgement
+cannot establish that a binary which predates the lock has stopped or will not
+be restarted. If you cannot establish this maintenance boundary, do not confirm;
+retain the original storage and have its administrator stop and verify it first.
+
+The command checks that the selected native service definition points to the
+same pinned config directory before stopping it. Pass the original `--profile`
+and `--config`; a service for a different config refuses. On macOS it boots the
+selected job out of launchd, verifies the user domain remains reachable and waits
+for the job to disappear. On Linux it stops the selected systemd user unit and
+requires an inactive/dead or failed/failed state with zero main/control PIDs.
+Previously observed service PIDs and a valid historical PID file must also be
+absent. Failed commands, malformed status, changed definitions, unavailable
+managers, unreadable process inventories and unknown platforms refuse. Each
+manager command has a 30-second deadline; the post-stop state/PID wait has a
+separate 30-second deadline. Timeout preserves storage and requires operator
+repair; it does not authorize migration.
+
+Kernel-backed process inspection also refuses other node commands/runtimes
+under the credential supervisor identity, including historical `nyxid-node`
+agents and renamed modern binaries. It never prints arguments or provider
+output. Other-UID/privileged processes and future external-supervisor restarts
+remain part of the operator-established boundary; this scan cannot attest that
+they are disabled. Upgraded runtimes acquire a shared lifetime lease before
+reading any secrets; migration acquires its exclusive side after stopping and
+checking processes, then repeats status/inventory checks before continuing each
+journaled phase. The pinned `.nyxid-storage-runtime.lock` inode is never removed.
+Starting an upgraded runtime while migration owns it refuses before secret reads.
+Service restart or custody drift interrupts migration and retains recovery data.
+Restart the upgraded daemon explicitly after migration; the command does not
+restart it automatically.
+
+Legacy keychain writers continue to direct you to this explicit migration path
+rather than converting the backend implicitly. Keychain migration must run in
+the credential supervisor's working OS-keychain session; an unavailable/locked
+key service refuses without substituting a file backend. These checks do not
+provide separation between processes sharing the supervisor's OS identity.
 
 The migration engine reads the complete typed source before staging any target:
 node authentication and signing, header/query/path-prefix/SigV4/IFTTT values,
@@ -303,10 +348,10 @@ the key and original complete source-plan tag commit together in one OS-keychain
 record, so recovery after key creation cannot reseal changed values, retirement
 bytes or OAuth recovery records. Once the active journal with keyed tags is
 installed, a missing/invalid migration key always refuses without regeneration
-or cleanup. Retain or restore its
-original keychain custody. After all target validation and source retirement are
-durable, the journal is replaced with a terminal marker that contains no secret
-tags. That marker authorizes only migration-key deletion and marker removal; it
+or cleanup. Retain or restore its original keychain custody. After all target
+validation and source retirement are durable, the journal is replaced with a
+terminal marker that contains no secret tags. That marker authorizes only
+migration-key deletion and marker removal; it
 never authorizes config publication or source cleanup. Restart after key deletion
 revalidates the exact healthy installed target and completes marker removal.
 The unreleased v1 migration journal format is refused, not silently adopted.
@@ -346,9 +391,10 @@ Migration output contains fixed states, validated backend names and counts;
 it never prints secret values, object references or provider bodies. Target
 key initialization is deliberate and never replaces an existing key. Runtime
 lookups and migration status do not generate keys. Restart the node explicitly
-after a completed migration. Support for real OS custody, daemon cutover and the
-manual first-upgrade acknowledgement remains a required follow-up before this
-branch's W9.6 gate can close.
+after a completed migration. The daemon/manual cutover requirements above apply
+even when resuming a terminal cleanup marker. Native key-service availability
+and access from separate OS identities are distinct checks; a successful
+supervisor migration does not establish the W9.5 agent/browser denial boundary.
 
 ---
 
@@ -386,28 +432,33 @@ param_value_encrypted = "<base64>"
 
 #### Keychain Backend
 
-When using the keychain backend, encrypted values are omitted from the config. Only non-secret metadata is stored:
+New keychain configs retain opaque object references in the existing
+`*_encrypted` fields; those strings are references, not secret values. The
+following placeholders illustrate the format and are not a usable config:
 
 ```toml
 storage_backend = "keychain"
+keychain_format = "immutable_v1"
 
 [server]
 url = "wss://auth.example.com/api/v1/nodes/ws"
 
 [node]
 id = "a1b2c3d4-..."
-auth_token_encrypted = ""
+auth_token_encrypted = "nyxid-key:v1:<attempt-uuid>:<auth-object-uuid>"
 
 [signing]
-shared_secret_encrypted = ""
+shared_secret_encrypted = "nyxid-key:v1:<attempt-uuid>:<signing-object-uuid>"
 
 [credentials.openai]
 injection_method = "header"
 header_name = "Authorization"
+header_value_encrypted = "nyxid-key:v1:<attempt-uuid>:<header-object-uuid>"
 
 [credentials.stripe]
 injection_method = "query_param"
 param_name = "api_key"
+param_value_encrypted = "nyxid-key:v1:<attempt-uuid>:<query-object-uuid>"
 ```
 
 > **Backwards compatibility:** Existing config files without a `storage_backend` field default to `"file"`.
@@ -642,7 +693,12 @@ CREDENTIALS REMOVE OPTIONS:
 
 MIGRATE OPTIONS:
   --to <BACKEND>            Target backend: "keychain" or "file"
+  --confirm-legacy-cutover  Acknowledge stopped legacy nodes/external supervisors;
+                           stop and verify the selected launchd/systemd service
+  --dry-run                Validate source and print counts without target writes
+  --status                 Show fixed migration state and counts without secrets
   --config <PATH>           Path to config directory
+  --profile <NAME>          Original node profile (also selects native service)
 ```
 
 ---
