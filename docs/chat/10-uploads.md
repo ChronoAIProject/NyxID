@@ -74,7 +74,7 @@ unbound, can never be adopted by a later turn, and is purged by pending retentio
 | --- | --- |
 | Items | At most 10 ingested per event; extra items produce an omitted-count note |
 | Payload | At most `min(CHANNEL_MEDIA_MAX_BYTES, 20 MiB)` per item; ordinary upload type and rate limits apply |
-| Ingest step | At most 90 seconds for the whole step, cancellable by Stop |
+| Collection | At most 90 seconds to collect media; unfinished items receive timeout outcomes and a fixed note, successful items are still bound, and the turn continues. Stop cancels the turn |
 | Event retention / native dedup | 24 hours for text events; 7 days for media events. Native replays after that horizon are outside the dedup guarantee |
 | Queue lifetime | After 6 days, the maintenance sweep converts queued media to a durable owner transcript notice before removing it |
 
