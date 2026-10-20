@@ -27,6 +27,25 @@ inputs **outside the callback**. The callback receives the same context and a
 new transaction snapshot on each body retry. All business reads, live authority
 fences, mutations and required audits join its supplied session.
 
+Both bounded owners share a process-local FIFO turn for the database, acquired
+before starting a session or polling the transaction callback. This avoids
+spending the retry budget on snapshots invalidated by other local audit writers.
+The turn covers session setup, the complete **DB-only** business/journal/audit
+callback, commit or abort, and any bounded retry backoff. It ends before the owner
+returns to its caller. Provider/KMS preparation, witness observation/claims,
+notification resolution/send, node dispatch and response delivery belong outside
+that turn and outside the retry callback. In-session helpers join their existing
+owner; they do not acquire a second turn. A new queued owner nested on the same
+task fails immediately with a typed programming error before its session or body
+starts, including core-to-history and history-to-core nesting.
+
+Waiters are FIFO in lock-acquisition order. Cancelling a waiter removes its slot;
+cancelling or unwinding an owner releases the turn. The queue holds no completed
+database fixture alive. It is local scheduling only: independent application
+processes still race through Mongo's existing CAS, snapshot conflict handling and
+the unchanged 32-body/8-commit budgets below. Tail-HMAC validation, unique indexes
+and majority+journal commits remain mandatory.
+
 | Failure | Required handling |
 | --- | --- |
 | Body/definite commit `TransientTransactionError`, or server WriteConflict 112 even without a label | Abort the failed transaction and retry the **whole business callback**, including its authorization/revision checks. The shared runner permits at most 32 body attempts, including the first, with randomized backoff capped at 160ms. |

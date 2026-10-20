@@ -35,61 +35,66 @@ pub async fn run<R, F>(db: &Database, mut callback: F) -> Result<R>
 where
     F: for<'a> AsyncFnMut(&'a mut Transaction) -> Result<R>,
 {
-    let mut transaction = Transaction {
-        session: db.client().start_session().await?,
-    };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    for attempt in 1..=audit_transaction::MAX_BODY_ATTEMPTS {
-        transaction
-            .session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(audit_state_service::majority())
-            .await?;
-        match callback(&mut transaction).await {
-            Ok(value) => {
-                for commit_attempt in 1..=audit_transaction::MAX_COMMIT_ATTEMPTS {
-                    match transaction.session.commit_transaction().await {
-                        Ok(()) => return Ok(value),
-                        Err(error)
-                            if error.contains_label("UnknownTransactionCommitResult")
-                                && commit_attempt < audit_transaction::MAX_COMMIT_ATTEMPTS
-                                && tokio::time::Instant::now() < deadline =>
-                        {
-                            audit_transaction::backoff(commit_attempt).await;
-                            continue;
+    audit_transaction::with_turn(db, async move {
+        let mut transaction = Transaction {
+            session: db.client().start_session().await?,
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        for attempt in 1..=audit_transaction::MAX_BODY_ATTEMPTS {
+            transaction
+                .session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(audit_state_service::majority())
+                .await?;
+            match callback(&mut transaction).await {
+                Ok(value) => {
+                    for commit_attempt in 1..=audit_transaction::MAX_COMMIT_ATTEMPTS {
+                        match transaction.session.commit_transaction().await {
+                            Ok(()) => return Ok(value),
+                            Err(error)
+                                if error.contains_label("UnknownTransactionCommitResult")
+                                    && commit_attempt < audit_transaction::MAX_COMMIT_ATTEMPTS
+                                    && tokio::time::Instant::now() < deadline =>
+                            {
+                                audit_transaction::backoff(commit_attempt).await;
+                                continue;
+                            }
+                            // Uncertainty dominates transient labeling; never abort or
+                            // replay a possibly committed callback, including at budget.
+                            Err(error)
+                                if error.contains_label("UnknownTransactionCommitResult") =>
+                            {
+                                return Err(error);
+                            }
+                            Err(error)
+                                if retryable(&error)
+                                    && attempt < audit_transaction::MAX_BODY_ATTEMPTS
+                                    && tokio::time::Instant::now() < deadline =>
+                            {
+                                let _ = transaction.session.abort_transaction().await;
+                                break;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        // Uncertainty dominates transient labeling; never abort or
-                        // replay a possibly committed callback, including at budget.
-                        Err(error) if error.contains_label("UnknownTransactionCommitResult") => {
-                            return Err(error);
-                        }
-                        Err(error)
-                            if retryable(&error)
-                                && attempt < audit_transaction::MAX_BODY_ATTEMPTS
-                                && tokio::time::Instant::now() < deadline =>
-                        {
-                            let _ = transaction.session.abort_transaction().await;
-                            break;
-                        }
-                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => {
+                    if error.contains_label("UnknownTransactionCommitResult") {
+                        return Err(error);
+                    }
+                    let _ = transaction.session.abort_transaction().await;
+                    if !retryable(&error)
+                        || attempt == audit_transaction::MAX_BODY_ATTEMPTS
+                        || tokio::time::Instant::now() >= deadline
+                    {
+                        return Err(error);
                     }
                 }
             }
-            Err(error) => {
-                if error.contains_label("UnknownTransactionCommitResult") {
-                    return Err(error);
-                }
-                let _ = transaction.session.abort_transaction().await;
-                if !retryable(&error)
-                    || attempt == audit_transaction::MAX_BODY_ATTEMPTS
-                    || tokio::time::Instant::now() >= deadline
-                {
-                    return Err(error);
-                }
-            }
+            audit_transaction::backoff(attempt).await;
         }
-        audit_transaction::backoff(attempt).await;
-    }
-    unreachable!("last bounded body attempt returns")
+        unreachable!("last bounded body attempt returns")
+    })
+    .await?
 }

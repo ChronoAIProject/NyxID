@@ -6,6 +6,9 @@ use rand::Rng;
 
 use crate::errors::{AppError, AppResult};
 
+mod turns;
+pub(in crate::services) use turns::with_turn;
+
 /// A finite attempt budget, including the first body execution. This is not a
 /// change to Mongo/server/request timeouts. No integrity error is retryable.
 pub const MAX_BODY_ATTEMPTS: u32 = 32;
@@ -57,46 +60,49 @@ where
     O: FnMut(u32, u32) + Send,
     P: Fn(&AppError) -> bool + Send,
 {
-    let mut session = db.client().start_session().await?;
-    let mut commits = 0;
-    for attempt in 1..=MAX_BODY_ATTEMPTS {
-        observe(attempt, commits);
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(crate::services::audit_state_service::majority())
-            .await?;
-        let result = match body(&mut session, context).await {
-            Ok(value) => commit_observed(&mut session, || {
-                commits += 1;
-                observe(attempt, commits);
-            })
-            .await
-            .map(|()| value)
-            .map_err(AppError::from),
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(value) => return Ok(value),
-            // An uncertain commit must never cause callback replay or abort.
-            Err(AppError::DatabaseError(error))
-                if error.contains_label("UnknownTransactionCommitResult") =>
-            {
-                return Err(AppError::DatabaseError(error));
-            }
-            Err(error) => {
-                let _ = session.abort_transaction().await;
-                if attempt == MAX_BODY_ATTEMPTS
-                    || !matches!(&error, AppError::DatabaseError(_))
-                    || !retry_body(&error)
+    with_turn(db, async move {
+        let mut session = db.client().start_session().await?;
+        let mut commits = 0;
+        for attempt in 1..=MAX_BODY_ATTEMPTS {
+            observe(attempt, commits);
+            session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .write_concern(crate::services::audit_state_service::majority())
+                .await?;
+            let result = match body(&mut session, context).await {
+                Ok(value) => commit_observed(&mut session, || {
+                    commits += 1;
+                    observe(attempt, commits);
+                })
+                .await
+                .map(|()| value)
+                .map_err(AppError::from),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(value) => return Ok(value),
+                // An uncertain commit must never cause callback replay or abort.
+                Err(AppError::DatabaseError(error))
+                    if error.contains_label("UnknownTransactionCommitResult") =>
                 {
-                    return Err(error);
+                    return Err(AppError::DatabaseError(error));
                 }
-                backoff(attempt).await;
+                Err(error) => {
+                    let _ = session.abort_transaction().await;
+                    if attempt == MAX_BODY_ATTEMPTS
+                        || !matches!(&error, AppError::DatabaseError(_))
+                        || !retry_body(&error)
+                    {
+                        return Err(error);
+                    }
+                    backoff(attempt).await;
+                }
             }
         }
-    }
-    unreachable!("last bounded body attempt returns")
+        unreachable!("last bounded body attempt returns")
+    })
+    .await?
 }
 
 pub(super) fn retryable(error: &AppError) -> bool {

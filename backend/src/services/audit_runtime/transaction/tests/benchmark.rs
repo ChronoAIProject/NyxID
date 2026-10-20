@@ -154,3 +154,202 @@ async fn audit_append_throughput_previous_vs_durable() {
         );
     }
 }
+
+// Exact pre-queue durable owner from committed 1d705e83a. Test-only: the
+// live append body, snapshot, CAS, HMAC, majority+journal and 32/8 budgets are
+// shared. This arm omits only local scheduling, never durable audit work.
+async fn unqueued_durable_append(
+    db: &Database,
+    event: AuditLog,
+    bodies: &mut u32,
+    commits: &mut u32,
+) -> AppResult<AuditLog> {
+    let mut session = db.client().start_session().await?;
+    for attempt in 1..=MAX_BODY_ATTEMPTS {
+        *bodies = attempt;
+        session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(state::majority())
+            .await?;
+        let result = match state::append_in_session(db, &mut session, event.clone(), &KEY).await {
+            Ok(value) => commit_observed(&mut session, || *commits += 1)
+                .await
+                .map(|()| value)
+                .map_err(AppError::from),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(AppError::DatabaseError(error))
+                if error.contains_label("UnknownTransactionCommitResult") =>
+            {
+                return Err(AppError::DatabaseError(error));
+            }
+            Err(error) => {
+                let _ = session.abort_transaction().await;
+                if attempt == MAX_BODY_ATTEMPTS || !retryable(&error) {
+                    return Err(error);
+                }
+                backoff(attempt).await;
+            }
+        }
+    }
+    unreachable!("last bounded body attempt returns")
+}
+
+#[derive(Default)]
+struct FifoMeasurement {
+    per_sec: f64,
+    succeeded: usize,
+    failed: usize,
+    bodies: u32,
+    max_bodies: u32,
+    max_commits: u32,
+}
+
+async fn measure_durable_fifo(tasks: usize, fifo: bool) -> FifoMeasurement {
+    let db = connect_transaction_test_database("audit_fifo_ab").await;
+    let barrier = Arc::new(Barrier::new(tasks + 1));
+    let mut workers = Vec::new();
+    for _ in 0..tasks {
+        let (db, barrier) = (db.clone(), barrier.clone());
+        workers.push(tokio::spawn(async move {
+            let events: Vec<_> = (0..256 / tasks).map(|_| entry()).collect();
+            let mut stats = FifoMeasurement::default();
+            barrier.wait().await;
+            for event in events {
+                let (mut bodies, mut commits) = (0, 0);
+                let result = if fifo {
+                    chain::append_chained_entry_observed(&db, event, &KEY, |b, c| {
+                        (bodies, commits) = (b, c);
+                    })
+                    .await
+                    .map_err(AppError::from)
+                } else {
+                    unqueued_durable_append(&db, event, &mut bodies, &mut commits).await
+                };
+                stats.bodies += bodies;
+                stats.max_bodies = stats.max_bodies.max(bodies);
+                stats.max_commits = stats.max_commits.max(commits);
+                match result {
+                    Ok(_) => stats.succeeded += 1,
+                    Err(error) => {
+                        stats.failed += 1;
+                        // Metadata only; no event or database command bodies.
+                        eprintln!("audit_fifo_ab failure fifo={fifo} tasks={tasks} bodies={bodies} commits={commits} transient={} unknown_commit={}",
+                            matches!(&error, AppError::DatabaseError(e) if e.contains_label("TransientTransactionError")),
+                            matches!(&error, AppError::DatabaseError(e) if e.contains_label("UnknownTransactionCommitResult")));
+                    }
+                }
+            }
+            stats
+        }));
+    }
+    let started = Instant::now();
+    barrier.wait().await;
+    let mut stats = FifoMeasurement::default();
+    for worker in workers {
+        let result = worker.await.unwrap();
+        stats.succeeded += result.succeeded;
+        stats.failed += result.failed;
+        stats.bodies += result.bodies;
+        stats.max_bodies = stats.max_bodies.max(result.max_bodies);
+        stats.max_commits = stats.max_commits.max(result.max_commits);
+    }
+    stats.per_sec = stats.succeeded as f64 / started.elapsed().as_secs_f64();
+    assert_chain(&db, stats.succeeded, true, 0).await;
+    crate::test_utils::teardown_test_database(&db).await;
+    stats
+}
+
+// Optional protocol for the external host-wide process monitor. It samples
+// throughout each arm and snapshots load/swap/processes at these boundaries.
+// Complete in-flight writes and fixture cleanup before rejecting a noisy arm;
+// never retain either arm of a contaminated pair in the reported median.
+fn host_gate(phase: &str, tasks: usize, round: usize, attempt: usize) -> bool {
+    if std::env::var_os("NYXID_FIFO_AB_HOST_GATE").is_none() {
+        return true;
+    }
+    eprintln!(
+        "audit_fifo_ab HOST_GATE phase={phase} tasks={tasks} round={round} attempt={attempt}"
+    );
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response).unwrap();
+    match response.trim() {
+        "quiet" => true,
+        "retry" => false,
+        other => panic!("host monitor closed or sent an invalid gate response: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual controlled durable audit FIFO versus unqueued owner benchmark"]
+async fn audit_append_throughput_durable_fifo_vs_unqueued() {
+    let mut failed = 0;
+    for tasks in [1, 16] {
+        let (mut unqueued, mut fifo) = (Vec::new(), Vec::new());
+        for round in 0..3 {
+            let mut attempt = 0;
+            let (without, with) = loop {
+                attempt += 1;
+                assert!(
+                    attempt <= 20,
+                    "host noise exhausted manual benchmark attempts"
+                );
+                if !host_gate("start", tasks, round + 1, attempt) {
+                    continue;
+                }
+                let fifo_first = round % 2 != 0;
+                let first = measure_durable_fifo(tasks, fifo_first).await;
+                if !host_gate("after_first", tasks, round + 1, attempt) {
+                    eprintln!(
+                        "audit_fifo_ab ABORTED tasks={tasks} round={} attempt={attempt} after=first",
+                        round + 1
+                    );
+                    continue;
+                }
+                let second = measure_durable_fifo(tasks, !fifo_first).await;
+                if !host_gate("after_second", tasks, round + 1, attempt) {
+                    eprintln!(
+                        "audit_fifo_ab ABORTED tasks={tasks} round={} attempt={attempt} after=second",
+                        round + 1
+                    );
+                    continue;
+                }
+                break if fifo_first {
+                    (second, first)
+                } else {
+                    (first, second)
+                };
+            };
+            for (queued, result) in [(false, &without), (true, &with)] {
+                eprintln!(
+                    "audit_fifo_ab tasks={tasks} round={} fifo={queued} attempted=256 succeeded={} failed={} appends_per_sec={:.2} body_attempts={} max_body_attempts={} max_commit_attempts={}",
+                    round + 1,
+                    result.succeeded,
+                    result.failed,
+                    result.per_sec,
+                    result.bodies,
+                    result.max_bodies,
+                    result.max_commits
+                );
+                failed += result.failed;
+            }
+            unqueued.push(without.per_sec);
+            fifo.push(with.per_sec);
+        }
+        unqueued.sort_by(f64::total_cmp);
+        fifo.sort_by(f64::total_cmp);
+        eprintln!(
+            "audit_fifo_ab MEDIAN tasks={tasks} rounds=3 unqueued_per_sec={:.2} fifo_per_sec={:.2} fifo_over_unqueued={:.3}",
+            unqueued[1],
+            fifo[1],
+            fifo[1] / unqueued[1]
+        );
+    }
+    assert_eq!(
+        failed, 0,
+        "all durable benchmark appends must succeed within unchanged budgets"
+    );
+}

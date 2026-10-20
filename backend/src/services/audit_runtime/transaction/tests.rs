@@ -43,10 +43,19 @@ struct Workload {
 }
 
 async fn current_workload(db: &Database, tasks: usize, per_task: usize) -> Workload {
+    observed_workload(db, tasks, per_task, None).await
+}
+
+async fn observed_workload(
+    db: &Database,
+    tasks: usize,
+    per_task: usize,
+    retry_seen: Option<Arc<tokio::sync::Notify>>,
+) -> Workload {
     let barrier = Arc::new(Barrier::new(tasks));
     let mut workers = Vec::new();
     for worker in 0..tasks {
-        let (db, barrier) = (db.clone(), barrier.clone());
+        let (db, barrier, retry_seen) = (db.clone(), barrier.clone(), retry_seen.clone());
         workers.push(tokio::spawn(async move {
             let mut stats = Workload::default();
             barrier.wait().await;
@@ -57,6 +66,9 @@ async fn current_workload(db: &Database, tasks: usize, per_task: usize) -> Workl
                 let result = if (worker + offset) % 2 == 0 {
                     chain::append_chained_entry_observed(&db, event, &KEY, |b, c| {
                         (bodies, commits) = (b, c);
+                        if b > 1 && let Some(retry_seen) = &retry_seen {
+                            retry_seen.notify_one();
+                        }
                     })
                     .await
                     .map(|_| ())
@@ -90,6 +102,9 @@ async fn current_workload(db: &Database, tasks: usize, per_task: usize) -> Workl
                         },
                         |b, c| {
                             (bodies, commits) = (b, c);
+                            if b > 1 && let Some(retry_seen) = &retry_seen {
+                                retry_seen.notify_one();
+                            }
                         },
                     )
                     .await
@@ -174,7 +189,23 @@ async fn audit_head_contention_256_mixed_appends_from_16_tasks_is_transparent_an
     let db = connect_transaction_test_database("audit_head_load").await;
     // Create the business collection before racing transactions to avoid DDL.
     db.create_collection("business").await.unwrap();
-    let stats = current_workload(&db, 16, 16).await;
+    // A raw independent transaction bypasses the process queue, just like a
+    // second application process. Keep the real-conflict assertion meaningful
+    // after local writers stop needlessly invalidating one another's snapshots.
+    let mut external = db.client().start_session().await.unwrap();
+    external.start_transaction().await.unwrap();
+    db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+        .update_one(doc! {}, doc! {"$inc": {"test_contention_fence": 1}})
+        .session(&mut external)
+        .await
+        .unwrap();
+    let retry_seen = Arc::new(tokio::sync::Notify::new());
+    let workload = observed_workload(&db, 16, 16, Some(retry_seen.clone()));
+    let release = async {
+        retry_seen.notified().await;
+        external.abort_transaction().await.unwrap();
+    };
+    let (stats, ()) = tokio::join!(workload, release);
     assert_eq!(stats.appends, 256);
     assert_eq!(stats.integrity_errors, 0);
     assert!(
@@ -189,6 +220,132 @@ async fn audit_head_contention_256_mixed_appends_from_16_tasks_is_transparent_an
         stats.max_body_attempts,
         stats.max_commit_attempts,
         stats.integrity_errors
+    );
+}
+
+#[tokio::test]
+async fn audit_transaction_nested_core_and_history_owners_fail_fast_and_abort_outer_body() {
+    let db = connect_transaction_test_database("audit_nested_owner").await;
+    db.create_collection("business").await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        run(&db, &db, |session, db| {
+            Box::pin(async move {
+                db.collection::<bson::Document>("business")
+                    .insert_one(doc! {"_id": "outer"})
+                    .session(session)
+                    .await?;
+                crate::services::service_history::transaction::run(db, async |_| Ok(())).await?;
+                Ok(())
+            })
+        }),
+    )
+    .await
+    .expect("nested owner must fail instead of deadlocking");
+    assert!(matches!(result, Err(AppError::DatabaseError(ref error))
+        if error.get_custom::<super::turns::NestedTransactionOwner>().is_some()));
+    assert_eq!(
+        db.collection::<bson::Document>("business")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        crate::services::service_history::transaction::run(&db, async |_| {
+            crate::services::api_key_mutation_service::transaction_result(
+                run(&db, &(), |_, ()| Box::pin(async { Ok(()) })).await,
+            )
+        }),
+    )
+    .await
+    .expect("history-to-core nesting must also fail fast");
+    assert!(
+        result
+            .unwrap_err()
+            .get_custom::<super::turns::NestedTransactionOwner>()
+            .is_some()
+    );
+    run(&db, &(), |_, ()| Box::pin(async { Ok(()) }))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audit_head_contention_two_processes_keep_the_same_retry_budgets_and_chain() {
+    const CHILD_DB: &str = "NYXID_AUDIT_CONTENTION_CHILD_DB";
+    const RETRY_MARKER: &str = "NYXID_AUDIT_CONTENTION_RETRY_MARKER";
+    if let Ok(name) = std::env::var(CHILD_DB) {
+        let client =
+            mongodb::Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+                .await
+                .unwrap();
+        let retry_seen = Arc::new(tokio::sync::Notify::new());
+        let marker = std::env::var(RETRY_MARKER).unwrap();
+        let signal = async {
+            retry_seen.notified().await;
+            std::fs::write(marker, b"retried").unwrap();
+        };
+        let db = client.database(&name);
+        let (stats, ()) = tokio::join!(
+            observed_workload(&db, 16, 16, Some(retry_seen.clone())),
+            signal,
+        );
+        assert!(
+            stats.max_body_attempts > 1,
+            "the independent process must retry the parent's real head lock"
+        );
+        assert_eq!(stats.appends, 256);
+        assert_eq!(stats.integrity_errors, 0);
+        eprintln!(
+            "audit_two_process child bodies={} max_body_attempts={} max_commit_attempts={}",
+            stats.body_attempts, stats.max_body_attempts, stats.max_commit_attempts
+        );
+        return;
+    }
+    let db = connect_transaction_test_database("audit_process_contention").await;
+    db.create_collection("business").await.unwrap();
+    let name = db.name().to_owned();
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("child-retried");
+    let child_marker = marker.clone();
+    let mut external = db.client().start_session().await.unwrap();
+    external.start_transaction().await.unwrap();
+    db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+        .update_one(doc! {}, doc! {"$inc": {"test_process_contention_fence": 1}})
+        .session(&mut external)
+        .await
+        .unwrap();
+    let child = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap()).args([
+            "--exact", "services::audit_runtime::transaction::tests::audit_head_contention_two_processes_keep_the_same_retry_budgets_and_chain",
+            "--nocapture",
+        ]).env(CHILD_DB, name).env(RETRY_MARKER, child_marker).output().unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !marker.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("child must observe real cross-process contention");
+    external.abort_transaction().await.unwrap();
+    let stats = current_workload(&db, 16, 16).await;
+    let child = child.await.unwrap();
+    assert!(
+        child.status.success(),
+        "child stdout={} stderr={}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    eprintln!("{}", String::from_utf8_lossy(&child.stderr));
+    assert_eq!(stats.appends, 256);
+    assert_eq!(stats.integrity_errors, 0);
+    assert_chain(&db, 512, true, 256).await;
+    eprintln!(
+        "audit_two_process parent bodies={} max_body_attempts={} max_commit_attempts={}",
+        stats.body_attempts, stats.max_body_attempts, stats.max_commit_attempts
     );
 }
 
