@@ -27,6 +27,45 @@ struct BaseFixture {
     attachment_id: String,
 }
 
+struct PausedTokenExchange {
+    endpoint: String,
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PausedTokenExchange {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let signal = reached.clone();
+        let resume = release.clone();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new().route("/token", axum::routing::post(move || {
+            let count = count.clone();
+            let signal = signal.clone();
+            let resume = resume.clone();
+            async move {
+                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                    signal.notify_one();
+                    resume.notified().await;
+                }
+                axum::Json(json!({"token":"tenant-test-token","expires_in":60}))
+            }
+        }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        Self { endpoint, reached, release, task }
+    }
+}
+
+impl Drop for PausedTokenExchange {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 async fn flag(f: &Fixture, key: &str, enabled: bool) {
     let now = bson::DateTime::now();
     f.state
@@ -1482,21 +1521,7 @@ async fn lark_base_write_single_card_binds_canonical_body_and_all_four_contracts
 async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_preparation() {
     for drift in ["key", "stop", "credential", "contract"] {
         let u = setup("base_final_send").await;
-        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let sent = count.clone();
-        Mock::given(path("/token"))
-            .respond_with(move |_: &wiremock::Request| {
-                let index = sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let response = ResponseTemplate::new(200)
-                    .set_body_json(json!({"token":"tenant-test-token","expires_in":1}));
-                if index == 2 {
-                    response.set_delay(std::time::Duration::from_millis(500))
-                } else {
-                    response
-                }
-            })
-            .mount(&u.server)
-            .await;
+        let exchange = PausedTokenExchange::start().await;
         let instance =
             u.f.state
                 .db
@@ -1519,7 +1544,7 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
             .await
             .unwrap();
         let config = crate::models::downstream_service::TokenExchangeConfig {
-            endpoint: format!("{}/token", u.server.uri()),
+            endpoint: exchange.endpoint.clone(),
             request_encoding: "json".into(),
             request_template: json!({}),
             token_response_path: "token".into(),
@@ -1541,13 +1566,9 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
             .unwrap();
         let auth = authenticate(&u.f).await;
         let (response, ()) = tokio::join!(call(&u, &auth, false, args(&u.attachment_id)), async {
-            tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                while count.load(std::sync::atomic::Ordering::SeqCst) < 3 {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(20), exchange.reached.notified())
+                .await
+                .unwrap();
             assert_eq!(
                 ledger(&u).await.state,
                 crate::models::lark_base_write::WriteState::Dispatching
@@ -1598,8 +1619,9 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
                         .unwrap();
                 }
             }
+            exchange.release.notify_one();
         });
-        assert_error(&response);
+        assert_eq!(response["result"]["isError"], true, "{drift}: {response}");
         assert_no_create(&u).await;
         assert_eq!(
             ledger(&u).await.state,
