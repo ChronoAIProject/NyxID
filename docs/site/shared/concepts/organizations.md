@@ -55,6 +55,14 @@ If the same slug exists on multiple orgs the user belongs to, the tiebreaker is 
 
 The org membership query has a 500-millisecond wall-clock timeout to prevent proxy latency from blowing up if the database is degraded. Users with a personal service never hit the org path.
 
+MCP tool-name precedence for people and NyxBot follows the same owner and
+membership cascade. Organization specialists consider only their bound
+organization, with its live member ACL applied before slug collisions are
+resolved. A personal or other-organization connection therefore cannot shadow a
+permitted organization connection on `tools/list`, `nyx__search_tools`,
+`/mcp/config` or execution. Exact `UserService` IDs remain bound through
+dispatch.
+
 ## Org-owned resources
 
 Every resource that already keys off `user_id` becomes org-owned by setting `user_id` to the org's user ID:

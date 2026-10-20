@@ -2107,6 +2107,7 @@ Contract guarantees for `contract_version: "1.0"`:
 - Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
 - `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
 - REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader, including auto-connected service expansion. Assistant chat keys discover services before acknowledgement on both surfaces; platform grants and account acknowledgement gate execution, not discovery. MCP adds its protocol-specific account/meta-tools separately. Stateful MCP sessions may show only the subset activated for that session.
+- Service selection applies authority before same-slug collision resolution. Organization specialist catalogs contain only connections from the bound organization that the live member ACL permits; an ungranted row may be listed with `chat_access: acknowledgement_required` and is then handled by the existing service gate. `nyx__list_connected_services` rows for user services include `owner_kind` (`personal` or `organization`), and `nyx__search_tools` accepts an exact connection ID query and includes `service_id` in each service match.
 
 `catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
 
@@ -2180,12 +2181,13 @@ Platform services are included only when the user has a valid connection with sa
     "invalid_contract_services": 0,
     "service_scope_restricted": false,
     "node_scope_restricted": false,
-    "node_scope_exclusions_present": false
+    "node_scope_exclusions_present": false,
+    "shadowed_connections": 0
   }
 }
 ```
 
-If the caller has no visible connections, `services` is empty, counts are `0`, and `diagnostics.no_visible_connections` is `true`. Other typed diagnostics distinguish visible-but-unavailable credentials/routes, generic-only fallback, and invalid visible operation contracts without exposing secrets or authorization-excluded resources.
+If the caller has no visible connections, `services` is empty, counts are `0`, and `diagnostics.no_visible_connections` is `true`. Other typed diagnostics distinguish visible-but-unavailable credentials/routes, generic-only fallback, invalid visible operation contracts, and caller-authorized same-slug connections omitted by precedence (`shadowed_connections`) without exposing secrets or authorization-excluded resources.
 
 **Example:**
 
