@@ -64,11 +64,13 @@ pub struct MfaDisableResponse {
 /// POST /api/v1/auth/mfa/setup
 ///
 /// Begin TOTP enrollment. Returns the secret and QR code URL.
+/// Requires a first-party human session or first-party access token.
 pub async fn setup(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
 ) -> AppResult<Json<MfaSetupResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let user = state
@@ -111,12 +113,14 @@ pub async fn setup(
 ///
 /// Complete TOTP enrollment by verifying a code. Returns recovery codes.
 /// Finds the user's pending (unverified) factor automatically.
+/// Requires a first-party human session or first-party access token.
 pub async fn confirm(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
     Json(body): Json<MfaConfirmRequest>,
 ) -> AppResult<Json<MfaConfirmResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
 
     // Find the pending (unverified, active) TOTP factor for this user
@@ -358,11 +362,13 @@ pub async fn verify(
 /// POST /api/v1/auth/mfa/disable
 ///
 /// Disable MFA on the account. Requires password confirmation.
+/// Requires a first-party human session or first-party access token.
 pub async fn disable(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<MfaDisableRequest>,
 ) -> AppResult<Json<MfaDisableResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id_str = auth_user.user_id.to_string();
 
     mfa_service::disable_totp(

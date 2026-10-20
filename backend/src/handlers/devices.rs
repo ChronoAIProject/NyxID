@@ -196,11 +196,13 @@ pub async fn poll_device_code(
     Ok(Json(response))
 }
 
+/// Requires a first-party human session or first-party access token.
 pub async fn approve_device_code(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(req): Json<ApproveDeviceCodeRequest>,
 ) -> AppResult<Json<DeviceCodeApprove>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     approve_device_code_with_notification_dispatcher(
         state,
         auth_user,
@@ -210,11 +212,13 @@ pub async fn approve_device_code(
     .await
 }
 
+/// Requires a first-party human session or first-party access token.
 pub async fn onboard_device(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(req): Json<OnboardDeviceRequest>,
 ) -> AppResult<Json<DeviceOnboard>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let actor_user_id = auth_user.user_id.to_string();
     let org_id = normalize_org_id(req.org_id)?;
     let label = normalize_onboard_label(&req.label)?;
@@ -263,11 +267,13 @@ pub async fn redeem_onboard_device(
     Ok(Json(response))
 }
 
+/// Requires a first-party human session or first-party access token.
 pub async fn revoke_onboard_device(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(bootstrap_id): Path<String>,
 ) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let actor_user_id = auth_user.user_id.to_string();
     revoke_onboard(&state.db, &actor_user_id, &bootstrap_id).await?;
 

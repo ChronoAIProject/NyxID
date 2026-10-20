@@ -1,17 +1,19 @@
 //! HTTP handlers for the remote CLI pairing flow (Mode B wizard).
 //!
-//! Five endpoints, all under `/api/v1/cli-pairings`:
+//! Seven endpoints, all under `/api/v1/cli-pairings`:
 //!
 //!   - `POST /`                 (CLI): create a pairing, get code + urls
 //!   - `GET  /{id}/poll`        (CLI): poll for status / ack
 //!   - `POST /{id}/cancel`      (CLI or browser): user gave up
 //!   - `POST /claim`            (browser): user entered the code
+//!   - `POST /{id}/reserve-action` (browser): reserve a destructive action
+//!   - `POST /{id}/rewind-action` (browser): rewind a cancelled action
 //!   - `POST /{id}/complete`    (browser): wizard finished, here's the ack
 //!
-//! All endpoints require a *human* session (rejected for service
-//! accounts via the human-only middleware in `routes.rs`). The CLI
-//! side authenticates with the user's access token; the browser side
-//! with the session cookie.
+//! Every handler requires a first-party human session or first-party access
+//! token, in addition to the router credential layers. Third-party OAuth apps
+//! cannot participate in pairing. The CLI uses a first-party access token;
+//! the browser uses its session cookie.
 
 use std::net::SocketAddr;
 
@@ -93,11 +95,13 @@ pub struct CompletePairingRequest {
 
 /// Create a pairing. CLI-side: authenticated via access token; the
 /// `user_id` on the record is bound to the caller's session.
+/// Requires a first-party human session or first-party access token.
 pub async fn create_pairing(
     State(state): State<AppState>,
     user: AuthUser,
     Json(req): Json<CreatePairingRequest>,
 ) -> AppResult<Json<CreatePairingResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
     if req.kind.is_empty() || req.kind.len() > MAX_KIND_LEN {
         return Err(AppError::BadRequest(format!(
             "kind must be 1..={MAX_KIND_LEN} chars"
@@ -130,11 +134,13 @@ pub async fn create_pairing(
 /// CLI-side poll. Returns `{status: "pending" | "claimed" | "completed"
 /// | "cancelled" | "expired"}`, with `ack` only populated in the
 /// `completed` shape.
+/// Requires a first-party human session or first-party access token.
 pub async fn poll_pairing(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<PollResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
     let resp = cli_pairing_service::poll(&state.db, &id, &user.user_id.to_string()).await?;
     Ok(Json(resp))
 }
@@ -142,6 +148,7 @@ pub async fn poll_pairing(
 /// Browser-side claim. Looks up by (hashed) code, enforces user_id
 /// binding, transitions status Pending → Claimed, returns the
 /// wizard-kind + prefill so the frontend can render the right panel.
+/// Requires a first-party human session or first-party access token.
 pub async fn claim_pairing(
     State(state): State<AppState>,
     user: AuthUser,
@@ -149,6 +156,7 @@ pub async fn claim_pairing(
     headers: HeaderMap,
     Json(req): Json<ClaimPairingRequest>,
 ) -> AppResult<Json<ClaimPairingResponse>> {
+    super::login_client_context::require_first_party_human(&user)?;
     // Rate-limit KEY: prefer `X-Forwarded-For` / `X-Real-IP` only
     // when the TCP peer appears in `config.trusted_proxy_ips`,
     // otherwise fall back to the peer address. This closes two
@@ -232,11 +240,13 @@ pub async fn claim_pairing(
 /// Browser-side: mark that the destructive API call is about to fire.
 /// Called just before `POST /api-keys`, `POST /api-keys/{id}/rotate`,
 /// etc. so a concurrent re-claim can tell the mint already happened.
+/// Requires a first-party human session or first-party access token.
 pub async fn reserve_action(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&user)?;
     cli_pairing_service::reserve_action(&state.db, &id, &user.user_id.to_string()).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -246,23 +256,27 @@ pub async fn reserve_action(
 /// Safe by construction — the service layer refuses to rewind a
 /// Completed pairing, so this can't be abused to replay a minted
 /// secret. A no-op when the pairing isn't in `Claimed` state.
+/// Requires a first-party human session or first-party access token.
 pub async fn rewind_action(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&user)?;
     cli_pairing_service::rewind_action(&state.db, &id, &user.user_id.to_string()).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Browser-side completion. Stores the typed ack; the next CLI poll
 /// returns it and the flow ends.
+/// Requires a first-party human session or first-party access token.
 pub async fn complete_pairing(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
     Json(req): Json<CompletePairingRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&user)?;
     cli_pairing_service::complete(
         &state.db,
         &state.encryption_keys,
@@ -276,11 +290,13 @@ pub async fn complete_pairing(
 
 /// Cancel by the originating user (CLI or browser side). Transitions
 /// (Pending | Claimed) → Cancelled.
+/// Requires a first-party human session or first-party access token.
 pub async fn cancel_pairing(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&user)?;
     cli_pairing_service::cancel(&state.db, &id, &user.user_id.to_string()).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -78,11 +78,13 @@ impl From<ServiceViewPreferences> for ServiceViewResponse {
 }
 
 /// PUT /api/v1/users/me/preferences/services
+/// Requires a first-party human session or first-party access token.
 pub async fn save_services_view(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<SaveServiceViewRequest>,
 ) -> AppResult<Json<ServiceViewResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let preferences = body.into();
     let saved = crate::services::user_preferences_service::save_services_view(
         &state.db,
@@ -152,11 +154,13 @@ impl From<crate::models::user::ServiceViewsPreferences> for ServiceViewsResponse
     }
 }
 
+/// Requires a first-party human session or first-party access token.
 pub async fn save_service_views(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<SaveServiceViewsRequest>,
 ) -> AppResult<Json<ServiceViewsResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let preferences = crate::models::user::ServiceViewsPreferences {
         default_id: body.default_id,
         views: body
@@ -387,11 +391,13 @@ pub struct CompleteOnboardingRequest {
 /// Marks a first-run onboarding flow as completed (or skipped) for the
 /// caller, so the post-login wizard redirect stops firing. Idempotent:
 /// re-stamping an already-completed flow just refreshes the timestamp.
+/// Requires a first-party human session or first-party access token.
 pub async fn complete_onboarding(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(req): Json<CompleteOnboardingRequest>,
 ) -> AppResult<Json<OnboardingStateResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id = auth_user.user_id.to_string();
 
     let field = match req.key.as_str() {
@@ -426,11 +432,13 @@ pub async fn complete_onboarding(
 /// PUT /api/v1/users/me
 ///
 /// Update the profile of the currently authenticated user.
+/// Requires a first-party human session or first-party access token.
 pub async fn update_me(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<UpdateProfileRequest>,
 ) -> AppResult<Json<UpdateProfileResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let user_id = auth_user.user_id.to_string();
 
     // Verify user exists
@@ -496,6 +504,7 @@ pub async fn update_me(
 /// DELETE /api/v1/users/me
 ///
 /// Permanently delete the currently authenticated user and related credentials/sessions.
+/// Requires a first-party human session or first-party access token.
 pub async fn delete_me(
     State(state): State<AppState>,
     auth_user: AuthUser,

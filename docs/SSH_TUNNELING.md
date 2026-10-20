@@ -14,7 +14,7 @@ SSH is a first-class service type in NyxID. Create the service with `service_typ
 |----------|---------|
 | `POST /api/v1/ssh/{service_id}/certificate` | Issue a short-lived OpenSSH user certificate |
 | `GET /api/v1/ssh/{service_id}` | Open the SSH-over-WebSocket tunnel |
-| `POST /api/v1/auth/cli-token` | Issue an access token for the CLI (cookie session auth) |
+| `POST /api/v1/auth/cli-token` | Issue access and refresh tokens for the CLI (first-party human session or first-party access token) |
 
 `GET /api/v1/ssh/{service_id}` upgrades to WebSocket and accepts binary frames only. In practice you should use the `nyxid ssh proxy` helper instead of speaking to the tunnel directly.
 

@@ -1124,8 +1124,9 @@ async fn ensure_billing_wallet_after_user_create(state: &AppState, user_id: &str
 
 /// POST /api/v1/auth/cli-token
 ///
-/// Issue an access token and refresh token for the CLI. Requires cookie-based
-/// session auth (used by the `/cli-auth` frontend page after browser login).
+/// Issue an access token and refresh token for the CLI. Requires a first-party
+/// human session or first-party access token. The `/cli-auth` frontend page
+/// uses its session cookie after browser login.
 ///
 /// The `client_ua` field in the request body carries the CLI's own User-Agent
 /// string through the browser round-trip so the session is recorded as a CLI
@@ -1137,6 +1138,7 @@ pub async fn cli_token(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Json<CliTokenResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
     let client_ua = parse_cli_token_request_body(body)?.and_then(|body| body.client_ua);
 
     let user_id_str = auth_user.user_id.to_string();
@@ -1181,12 +1183,10 @@ mod tests {
     use axum::body::Bytes;
 
     #[tokio::test]
-    async fn w8_id_cli_session_records_authenticated_key_principal() {
+    async fn w8_id_cli_session_refuses_authenticated_key() {
         use crate::{
             models::{
-                audit_outbox::{
-                    AuditOwner, AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent,
-                },
+                audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent},
                 user::{COLLECTION_NAME as USERS, User, UserType},
             },
             test_utils::*,
@@ -1233,24 +1233,21 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let event = db
-            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
-            .find_one(doc! {"event.action": "session_issued"})
-            .await
-            .unwrap()
-            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
-            event.event.principal,
-            AuditPrincipal::ApiKey {
-                id: key,
-                owner_id: owner.clone()
-            }
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
         );
-        assert_eq!(event.event.owner, AuditOwner::Person { id: owner });
-        let safe = serde_json::to_string(&event).unwrap();
-        assert!(!safe.contains(&secret));
-        assert!(!safe.contains("w8-id-private-key-name"));
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1591,5 +1588,518 @@ mod tests {
             extract_email_domain("tricky@sign@domain.com"),
             Some("domain.com".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod w8_id_first_party_tests {
+    use super::*;
+    use crate::{
+        crypto::jwt,
+        handlers::{cli_pairings, devices, mfa, users},
+        models::{
+            audit_outbox::{AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent},
+            user::{COLLECTION_NAME as USERS, User, UserType},
+        },
+        mw::auth::AuthMethod,
+        test_utils::{
+            connect_transaction_test_database, test_app_state, test_auth_user, test_user,
+        },
+    };
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+        routing::{delete, get, post, put},
+    };
+    use mongodb::bson::{Document, doc};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    async fn fixture(name: &str) -> (AppState, String) {
+        let db = connect_transaction_test_database(name).await;
+        role_service::seed_system_roles(&db).await.unwrap();
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        (test_app_state(db), owner)
+    }
+
+    fn bare_routes() -> Router<AppState> {
+        Router::new()
+            .route("/api/v1/auth/cli-token", post(cli_token))
+            .route("/api/v1/auth/mfa/setup", post(mfa::setup))
+            .route("/api/v1/auth/mfa/confirm", post(mfa::confirm))
+            .route("/api/v1/auth/mfa/disable", post(mfa::disable))
+            .route(
+                "/api/v1/devices/code/approve",
+                post(devices::approve_device_code),
+            )
+            .route("/api/v1/devices/onboard", post(devices::onboard_device))
+            .route(
+                "/api/v1/devices/onboard/{id}",
+                delete(devices::revoke_onboard_device),
+            )
+            .route("/api/v1/cli-pairings", post(cli_pairings::create_pairing))
+            .route(
+                "/api/v1/cli-pairings/claim",
+                post(cli_pairings::claim_pairing),
+            )
+            .route(
+                "/api/v1/cli-pairings/{id}/poll",
+                get(cli_pairings::poll_pairing),
+            )
+            .route(
+                "/api/v1/cli-pairings/{id}/reserve-action",
+                post(cli_pairings::reserve_action),
+            )
+            .route(
+                "/api/v1/cli-pairings/{id}/rewind-action",
+                post(cli_pairings::rewind_action),
+            )
+            .route(
+                "/api/v1/cli-pairings/{id}/complete",
+                post(cli_pairings::complete_pairing),
+            )
+            .route(
+                "/api/v1/cli-pairings/{id}/cancel",
+                post(cli_pairings::cancel_pairing),
+            )
+            .route(
+                "/api/v1/users/me",
+                get(users::get_me)
+                    .put(users::update_me)
+                    .delete(users::delete_me),
+            )
+            .route(
+                "/api/v1/users/me/preferences/services",
+                put(users::save_services_view),
+            )
+            .route(
+                "/api/v1/users/me/preferences/service-views",
+                put(users::save_service_views),
+            )
+            .route(
+                "/api/v1/users/me/onboarding/complete",
+                post(users::complete_onboarding),
+            )
+    }
+
+    fn serve(router: Router<AppState>, state: AppState) -> Router {
+        router
+            .layer(axum::Extension(ConnectInfo(
+                "127.0.0.1:23151".parse::<SocketAddr>().unwrap(),
+            )))
+            .with_state(state)
+    }
+
+    async fn request(
+        app: &Router,
+        method: &str,
+        path: &str,
+        credential: (&str, &str),
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(credential.0, credential.1)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    async fn assert_no_authority_or_audit(db: &mongodb::Database) {
+        for collection in [
+            crate::models::session::COLLECTION_NAME,
+            crate::models::refresh_token::COLLECTION_NAME,
+            crate::models::mfa_factor::COLLECTION_NAME,
+            crate::models::cli_pairing::COLLECTION_NAME,
+            crate::models::device_onboard_credential::COLLECTION_NAME,
+            crate::models::api_key::COLLECTION_NAME,
+            crate::models::node::COLLECTION_NAME,
+            crate::models::audit_log::COLLECTION_NAME,
+            PENDING_COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "unexpected mutation in {collection}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn w8_id_oauth_client_tokens_are_refused_at_every_first_party_handler() {
+        let (state, owner) = fixture("w8_id_oauth_first_party_handlers").await;
+        let token = jwt::generate_oauth_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&owner).unwrap(),
+            "openid profile email proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            &Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        let bearer = format!("Bearer {token}");
+        let (_, production) = crate::routes::build_router_with_state(state.clone());
+        let full = serve(production, state.clone());
+        let bare = serve(bare_routes(), state.clone());
+        let id = Uuid::new_v4().to_string();
+        // Valid request shapes reach each handler's credential decision. Exercise
+        // both direct mounts and production middleware: app tokens used to pass
+        // those layers even though API keys were already refused there.
+        let cases = [
+            ("POST", "/api/v1/auth/cli-token".to_string(), json!({})),
+            ("POST", "/api/v1/auth/mfa/setup".to_string(), json!({})),
+            (
+                "POST",
+                "/api/v1/auth/mfa/confirm".to_string(),
+                json!({"code":"123456"}),
+            ),
+            (
+                "POST",
+                "/api/v1/auth/mfa/disable".to_string(),
+                json!({"password":"unused"}),
+            ),
+            (
+                "POST",
+                "/api/v1/devices/code/approve".to_string(),
+                json!({"user_code":"ABCD-EFGH"}),
+            ),
+            (
+                "POST",
+                "/api/v1/devices/onboard".to_string(),
+                json!({"label":"unused"}),
+            ),
+            ("DELETE", format!("/api/v1/devices/onboard/{id}"), json!({})),
+            (
+                "POST",
+                "/api/v1/cli-pairings".to_string(),
+                json!({"kind":"api-key-create","prefill":{}}),
+            ),
+            (
+                "POST",
+                "/api/v1/cli-pairings/claim".to_string(),
+                json!({"code":"ABCD-EFGH"}),
+            ),
+            ("GET", format!("/api/v1/cli-pairings/{id}/poll"), json!({})),
+            (
+                "POST",
+                format!("/api/v1/cli-pairings/{id}/reserve-action"),
+                json!({}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/cli-pairings/{id}/rewind-action"),
+                json!({}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/cli-pairings/{id}/complete"),
+                json!({"ack":{}}),
+            ),
+            (
+                "POST",
+                format!("/api/v1/cli-pairings/{id}/cancel"),
+                json!({}),
+            ),
+            (
+                "PUT",
+                "/api/v1/users/me".to_string(),
+                json!({"display_name":"must not change"}),
+            ),
+            ("DELETE", "/api/v1/users/me".to_string(), json!({})),
+            (
+                "PUT",
+                "/api/v1/users/me/preferences/services".to_string(),
+                json!({"organization_ids":[],"service_group_ids":[],"search":"must not save","source":"all","state":"all","service_type":"all","show_auto_connected":true}),
+            ),
+            (
+                "PUT",
+                "/api/v1/users/me/preferences/service-views".to_string(),
+                json!({"views":[],"default_id":null}),
+            ),
+            (
+                "POST",
+                "/api/v1/users/me/onboarding/complete".to_string(),
+                json!({"key":"ai_services"}),
+            ),
+        ];
+        let before = state
+            .db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        for (mount, app) in [("bare", bare), ("production", full)] {
+            let (status, control) = request(
+                &app,
+                "GET",
+                "/api/v1/users/me",
+                ("authorization", &bearer),
+                json!({}),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the same verified app token can still read its profile through {mount}: {control}"
+            );
+            for (method, path, body) in &cases {
+                let (status, response) =
+                    request(&app, method, path, ("authorization", &bearer), body.clone()).await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{mount} {method} {path}: {response}"
+                );
+                assert_eq!(response["error"], "forbidden");
+                assert_eq!(response["error_code"], 1002);
+                assert_eq!(
+                    response["details"]["reason"], "credential_type_unsupported",
+                    "{mount} {method} {path}: {response}"
+                );
+                assert_eq!(response["details"]["credential_type"], "oauth_client");
+                assert_no_authority_or_audit(&state.db).await;
+            }
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_id_cli_token_accepts_cookie_and_first_party_access_token() {
+        let (state, owner) = fixture("w8_id_cli_first_party_success").await;
+        let browser =
+            token_service::create_session(&state.db, &state.audit_runtime, &owner, None, None)
+                .await
+                .unwrap();
+        let tokens = token_service::create_session_and_issue_tokens(
+            &state.db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &owner,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &tokens.access_token).unwrap();
+        assert_eq!(claims.sid.as_deref(), Some(tokens.session_id.as_str()));
+        assert!(claims.client_id.is_none());
+        let cookie = format!("nyx_session={}", browser.session_token);
+        let bearer = format!("Bearer {}", tokens.access_token);
+        let app = serve(bare_routes(), state.clone());
+        for credential in [
+            ("cookie", cookie.as_str()),
+            ("authorization", bearer.as_str()),
+        ] {
+            let (status, body) = request(
+                &app,
+                "POST",
+                "/api/v1/auth/cli-token",
+                credential,
+                json!({"client_ua":"nyxid-cli/w8-id"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "first-party exchange must succeed");
+            let access = jwt::verify_token(
+                &state.jwt_keys,
+                &state.config,
+                body["access_token"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert!(access.client_id.is_none());
+            let event = state.db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME).find_one(doc! {"event.action":"session_issued","event.target_id":access.sid.as_deref().unwrap()}).await.unwrap().unwrap();
+            assert_eq!(
+                event.event.principal,
+                AuditPrincipal::Person { id: owner.clone() }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn w8_id_cli_token_refuses_verified_nonhuman_credentials_before_parsing() {
+        let (state, owner) = fixture("w8_id_cli_credential_guard").await;
+        for (method, oauth, actor, key, child, unrestricted) in [
+            (AuthMethod::AccessToken, true, false, false, false, true),
+            (AuthMethod::Delegated, false, true, false, false, true),
+            (AuthMethod::Relay, false, false, true, false, true),
+            (AuthMethod::ServiceAccount, false, false, false, false, true),
+            (AuthMethod::ApiKey, false, false, true, false, true),
+            (AuthMethod::ApiKey, false, false, true, false, false),
+            (AuthMethod::ApiKey, false, false, true, true, false),
+            // Verified identity fields must also prevent a falsely broad method.
+            (AuthMethod::AccessToken, false, true, false, false, true),
+            (AuthMethod::AccessToken, false, false, true, false, true),
+        ] {
+            let mut user = test_auth_user(&owner);
+            user.auth_method = method.clone();
+            user.oauth_client_id = oauth.then(|| Uuid::new_v4().to_string());
+            user.acting_client_id = actor.then(|| Uuid::new_v4().to_string());
+            user.api_key_id = key.then(|| Uuid::new_v4().to_string());
+            user.api_key_credential_id = child.then(|| Uuid::new_v4().to_string());
+            user.allow_all_services = unrestricted;
+            let response = cli_token(
+                State(state.clone()),
+                ConnectInfo("127.0.0.1:23151".parse().unwrap()),
+                user,
+                HeaderMap::new(),
+                Bytes::from_static(b"invalid-json"),
+            )
+            .await;
+            assert!(
+                matches!(response, Err(AppError::ForbiddenWithGuidance { .. })),
+                "{method:?} must fail before body parsing"
+            );
+        }
+        assert_no_authority_or_audit(&state.db).await;
+    }
+
+    #[tokio::test]
+    async fn w8_id_cli_token_router_layers_refuse_key_headers() {
+        let (state, _) = fixture("w8_id_cli_key_layers").await;
+        let (_, production) = crate::routes::build_router_with_state(state.clone());
+        let app = serve(production, state.clone());
+        // Deliberately unregistered keys: the route layer must decide from the
+        // credential shape before the extractor can report invalid credentials.
+        for credential in [
+            ("x-api-key", "nyx_unregistered"),
+            ("authorization", "Bearer nyxid_ag_unregistered_child"),
+        ] {
+            let (status, body) = request(
+                &app,
+                "POST",
+                "/api/v1/auth/cli-token",
+                credential,
+                json!({}),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "router layer must reject keys: {body}"
+            );
+            assert_eq!(body["error"], "forbidden");
+            assert_eq!(body["error_code"], 1002);
+            assert_eq!(
+                body["details"]["reason"], "credential_type_unsupported",
+                "{body}"
+            );
+            assert_eq!(body["details"]["credential_type"], "api_key");
+            assert_eq!(
+                body["message"], "Forbidden: API keys cannot access this endpoint",
+                "the shape-based reject_api_key_tokens layer must refuse both identities"
+            );
+            assert_no_authority_or_audit(&state.db).await;
+        }
+        assert_no_authority_or_audit(&state.db).await;
+    }
+
+    #[tokio::test]
+    async fn w8_id_connection_audit_retains_authenticated_key() {
+        use crate::models::{
+            audit_log::{AuditLog, COLLECTION_NAME as AUDITS},
+            downstream_service::{
+                COLLECTION_NAME as SERVICES, DownstreamService, test_helpers::dummy_service,
+            },
+        };
+        let (state, owner) = fixture("w8_id_key_connection_audit").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let key = Uuid::new_v4().to_string();
+        let (prefix, secret, hash) = crate::crypto::token::generate_api_key();
+        state
+            .db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &key, "user_id": &owner, "name": "w8-id-key",
+                "key_prefix": prefix, "key_hash": hash, "scopes": "read write",
+                "is_active": true, "created_at": mongodb::bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        let mut service = dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.service_category = "internal".into();
+        service.service_type = "http".into();
+        service.requires_user_credential = false;
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let (_, production) = crate::routes::build_router_with_state(state.clone());
+        let app = serve(production, state.clone());
+        let (status, body) = request(
+            &app,
+            "POST",
+            &format!("/api/v1/connections/{}", service.id),
+            ("x-api-key", &secret),
+            json!({}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "keys may connect an internal service: {body}"
+        );
+        // This endpoint retains its legacy audit until the connection batch.
+        // Preserve key attribution on a production route that admits API keys.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = state
+                    .db
+                    .collection::<AuditLog>(AUDITS)
+                    .find_one(doc! {"event_type":"connection_created"})
+                    .await
+                    .unwrap()
+                {
+                    break event;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("connection audit must finish");
+        assert_eq!(event.api_key_id.as_deref(), Some(key.as_str()));
+        assert_eq!(event.user_id.as_deref(), Some(owner.as_str()));
+        assert!(!serde_json::to_string(&event).unwrap().contains(&secret));
     }
 }
