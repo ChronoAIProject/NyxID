@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "samplingStatus": "not-run",
+  "questions": [
+    {
+      "id": "Q01",
+      "category": "product",
+      "en": "What is NyxID and who is it for?",
+      "zh": "NyxID 是什么，适合谁？"
+    },
+    {
+      "id": "Q02",
+      "category": "product",
+      "en": "How does NyxBot differ from an AI chat interface?",
+      "zh": "NyxBot 和普通 AI 聊天界面有什么区别？"
+    },
+    {
+      "id": "Q03",
+      "category": "product",
+      "en": "Can NyxID work with an existing AI agent?",
+      "zh": "NyxID 能接入已有 AI Agent 吗？"
+    },
+    {
+      "id": "Q04",
+      "category": "product",
+      "en": "Where should a developer start with NyxID?",
+      "zh": "开发者应该从哪里开始接入 NyxID？"
+    },
+    {
+      "id": "Q05",
+      "category": "security",
+      "en": "Does an AI agent see raw credentials when using NyxID?",
+      "zh": "通过 NyxID 使用服务时，AI Agent 能看到原始凭证吗？"
+    },
+    {
+      "id": "Q06",
+      "category": "security",
+      "en": "What are scoped agent keys in NyxID?",
+      "zh": "NyxID 的 scoped Agent Keys 是什么？"
+    },
+    {
+      "id": "Q07",
+      "category": "security",
+      "en": "How do NyxID approvals limit agent actions?",
+      "zh": "NyxID 的审批如何限制 Agent 操作？"
+    },
+    {
+      "id": "Q08",
+      "category": "security",
+      "en": "What is a NyxID credential node?",
+      "zh": "NyxID 的 credential node 是什么？"
+    },
+    {
+      "id": "Q09",
+      "category": "availability",
+      "en": "Is the NyxID help desk solution currently available to activate?",
+      "zh": "NyxID 的客服方案目前能直接开通吗？"
+    },
+    {
+      "id": "Q10",
+      "category": "availability",
+      "en": "Can NyxID stock analyst place trades?",
+      "zh": "NyxID 的股票分析方案会下单交易吗？"
+    },
+    {
+      "id": "Q11",
+      "category": "availability",
+      "en": "Are all integrations listed on the NyxID website live?",
+      "zh": "NyxID 官网列出的集成是否都已经上线？"
+    },
+    {
+      "id": "Q12",
+      "category": "availability",
+      "en": "How can I ask NyxID about a custom bundle?",
+      "zh": "如何联系 NyxID 咨询自定义套餐？"
+    },
+    {
+      "id": "Q13",
+      "category": "delivery",
+      "en": "What permissions does the NyxID restaurant manager scenario require?",
+      "zh": "NyxID 的餐厅管理场景需要哪些权限？"
+    },
+    {
+      "id": "Q14",
+      "category": "delivery",
+      "en": "How does the NyxID appointment booker handle changes?",
+      "zh": "NyxID 的预约方案如何处理改期？"
+    },
+    {
+      "id": "Q15",
+      "category": "delivery",
+      "en": "Can NyxID work with a portal that has no API?",
+      "zh": "NyxID 能用于没有 API 的后台门户吗？"
+    },
+    {
+      "id": "Q16",
+      "category": "delivery",
+      "en": "How does a NyxID research scenario deliver its report?",
+      "zh": "NyxID 的研究场景会如何交付报告？"
+    },
+    {
+      "id": "Q17",
+      "category": "reading",
+      "en": "Where are NyxID public product Markdown pages?",
+      "zh": "在哪里可以读取 NyxID 的公开产品 Markdown？"
+    },
+    {
+      "id": "Q18",
+      "category": "reading",
+      "en": "How do the NyxID website and API llms.txt files differ?",
+      "zh": "NyxID 官网和 API 的 llms.txt 有什么区别？"
+    },
+    {
+      "id": "Q19",
+      "category": "reading",
+      "en": "Does submitting the NyxID Contact form send an email automatically?",
+      "zh": "提交 NyxID Contact 表单是否会自动发送邮件？"
+    },
+    {
+      "id": "Q20",
+      "category": "reading",
+      "en": "Does NyxID publish verified customer stories on its Blog?",
+      "zh": "NyxID Blog 上是否已经发布审核通过的真实客户案例？"
+    }
+  ]
+}
