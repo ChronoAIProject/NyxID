@@ -358,3 +358,12 @@
 - Inspect the stopped final image with host-side dpkg-list/tar parsing, refusing executable/ELF/non-header payloads; publication reruns that proof.
 - No real header records activated: the strict /usr/include-only negative still rejects the two package documentation files pending the explicit PM clarification.
 - Local: eligibility 13/13; all existing image-vulnerability tests retain HIGH/CRITICAL/UNKNOWN behavior. Required Scanner Policy and Artifact Packaging Policy run the new negatives on PRs/schedules.
+
+## W7 CI82 follow-up — execute every final image
+- Mandatory identity verification now runs immutable-image executable/default-entrypoint smoke checks before publication or operator tagging.
+- All CLI images execute version/help and default-entrypoint help; backend/frontend, MCP stdio ping and updater's safe invalid-command path also execute.
+- Node ELF dependencies must fit the five-package runtime; the confirmed current DBus link remains a hard failure until the coordinated CLI fix.
+- Machine Dockerfiles dispatch sole help/version flags before existing entrypoints; ordinary startup arguments/environment are preserved; D's entrypoint source stays unchanged.
+- Probes have no network/registration input, read-only roots, dropped capabilities and resource/time bounds; cleanup removes probe containers and anonymous volumes.
+- Local: runtime 9/9, shell dispatcher 3/3, packaging 17/17, operator wrapper 19/19, build/APT policy 45/45; native scratch MCP passed this exact read-only/network-less runtime gate.
+- PR: Artifact Packaging Policy; Backend Credential Packaging and all Shipped Image Identity matrix cells; publication/operator checks inherit the same gate.

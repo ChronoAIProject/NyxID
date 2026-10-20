@@ -61,6 +61,18 @@ must also remove the DBus link; adding the old CLI to this rootfs would fail.
 This service image is distinct from the machine workstation images, whose
 owner shell/build/browser workloads retain their documented tools.
 
+The mandatory final identity checker also executes the actual immutable image.
+Every CLI image must run `nyxid --version`, `nyxid --help`, and its configured
+entrypoint's sole `--help` path. Backend/frontend executables, the MCP stdio
+ping, and the updater's side-effect-free invalid-command path are exercised
+as well. A loader error, timeout, wrong response or failed exit blocks PR
+acceptance, publication and the operator wrapper before it applies a tag.
+Probes run without networking or registration input, with a read-only root,
+dropped capabilities and bounded resources; cleanup removes anonymous volumes.
+The workstation Dockerfiles use a fixed help/version dispatcher ahead of their
+existing entrypoints so these probes perform no registration or startup writes.
+Ordinary invocation preserves the original arguments and environment.
+
 ## Approved residual-finding policy
 
 A final-image finding is disposition-eligible only when all hold: (a) the

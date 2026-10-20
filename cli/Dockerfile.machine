@@ -97,6 +97,7 @@ RUN chmod 0755 /usr/local/bin/nyxid-machine-entrypoint /usr/local/bin/nyxid-desk
     && NYXID_MACHINE_CONTAINER=1 /usr/local/bin/nyxid node machine-browser-install --port 32248
 VOLUME ["/workspace", "/var/lib/nyxid-machine"]
 WORKDIR /workspace
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-entrypoint"]
+COPY --chmod=755 scripts/image-entrypoint-dispatch.sh /usr/local/bin/nyxid-image-entrypoint
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-image-entrypoint", "/usr/local/bin/nyxid-machine-entrypoint"]
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=3 CMD ["nyxid", "node", "machine-updater", "health"]

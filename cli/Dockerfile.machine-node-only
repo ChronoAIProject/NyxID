@@ -83,7 +83,8 @@ WORKDIR /workspace
 # The entrypoint stays root so Node credentials remain outside the command
 # user's workspace. `nyxid node setup --container` drops command execution to
 # the fixed non-root `agent` identity.
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-machine-node-only"]
+COPY --chmod=755 scripts/image-entrypoint-dispatch.sh /usr/local/bin/nyxid-image-entrypoint
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/nyxid-image-entrypoint", "/usr/local/bin/nyxid-machine-node-only"]
 
 # A healthy container has a protected identity/config and a live node process.
 # This does not claim that the Sandbox/Pod is physically fenced; that evidence

@@ -22,6 +22,8 @@ jobs:
       - run: python3 scripts/test-elf-runtime.py
       - run: python3 scripts/test-node-rootfs.py
       - run: python3 scripts/test-image-dispositions.py
+      - run: python3 scripts/test-image-runtime.py
+      - run: python3 scripts/test-image-entrypoint-dispatch.py
       - run: python3 scripts/test-build-local-image.py
       - run: python3 scripts/test-built-image-csp.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -123,7 +125,7 @@ jobs:
           python3 scripts/check-credential-image.py --image nyxid-credential-backend:ci --component backend \
             --compare-image nyxid-credential-frontend:ci --source-root "$RUNNER_TEMP/image-source/source" \
             --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}'
-      - name: Require final backend and frontend source identities
+      - name: Require final backend/frontend identity and executable entrypoint smoke checks
         run: |
           for component in backend frontend; do
             python3 scripts/check-image-identity.py --image "nyxid-credential-$component:ci" --component "$component" \

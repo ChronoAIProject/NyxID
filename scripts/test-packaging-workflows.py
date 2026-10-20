@@ -41,6 +41,11 @@ def require_gates(data):
     if packaging['permissions'] != {'contents': 'read'}:
         raise ValueError('PR packaging permissions')
     jobs = packaging['jobs']
+    for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py'):
+        tests = [step for step in jobs['policy']['steps']
+                 if step.get('run') == 'python3 scripts/' + script]
+        if len(tests) != 1 or 'if' in tests[0] or tests[0].get('continue-on-error'):
+            raise ValueError('final runtime and entrypoint failure regressions must run')
     if {item['arch'] for item in jobs['credentials']['strategy']['matrix']['include']} != {'amd64', 'arm64'}:
         raise ValueError('both native credential architectures required')
     for job in jobs.values():
@@ -139,6 +144,14 @@ def require_gates(data):
 
 
 class PackagingWorkflows(unittest.TestCase):
+    def test_runtime_failure_regressions_cannot_be_skipped(self):
+        for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['policy']['steps']
+            steps[:] = [step for step in steps if script not in step.get('run', '')]
+            with self.subTest(script=script), self.assertRaisesRegex(ValueError, 'runtime and entrypoint'):
+                require_gates(data)
+
     def test_partial_existing_toolchains_must_install_essentials_explicitly(self):
         for component in ('cargo', 'rustc', 'rust-std'):
             data = workflows()

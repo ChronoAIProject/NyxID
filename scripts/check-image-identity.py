@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Check final image labels and extracted executable/assets without image startup."""
+"""Check final image labels and extracted executable/assets plus safe executable/entrypoint startup."""
 import argparse
 from pathlib import Path
 import tempfile
 
 from credential_packaging import verify as verify_credentials
 from image_artifacts import copy, image_container
+from image_runtime import check as check_runtime
 from source_artifacts import IMAGES, verify_binary, verify_frontend, verify_labels, versions
 
 
@@ -18,6 +19,7 @@ def check(image, component, arch, source, commit, epoch, extractor):
             copy(container, path + '/.', directory)
             verify_frontend(directory, source, commit, epoch)
             verify_credentials(directory, source, commit, epoch)
+            check_runtime(info["Id"], component)
         else:
             extracted = copy(container, path, directory)
             name = Path(path).name
@@ -30,6 +32,7 @@ def check(image, component, arch, source, commit, epoch, extractor):
                 for name in ('credential-accept', 'release-integrity'):
                     copy(container, '/app/frontend/dist/' + name + '/.', credential_root / name)
                 verify_credentials(credential_root, source, commit, epoch)
+            check_runtime(info['Id'], component, directory / Path(path).name)
         print(f'Final source identity verified: {component} {arch}, image {info["Id"]}, SOURCE_COMMIT={commit}, epoch={epoch}')
 
 
