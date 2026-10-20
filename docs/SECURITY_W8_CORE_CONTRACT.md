@@ -432,3 +432,11 @@ label its successful-throughput ratio accordingly. Record medians and any
 slowdown above roughly 2x in the W8 log before PM fanout. Debug/local single-node
 figures from the shared development host describe this comparison, not
 production capacity.
+
+
+ID-2 account authority details use `SecurityFlagChange { flag: AccountActive,
+old, new }` for account-active status and `PlatformRoleChange { old, new }` for
+the closed `PlatformRole` values `user`, `operator`, `admin`. Derive both values
+from the transaction's persisted before/after rows. `old: None` is permitted only
+when that transaction creates the account; it never means an unknown prior role
+or an inherited override. Neither variant admits request-authored strings.

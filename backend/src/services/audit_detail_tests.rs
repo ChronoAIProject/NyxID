@@ -9,6 +9,7 @@ use crate::{
         },
         org_membership::OrgRole,
         service_approval_config::ApprovalMode,
+        user::PlatformRole,
     },
     test_utils::connect_transaction_test_database,
 };
@@ -93,6 +94,19 @@ fn valid_details() -> Vec<AuditDetail> {
         AuditDetail::NodeBindingPriorityChange {
             old: i32::MIN,
             new: i32::MAX,
+        },
+        AuditDetail::PlatformRoleChange {
+            old: None,
+            new: PlatformRole::User,
+        },
+        AuditDetail::PlatformRoleChange {
+            old: Some(PlatformRole::User),
+            new: PlatformRole::Admin,
+        },
+        AuditDetail::SecurityFlagChange {
+            flag: SecurityFlag::AccountActive,
+            old: true,
+            new: false,
         },
         AuditDetail::OrgRoleChange {
             old: OrgRole::Viewer,
@@ -681,4 +695,69 @@ async fn audit_detail_enqueue_replay_conflicts_and_materialization_revalidates_s
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn audit_detail_account_active_and_platform_role_have_closed_canonical_bytes() {
+    for (detail, expected) in [
+        (
+            AuditDetail::SecurityFlagChange {
+                flag: SecurityFlag::AccountActive,
+                old: true,
+                new: false,
+            },
+            r#"{"kind":"security_flag_change","flag":"account_active","old":true,"new":false}"#,
+        ),
+        (
+            AuditDetail::PlatformRoleChange {
+                old: None,
+                new: PlatformRole::User,
+            },
+            r#"{"kind":"platform_role_change","old":null,"new":"user"}"#,
+        ),
+        (
+            AuditDetail::PlatformRoleChange {
+                old: Some(PlatformRole::User),
+                new: PlatformRole::Operator,
+            },
+            r#"{"kind":"platform_role_change","old":"user","new":"operator"}"#,
+        ),
+        (
+            AuditDetail::PlatformRoleChange {
+                old: Some(PlatformRole::Operator),
+                new: PlatformRole::Admin,
+            },
+            r#"{"kind":"platform_role_change","old":"operator","new":"admin"}"#,
+        ),
+    ] {
+        validate_detail(&detail).unwrap();
+        assert_eq!(serde_json::to_string(&detail).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_str::<AuditDetail>(expected).unwrap(),
+            detail
+        );
+        assert_eq!(
+            bson::from_slice::<AuditDetail>(&bson::to_vec(&detail).unwrap()).unwrap(),
+            detail
+        );
+        let projected = event().with_detail(detail).project();
+        validate(&projected).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<SafeAuditEvent>(&serde_json::to_vec(&projected).unwrap())
+                .unwrap(),
+            projected
+        );
+    }
+    for invalid in [
+        r#"{"kind":"platform_role_change","old":"root","new":"user"}"#,
+        r#"{"kind":"platform_role_change","old":null,"new":"root"}"#,
+        r#"{"kind":"platform_role_change","old":null,"new":null}"#,
+        r#"{"kind":"platform_role_change","old":null,"new":"user","email":"secret"}"#,
+        r#"{"kind":"security_flag_change","flag":"account_active","old":true,"new":false,"body":"secret"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AuditDetail>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
 }

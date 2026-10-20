@@ -146,6 +146,7 @@ pub enum AcknowledgementApproverKind {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityFlag {
+    AccountActive,
     MfaEnabled,
     EmailVerified,
     SkipDestructiveConfirmation,
@@ -180,6 +181,11 @@ pub enum AuditDetail {
     },
     /// The binding model accepts the complete i32 range; lower sorts first.
     NodeBindingPriorityChange { old: i32, new: i32 },
+    /// None is valid only when the transaction creates a new account row.
+    PlatformRoleChange {
+        old: Option<super::user::PlatformRole>,
+        new: super::user::PlatformRole,
+    },
     OrgRoleChange {
         old: super::org_membership::OrgRole,
         new: super::org_membership::OrgRole,
