@@ -259,3 +259,15 @@
 - Workflow YAML, permission ceilings, pin policy and diff checks passed; signing root is automatically audited and receives weekly Dependabot updates.
 - PR evidence: Release Signing Policy / W6 Signing Compatibility (amd64/arm64); Signing Rehearsal / OIDC Rehearsal and Production Rejection; Every Dependency Root Audit; Rust Clippy; CI Pipeline.
 - RELEASE_SIGNING.md specifies admin rulesets/environment/reviewers/variable/OIDC permissions and public-trust prerequisites; no remote provisioning or publication performed.
+
+## W9.4 D-5 — required hosted native and full-image acceptance wiring
+- Require Machine Native Acceptance / Native Machine Separation (amd64) on every PR and in CI Pipeline; repeat weekly without secrets or publication permissions.
+- Invoke D's unchanged root/disposable harness with locked CLI/context-spike builds, pinned CUA, 100 samples and full native/adversarial checks.
+- Fail with kernel/LSM/AppArmor diagnostics unless native Linux amd64 root has Landlock ABI >= 6 and real AppArmor userns restrictions; never skip or relax policy.
+- Snapshot-install native display/venv/NSS dependencies and /usr/bin offline toolchain; native Google Chrome and actual image Debian Chromium cover both managed policy layouts.
+- Machine Container E2E additionally runs D's 100-sample probe with --init, 512m shm and committed seccomp; no token env or explicit state/workspace mounts; assert container/anonymous-volume cleanup.
+- Preserve fixed-label per-sample timing, first observation, p99/max and review bounds as machine-native-amd64-probe-timings and machine-container-amd64-probe-timings artifacts.
+- Local commands: test-machine-acceptance-ci.py 9/9; test-packaging-workflows.py 14/14; test-signing-workflows.py 5/5; CI helper discover 29/29; test-workflow-yaml.py 9/9; test-build-inputs.py 20/20 (86 passed, 0 failed).
+- Actual pinned amd64 CUA archive SHA/size and safe complete driver/SDK extraction passed; shell/Python syntax, workflow mapping/permissions, pin policy and diff checks passed.
+- Native root/browser and Docker execution remain hosted-only evidence; no local destructive acceptance or image builds attempted. D's 16/16 native and 44/44 adversarial results are separate PM-provided evidence.
+- PR jobs: Machine Native Acceptance / Native Machine Separation (amd64), Machine Container E2E, existing Artifact Packaging / Machine Docker CLI E2E, Workflow Permissions, Detect Changes, CI Pipeline.

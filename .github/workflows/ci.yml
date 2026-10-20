@@ -719,6 +719,12 @@ jobs:
       id-token: write
     uses: ./.github/workflows/security-release-rehearsal.yml
 
+  machine-native:
+    name: Machine Native Acceptance
+    permissions:
+      contents: read
+    uses: ./.github/workflows/machine-native-acceptance.yml
+
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
   # ---------------------------------------------------------------------------
@@ -730,7 +736,9 @@ jobs:
       attestations: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The additional 100 real full-image probes can consume up to 25 minutes
+    # at the unchanged three-browser-probe observation bounds.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -783,9 +791,31 @@ jobs:
       - name: Verify exported image inputs after build
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
+      - name: Build trusted fixture overlay on the actual machine image
+        run: docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
+      - name: Time 100 actual Debian Chromium probes without registration or persistent mounts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/machine-container-evidence"
+          docker volume ls --format '{{.Name}}' | sort > "$RUNNER_TEMP/machine-container-evidence/volumes-before.txt"
+          docker run --rm --init --name nyxid-machine-probe-acceptance --shm-size=512m \
+            --security-opt seccomp=cli/resources/machine-container/seccomp.json \
+            --entrypoint python3 nyxid-machine-e2e:ci \
+            /test/machine_probe_acceptance.py --disposable --binary /usr/local/bin/nyxid --container --samples 100 \
+            2>&1 | tee "$RUNNER_TEMP/machine-container-evidence/probe-timings.txt"
+          docker volume ls --format '{{.Name}}' | sort > "$RUNNER_TEMP/machine-container-evidence/volumes-after.txt"
+          diff -u "$RUNNER_TEMP/machine-container-evidence/volumes-before.txt" "$RUNNER_TEMP/machine-container-evidence/volumes-after.txt"
+          test -z "$(docker ps -aq --filter name='^/nyxid-machine-probe-acceptance$')"
+      - name: Preserve fixed-label full-image timing evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: machine-container-amd64-probe-timings
+          path: ${{ runner.temp }}/machine-container-evidence/probe-timings.txt
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify sandbox, isolation, saved logins, takeover and live desktop
         run: |
-          docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
           python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
           docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
@@ -1557,6 +1587,7 @@ jobs:
       - artifact-packaging
       - release-signing
       - signing-rehearsal
+      - machine-native
       - cli-test
       - machine-container
       - rust-features
@@ -1595,6 +1626,7 @@ jobs:
             artifact-packaging=${{ needs.artifact-packaging.result }}
             release-signing=${{ needs.release-signing.result }}
             signing-rehearsal=${{ needs.signing-rehearsal.result }}
+            machine-native=${{ needs.machine-native.result }}
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}

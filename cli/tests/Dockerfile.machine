@@ -5,6 +5,7 @@ COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/ap
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble debian:bookworm -- libnss3-tools node-ws
 COPY cli/tests/machine_container_e2e.mjs cli/tests/machine_context_e2e.mjs /test/
 COPY cli/tests/machine_native_probe_drop.py /test/
+COPY cli/tests/machine_probe_acceptance.py /test/
 COPY cli/tests/machine_native_host_e2e.py /test/
 COPY cli/tests/machine_filler.test.mjs /test/machine_filler.test.mjs
 COPY cli/resources/machine-browser/ /resources/machine-browser/
