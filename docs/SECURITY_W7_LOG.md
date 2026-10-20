@@ -21,3 +21,10 @@
 - Local verification: APK tests 35/0; build-input tests 20/0; APT tests 19/0; YAML tests 6/0; policy, syntax and permission checks pass.
 - Native replay, offline Dockerfile execution and final application-image behavior remain pending PR CI; no local image builds.
 - C-3 retains weekly candidate-refresh/stale-catalog gates and the HTTPS-catalog/installer-only HTTP transport regression.
+
+## C-1 follow-up — restore Detect Changes helper tests
+- Root cause: legacy sudo/apt-get stub rejected the snapshot-installer delegation with exit 99.
+- Preserve all four original cases using the real helper and installer with isolated filesystem/command fixtures; add download-failure coverage.
+- Detect Changes exact discovery command: all four helper modules, 22 passed/0 failed.
+- C-1/C-2 local suites: build inputs 20/0, APT 19/0, APK 35/0, workflow YAML 6/0; policy/YAML/permission checks pass.
+- Production helper/installer behavior unchanged; hosted Detect Changes and downstream APT/APK evidence pending the next PR run.
