@@ -2491,7 +2491,10 @@ mod tests {
             "http://",
             "https://",
         ] {
-            assert!(!rendered.contains(secret), "diagnostic leaked {secret}");
+            assert!(
+                !rendered.contains(secret),
+                "diagnostic leaked a protected fixture value"
+            );
         }
         safe
     }

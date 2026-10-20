@@ -2116,7 +2116,10 @@ fn deletion_diagnostic_projection_is_allowlisted_and_redacted() {
         assert!(view.error_message.as_deref().unwrap().contains("pending"));
         let encoded = serde_json::to_string(&view).unwrap();
         for secret in ["private-", "credential writer-fence"] {
-            assert!(!encoded.contains(secret), "{code} leaked {secret}");
+            assert!(
+                !encoded.contains(secret),
+                "diagnostic leaked a protected fixture value"
+            );
         }
         operation.action = LifecycleAction::Create;
         assert_eq!(
