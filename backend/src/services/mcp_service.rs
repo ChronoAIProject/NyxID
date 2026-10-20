@@ -4050,8 +4050,10 @@ pub async fn prepare_chat_proxy_tool_call(
     if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
         return prepare_proxy_tool_call(service, endpoint, args);
     }
-    let materialized =
-        super::lark_attachment_tool::materialize(db, keys, chat, service, endpoint, args).await?;
+    let materialized = Box::pin(super::lark_attachment_tool::materialize(
+        db, keys, chat, service, endpoint, args,
+    ))
+    .await?;
     // Reuse route/policy preparation with no caller body. This private copy
     // changes only body construction; consent and identity keep the real endpoint.
     let mut route = endpoint.clone();
