@@ -898,6 +898,24 @@ Measurements and reproduction commands are under
 - **Existing features.** Proxy, credential, SSH and oracle behaviour are
   unchanged.
 
+Linux managed-browser setup accepts `NYXID_MACHINE_BROWSER` as an absolute,
+executable package path. An explicit missing, non-executable or unknown package
+fails setup; it never falls back to another installed browser. Resolved package
+metadata still selects the policy directory: Debian Chromium uses
+`/etc/chromium/policies/managed`, Ubuntu Snap Chromium uses
+`/etc/chromium-browser/policies/managed`, and Google Chrome deb uses
+`/etc/opt/chrome/policies/managed`. This selection does not bypass the live
+policy-effectiveness or renderer-sandbox checks.
+
+Native acceptance (`bash cli/tests/machine_native_acceptance.sh --disposable`)
+defaults explicitly to `/usr/bin/google-chrome`, regardless of installed Chromium
+transitional shims. The prerequisite check and harness share one selector and
+print every candidate's resolved path and the selected policy directory. The
+hosted amd64 prerequisite requires the Google Chrome deb layout. Native Snap or
+Debian acceptance must explicitly pass the corresponding supported package path,
+for example `NYXID_MACHINE_BROWSER=/usr/bin/chromium`; these layouts remain covered
+by package-detection tests and the Snap guest / Debian container acceptance runs.
+
 ### D12. Documentation
 
 This document describes what shipped. Also update:

@@ -12,24 +12,16 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {createRequire} from 'node:module';
 import {contexts} from './machine_context_e2e.mjs';
+import {selectBrowser} from './machine_native_browser.mjs';
 const {WebSocketServer}=createRequire(import.meta.url)('ws');
 assert(process.argv.includes('--disposable'),'requires explicit --disposable in an expendable Linux guest');
 assert.equal(process.platform,'linux');assert.equal(process.getuid(),0);
 const binary=process.env.NYXID_TEST_CLI,cua=process.env.NYXID_TEST_CUA_DRIVER;
 assert(binary&&path.isAbsolute(binary),'NYXID_TEST_CLI must name the built CLI');
 assert(cua&&path.isAbsolute(cua),'NYXID_TEST_CUA_DRIVER must name the pinned driver');
-// Match setup's package candidates, including Google Chrome on hosted Ubuntu.
-const browserBinary=(await Promise.all(['/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].map(async candidate=>await fs.access(candidate).then(()=>candidate,()=>undefined)))).find(Boolean);
-assert(browserBinary,'install a supported Chromium or Google Chrome package');
-const resolvedBrowser=await fs.realpath(browserBinary);
-let policyDirectory,browserExecutable;
-if(/^\/snap\/chromium\/\d+\/usr\/lib\/chromium-browser\/chrome$/.test(resolvedBrowser)) {
- policyDirectory='/etc/chromium-browser/policies/managed';browserExecutable=resolvedBrowser;
-}else if(['/usr/bin/chromium','/usr/lib/chromium/chromium'].includes(resolvedBrowser)) {
- policyDirectory='/etc/chromium/policies/managed';browserExecutable='/usr/lib/chromium/chromium';
-}else if(['/opt/google/chrome/google-chrome','/opt/google/chrome/chrome'].includes(resolvedBrowser)) {
- policyDirectory='/etc/opt/chrome/policies/managed';browserExecutable='/opt/google/chrome/chrome';
-}else assert.fail('native acceptance requires a recognized resolved browser package layout');
+const {browserBinary,policyDirectory,browserExecutable}=selectBrowser();
+// Setup must launch the very package whose policies this harness inspects.
+process.env.NYXID_MACHINE_BROWSER=browserBinary;
 const profileName=process.env.NYXID_TEST_NATIVE_PROFILE??`w94-${process.pid}`;
 assert(/^[a-z][a-z0-9-]{0,15}$/.test(profileName),'safe unique native test profile');
 const directory=`/var/lib/nyxid-machine/${profileName}/node`,workspace=`/srv/nyxid-${profileName}-workspace`;

@@ -559,16 +559,16 @@ pub async fn run(mut args: Setup) -> Result<()> {
             eprintln!(
                 "Saved-login filling needs admin-installed Chromium policies and the protected NyxID extension. Your system may ask for an administrator password. If declined, computer use still works and filling remains unavailable."
             );
-            std::process::Command::new("sudo")
-                .arg(std::env::current_exe()?)
-                .args([
-                    "node",
-                    "machine-browser-install",
-                    "--port",
-                    &port.to_string(),
-                ])
-                .status()
-                .is_ok_and(|s| s.success())
+            browser_installer(
+                &std::env::current_exe()?,
+                port,
+                cfg!(target_os = "linux")
+                    .then(browser_binary)
+                    .transpose()?
+                    .as_deref(),
+            )
+            .status()
+            .is_ok_and(|s| s.success())
         };
         if installed {
             let binary = browser_binary()?;
@@ -747,7 +747,55 @@ fn browser_binary() -> Result<PathBuf> {
             "/usr/bin/google-chrome",
         ]
     };
-    paths.iter().map(PathBuf::from).find(|p|p.is_file()).context("Install Chromium (or Google Chrome on macOS), then run setup again to enable saved-login filling")
+    let explicit = if cfg!(target_os = "linux") {
+        std::env::var_os("NYXID_MACHINE_BROWSER").map(PathBuf::from)
+    } else {
+        None
+    };
+    select_browser_binary(explicit.as_deref(), paths)
+}
+
+fn select_browser_binary(explicit: Option<&Path>, candidates: &[&str]) -> Result<PathBuf> {
+    if let Some(binary) = explicit {
+        use std::os::unix::fs::PermissionsExt;
+        anyhow::ensure!(
+            binary.is_absolute(),
+            "NYXID_MACHINE_BROWSER must be an absolute executable path"
+        );
+        let metadata = binary.metadata().context(
+            "NYXID_MACHINE_BROWSER is unavailable; install a supported browser package or correct the selected path",
+        )?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            "NYXID_MACHINE_BROWSER must name an executable file"
+        );
+        // Linux setup still validates the resolved package and policy layout.
+        // An invalid explicit choice must never fall back to another browser.
+        return Ok(binary.to_owned());
+    }
+    candidates.iter().map(PathBuf::from).find(|p|p.is_file()).context("Install Chromium (or Google Chrome on macOS), then run setup again to enable saved-login filling")
+}
+
+fn browser_installer(
+    executable: &Path,
+    port: u16,
+    browser: Option<&Path>,
+) -> std::process::Command {
+    let mut command = std::process::Command::new("sudo");
+    if let Some(browser) = browser {
+        // sudo normally strips custom environment variables. Forward only the
+        // selected package path; the privileged installer validates it again.
+        let mut selection = std::ffi::OsString::from("NYXID_MACHINE_BROWSER=");
+        selection.push(browser);
+        command.arg("env").arg(selection);
+    }
+    command.arg(executable).args([
+        "node",
+        "machine-browser-install",
+        "--port",
+        &port.to_string(),
+    ]);
+    command
 }
 
 pub fn install_browser(port: u16) -> Result<()> {
@@ -981,6 +1029,65 @@ fn systemd_quote(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privileged_browser_installer_receives_the_selected_package_only() {
+        let executable = Path::new("/opt/nyxid/bin/nyxid");
+        let command =
+            browser_installer(executable, 32248, Some(Path::new("/usr/bin/google-chrome")));
+        assert_eq!(command.get_program(), "sudo");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "env",
+                "NYXID_MACHINE_BROWSER=/usr/bin/google-chrome",
+                "/opt/nyxid/bin/nyxid",
+                "node",
+                "machine-browser-install",
+                "--port",
+                "32248",
+            ]
+        );
+        let mac = browser_installer(executable, 32248, None);
+        assert_eq!(mac.get_args().next().unwrap(), executable);
+    }
+
+    #[test]
+    fn explicit_browser_selection_wins_over_installed_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let shim = root.path().join("chromium-browser");
+        let chrome = root.path().join("google-chrome");
+        for binary in [&shim, &chrome] {
+            std::fs::write(binary, "browser").unwrap();
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let candidates = [shim.to_str().unwrap(), chrome.to_str().unwrap()];
+        assert_eq!(select_browser_binary(None, &candidates).unwrap(), shim);
+        assert_eq!(
+            select_browser_binary(Some(&chrome), &candidates).unwrap(),
+            chrome
+        );
+    }
+
+    #[test]
+    fn invalid_explicit_browser_fails_without_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("google-chrome");
+        std::fs::write(&installed, "browser").unwrap();
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let candidates = [installed.to_str().unwrap()];
+        for selected in [
+            Path::new(""),
+            Path::new("google-chrome"),
+            &root.path().join("missing"),
+            root.path(),
+            &installed,
+        ] {
+            assert!(select_browser_binary(Some(selected), &candidates).is_err());
+        }
+    }
 
     fn setup_args(extra: &[&str]) -> Setup {
         use crate::cli::{Cli, Commands, NodeCommands};

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail with diagnostics when the native amd64 acceptance host is unsuitable."""
 import ctypes
+import json
 import os
 from pathlib import Path
 import platform
@@ -41,17 +42,25 @@ def main():
         if not executable:
             raise ValueError('missing mandatory native prerequisite: ' + command)
         print(command + '=' + executable, flush=True)
-    # D's harness picks the first installed candidate. Require the hosted
-    # Google Chrome layout here; the built-image job covers Debian Chromium.
-    browser = next((Path(p) for p in ('/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome')
-                    if Path(p).exists()), None)
-    if browser is None or str(browser.resolve()) not in ('/opt/google/chrome/google-chrome', '/opt/google/chrome/chrome'):
-        raise ValueError('hosted native job requires the packaged Google Chrome policy layout')
-    subprocess.run([str(browser), '--version'], check=True)
+    # Share the harness's explicit selection and resolution diagnostics. Hosted
+    # native acceptance must exercise Chrome's deb policy directory even when
+    # an Ubuntu Chromium transitional shim is also installed.
+    browser = select_browser()
+    subprocess.run([browser['browserBinary'], '--version'], check=True)
     subprocess.run(['node', '-e', 'require("ws")'], check=True)
     subprocess.run(['/usr/bin/cargo', '--version'], check=True)
     subprocess.run(['/usr/bin/rustc', '--version'], check=True)
     print('Native amd64 prerequisites passed without changing sandbox policies.', flush=True)
+
+
+def select_browser():
+    selector = Path(__file__).resolve().parents[1] / 'cli/tests/machine_native_browser.mjs'
+    result = subprocess.run(['node', str(selector), '--require-google-chrome'],
+                            text=True, capture_output=True)
+    print(result.stderr, end='', flush=True)
+    if result.returncode:
+        raise ValueError('native browser prerequisite failed; see candidate resolutions above')
+    return json.loads(result.stdout)
 
 
 if __name__ == '__main__':
