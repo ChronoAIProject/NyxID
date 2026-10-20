@@ -673,9 +673,14 @@ async fn lark_attachment_origin_access_refuses_cross_owner_conversation_guest_st
 
 #[tokio::test]
 async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fallback() {
-    let u = setup("attachment_tool_image").await;
+    let mut u = setup("attachment_tool_image").await;
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(true);
+    keys.set_allow_legacy_record_reads(false);
+    u.f.state.encryption_keys = std::sync::Arc::new(keys);
     let auth = authenticate(&u.f).await;
-    let image = crate::models::assistant_attachment::AssistantAttachment {
+    let mut image = crate::models::assistant_attachment::AssistantAttachment {
+        secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "tool".into(),
         user_id: u.f.owner.clone(),
@@ -683,9 +688,21 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
         turn_id: u.f.chat.turn_id.clone().unwrap(),
         content_type: "image/jpeg".into(),
         size: 4,
-        data_encrypted: u.f.state.encryption_keys.encrypt(b"JPEG").await.unwrap(),
+        data_encrypted: Vec::new(),
         created_at: chrono::Utc::now(),
     };
+    image.data_encrypted = crate::services::assistant_record_service::encrypt_image(
+        &u.f.state.encryption_keys,
+        &image,
+        b"JPEG",
+    )
+    .await
+    .unwrap();
+    crate::services::credential_record_service::mark_version(
+        &mut image.secret_context_versions,
+        &u.f.state.encryption_keys,
+        "data_encrypted",
+    );
     u.f.state
         .db
         .collection::<crate::models::assistant_attachment::AssistantAttachment>(

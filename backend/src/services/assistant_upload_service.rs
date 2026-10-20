@@ -270,9 +270,11 @@ async fn store_authorized(
             .await?;
         Ok(())
     }
-.await;
+    .await;
     #[cfg(test)]
-    if result.is_ok() && let Some(source) = &row.source {
+    if result.is_ok()
+        && let Some(source) = &row.source
+    {
         super::assistant_channel_media::test_hooks::reach(
             db,
             &source.turn_id,
@@ -1249,7 +1251,10 @@ pub async fn egress_bytes(
     }
     let bytes = match current {
         EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
-        EgressAttachment::Tool(row) => keys.decrypt(&row.data_encrypted).await?,
+        EgressAttachment::Tool(row) => {
+            let mut protected = super::assistant_record_service::decrypt_image(keys, &row).await?;
+            std::mem::take(&mut *protected)
+        }
     };
     if bytes.len() as i64 != attachment.size() {
         return Err(missing());

@@ -832,7 +832,22 @@ async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_a
     for chunk in chunks {
         let encrypted = chunk.get_binary_generic("data_encrypted").unwrap();
         assert!(!encrypted.starts_with(&payload[..8]));
-        clear.extend(state.encryption_keys.decrypt(encrypted).await.unwrap());
+        clear.extend_from_slice(
+            &crate::services::assistant_record_service::decrypt_chunk(
+                &state.encryption_keys,
+                chunk.get_str("_id").unwrap(),
+                root.get_str("user_id").unwrap(),
+                id,
+                chunk.get_i64("chunk_index").unwrap(),
+                crate::services::record_field_service::stored_versions(&chunk)
+                    .unwrap()
+                    .get("data_encrypted")
+                    .copied(),
+                encrypted,
+            )
+            .await
+            .unwrap(),
+        );
     }
     assert_eq!(clear, payload);
 }
@@ -1923,4 +1938,91 @@ async fn channel_media_rollback_rehearsal_flags_off_sweeps_then_admin_drain_reac
                 .unwrap()
         );
     }
+}
+
+#[tokio::test]
+async fn channel_media_uploads_share_browser_record_context_and_strict_base_egress() {
+    let (mut state, row, message, event) = fixture().await;
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(true);
+    keys.set_allow_legacy_record_reads(false);
+    state.encryption_keys = std::sync::Arc::new(keys);
+    let id = upload(&state, &row, &event).await;
+    binding::bind(&state.db, &message, &proposed(&event, id.clone()))
+        .await
+        .unwrap();
+    let chat = crate::services::assistant_acknowledgement_service::for_key(
+        &state.db,
+        &row.user_id,
+        Some(&row.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let attachment = uploads::for_egress(&state.db, &chat, &id).await.unwrap();
+    assert_eq!(
+        uploads::egress_bytes(&state.db, &state.encryption_keys, &chat, &attachment)
+            .await
+            .unwrap(),
+        png()
+    );
+    let roots = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME);
+    let root = roots.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
+    assert_eq!(
+        root.get_document("secret_context_versions")
+            .unwrap()
+            .get_i32("text_encrypted")
+            .unwrap(),
+        3
+    );
+    crate::services::assistant_record_service::verify_current_attachment(
+        &state.db,
+        &state.encryption_keys,
+        &root,
+    )
+    .await
+    .unwrap();
+    let chunk = roots
+        .find_one(doc! {"parent_attachment_id":&id})
+        .await
+        .unwrap()
+        .unwrap();
+    crate::services::assistant_record_service::verify_current_attachment(
+        &state.db,
+        &state.encryption_keys,
+        &chunk,
+    )
+    .await
+    .unwrap();
+    // A browser-upload chunk has the same context schema but a different root.
+    let browser = uploads::upload(
+        &state.db,
+        &state.encryption_keys,
+        &row.user_id,
+        &row.id,
+        "browser.png",
+        png(),
+    )
+    .await
+    .unwrap();
+    let browser_chunk = roots
+        .find_one(doc! {"parent_attachment_id":&browser.id})
+        .await
+        .unwrap()
+        .unwrap();
+    roots
+        .update_one(
+            doc! {"_id":chunk.get("_id").unwrap()},
+            doc! {"$set":{"data_encrypted":browser_chunk.get("data_encrypted").unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        uploads::egress_bytes(&state.db, &state.encryption_keys, &chat, &attachment)
+            .await
+            .is_err()
+    );
+    state.db.drop().await.unwrap();
 }
