@@ -96,6 +96,23 @@ fn own(fd: &OwnedFd, uid: u32, gid: u32, mode: u32) -> Result<()> {
     );
     Ok(())
 }
+
+/// Registration keeps its state private, including newly created ancestors.
+/// Only the standard native profile parent is shared with context/display
+/// roles. Give it traversal after pinning the node directory behind a private
+/// gate; never widen an owner-selected config directory or an arbitrary home.
+pub(super) fn prepare_native_profile(directory: &Path) -> Result<()> {
+    let profile = directory
+        .parent()
+        .context("context_state_parent_required")?;
+    ensure!(
+        directory.file_name() == Some(std::ffi::OsStr::new("node"))
+            && profile.parent() == Some(Path::new("/var/lib/nyxid-machine")),
+        "context_native_profile_path_invalid"
+    );
+    own(&protected(directory)?, 0, 0, 0o700)?;
+    own(&protected(profile)?, 0, 0, 0o711)
+}
 fn child(parent: &OwnedFd, name: &str, uid: u32, gid: u32, mode: u32) -> Result<()> {
     let name = std::ffi::CString::new(name)?;
     let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode) } == 0;
@@ -578,5 +595,53 @@ mod tests {
         std::fs::remove_file(path.join("machine-contexts.json")).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", path.join("machine-contexts.json")).unwrap();
         assert!(Store::open(&path, &node).is_err());
+    }
+
+    #[test]
+    fn native_profile_parent_allows_role_traversal_but_keeps_node_state_private() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        use std::os::unix::process::CommandExt;
+        let managed = Path::new("/var/lib/nyxid-machine");
+        protected(managed).unwrap();
+        let profile = tempfile::tempdir_in(managed).unwrap();
+        let node = profile.path().join("node");
+        std::fs::create_dir(&node).unwrap();
+        std::fs::write(node.join("secret"), b"private fixture").unwrap();
+        let role = profile.path().join("role");
+        std::fs::create_dir(&role).unwrap();
+        std::fs::set_permissions(&role, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..2 {
+            prepare_native_profile(&node).unwrap();
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "test -x \"$1\" && test ! -r \"$2/secret\" && test ! -x \"$2\"",
+                    "fixture",
+                ])
+                .arg(&role)
+                .arg(&node);
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setgroups(0, std::ptr::null()) != 0
+                        || libc::setgid(65534) != 0
+                        || libc::setuid(65534) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            assert!(command.status().unwrap().success());
+            assert_eq!(
+                std::fs::metadata(profile.path()).unwrap().mode() & 0o777,
+                0o711
+            );
+            assert_eq!(std::fs::metadata(&node).unwrap().mode() & 0o777, 0o700);
+        }
+        assert!(prepare_native_profile(&profile.path().join("custom")).is_err());
+        assert!(prepare_native_profile(Path::new("/root/node")).is_err());
     }
 }

@@ -374,6 +374,10 @@ pub async fn run(mut args: Setup) -> Result<()> {
     };
     let config_path = directory.join("config.toml");
     crate::node::managed_runtime::require_self_hosted_mutation(&directory)?;
+    #[cfg(target_os = "linux")]
+    if args.separate_users && !args.container && args.config.is_none() {
+        super::context_runtime::prepare_native_profile(&directory)?;
+    }
     let token = args.token.take().map(Zeroizing::new);
     let shell = args.machine || args.shell;
     let files = args.machine || args.files;
