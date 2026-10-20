@@ -124,6 +124,7 @@ export function AudienceSwitcher({
       {items.map((item, index) => (
         <div
           key={`${item.id}-${selected === index}`}
+          data-public-panel="audience"
           role="tabpanel"
           id={`icp-p-${item.id}`}
           aria-labelledby={`icp-t-${item.id}`}
@@ -166,7 +167,12 @@ export function CodeExample({
         </div>
       </div>
       {snippets.map((snippet, index) => (
-        <pre hidden={selected !== index} key={index}>
+        <pre
+          data-public-panel="code"
+          data-public-label={labels[index]}
+          hidden={selected !== index}
+          key={index}
+        >
           {snippet}
         </pre>
       ))}

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { verifyMarkdownContract } from "./public-markdown-contract.mjs";
 import { semanticMarkdown } from "./public-content.mjs";
 import { Window } from "happy-dom";
 const root = path.resolve(import.meta.dirname, ".."),
@@ -73,6 +74,7 @@ for (const page of release.pages) {
   try {
     const html = await fs.readFile(path.join(dist, page.file), "utf8"),
       md = await fs.readFile(path.join(dist, page.markdown), "utf8");
+    verifyMarkdownContract(page.path, md);
     const doc = new Window().document;
     doc.write(html);
     assert.equal(doc.querySelectorAll("h1").length, 1);

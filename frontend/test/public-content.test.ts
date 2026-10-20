@@ -14,6 +14,6 @@ it("retains table columns, code whitespace, links, images and ordered list meani
   expect(md).toContain("1. Connect");
   expect(md).toContain("2. Approve");
   expect(md).toContain("![Credential boundary]");
-  expect(md).toContain("[reference](https://nyx.chrono-ai.fun/docs)");
+  expect(md).toContain("[reference](<https://nyx.chrono-ai.fun/docs>)");
   expect(md).not.toContain("private panel");
 });
