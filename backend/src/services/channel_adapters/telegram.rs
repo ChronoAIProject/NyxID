@@ -372,6 +372,19 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
         "parse_mode": "Markdown",
     });
 
+    if let Some(entities) = reply.metadata.as_ref().and_then(|m| m.get("entities")) {
+        body.as_object_mut().unwrap().remove("parse_mode");
+        body["entities"] = entities.clone();
+    }
+    if let Some(protected) = reply
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("protect_content"))
+        .and_then(|v| v.as_bool())
+    {
+        body["protect_content"] = protected.into();
+    }
+
     if let Some(ref reply_to_id) = reply.reply_to_platform_message_id
         && let Ok(id) = reply_to_id.parse::<i64>()
     {
@@ -401,6 +414,15 @@ fn build_edit_message_body(
         "text": edit.text.as_deref().unwrap_or(""),
         "parse_mode": "Markdown",
     }))
+}
+
+impl TelegramAdapter {
+    pub(crate) fn for_api_base(base: &str) -> Self {
+        Self {
+            base_url: format!("{base}/bot"),
+            file_base_url: format!("{base}/file/bot"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -701,27 +723,18 @@ impl PlatformAdapter for TelegramAdapter {
         let body = build_message_body(conversation_id, reply);
 
         let url = format!("{}{bot_token}/sendMessage", self.base_url);
-        let resp: serde_json::Value = http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram sendMessage request failed: {}",
-                    e.without_url()
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram sendMessage response parse failed: {}",
-                    e.without_url()
-                ))
-            })?;
+        let (status, resp) = crate::services::channel_media_service::platform_json_value(
+            http.post(&url).json(&body),
+        )
+        .await?;
+        if status.is_server_error() || resp.get("ok").and_then(|v| v.as_bool()).is_none() {
+            return Err(crate::services::channel_media_service::upload_failed());
+        }
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            if resp["error_code"] == 429 || status.as_u16() == 429 {
+                return Err(AppError::RateLimited);
+            }
             let description = resp
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -739,9 +752,11 @@ impl PlatformAdapter for TelegramAdapter {
             .get("result")
             .and_then(|r| r.get("message_id"))
             .and_then(|v| v.as_i64())
-            .map(|id| id.to_string());
+            .filter(|id| *id > 0)
+            .map(|id| id.to_string())
+            .ok_or_else(crate::services::channel_media_service::upload_failed)?;
 
-        Ok(message_id)
+        Ok(Some(message_id))
     }
 
     async fn edit_reply(
@@ -972,7 +987,11 @@ impl TelegramAdapter {
                     if let Some(caption) = &attachment.caption {
                         form = form.text("caption", caption.clone());
                     }
-                    for key in ["reply_to_message_id", "message_thread_id"] {
+                    for key in [
+                        "reply_to_message_id",
+                        "message_thread_id",
+                        "protect_content",
+                    ] {
                         if let Some(value) = context.get(key) {
                             form = form.text(key, value.to_string());
                         }

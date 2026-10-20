@@ -2267,3 +2267,25 @@ manager/child identity, funding, quotas and activation. In-flight replies and
 creation workers carry exact revision/digest/generation fences. Previous gateway
 cleanup retains the captured remote version; admin recovery can preserve a changed
 binding without deleting it. See [Platform BotFather](PLATFORM_BOTFATHER.md).
+
+### Assistant multipart text receipts
+
+NyxBot manager replies, explicit posts and automation results share the ordinary
+relay's platform-aware boundary machinery and 64-message bound. Assistant Markdown
+is planned into independently valid fragments; Telegram uses explicit UTF-16
+entities. Long replies retain their text. Only explicit overflow, web-only action
+review and unavailable media add app links. See [Full saved reply delivery](TELEGRAM_NEW.md#full-saved-reply-delivery)
+for the send, attachment and rollout contract.
+
+The separate metadata-only `channel_text_deliveries` journal binds an immutable
+plan to its owner and logical source. Each part has a fresh CAS attempt, confirmed
+provider receipt, and pending/sending/sent/refused state. An accepted prefix is
+retained on failure; sending without a receipt is permanently uncertain. A
+confirmed Telegram rate refusal returns only that part to pending. Every later
+provider effect rechecks live authority and target. Proactive `text_delivery`
+counts expose partial outcomes without exposing text. Stable automation run IDs
+and authored turn-post identities prevent repeated calls from replaying accepted
+parts; distinct authored posts in the same turn remain independent. Changed
+content under the same automation run is rejected. These journals have no TTL
+and are purged on owner deletion. They do not replace ordinary relay receipts or
+the legacy/v2 image migration checks.

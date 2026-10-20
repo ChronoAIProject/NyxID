@@ -286,6 +286,14 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
         "text": text,
     });
 
+    if let Some(markdown) = reply
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("mrkdwn"))
+        .and_then(|m| m.as_bool())
+    {
+        body["mrkdwn"] = markdown.into();
+    }
     let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
     if let Some(ts) = thread_ts {
         body["thread_ts"] = serde_json::json!(ts);

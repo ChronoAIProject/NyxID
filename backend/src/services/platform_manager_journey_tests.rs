@@ -9,6 +9,8 @@ mod legacy_compatibility;
 mod management;
 #[path = "platform_manager_journey_tests/native_personal.rs"]
 mod native_personal;
+#[path = "platform_manager_journey_tests/outbound.rs"]
+mod outbound;
 use super::*;
 use crate::{
     models::{
@@ -961,7 +963,7 @@ async fn telegram_personal_link_saved_reply_web_history_and_unlink_journey() {
     assert_eq!(private[0]["chat_id"], 700);
     assert_eq!(private[0]["protect_content"], true);
     assert!(
-        private[0]["text"]
+        !private[0]["text"]
             .as_str()
             .unwrap()
             .contains(&format!("?c={}", reply.turn.conversation_id))
@@ -1342,13 +1344,13 @@ fn expected_personal_admission_errors_are_bounded_and_infrastructure_stays_error
 }
 
 #[test]
-fn bounded_reply_renderer_links_exact_thread_and_strips_unrelated_query_secrets() {
+fn saved_reply_keeps_full_text_without_an_unconditional_web_link() {
     let message:AssistantMessage=mongodb::bson::from_document(doc! {"_id":"reply","conversation_id":"nyxa-0123456789abcdef0123456789abcdef","user_id":"owner","seq":2_i64,"turn_id":"turn","role":"assistant","text":"Review the pending action in NyxID.","status":"completed","error_code":bson::Bson::Null,"created_at":bson::DateTime::now()}).unwrap();
     let rendered = delivery::render_saved(
         &message,
         "https://app.nyxid.test/old?secret=discard#discard",
     );
-    assert!(rendered.contains("/assistant?c=nyxa-0123456789abcdef0123456789abcdef"));
+    assert_eq!(rendered, message.text);
     assert!(!rendered.contains("discard"));
     let enormous_origin = format!("https://{}.example.test", "a".repeat(4096));
     assert!(
@@ -2139,7 +2141,31 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
     let code = super::super::assistant_acknowledgement_service::confirm_code(&exact.id);
     assert!(text.contains(&format!("yes {code}")) && text.contains(&format!("no {code}")));
     assert!(text.contains("Create the requested report"));
-    assert!(text.contains(&format!("c={}", row.id)));
+    assert!(!text.contains(&format!("c={}", row.id)));
+    let web_only = card(
+        "00000200-0000-4000-8000-000000000003",
+        &reply.turn.turn_id,
+        &row.credential_api_key_id,
+        bson::Bson::Null,
+    );
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&web_only)
+        .await
+        .unwrap();
+    let mixed = delivery::render_personal(&j.state, &saved, None)
+        .await
+        .unwrap();
+    assert!(mixed.contains(&format!("yes {code}")));
+    assert!(mixed.contains("Pending actions require review"));
+    assert!(mixed.contains(&format!("c={}", row.id)));
+    j.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .delete_one(doc! {"_id":&web_only.id})
+        .await
+        .unwrap();
     for (field, value) in [
         ("routing", bson::Bson::Null),
         ("api_key_id", bson::Bson::String("different-key".into())),
@@ -2159,6 +2185,7 @@ async fn pending_action_renderer_uses_exact_turn_key_routing_and_unique_codes() 
             .unwrap();
         assert!(!text.contains(&format!("yes {code}")));
         assert!(text.contains("Pending actions require review"));
+        assert!(text.contains(&format!("c={}", row.id)));
         j.state
             .db
             .collection::<Document>(ACKS)

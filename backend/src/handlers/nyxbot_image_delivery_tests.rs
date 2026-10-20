@@ -13,6 +13,9 @@ use wiremock::matchers::body_string_contains;
 
 async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer) {
     let mut f = fixture(&format!("nyxbot_images_{platform}_{transport}")).await;
+    crate::services::channel_text_delivery::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
     let server = MockServer::start().await;
     f.channel.platform = platform.into();
     f.channel.transport = transport.into();
@@ -2397,11 +2400,24 @@ async fn nyxbot_cancelled_image_post_releases_claims_for_automation_result() {
         &target.id,
         None,
         run.thread_id.as_deref().unwrap(),
-        "Repeated result",
+        "Automation result",
     )
     .await
     .unwrap();
     assert_eq!(repeated["images"]["previously_delivered"], 2);
+    assert!(
+        chats::post_automation_images(
+            &f.state,
+            &run,
+            &target.id,
+            None,
+            run.thread_id.as_deref().unwrap(),
+            "Changed result",
+        )
+        .await
+        .is_err(),
+        "one run cannot replay a different text plan"
+    );
     assert_eq!(
         server
             .received_requests()
@@ -2711,5 +2727,261 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
         "I couldn't accept this message right now. Please try again in a moment."
     );
     assert_eq!(reply["reply_to_message_id"], 18);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_delivers_all_text_and_repeated_calls_reuse_receipts() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":99}})),
+        )
+        .mount(&server)
+        .await;
+    let text = "🦉x".repeat(1800);
+    let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(result["text"], "sent");
+    let calls = server.received_requests().await.unwrap();
+    assert!(calls.len() > 1);
+    let bodies: Vec<Value> = calls
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|b| b["text"].as_str().unwrap())
+            .collect::<String>(),
+        text.trim()
+    );
+    assert!(bodies.iter().all(
+        |b| b["text"].as_str().unwrap().encode_utf16().count() <= 4096
+            && b.get("parse_mode").is_none()
+    ));
+    assert_eq!(
+        chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+            .await
+            .unwrap()["text"],
+        "sent"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), calls.len());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_automation_delivers_the_full_saved_result_once() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":99}})),
+        )
+        .mount(&server)
+        .await;
+    let text: String = (0..400)
+        .map(|i| format!("🦉 Full automation paragraph {i}\n\n"))
+        .collect();
+    for _ in 0..2 {
+        chats::post_automation(
+            &f.state,
+            &chat.user_id,
+            &target.id,
+            &text,
+            None,
+            &chat.conversation_id,
+            "multipart-run",
+        )
+        .await
+        .unwrap();
+    }
+    let calls = server.received_requests().await.unwrap();
+    assert!(calls.len() > 2);
+    let bodies: Vec<Value> = calls
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|b| b["text"].as_str().unwrap())
+            .collect::<String>(),
+        text.trim()
+    );
+    assert!(
+        chats::post_automation(
+            &f.state,
+            &chat.user_id,
+            &target.id,
+            "Different result",
+            None,
+            &chat.conversation_id,
+            "multipart-run"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), calls.len());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_keeps_an_accepted_prefix_and_never_retries_ambiguous_parts() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let calls = counter.clone();
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(move |_: &wiremock::Request| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":99}}))
+            } else {
+                ResponseTemplate::new(200).set_body_string("lost response")
+            }
+        })
+        .mount(&server)
+        .await;
+    let text = "🦉".repeat(3500);
+    for _ in 0..2 {
+        let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+            .await
+            .unwrap();
+        assert_eq!(result["text"], "unknown");
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::channel_text_delivery::ChannelTextDelivery>(
+            crate::models::channel_text_delivery::COLLECTION_NAME,
+        )
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    use crate::models::channel_text_delivery::TextPartState;
+    assert_eq!(row.parts[0].state, TextPartState::Sent);
+    assert_eq!(row.parts[1].state, TextPartState::Sending);
+    assert_eq!(row.parts.len(), 2);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_rechecks_stop_and_target_before_sending_the_suffix() {
+    for stop_turn in [true, false] {
+        let (f, server) = image_fixture("telegram", "direct").await;
+        let chat = live_image_authority(&f, &[]).await;
+        let target = thread(&f).await;
+        let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notify = reached.clone();
+        Mock::given(path("/bottoken/sendMessage"))
+            .respond_with(move |_: &wiremock::Request| {
+                notify.notify_one();
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(150))
+                    .set_body_json(json!({"ok":true,"result":{"message_id":99}}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db = f.state.db.clone();
+        let conversation = chat.conversation_id.clone();
+        let thread_id = target.id.clone();
+        let stop = tokio::spawn(async move {
+            reached.notified().await;
+            if stop_turn {
+                db.collection::<bson::Document>(CONVERSATIONS)
+                    .update_one(
+                        doc! {"_id":conversation},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                db.collection::<bson::Document>(THREADS)
+                    .update_one(
+                        doc! {"_id":thread_id},
+                        doc! {"$set":{"platform_chat_id":"987"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let result =
+            chats::post_current_turn(&f.state, &chat, &target.id, &"🦉".repeat(3500), false)
+                .await
+                .unwrap();
+        stop.await.unwrap();
+        assert_eq!(
+            result["text"],
+            if stop_turn { "cancelled" } else { "failed" }
+        );
+        server.verify().await;
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nyxbot_multipart_post_resumes_a_proven_rate_refusal_without_replaying_the_prefix() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (f, server) = image_fixture("telegram", "direct").await;
+    let chat = live_image_authority(&f, &[]).await;
+    let target = thread(&f).await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let calls = counter.clone();
+    Mock::given(path("/bottoken/sendMessage"))
+        .respond_with(move |_: &wiremock::Request| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 1 {
+                ResponseTemplate::new(429).set_body_json(
+                    json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}}),
+                )
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":100+n}}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let text: String = (0..600).map(|i| format!("🦉🦉{i} ")).collect();
+    let first = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(first["text_delivery"]["sent"], 1);
+    assert_eq!(first["text_delivery"]["uncertain"], 0);
+    assert_ne!(first["text"], "sent");
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let resumed = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
+        .await
+        .unwrap();
+    assert_eq!(resumed["text"], "sent");
+    let bodies: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["text"] == bodies[0]["text"])
+            .count(),
+        1
+    );
     f.state.db.drop().await.unwrap();
 }

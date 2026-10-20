@@ -892,6 +892,7 @@ pub(super) async fn settle_result(
                     final_text,
                     agent_id,
                     &row.id,
+                    &run.id,
                 ))
                 .await
                 .map(|_| ())

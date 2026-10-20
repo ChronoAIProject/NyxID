@@ -28,6 +28,21 @@ impl TextLimit {
         Self { units, budget }
     }
 
+    pub fn measure(self, text: &str) -> usize {
+        text.chars().map(|ch| self.cost(ch)).sum()
+    }
+
+    pub fn budget(self) -> usize {
+        self.budget
+    }
+
+    pub fn with_budget(self, budget: usize) -> Self {
+        Self {
+            budget: budget.max(1).min(self.budget),
+            ..self
+        }
+    }
+
     fn cost(self, ch: char) -> usize {
         match self.units {
             Units::Utf16 => ch.len_utf16(),
@@ -44,6 +59,16 @@ impl TextLimit {
     /// entire platform budget must be split at a Unicode scalar boundary.
     /// Concatenating all parts always recovers the input, including whitespace.
     pub fn chunks(self, text: &str) -> impl Iterator<Item = &str> {
+        self.chunks_inner(text, true)
+    }
+
+    /// Display text has no Markdown escape pairs until the renderer adds them.
+    /// A reduced planning budget still retains at least one complete scalar.
+    pub fn display_chunks(self, text: &str) -> impl Iterator<Item = &str> {
+        self.chunks_inner(text, false)
+    }
+
+    fn chunks_inner(self, text: &str, keep_escapes: bool) -> impl Iterator<Item = &str> {
         let mut rest = text;
         std::iter::from_fn(move || {
             if rest.is_empty() {
@@ -54,6 +79,9 @@ impl TextLimit {
             for (index, ch) in rest.char_indices() {
                 let cost = self.cost(ch);
                 if used + cost > self.budget {
+                    if end == 0 {
+                        end = index + ch.len_utf8();
+                    }
                     break;
                 }
                 used += cost;
@@ -75,15 +103,20 @@ impl TextLimit {
                     .unwrap_or(end);
                 // A backslash and the escaped scalar are one rendering atom.
                 // An even run ends in an escaped backslash and is safe to cut.
-                if rest[..end]
-                    .bytes()
-                    .rev()
-                    .take_while(|b| *b == b'\\')
-                    .count()
-                    % 2
-                    == 1
+                if keep_escapes
+                    && rest[..end]
+                        .bytes()
+                        .rev()
+                        .take_while(|b| *b == b'\\')
+                        .count()
+                        % 2
+                        == 1
                 {
-                    end -= 1;
+                    if end == 1 {
+                        end += rest[end..].chars().next().map_or(0, char::len_utf8);
+                    } else {
+                        end -= 1;
+                    }
                 }
             }
             let (part, tail) = rest.split_at(end);
@@ -96,6 +129,21 @@ impl TextLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduced_display_budgets_make_progress_without_splitting_scalars() {
+        let text = "\\🦉\\x界";
+        for platform in ["telegram", "discord", "slack", "lark"] {
+            for budget in 1..=8 {
+                let parts: Vec<_> = TextLimit::for_platform(platform)
+                    .with_budget(budget)
+                    .display_chunks(text)
+                    .collect();
+                assert!(parts.iter().all(|part| !part.is_empty()));
+                assert_eq!(parts.concat(), text);
+            }
+        }
+    }
 
     #[test]
     fn keeps_markdown_escape_pairs_together_at_hard_boundaries() {

@@ -786,3 +786,13 @@ no-op discovery/planning must not mutate state. Tool icons reuse static-SVG
 validation and recheck authority on attachment. Keep manifest/wizard credentials
 in zeroizing memory, env names only in saved manifests, no credential reads in
 dry-run/validate, no redirects on shared-credential transport. See docs/TOOLS.md.
+
+NyxBot saved manager replies and proactive text posts use the shared
+`channel_reply_plan`/`channel_text` planner (64 parts) and metadata-only
+`channel_text_deliveries` per-part receipts. Never replace long content with an app
+link or replay a sending/uncertain part. Revalidate live authority between effects;
+retain confirmed prefix IDs on partial outcomes. Pin action-card identities and
+numeric media notice inputs so retries reproduce the plan without storing bodies.
+Manager attachments use v2 image claims with the existing legacy read gate. Drain
+these writers for upgrade/rollback; old workers must not resume multipart rows.
+See `docs/TELEGRAM_NEW.md#full-saved-reply-delivery`.

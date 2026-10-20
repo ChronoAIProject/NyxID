@@ -295,3 +295,61 @@ creation challenges keep their existing workflow. Pausing the guide does not era
 native creation credentials or replace the shared manager webhook. Profile edits
 advance authority generation and pause existing child replies until client review.
 See [Platform BotFather](PLATFORM_BOTFATHER.md) for lifecycle, recovery and rollout.
+
+### Full saved reply delivery
+
+Manager personal replies and proactive NyxBot/automation posts deliver complete
+text in order using the shared `channel_text::TextLimit` splitter and
+`channel_reply_plan` planner. Telegram messages contain at most 4096 UTF-16 units;
+Unicode scalars stay intact and paragraph, line and word boundaries are preferred.
+The planner converts assistant Markdown to Telegram display text with explicit
+per-message entities, so emphasis, links and code do not depend on parsing an
+unfinished Markdown fragment. Native manager and proactive posts use the same
+platform-specific limits (including Slack scalar and Lark JSON-byte accounting).
+
+Authored post requests retain their 4,000-character input limit; Unicode can
+still require multiple provider messages. Saved manager replies and automation
+results use the larger delivery bound below, with their saved thread as the
+source for any overflow link.
+
+Each text delivery is bounded to 64 messages, matching ordinary channel relay's
+amplification bound. An oversized result sends 63 content messages and a final
+plain notice linking the exact saved thread for the remainder. Ordinary replies
+contain their content without an automatic NyxID link. Chat-decidable action
+requests retain their chat instructions; a pending action requiring web review
+adds a link. Native attachment failures also explain where to find the item.
+
+`channel_text_deliveries` stores UUID identities, source/owner IDs, immutable plan
+hashes and ordered per-part attempt states and receipts. It stores no message
+bodies, URLs, tokens or raw updates. Accepted parts are never replayed. Only a
+proven unattempted part (including a documented Telegram 429 refusal) can retry;
+a lost, malformed or timed-out provider response leaves the part uncertain and
+fences the suffix. Manager recovery uses this evidence rather than treating an
+entire multipart reply as one operation. Legacy dispatching rows keep their
+single-attempt uncertainty semantics. Parent records retain confirmed prefix IDs
+on refusal or uncertainty. Proactive tool results include `text_delivery` counts
+for sent, uncertain, refused and unattempted parts. A fully delivered status
+requires a confirmed receipt for every text part.
+
+The manager pins action-card IDs and media outcome counts, and proactive plans
+pin numeric media-notice inputs. Deciding a card or revisiting an image claim
+cannot alter a partially accepted plan. Live manager identity, binding generation,
+Stop/revocation and destination authority are checked between provider effects.
+Native receipt/token expiry remains an upper bound; each provider call is bounded.
+
+Generated images and stored tool files use Telegram photo/document uploads and
+the existing source/audience `nyxbot_image_deliveries_v2` claims, including legacy
+claim reads across the owner's channel aliases. Manager uploads retain the same
+Telegram content protection as private text replies. The loader checks owner,
+conversation, turn, retention, MIME and size
+before upload. Ambiguous uploads are never retried. Successful attachments have
+no placeholder; only unavailable/unconfirmed items get a fallback note. The
+turn's existing eight-attachment capture bound and media byte limit still apply.
+
+Rollout: drain manager/proactive writers before upgrading their API replicas and
+workers together. Old binaries do not understand multipart receipts and must not
+resume new pending rows. Before rollback, stop/drain these writers and terminally
+fence every unfinished multipart parent/job; preserve the journals and v2 image
+claims. Do not delete a journal to force a resend. Text journals have no TTL so a
+later retry cannot forget acceptance; owner deletion purges them. Existing v1
+image rollout and sunset requirements remain in force.
