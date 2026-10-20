@@ -65,6 +65,12 @@ def require_gates(data):
     hosted = next(item for item in image_job['strategy']['matrix']['include'] if item.get('component') == 'machine-hosted-desktop')
     if hosted.get('target') != 'desktop' or '--build-context' in str(image_job):
         raise ValueError('PR hosted evidence must use the real public desktop target')
+    operator = [step for step in image_job['steps'] if 'scripts/build-local-image.py' in step.get('run', '')]
+    if len(operator) != 1 or operator[0].get('if') != "matrix.component == 'machine-hosted-desktop'" or \
+            operator[0].get('continue-on-error') or any(text not in operator[0]['run'] for text in (
+                '--file cli/Dockerfile.machine-hosted --target desktop', "['identity_check']['status'] == 'passed'",
+                "['image']['tagged'] is True", "actual == receipt['image']['id']")):
+        raise ValueError('PR hosted desktop must exercise mandatory operator verification before tagging')
     targets = {item['target'] for item in jobs['archives']['strategy']['matrix']['include']}
     policy = json.loads((ROOT / 'security/publication-policy.json').read_text())
     if targets != set(policy['cli']['targets']) or 'run-dist-build.py' not in str(jobs['archives']['steps']) or \
@@ -126,6 +132,12 @@ class PackagingWorkflows(unittest.TestCase):
         data = workflows()
         data['artifact-packaging']['jobs']['archives']['strategy']['matrix']['include'].pop()
         with self.assertRaises(ValueError): require_gates(data)
+
+    def test_operator_gate_must_have_real_pr_coverage(self):
+        data = workflows()
+        steps = data['artifact-packaging']['jobs']['images']['steps']
+        steps[:] = [step for step in steps if 'scripts/build-local-image.py' not in step.get('run', '')]
+        with self.assertRaisesRegex(ValueError, 'operator verification'): require_gates(data)
 
     def test_verifier_changes_cannot_skip_pr_jobs(self):
         data = workflows()

@@ -73,10 +73,18 @@ PR evidence for `cli/Dockerfile.machine-hosted` ends at the real public
 `scripts/check-image-identity.py --component machine-hosted` on the final
 `hosted` image after all private layers and before publication, supplying the
 same exported source root, commit, epoch, native architecture and locked
-`nyxid-artifact-info` inspector. The repository's current `Publish Images`
-matrix covers five public components and has no private hosted publisher;
-the final private publisher must be identified and its required gate wired
-before that coverage can be accepted. Private patch bytes remain external.
+`nyxid-artifact-info` inspector. Hosted deployment uses the operator path in
+`docs/MACHINE_HECA_CMA_IMAGE.md`, not a CI publisher. `build-local-image.py`
+now requires this check for every reviewed application target, builds the
+inspector from the exact source export, and applies the requested tag only
+after verification. Its existing execution receipt records the image ID,
+component/platform, check result and tagging result. Missing or failed checks
+return non-zero without applying a tag; no skip/alternate-checker option exists.
+Unknown image/stage combinations reject; the updater's explicit `e2e` target
+retains a distinct test-only receipt. PR CI exercises the operator sequence
+against the real public hosted desktop on both native architectures. Private
+patch bytes remain external, and final private-image acceptance stays with
+the operator's successful receipt and recorded runtime tests.
 
 The two machine test Dockerfiles deliberately accept `MACHINE_IMAGE` from the
 exact same CI build, rather than claiming a preexisting release digest. The

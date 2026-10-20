@@ -25,6 +25,11 @@ def check(image, component, arch, source, commit, epoch, extractor):
                 raise ValueError('unexpected executable extraction closure')
             target = {'amd64': 'x86_64', 'arm64': 'aarch64'}[arch] + '-unknown-linux-' + abi
             verify_binary(directory / name, extractor, package, versions(source)[package], target, commit, epoch)
+            if component == 'backend':
+                credential_root = Path(temporary) / 'credentials'
+                for name in ('credential-accept', 'release-integrity'):
+                    copy(container, '/app/frontend/dist/' + name + '/.', credential_root / name)
+                verify_credentials(credential_root, source, commit, epoch)
         print(f'Final source identity verified: {component} {arch}, image {info["Id"]}, SOURCE_COMMIT={commit}, epoch={epoch}')
 
 

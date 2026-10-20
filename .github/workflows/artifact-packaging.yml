@@ -19,6 +19,7 @@ jobs:
           persist-credentials: false
       - run: python3 scripts/test-credential-packaging.py
       - run: python3 scripts/test-source-artifacts.py
+      - run: python3 scripts/test-build-local-image.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
@@ -157,6 +158,7 @@ jobs:
         run: CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build actual final application image without publication or private inputs
+        if: matrix.component != 'machine-hosted-desktop'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: ${{ runner.temp }}/image-source/source
@@ -172,6 +174,21 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=identity-${{ matrix.component }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=identity-${{ matrix.component }}-${{ matrix.arch }}
+      - name: Exercise mandatory operator check before tagging the public hosted desktop
+        if: matrix.component == 'machine-hosted-desktop'
+        run: |
+          python3 scripts/build-local-image.py --file cli/Dockerfile.machine-hosted --target desktop \
+            --platform 'linux/${{ matrix.arch }}' --tag nyxid-identity:ci --destination "$RUNNER_TEMP/operator-image-source"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'operator-image-source/image-build-execution.json').read_text())
+          assert receipt['exit_code'] == 0 and receipt['post_build_source_verified'] is True
+          assert receipt['identity_check']['status'] == 'passed' and receipt['identity_check']['exit_code'] == 0
+          assert receipt['image']['component'] == 'machine-hosted-desktop' and receipt['image']['tagged'] is True
+          actual = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', 'nyxid-identity:ci'], text=True).strip()
+          assert actual == receipt['image']['id'], 'tag differs from the identity-checked image ID'
+          PY
       - name: Require actual final executable identity and image platform/revision/epoch
         run: |
           python3 scripts/check-image-identity.py --image nyxid-identity:ci --component '${{ matrix.component }}' \

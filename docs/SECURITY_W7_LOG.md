@@ -110,3 +110,13 @@
 - YAML/permissions/input policies, Python syntax, Rust 2024 formatting and diff checks pass; no local Docker, backend suite, push or remote workflow execution.
 - Private hosted final-image checker is ready; no private hosted publisher exists in this checkout or workflow inventory. Caller identification/integration remains pending PM.
 - C-4c built-image worklet/CSP and C-4d real Docker CLI paths remain next; private CMA patch bytes and other streams' paths are untouched.
+
+## C-4b follow-up — mandatory operator image gate
+- Hosted deployment uses the local operator wrapper; all reviewed application targets now build untagged and verify their immutable image ID before tagging.
+- Build the locked inspector from the exact source export; missing/failed checkers or inspectors, invalid IDs and source mutation fail closed with no new tag.
+- Existing execution receipts record final status, checked image/component/platform, verification command/result and tag outcome; unknown stages reject.
+- Backend operator verification includes actual credential-page extraction; the explicit updater e2e target remains test-only.
+- PR/weekly hosted-desktop jobs exercise the real wrapper and receipt/tag-ID binding on native amd64/arm64 without private CMA inputs.
+- Local: wrapper15, wiring11, identity16, credential21, exported runner7, CI helpers26, input policy20, YAML9 (125 passed/0 failed).
+- Workflow YAML/permissions/input policies, AST syntax and diff checks pass; Docker/private final-image execution remains hosted/operator evidence.
+- Documented mandatory passing receipt and registry digest provenance; raw Docker builds are unsupported for hosted deployment.
