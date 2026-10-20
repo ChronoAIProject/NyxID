@@ -546,6 +546,9 @@ async fn server_main() {
     db::ensure_indexes(&db)
         .await
         .expect("Failed to verify MongoDB indexes and compatibility migrations");
+    services::notification_service::delivery::ensure_indexes(&db)
+        .await
+        .expect("Failed to verify notification delivery dedupe indexes");
     services::audit_outbox_service::spawn_materializer(db.clone(), audit_chain_hmac_key.clone());
     services::audit_runtime::spawn_monitor(db.clone(), audit_runtime.clone());
     db::run_startup_migrations(&db)

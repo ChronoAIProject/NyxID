@@ -11,7 +11,7 @@ use crate::{
         audit_outbox::{
             AccessModeScope, AuditDetail, AuditOutbox, AuditOwner, AuditPrincipal, AuditStage,
             COLLECTION_NAME as OUTBOX, PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent,
-            SafeAuditEvent, ScopeIdent,
+            SafeAuditEvent, ScopeIdent, SystemAuditActor,
         },
         audit_state::{AuditState, COLLECTION_NAME as STATE},
     },
@@ -170,6 +170,23 @@ fn validate_detail(detail: &AuditDetail) -> AppResult<()> {
         {
             return Err(invalid_detail());
         }
+        AuditDetail::NotificationSettingsChange { old, new }
+            if [old, new].iter().any(|settings| {
+                !(10..=300).contains(&settings.approval_timeout_secs)
+                    || !(1..=365).contains(&settings.grant_expiry_days)
+            }) =>
+        {
+            return Err(invalid_detail());
+        }
+        AuditDetail::WebhookDeliveryFailure {
+            attempts,
+            last_http_status,
+            ..
+        } if *attempts > 3
+            || last_http_status.is_some_and(|status| !(100..=599).contains(&status)) =>
+        {
+            return Err(invalid_detail());
+        }
         // BSON persists milliseconds: reject lossy values before replay
         // comparison rather than silently changing the queued decision.
         AuditDetail::ExpiryChange { old, new }
@@ -203,6 +220,13 @@ fn uuid(value: &str) -> AppResult<()> {
 }
 
 pub(super) fn validate(event: &SafeAuditEvent) -> AppResult<()> {
+    if matches!(
+        event.detail,
+        Some(AuditDetail::WebhookDeliveryFailure { .. })
+    ) && !matches!(event.stage, AuditStage::Failed | AuditStage::Uncertain)
+    {
+        return Err(invalid_detail());
+    }
     uuid(&event.operation_id)?;
     match &event.principal {
         AuditPrincipal::Person { id }
@@ -231,6 +255,13 @@ pub(super) fn validate(event: &SafeAuditEvent) -> AppResult<()> {
                     "Invalid audit Oracle worker identity".into(),
                 ));
             }
+        }
+        AuditPrincipal::System {
+            actor: SystemAuditActor::Authentication,
+        } if !matches!(event.owner, AuditOwner::Person { .. }) => {
+            return Err(AppError::ValidationError(
+                "Authentication audit requires an affected person owner".into(),
+            ));
         }
         AuditPrincipal::System { .. } => (),
     }

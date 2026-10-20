@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS, EffectPhase},
+    models::{
+        audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS, EffectPhase},
+        audit_outbox::{AuditDetail, WebhookEventKind, WebhookFailureKind},
+    },
     services::audit_runtime::{intent::EffectReservation, policy::AuditTier},
 };
 
@@ -21,7 +24,11 @@ fn reservation() -> EffectReservation {
     }
 }
 
-async fn begin(db: &Database, runtime: &AuditRuntime, request: &EffectReservation) {
+async fn begin<E: audit_outbox_service::AuditEventSource>(
+    db: &Database,
+    runtime: &AuditRuntime,
+    request: &EffectReservation<E>,
+) {
     let mut session = db.client().start_session().await.unwrap();
     session
         .start_transaction()
@@ -37,6 +44,227 @@ async fn begin(db: &Database, runtime: &AuditRuntime, request: &EffectReservatio
         .await
         .unwrap();
     audit_state_service::commit(&mut session).await.unwrap();
+}
+
+fn failure_detail(attempts: u8) -> AuditDetail {
+    AuditDetail::WebhookDeliveryFailure {
+        event: WebhookEventKind::ConnectionExpired,
+        reason: WebhookFailureKind::NonSuccessStatus,
+        attempts,
+        last_http_status: Some(503),
+    }
+}
+
+async fn finish_detail(
+    db: &Database,
+    runtime: &AuditRuntime,
+    operation: &str,
+    stage: AuditStage,
+    detail: &AuditDetail,
+) -> crate::errors::AppResult<()> {
+    crate::services::audit_runtime::transaction::run(
+        db,
+        &(db, runtime, operation, stage, detail),
+        |session, (db, runtime, operation, stage, detail)| {
+            Box::pin(async move {
+                db.collection::<bson::Document>("product_receipts")
+                    .update_one(
+                        doc! {"_id": *operation},
+                        doc! {"$set": {"terminal": bson::to_bson(stage).unwrap()}},
+                    )
+                    .upsert(true)
+                    .session(&mut *session)
+                    .await?;
+                runtime
+                    .finish_effect_with_detail_in_session(
+                        db,
+                        session,
+                        operation,
+                        stage.clone(),
+                        Some((*detail).clone()),
+                    )
+                    .await
+            })
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn audit_intent_terminal_detail_is_atomic_replay_fenced_and_revalidated() {
+    for stage in [AuditStage::Failed, AuditStage::Uncertain] {
+        let f = Fixture::new("audit_terminal_detail").await;
+        let request = reservation();
+        let operation = &request.event.operation_id;
+        let detail = failure_detail(3);
+        begin(&f.db, &f.runtime, &request).await;
+        audit_outbox_service::materialize_one(&f.db, &[2; 32])
+            .await
+            .unwrap();
+        f.relay.tick().await.unwrap();
+        f.relay.tick().await.unwrap();
+        let effects = AtomicUsize::new(0);
+        f.runtime
+            .authorize_effect(&f.db, operation)
+            .await
+            .unwrap()
+            .run(|| async {
+                effects.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+            .unwrap();
+        let mut session = f.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        f.runtime
+            .finish_effect_with_detail_in_session(
+                &f.db,
+                &mut session,
+                operation,
+                stage.clone(),
+                Some(detail.clone()),
+            )
+            .await
+            .unwrap();
+        f.db.collection::<bson::Document>("product_receipts")
+            .insert_one(doc! {"_id": operation})
+            .session(&mut session)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        let intents = f.db.collection::<AuditEffectIntent>(INTENTS);
+        let pending = f.db.collection::<PendingAuditEvent>(PENDING);
+        assert!(
+            intents
+                .find_one(doc! {"_id": operation})
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_stage
+                .is_none()
+        );
+        assert!(
+            pending
+                .find_one(doc! {"_id": request.terminal_event_id.to_string()})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            f.db.collection::<bson::Document>("product_receipts")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        finish_detail(&f.db, &f.runtime, operation, stage.clone(), &detail)
+            .await
+            .unwrap();
+        finish_detail(&f.db, &f.runtime, operation, stage.clone(), &detail)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.db.collection::<bson::Document>("product_receipts")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert!(f.runtime.authorize_effect(&f.db, operation).await.is_err());
+        begin(&f.db, &f.runtime, &request).await;
+        let saved = intents
+            .find_one(doc! {"_id": operation})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.terminal_detail, Some(detail.clone()));
+        assert_eq!(saved.event.detail, None, "intent bytes remain immutable");
+        assert!(matches!(
+            finish_detail(
+                &f.db,
+                &f.runtime,
+                operation,
+                stage.clone(),
+                &failure_detail(2)
+            )
+            .await,
+            Err(AppError::AuditIntegrityConflict)
+        ));
+        let mut session = f.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            matches!(
+                f.runtime
+                    .finish_effect_in_session(&f.db, &mut session, operation, stage)
+                    .await,
+                Err(AppError::AuditIntegrityConflict)
+            ),
+            "omitting recorded terminal detail conflicts"
+        );
+        session.abort_transaction().await.unwrap();
+        f.db.collection::<bson::Document>(PENDING)
+            .update_one(
+                doc! {"_id": request.terminal_event_id.to_string()},
+                doc! {"$set": {"event.detail.attempts": 4_i32}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            audit_outbox_service::materialize_one(&f.db, &[2; 32])
+                .await
+                .is_err(),
+            "materialization must revalidate terminal bounds"
+        );
+    }
+}
+
+#[tokio::test]
+async fn audit_intent_terminal_detail_cannot_replace_policy_or_authorize_success() {
+    use crate::models::audit_outbox::SecurityFlag;
+    let f = Fixture::new("audit_terminal_detail_policy").await;
+    let request = reservation();
+    let operation = request.event.operation_id.clone();
+    let policy = AuditDetail::SecurityFlagChange {
+        flag: SecurityFlag::BrokerEnabled,
+        old: false,
+        new: true,
+    };
+    let detailed = EffectReservation {
+        event: request.event.with_detail(policy.clone()),
+        event_id: request.event_id,
+        terminal_event_id: request.terminal_event_id,
+    };
+    begin(&f.db, &f.runtime, &detailed).await;
+    for stage in [
+        AuditStage::Failed,
+        AuditStage::Uncertain,
+        AuditStage::Succeeded,
+        AuditStage::Cancelled,
+    ] {
+        assert!(matches!(
+            finish_detail(&f.db, &f.runtime, &operation, stage, &failure_detail(0)).await,
+            Err(AppError::AuditIntegrityConflict)
+        ));
+    }
+    assert!(
+        matches!(
+            finish_detail(&f.db, &f.runtime, &operation, AuditStage::Failed, &policy).await,
+            Err(AppError::AuditIntegrityConflict)
+        ),
+        "terminal additions use only reviewed outcome variants"
+    );
+    finish(&f.db, &f.runtime, &operation, AuditStage::Failed).await;
+    let terminal =
+        f.db.collection::<PendingAuditEvent>(PENDING)
+            .find_one(doc! {"_id": detailed.terminal_event_id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        terminal.event.detail,
+        Some(policy),
+        "legacy terminal helper preserves intent detail"
+    );
 }
 async fn finish(db: &Database, runtime: &AuditRuntime, operation: &str, stage: AuditStage) {
     let mut session = db.client().start_session().await.unwrap();

@@ -5,7 +5,9 @@ use crate::{
     errors::{AppError, AppResult, AuditAdmissionReason},
     models::{
         audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS, EffectPhase},
-        audit_outbox::{AuditStage, PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent},
+        audit_outbox::{
+            AuditDetail, AuditStage, PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent,
+        },
         audit_state::{AuditState, COLLECTION_NAME as STATE},
         audit_witness_delivery::{COLLECTION_NAME as DELIVERY, WitnessDelivery},
     },
@@ -85,6 +87,22 @@ fn deferred() -> AppError {
     }
 }
 
+fn apply_terminal_detail(
+    event: &mut crate::models::audit_outbox::SafeAuditEvent,
+    detail: Option<&AuditDetail>,
+) -> AppResult<()> {
+    if let Some(detail) = detail {
+        if !matches!(detail, AuditDetail::WebhookDeliveryFailure { .. })
+            || !matches!(event.stage, AuditStage::Failed | AuditStage::Uncertain)
+            || event.detail.is_some()
+        {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        event.detail = Some(detail.clone());
+    }
+    Ok(())
+}
+
 impl AuditRuntime {
     /// Uses the same generation UUID advertised by this serving process. Tests
     /// opt in explicitly; ordinary test/local constructors create no readiness.
@@ -134,7 +152,9 @@ impl AuditRuntime {
             .session(&mut *session)
             .await?
         {
-            if existing.event != event {
+            if existing.event != event
+                || (existing.terminal_stage.is_none() && existing.terminal_detail.is_some())
+            {
                 return Err(AppError::AuditIntegrityConflict);
             }
             let original = db
@@ -169,6 +189,8 @@ impl AuditRuntime {
                     .ok_or(AppError::AuditIntegrityConflict)?;
                 let mut expected = event.clone();
                 expected.stage = stage.clone();
+                apply_terminal_detail(&mut expected, existing.terminal_detail.as_ref())?;
+                audit_outbox_service::validate(&expected)?;
                 if terminal.event != expected
                     || terminal.order != existing.terminal_order
                     || terminal.reserved_at != existing.reserved_at
@@ -214,6 +236,7 @@ impl AuditRuntime {
                 phase: EffectPhase::Pending,
                 attempt: None,
                 terminal_stage: None,
+                terminal_detail: None,
             })
             .session(session)
             .await?;
@@ -228,6 +251,21 @@ impl AuditRuntime {
         session: &mut ClientSession,
         operation: &str,
         stage: AuditStage,
+    ) -> AppResult<()> {
+        self.finish_effect_with_detail_in_session(db, session, operation, stage, None)
+            .await
+    }
+
+    /// Commit reviewed post-dispatch failure evidence with the product outcome.
+    /// Only WebhookDeliveryFailure on Failed/Uncertain is accepted. It cannot
+    /// replace an intent's existing decision detail or create dispatch authority.
+    pub async fn finish_effect_with_detail_in_session(
+        &self,
+        db: &Database,
+        session: &mut ClientSession,
+        operation: &str,
+        stage: AuditStage,
+        detail: Option<AuditDetail>,
     ) -> AppResult<()> {
         if !matches!(
             stage,
@@ -248,12 +286,29 @@ impl AuditRuntime {
             .session(&mut *session)
             .await?
             .ok_or(AppError::AuditIntegrityConflict)?;
-        if let Some(previous) = intent.terminal_stage {
-            return if previous == stage {
-                Ok(())
-            } else {
-                Err(AppError::AuditIntegrityConflict)
-            };
+        let mut event = intent.event.clone();
+        event.stage = stage.clone();
+        apply_terminal_detail(&mut event, detail.as_ref())?;
+        audit_outbox_service::validate(&event)?;
+        if let Some(previous) = &intent.terminal_stage {
+            let terminal = db
+                .collection::<PendingAuditEvent>(PENDING)
+                .find_one(doc! {"_id": &intent.terminal_event_id})
+                .session(&mut *session)
+                .await?
+                .ok_or(AppError::AuditIntegrityConflict)?;
+            if previous != &stage
+                || intent.terminal_detail != detail
+                || terminal.event != event
+                || terminal.order != intent.terminal_order
+                || terminal.reserved_at != intent.reserved_at
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            return Ok(());
+        }
+        if intent.terminal_detail.is_some() {
+            return Err(AppError::AuditIntegrityConflict);
         }
         if state.pending_count <= 0
             || intent.terminal_order <= 0
@@ -271,9 +326,6 @@ impl AuditRuntime {
         {
             return Err(AppError::AuditIntegrityConflict);
         }
-        let mut event = intent.event;
-        event.stage = stage.clone();
-        audit_outbox_service::validate(&event)?;
         db.collection::<PendingAuditEvent>(PENDING)
             .insert_one(PendingAuditEvent {
                 id: intent.terminal_event_id,
@@ -284,8 +336,23 @@ impl AuditRuntime {
             })
             .session(&mut *session)
             .await?;
-        intents.update_one(doc! {"_id": operation, "terminal_stage": bson::Bson::Null},
-            doc! {"$set": {"phase": "terminal", "terminal_stage": bson::to_bson(&stage).map_err(|_| AppError::AuditIntegrityConflict)?}}).session(session).await?;
+        let mut outcome = doc! {"phase": "terminal", "terminal_stage": bson::to_bson(&stage).map_err(|_| AppError::AuditIntegrityConflict)?};
+        if let Some(detail) = detail {
+            outcome.insert(
+                "terminal_detail",
+                bson::to_bson(&detail).map_err(|_| AppError::AuditIntegrityConflict)?,
+            );
+        }
+        let updated = intents
+            .update_one(
+                doc! {"_id": operation, "terminal_stage": bson::Bson::Null},
+                doc! {"$set": outcome},
+            )
+            .session(session)
+            .await?;
+        if updated.matched_count != 1 {
+            return Err(AppError::AuditIntegrityConflict);
+        }
         Ok(())
     }
 

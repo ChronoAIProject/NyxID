@@ -2,7 +2,11 @@ use super::*;
 use crate::{
     models::{
         assistant_settings::AccessMode,
-        audit_outbox::{AuditApprovalMode, ResourceSetKind, SecurityFlag, SystemAuditActor},
+        audit_outbox::{
+            AcknowledgementApproverKind, AcknowledgementCardKind, AcknowledgementDecision,
+            AuditApprovalMode, NotificationSettingsDecision, ResourceSetKind, SecurityFlag,
+            SystemAuditActor, WebhookEventKind, WebhookFailureKind,
+        },
         org_membership::OrgRole,
         service_approval_config::ApprovalMode,
     },
@@ -20,6 +24,56 @@ fn event() -> AuditEvent {
         owner: AuditOwner::Platform,
         action: "audit_detail_test",
         target_id: None,
+    }
+}
+
+#[test]
+fn audit_detail_authentication_actor_round_trips_without_request_identity() {
+    let mut event = event();
+    event.principal = AuditPrincipal::System {
+        actor: SystemAuditActor::Authentication,
+    };
+    event.owner = AuditOwner::Person {
+        id: "00000000-0000-4000-8000-000000000002".into(),
+    };
+    let event = event.project();
+    validate(&event).unwrap();
+    let expected = r#"{"operation_id":"00000000-0000-4000-8000-000000000001","stage":"committed","principal":{"kind":"system","actor":"authentication"},"owner":{"kind":"person","id":"00000000-0000-4000-8000-000000000002"},"action":"audit_detail_test","target_id":null}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_str::<SafeAuditEvent>(expected).unwrap(),
+        event
+    );
+    assert_eq!(
+        bson::from_slice::<SafeAuditEvent>(&bson::to_vec(&event).unwrap()).unwrap(),
+        event
+    );
+    let row = audit_entry(&PendingAuditEvent {
+        id: "00000000-0000-4000-8000-000000000003".into(),
+        event: event.clone(),
+        order: 1,
+        reserved_at: Utc.timestamp_millis_opt(1_800_000_000_000).unwrap(),
+        materialized_seq: None,
+    })
+    .unwrap();
+    assert_eq!(row.user_id, None);
+    assert_eq!(row.ip_address, None);
+    assert_eq!(row.user_agent, None);
+    assert_eq!(row.api_key_id, None);
+    assert_eq!(row.api_key_name, None);
+    assert_eq!(row.event_data, Some(serde_json::to_value(event).unwrap()));
+    for owner in [
+        AuditOwner::Platform,
+        AuditOwner::Org {
+            id: "00000000-0000-4000-8000-000000000002".into(),
+        },
+    ] {
+        let mut invalid = serde_json::from_str::<SafeAuditEvent>(expected).unwrap();
+        invalid.owner = owner;
+        assert!(matches!(
+            validate(&invalid),
+            Err(AppError::ValidationError(_))
+        ));
     }
 }
 
@@ -78,6 +132,148 @@ fn ids(start: u64, count: u64) -> Vec<String> {
     (start..start + count)
         .map(|n| format!("00000000-0000-4000-8000-{n:012x}"))
         .collect()
+}
+
+fn notification_settings(timeout: u32, expiry: u32) -> NotificationSettingsDecision {
+    NotificationSettingsDecision {
+        telegram_enabled: true,
+        push_enabled: false,
+        approval_suspended: false,
+        approval_delivery_configured: true,
+        global_approval_mode: AuditApprovalMode::WritesOnly,
+        approval_timeout_secs: timeout,
+        grant_expiry_days: expiry,
+    }
+}
+
+fn webhook_failure(attempts: u8, status: Option<u16>) -> AuditDetail {
+    AuditDetail::WebhookDeliveryFailure {
+        event: WebhookEventKind::ConnectLinkCompleted,
+        reason: WebhookFailureKind::NonSuccessStatus,
+        attempts,
+        last_http_status: status,
+    }
+}
+
+#[test]
+fn audit_detail_acknowledgement_inventory_and_approvers_are_closed() {
+    for card_kind in [
+        AcknowledgementCardKind::Action,
+        AcknowledgementCardKind::Service,
+        AcknowledgementCardKind::Account,
+        AcknowledgementCardKind::Operations,
+        AcknowledgementCardKind::Skills,
+        AcknowledgementCardKind::Machine,
+        AcknowledgementCardKind::SavedLogin,
+    ] {
+        for decision in [
+            AcknowledgementDecision::Allow,
+            AcknowledgementDecision::Deny,
+        ] {
+            for approver_kind in [
+                AcknowledgementApproverKind::Owner,
+                AcknowledgementApproverKind::OwnerChannel,
+                AcknowledgementApproverKind::Nyxbot,
+                AcknowledgementApproverKind::ApiKey,
+            ] {
+                let detail = AuditDetail::AcknowledgementDecision {
+                    decision,
+                    card_kind,
+                    approver_kind,
+                };
+                let projected = event().with_detail(detail.clone()).project();
+                validate(&projected).unwrap();
+                let json = serde_json::to_vec(&projected).unwrap();
+                assert_eq!(serde_json::to_vec(&projected).unwrap(), json);
+                assert_eq!(
+                    serde_json::from_slice::<SafeAuditEvent>(&json).unwrap(),
+                    projected
+                );
+                assert_eq!(
+                    bson::from_slice::<SafeAuditEvent>(&bson::to_vec(&projected).unwrap()).unwrap(),
+                    projected
+                );
+                for field in ["decision", "card_kind", "approver_kind", "provider_text"] {
+                    let mut value = serde_json::to_value(&detail).unwrap();
+                    value[field] = serde_json::json!("future_unreviewed_value");
+                    assert!(serde_json::from_value::<AuditDetail>(value).is_err());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn audit_detail_notification_settings_bounds_and_nested_fields_are_closed() {
+    let valid = AuditDetail::NotificationSettingsChange {
+        old: notification_settings(10, 1),
+        new: notification_settings(300, 365),
+    };
+    let projected = event().with_detail(valid.clone()).project();
+    validate(&projected).unwrap();
+    assert_eq!(
+        bson::from_slice::<SafeAuditEvent>(&bson::to_vec(&projected).unwrap()).unwrap(),
+        projected
+    );
+    for (timeout, expiry) in [(0, 1), (9, 1), (301, 1), (10, 0), (10, 366)] {
+        for old_invalid in [false, true] {
+            let bad = notification_settings(timeout, expiry);
+            let good = notification_settings(10, 1);
+            let detail = AuditDetail::NotificationSettingsChange {
+                old: if old_invalid {
+                    bad.clone()
+                } else {
+                    good.clone()
+                },
+                new: if old_invalid { good } else { bad },
+            };
+            assert!(validate_detail(&detail).is_err());
+        }
+    }
+    let mut json = serde_json::to_value(&valid).unwrap();
+    json["new"]["destination"] = serde_json::json!("forbidden");
+    assert!(serde_json::from_value::<AuditDetail>(json).is_err());
+}
+
+#[test]
+fn audit_detail_webhook_failure_bounds_and_terminal_stages_are_enforced() {
+    for attempts in [0, 3] {
+        for status in [None, Some(100), Some(599)] {
+            for stage in [AuditStage::Failed, AuditStage::Uncertain] {
+                let mut projected = event()
+                    .with_detail(webhook_failure(attempts, status))
+                    .project();
+                projected.stage = stage;
+                validate(&projected).unwrap();
+                assert_eq!(
+                    bson::from_slice::<SafeAuditEvent>(&bson::to_vec(&projected).unwrap()).unwrap(),
+                    projected
+                );
+            }
+        }
+    }
+    for (attempts, status) in [(4, None), (u8::MAX, None), (0, Some(99)), (0, Some(600))] {
+        assert!(validate_detail(&webhook_failure(attempts, status)).is_err());
+    }
+    for stage in [
+        AuditStage::Committed,
+        AuditStage::Intent,
+        AuditStage::Succeeded,
+        AuditStage::Cancelled,
+    ] {
+        let mut projected = event().with_detail(webhook_failure(0, None)).project();
+        projected.stage = stage;
+        assert!(validate(&projected).is_err());
+    }
+    for (field, value) in [
+        ("event", "future_event"),
+        ("reason", "provider_error"),
+        ("body", "forbidden"),
+    ] {
+        let mut json = serde_json::to_value(webhook_failure(3, Some(503))).unwrap();
+        json[field] = serde_json::json!(value);
+        assert!(serde_json::from_value::<AuditDetail>(json).is_err());
+    }
 }
 
 #[test]

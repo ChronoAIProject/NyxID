@@ -81,6 +81,21 @@ The existing core validator checks these identities and safe event fields.
 | `permit.run(\|queued\| async move { ... })` | Consume that permit and context once. The core rechecks its process/attempt claim and live admission before entering the closure. Resolve/fence product inputs and perform one provider effect. Never detach the send or return the permit as a boolean. |
 | `finish_in_session(db, session, runtime, operation_id, outcome)` | Join the product receipt/outcome transaction and call the core's terminal helper. Uses its reserved slot, even after new admission closes. |
 
+CORE-B's next resolver/sink implementation will add the following interfaces
+with their real consumers. They are deliberately absent from the current Rust
+API until that implementation lands together, without unused declarations:
+
+| Interface | Required consumer and contract |
+| --- | --- |
+| `DeliveryBinding { destination_id: Uuid, payload: PayloadRef }` | ID's `PayloadSource::Account` resolver, and other producer-owned resolvers, return the exact server-loaded immutable payload/destination binding. It contains no dispatch authority. |
+| `DeliveryPermit::run_bound(binding, channel, effect)` | The sink checks the queued destination, payload reference and channel against that independently resolved binding before consuming the existing one-shot permit. A mismatch refuses the send. |
+| `SendOutcome<T>` | A sink returns `Accepted(T)` for positive provider acceptance, `Rejected { status: Option<u16>, invalid_destination: bool }` only for positive rejection, or `Uncertain` for ambiguous delivery. Provider receipt `T` stays in protected product storage; no free-form response enters audit detail. |
+| `SendOutcome::delivery_outcome()` | The worker maps those outcomes to Succeeded, DefinitiveFailure or Uncertain and commits the product receipt plus the reviewed core terminal completion together. Webhook failure detail uses `finish_effect_with_detail_in_session`; mapping never grants retry authority. |
+
+Until those consumers land, use the published `DeliveryPermit::run` and enforce
+the final product/destination fences inside its closure. Do not create a second
+intent, bypass a permit, or equate a timeout with proof of rejection.
+
 Use the serving process's existing `AuditRuntime`. Do not bind effects, create
 an unconfigured runtime or synthesize readiness in a producer or sink.
 The enqueue tier is the owning DB operation's Standard, Availability or Narrowing

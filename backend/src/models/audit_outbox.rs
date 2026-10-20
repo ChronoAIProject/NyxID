@@ -33,6 +33,7 @@ pub enum AuditPrincipal {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAuditActor {
+    Authentication,
     Startup,
     Maintenance,
     Reconciliation,
@@ -73,6 +74,73 @@ pub enum AuditApprovalMode {
     WritesOnly,
     All,
     Off,
+}
+
+/// Enumerable notification/approval policy; never destinations or credentials.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationSettingsDecision {
+    pub telegram_enabled: bool,
+    pub push_enabled: bool,
+    pub approval_suspended: bool,
+    pub approval_delivery_configured: bool,
+    pub global_approval_mode: AuditApprovalMode,
+    pub approval_timeout_secs: u32,
+    pub grant_expiry_days: u32,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookEventKind {
+    ConnectionExpired,
+    ConnectLinkCompleted,
+    ConnectLinkCancelled,
+    ConnectLinkExpired,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookFailureKind {
+    TenantIdentityMissing,
+    ConfigurationLoadFailed,
+    RateLimitUnavailable,
+    AppRateLimited,
+    KeyIdLoadFailed,
+    KeyIdStoreFailed,
+    SecretDecryptFailed,
+    SerializationFailed,
+    BodyTooLarge,
+    DestinationUnavailable,
+    SendFailed,
+    NonSuccessStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcknowledgementCardKind {
+    Action,
+    Service,
+    Account,
+    Operations,
+    Skills,
+    Machine,
+    SavedLogin,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcknowledgementDecision {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcknowledgementApproverKind {
+    Owner,
+    OwnerChannel,
+    Nyxbot,
+    ApiKey,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +216,22 @@ pub enum AuditDetail {
     /// Mongo modified_count, capped at one million; saturated means the actual
     /// count exceeded that cap. Never a request-supplied or content count.
     SessionRevocationCount { count: u64, saturated: bool },
+    NotificationSettingsChange {
+        old: NotificationSettingsDecision,
+        new: NotificationSettingsDecision,
+    },
+    /// Terminal evidence, never dispatch/retry permission or provider text.
+    WebhookDeliveryFailure {
+        event: WebhookEventKind,
+        reason: WebhookFailureKind,
+        attempts: u8,
+        last_http_status: Option<u16>,
+    },
+    AcknowledgementDecision {
+        decision: AcknowledgementDecision,
+        card_kind: AcknowledgementCardKind,
+        approver_kind: AcknowledgementApproverKind,
+    },
 }
 
 /// An allowlisted projection. No arbitrary event JSON, strings from provider

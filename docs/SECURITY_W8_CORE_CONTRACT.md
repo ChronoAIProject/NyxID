@@ -81,12 +81,14 @@ does not supply cross-request business idempotency by itself.
 - `principal`: `AuditPrincipal::Person { id }` for a verified human;
   `Node { id }`, `ServiceAccount { id }`, `OracleWorker { id }` or
   `ApiKey { id, owner_id }` for an authenticated machine/key identity; or
-  `System { actor: SystemAuditActor }` for Startup, Maintenance,
+  `System { actor: SystemAuditActor }` for Authentication, Startup, Maintenance,
   Reconciliation, Expiry or Delivery;
 - `owner`: `AuditOwner::Person { id }`, `Org { id }` or fixed `Platform`;
 - `action`: reviewed `&'static str`, bounded to 96 identifier characters;
 - `target_id`: optional UUID v4, never a label or provider reference string;
 - `detail`: optional, closed `AuditDetail`, attached with `event.with_detail(detail)` (Decision 6).
+
+`System { actor: SystemAuditActor::Authentication }` records an account-authority mutation performed by the authentication service on an unauthenticated, request-driven input: self-registration, invitation consumption during registration, and password-reset-token issuance. `owner` is the server-created or server-loaded `Person` row the mutation affects; the requester is never attributed, and no email, IP or submitted identifier is stored. Any operation that verified a credential or redeemed a server-issued token (password login, MFA, reset redemption, email verification, forced reset by an admin) records `Person { id: verified subject }` (or the admin's principal), never `Authentication`.
 
 The enqueue/intent path validates every UUID/action before reservation and again
 before materialization. There is no arbitrary metadata/payload map. Never copy
@@ -114,6 +116,7 @@ Authenticated-machine attribution is explicit:
 | Oracle worker | `OracleWorker { id: "{pool_uuid}:{worker_label}" }` from the authenticated/validated worker binding | `user_id = null` |
 | Service-account token | `ServiceAccount { id: verified service-account UUID v4 }`; use the token subject, never `approval_owner_user_id` | `user_id = null` |
 | API/agent key, including child credentials | `ApiKey { id: verified api_key_id, owner_id: verified key owner }`; retain the verified parent API-key identity used by `AuthUser` | `user_id = null`, `api_key_id = key id`, `api_key_name = null` |
+| Unauthenticated account-lifecycle request | `System { actor: Authentication }`; owner = affected person row | `user_id = null` |
 | Unauthenticated rejection or background work | Closed named `System` actor; never manufacture a verified identity from submitted IDs | `user_id = null` |
 
 API-key owner can be a person **or org** and is recorded independently of the
@@ -170,6 +173,9 @@ rewritten or re-signed; the witness still receives hashes only.
 | `ResourceSetChange` | `kind: ResourceSetKind` (`Services/Nodes/Agents/OrgMembers`), UUID-v4 added/removed, truncated. JSON calls the resource field `resource_kind` because the enum's internal `kind` tag already identifies `resource_set_change`. |
 | `ExpiryChange` | Optional old/new BSON datetimes, millisecond precision; None = no expiry. |
 | `SessionRevocationCount` | `count: u64 <= 1_000_000`, `saturated: bool`. Use `session_revocation_count(update_many.modified_count)` from `revoke_all_user_sessions_in_session`, never request input. Actual counts above the cap become count=1_000_000/saturated=true; saturated implies count=cap. Zero is valid. |
+| `NotificationSettingsChange` | `old/new: NotificationSettingsDecision`: `telegram_enabled`, `push_enabled`, `approval_suspended`, `approval_delivery_configured` booleans; `global_approval_mode: AuditApprovalMode`; `approval_timeout_secs: u32` in 10–300; `grant_expiry_days: u32` in 1–365. Derive both snapshots inside the authorized mutation transaction. Preserve legacy global None as `WritesOnly`. No destinations or credentials. |
+| `WebhookDeliveryFailure` | `event: WebhookEventKind` (`ConnectionExpired/ConnectLinkCompleted/ConnectLinkCancelled/ConnectLinkExpired`); `reason: WebhookFailureKind` (`TenantIdentityMissing/ConfigurationLoadFailed/RateLimitUnavailable/AppRateLimited/KeyIdLoadFailed/KeyIdStoreFailed/SecretDecryptFailed/SerializationFailed/BodyTooLarge/DestinationUnavailable/SendFailed/NonSuccessStatus`); `attempts: u8` in 0–3; `last_http_status: Option<u16>` in 100–599. Only Failed/Uncertain terminal events. The bounded counter records evidence; it grants no retry authority. No provider text, URLs or response bodies. |
+| `AcknowledgementDecision` | `decision: AcknowledgementDecision` (`Allow/Deny`); `card_kind: AcknowledgementCardKind` (`Action/Service/Account/Operations/Skills/Machine/SavedLogin`); `approver_kind: AcknowledgementApproverKind` (`Owner/OwnerChannel/Nyxbot/ApiKey`). Use the server-loaded card and verified deciding authority for HTTP, NyxBot, channel and voice paths; never user-authored labels or an unknown-kind fallback. |
 
 Every variant denies unknown kinds/fields. Scope identifiers use only
 `[a-z0-9:_.-]`, 1–64 bytes, and must be server-registered; free-form provider
@@ -293,6 +299,38 @@ after closure. Identical terminal replay is idempotent; conflicting outcomes
 fail. Cancelled requires an unclaimed pending intent; Succeeded requires the
 claim owned by this process. A timeout, lost response, crash or recovered claim
 without positive terminal proof is **Uncertain**, never automatic Failed/retry.
+
+For webhook failure evidence known only after dispatch, use
+`runtime.finish_effect_with_detail_in_session(db, session, operation_id, stage, Some(detail))`
+in that same product-receipt transaction. Its `detail` parameter is
+`Option<AuditDetail>`: `Some` accepts only `WebhookDeliveryFailure` on Failed or
+Uncertain, and only when the original intent has no detail. It cannot replace
+the original intent's policy decision. `None` preserves the intent's existing
+detail and is the exact behavior of `finish_effect_in_session`. The immutable
+intent remains unchanged; separate `terminal_detail` evidence and the terminal
+outbox event commit atomically with the outcome. Replay must supply the same
+stage and detail, including presence/absence, and match the complete terminal
+event and reserved slot. Changed or omitted recorded detail conflicts. Enqueue
+and materialization validate the terminal detail again. No terminal addition
+creates a claim, reopens a terminal result or permits a second dispatch. Request
+additional terminal variants centrally; ordinary policy variants cannot be
+introduced through this post-dispatch API.
+
+The shared [delivery interface](SECURITY_W8_DELIVERY_CONTRACT.md) uses this same
+runtime. Startup registers its product/destination/channel dedupe indexes after
+the database DDL and before migrations, workers or producers; a missing index
+continues to fail closed at enqueue. Sink owners join the product receipt and
+core terminal completion in one transaction rather than introducing a second
+outcome state machine.
+
+The ID account payload store uses `account_delivery_payloads_v1`. Startup DDL
+creates `account_delivery_user_kind_revision`, unique on
+`(user_id, kind, revision_id)`, and `account_delivery_expiry`, a nonunique scan
+index on `(expires_at, _id)`. Neither is a TTL index: expiry does not authorize
+automatic removal of payloads needed by unsettled delivery or reconciliation.
+Until the producer model lands, the collection name is available as
+`db::ACCOUNT_DELIVERY_PAYLOADS_COLLECTION_NAME` for its model to re-export;
+the startup commit does not depend on that producer module.
 
 Dropping a permit, lease expiry, Mongo restore or a new process does not reopen
 dispatch. The protected claim prevents reassignment; recovery records uncertainty

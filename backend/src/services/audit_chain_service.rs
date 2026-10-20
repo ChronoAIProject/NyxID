@@ -600,6 +600,32 @@ mod tests {
     }
 
     #[test]
+    fn audit_authentication_actor_canonical_bytes_preserve_existing_system_actors() {
+        use crate::models::audit_outbox::{AuditPrincipal, SystemAuditActor};
+        for (actor, text) in [
+            (SystemAuditActor::Authentication, "authentication"),
+            (SystemAuditActor::Startup, "startup"),
+            (SystemAuditActor::Maintenance, "maintenance"),
+            (SystemAuditActor::Reconciliation, "reconciliation"),
+            (SystemAuditActor::Expiry, "expiry"),
+            (SystemAuditActor::Delivery, "delivery"),
+        ] {
+            let principal = AuditPrincipal::System { actor };
+            let json = serde_json::to_value(principal).unwrap();
+            let entry = AuditLog {
+                user_id: None,
+                ip_address: None,
+                user_agent: None,
+                ..test_entry(Some(json))
+            };
+            let expected = format!(
+                "1\u{1e}{GENESIS_PREV_HASH}\u{1e}entry-1\u{1e}\u{1e}login\u{1e}{{\"actor\":\"{text}\",\"kind\":\"system\"}}\u{1e}\u{1e}\u{1e}\u{1e}\u{1e}1700000000123"
+            );
+            assert_eq!(canonical_audit_bytes(&entry).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
     fn canonical_audit_bytes_include_empty_optional_fields_and_millis() {
         let entry = AuditLog {
             user_id: None,

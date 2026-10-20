@@ -1,6 +1,6 @@
 //! Effect bookkeeping contains only reviewed identity/action metadata and hash
 //! evidence. Never put provider arguments, URLs, credentials or responses here.
-use super::audit_outbox::{AuditStage, SafeAuditEvent};
+use super::audit_outbox::{AuditDetail, AuditStage, SafeAuditEvent};
 use chrono::{DateTime, Utc};
 use nyxid::models::audit_witness::DispatchRequest;
 use serde::{Deserialize, Serialize};
@@ -29,4 +29,8 @@ pub struct AuditEffectIntent {
     pub phase: EffectPhase,
     pub attempt: Option<DispatchRequest>,
     pub terminal_stage: Option<AuditStage>,
+    /// Closed post-dispatch evidence, committed atomically with the outcome.
+    /// Absent on all existing intents; never replaces the immutable intent event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_detail: Option<AuditDetail>,
 }
