@@ -7,8 +7,27 @@ pub const PENDING_COLLECTION_NAME: &str = "audit_pending_events";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuditPrincipal {
-    Person { id: String },
-    System { actor: SystemAuditActor },
+    Person {
+        id: String,
+    },
+    Node {
+        id: String,
+    },
+    /// Existing Oracle identity: canonical pool UUID + ':' + bounded worker label.
+    OracleWorker {
+        id: String,
+    },
+    ServiceAccount {
+        id: String,
+    },
+    /// A key owner can be a person or org; it is never an inferred human actor.
+    ApiKey {
+        id: String,
+        owner_id: String,
+    },
+    System {
+        actor: SystemAuditActor,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

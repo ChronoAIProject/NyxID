@@ -11,6 +11,112 @@ use chrono::Utc;
 
 const KEY: [u8; 32] = [2; 32];
 
+#[tokio::test]
+async fn audit_machine_principals_keep_authenticated_identity_without_inventing_a_person() {
+    let db = connect_transaction_test_database("audit_machine_principals").await;
+    let key = crate::services::audit_service::audit_chain_hmac_key().unwrap();
+    let id = Uuid::new_v4().to_string();
+    let owner = Uuid::new_v4().to_string();
+    let principals = [
+        AuditPrincipal::Node { id: id.clone() },
+        AuditPrincipal::OracleWorker {
+            id: format!("{id}:tab_1"),
+        },
+        AuditPrincipal::ServiceAccount { id: id.clone() },
+        AuditPrincipal::ApiKey {
+            id: id.clone(),
+            owner_id: owner.clone(),
+        },
+    ];
+    for principal in principals {
+        let event = AuditEvent {
+            principal: principal.clone(),
+            owner: AuditOwner::Org { id: owner.clone() },
+            ..event()
+        };
+        let event_id = Uuid::new_v4().to_string();
+        enqueue(&db, &event_id, &event).await.unwrap();
+        assert!(materialize_one(&db, key).await.unwrap());
+        // Stable identical replay, even after local materialization.
+        assert_eq!(enqueue(&db, &event_id, &event).await.unwrap(), event_id);
+        let stored = db
+            .collection::<AuditLog>(AUDIT)
+            .find_one(doc! {"_id": &event_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.user_id, None, "machine owner is not its human actor");
+        assert_eq!(
+            stored.api_key_id,
+            matches!(principal, AuditPrincipal::ApiKey { .. }).then(|| id.clone())
+        );
+        assert!(stored.api_key_name.is_none());
+        let saved: SafeAuditEvent = serde_json::from_value(stored.event_data.unwrap()).unwrap();
+        assert_eq!(saved.principal, principal);
+        assert_eq!(saved.owner, AuditOwner::Org { id: owner.clone() });
+        let mut changed = event.clone();
+        changed.principal = AuditPrincipal::Person { id: id.clone() };
+        assert!(matches!(
+            enqueue(&db, &event_id, &changed).await,
+            Err(AppError::AuditIntegrityConflict)
+        ));
+    }
+    let report = chain::verify_chain(&db, key, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(report.status, chain::AuditChainStatus::Ok);
+    assert_eq!(report.checked_count, 4);
+}
+
+#[test]
+fn audit_machine_principal_ids_reject_tokens_unbounded_labels_and_ambiguous_worker_ids() {
+    let id = Uuid::new_v4().to_string();
+    let invalid = [
+        AuditPrincipal::Node {
+            id: "nyx_nauth_secret".into(),
+        },
+        AuditPrincipal::ServiceAccount {
+            id: "bearer-secret".into(),
+        },
+        AuditPrincipal::ApiKey {
+            id: id.clone(),
+            owner_id: "not-an-owner".into(),
+        },
+        AuditPrincipal::OracleWorker {
+            id: format!("{id}:"),
+        },
+        AuditPrincipal::OracleWorker {
+            id: format!("{id}:tab:other"),
+        },
+        AuditPrincipal::OracleWorker {
+            id: format!("{id}:{}", "x".repeat(65)),
+        },
+        AuditPrincipal::OracleWorker {
+            id: format!("{id}:SECRET payload"),
+        },
+        AuditPrincipal::OracleWorker {
+            id: format!("{}:tab_1", id.replace('-', "")),
+        },
+    ];
+    for principal in invalid {
+        assert!(
+            validate(
+                &AuditEvent {
+                    principal,
+                    ..event()
+                }
+                .safe_projection()
+            )
+            .is_err()
+        );
+    }
+    // Adding tagged variants does not change the preexisting event encoding.
+    assert_eq!(
+        serde_json::to_string(&AuditPrincipal::Person { id: id.clone() }).unwrap(),
+        format!(r#"{{"kind":"person","id":"{id}"}}"#)
+    );
+}
+
 fn event() -> AuditEvent {
     AuditEvent {
         operation_id: Uuid::new_v4().to_string(),

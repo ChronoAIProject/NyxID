@@ -396,41 +396,18 @@ impl LocalCommit {
     }
 
     async fn run_owned_transaction(&self) -> mongodb::error::Result<Outcome> {
-        let mut session = self.db.client().start_session().await?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            session.start_transaction().await?;
-            let result = self.run(&mut session).await;
-            match result {
-                Ok(outcome) => loop {
-                    match session.commit_transaction().await {
-                        Ok(()) => return Ok(outcome),
-                        Err(error)
-                            if error.contains_label("UnknownTransactionCommitResult")
-                                && tokio::time::Instant::now() < deadline =>
-                        {
-                            continue;
-                        }
-                        Err(error)
-                            if error.contains_label("TransientTransactionError")
-                                && tokio::time::Instant::now() < deadline =>
-                        {
-                            break;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                },
-                Err(error) => {
-                    let _ = session.abort_transaction().await;
-                    if !super::transaction::retryable(&error)
-                        || tokio::time::Instant::now() >= deadline
-                    {
-                        return Err(error);
-                    }
-                }
-            }
-            tokio::task::yield_now().await;
-        }
+        crate::services::api_key_mutation_service::transaction_result(
+            crate::services::audit_runtime::transaction::run_classified(
+                &self.db,
+                self,
+                |session, operation| Box::pin(async move { Ok(operation.run(session).await?) }),
+                |_, _| {},
+                move |error| tokio::time::Instant::now() < deadline
+                    && matches!(error, crate::errors::AppError::DatabaseError(error) if super::transaction::retryable(error)),
+            )
+            .await,
+        )
     }
 
     async fn run(&self, session: &mut ClientSession) -> mongodb::error::Result<Outcome> {

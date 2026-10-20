@@ -53,8 +53,35 @@ fn uuid(value: &str) -> AppResult<()> {
 
 pub(super) fn validate(event: &SafeAuditEvent) -> AppResult<()> {
     uuid(&event.operation_id)?;
-    if let AuditPrincipal::Person { id } = &event.principal {
-        uuid(id)?;
+    match &event.principal {
+        AuditPrincipal::Person { id }
+        | AuditPrincipal::Node { id }
+        | AuditPrincipal::ServiceAccount { id } => uuid(id)?,
+        AuditPrincipal::ApiKey { id, owner_id } => {
+            uuid(id)?;
+            uuid(owner_id)?;
+        }
+        AuditPrincipal::OracleWorker { id } => {
+            let (pool, label) = id.split_once(':').ok_or_else(|| {
+                AppError::ValidationError(
+                    "Audit Oracle identity must be pool UUID:worker label".into(),
+                )
+            })?;
+            uuid(pool)?;
+            // Same closed alphabet/limit as the authenticated Oracle protocol.
+            if label.is_empty()
+                || label.len() > 64
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+                || Uuid::parse_str(pool).is_ok_and(|value| value.to_string() != pool)
+            {
+                return Err(AppError::ValidationError(
+                    "Invalid audit Oracle worker identity".into(),
+                ));
+            }
+        }
+        AuditPrincipal::System { .. } => (),
     }
     match &event.owner {
         AuditOwner::Person { id } | AuditOwner::Org { id } => uuid(id)?,
@@ -196,7 +223,7 @@ fn audit_entry(pending: &PendingAuditEvent) -> AppResult<AuditLog> {
         id: pending.id.clone(),
         user_id: match &pending.event.principal {
             AuditPrincipal::Person { id } => Some(id.clone()),
-            AuditPrincipal::System { .. } => None,
+            _ => None,
         },
         event_type: pending.event.action.clone(),
         event_data: Some(
@@ -204,7 +231,10 @@ fn audit_entry(pending: &PendingAuditEvent) -> AppResult<AuditLog> {
         ),
         ip_address: None,
         user_agent: None,
-        api_key_id: None,
+        api_key_id: match &pending.event.principal {
+            AuditPrincipal::ApiKey { id, .. } => Some(id.clone()),
+            _ => None,
+        },
         api_key_name: None,
         seq: None,
         prev_hash: None,

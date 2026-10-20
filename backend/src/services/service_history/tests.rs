@@ -15,6 +15,9 @@ use crate::{
 use bson::{Document, doc};
 use futures::TryStreamExt;
 
+#[path = "coordinator_tests.rs"]
+mod coordinator_tests;
+
 fn actor(id: &str, group: &str) -> HistoryContext {
     HistoryContext {
         actor: HistoryActor {

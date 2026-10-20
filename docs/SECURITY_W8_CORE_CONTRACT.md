@@ -46,6 +46,21 @@ Lane conversions should use the explicit bounded runner above (including raw
 112 handling), or request CORE review of an existing equivalent retry owner.
 Never catch a write conflict and continue on that aborted session.
 
+`service_history::transaction::run(db, async |transaction| { ... })` is an
+equivalent bounded owner for existing journal-coupled mutations. Keep its
+`Transaction` wrapper and **complete** domain/journal/audit callback; passing
+`&mut *transaction` to core helpers joins that same Mongo session. Its former
+deadline-only loops now share core contention classification, backoff and the
+32-body/8-commit budgets, snapshot reads and majority+journal commits. The
+existing 120-second retry cutoff remains an additional ceiling. Unknown commit
+has priority over a simultaneous transient label and never causes abort/body
+replay. `ConcurrentHeadCreation` additionally retries the whole journal callback
+because its first-writer insert race is safe to retry. Implicit service-history
+writes invoke the core runner directly with the same typed first-writer retry
+classification, instead of maintaining a separate retry implementation. EventIds
+and history context stay outside body retries; do not replace a larger caller
+transaction with individual auto-owned journal writes.
+
 The CAS `matched_count` guard remains an integrity check. Under a valid snapshot
 transaction, another committed writer causes Mongo's write conflict rather than
 a successful stale overwrite. Do not turn the guard into a surviving-tail
@@ -63,8 +78,10 @@ does not supply cross-request business idempotency by itself.
 
 - `operation_id`: stable UUID v4 for this logical operation;
 - `stage`: `AuditStage` enum;
-- `principal`: `AuditPrincipal::Person { id }` from the verified acting identity,
-  or `System { actor: SystemAuditActor }` for Startup, Maintenance,
+- `principal`: `AuditPrincipal::Person { id }` for a verified human;
+  `Node { id }`, `ServiceAccount { id }`, `OracleWorker { id }` or
+  `ApiKey { id, owner_id }` for an authenticated machine/key identity; or
+  `System { actor: SystemAuditActor }` for Startup, Maintenance,
   Reconciliation, Expiry or Delivery;
 - `owner`: `AuditOwner::Person { id }`, `Org { id }` or fixed `Platform`;
 - `action`: reviewed `&'static str`, bounded to 96 identifier characters;
@@ -85,8 +102,37 @@ live policy checks. `can_read` alone does not authorize a mutation; membership o
 an event's owner field never grants authority. Preserve the verified actor
 separately from the org owner. The `Person` principal enum records the verified
 acting ID; it must not substitute the affected user for a background actor or
-invent a human behind an org-owned credential. If a workflow needs richer
-authenticated-principal attribution, coordinate the typed extension with CORE.
+invent a human behind an org-owned credential.
+
+Authenticated-machine attribution is explicit:
+
+| Verified caller | Principal and source | Materialized compatibility fields |
+| --- | --- | --- |
+| Human session/access/delegated token | `Person { id: verified subject }`; the affected user is not the actor | `user_id = person id` |
+| Node token or redeemed registration identity | `Node { id: server-resolved node UUID v4 }`; use the newly allocated node ID for successful registration, never the stored owner | `user_id = null` |
+| Oracle worker | `OracleWorker { id: "{pool_uuid}:{worker_label}" }` from the authenticated/validated worker binding | `user_id = null` |
+| Service-account token | `ServiceAccount { id: verified service-account UUID v4 }`; use the token subject, never `approval_owner_user_id` | `user_id = null` |
+| API/agent key, including child credentials | `ApiKey { id: verified api_key_id, owner_id: verified key owner }`; retain the verified parent API-key identity used by `AuthUser` | `user_id = null`, `api_key_id = key id`, `api_key_name = null` |
+| Unauthenticated rejection or background work | Closed named `System` actor; never manufacture a verified identity from submitted IDs | `user_id = null` |
+
+API-key owner can be a person **or org** and is recorded independently of the
+resource's `event.owner`; no stored owner implies a human caller. This explicit
+key principal is mandatory for new typed events instead of `Person` plus a lost
+key attribution. Existing direct transactional audits retain their reviewed
+`AuditActor`/`AuditLog.api_key_id`/name projection and v1 bytes. Machine/key
+materialization does not copy user-authored key names or worker tokens. Principal
+UUIDs (including key owner) validate as v4. Oracle's existing row identity is not
+a UUID: require a canonical hyphenated v4 pool UUID, one colon, then 1–64 ASCII
+letters/digits/underscore/hyphen, exactly as its protocol permits; no arbitrary
+labels, URL, token or payload. Authority still comes from live authentication and
+fences; syntactic validation is not authentication. An unverified submitted node
+or worker ID belongs in neither a verified principal nor an invented `Person`.
+
+These are additive, tagged JSON variants; old Person/System serialized bytes and
+the existing v1 HMAC encoder remain unchanged. The typed event's principal is
+already part of its canonical JSON and immutable replay comparison; changing a
+principal conflicts. New version/key/checkpoint metadata and its length-framed
+encoding remain W8-5b work; do not rewrite or re-sign historical v1 entries.
 
 For system work use the named system principal and owner from the authorized
 domain row (or Platform for platform maintenance). Do not impersonate the
@@ -203,7 +249,7 @@ Effect. Do not make the local revocation wait for a witness claim or move a
 credential/consent grant into Narrowing to avoid Standard admission.
 
 Every lane batch must test abort/commit/replay, its tier/state cells and authority
-fences, explicit person/system attribution, safe records, and HTTP/non-HTTP
+fences, explicit human/machine/system attribution, safe records, and HTTP/non-HTTP
 entrypoints. I/O conversions additionally cover before/after intent, claim,
 effect and outcome; restored Mongo; paused old sender; duplicate delivery; and
 honest uncertain reconciliation. Update inventory workflow status only after

@@ -37,11 +37,11 @@ The old 354-call PM inventory predates the main merge. Test files and fixtures i
 | D | Derived display/telemetry, liveness, cache or enforcement bookkeeping; preserve its existing durability/security policy, without adding an audit event for every counter or heartbeat. Authority changes and irreversible effects remain T/I. |
 | B | Accepted W8-1 provenance boundary; subsequent integrations must retain it. |
 
-Actors are explicit: verified human/API-key actor for an admitted request; named system/worker actor for expiry, seeds, migration and recovery. System work does not impersonate the affected owner. `AuditOwner::{Person,Org,Platform}` must be server-resolved; org actions use `org_service::resolve_owner_access`. A caller-supplied owner or arbitrary payload field cannot grant visibility. Records contain IDs, generations, stages and fixed outcome codes; never credentials, tokens/ciphertext, command bodies, prompts, transcripts, uploads, message text, request/response bodies, or bearer-bearing URLs. Existing product content/receipts are not copied into the security outbox.
+Actors are explicit: verified human, node, Oracle-worker, service-account or API-key principal for an admitted request; named system actor for expiry, seeds, migration and recovery. Machine/key owner is separate from the authenticated principal and never implies a human; use the typed rules in the core contract. System work does not impersonate the affected owner. `AuditOwner::{Person,Org,Platform}` must be server-resolved; org actions use `org_service::resolve_owner_access`. A caller-supplied owner or arbitrary payload field cannot grant visibility. Records contain IDs, generations, stages and fixed outcome codes; never credentials, tokens/ciphertext, command bodies, prompts, transcripts, uploads, message text, request/response bodies, or bearer-bearing URLs. Existing product content/receipts are not copied into the security outbox.
 
 For I, preserve existing provider idempotency and product dedupe identities. A local lease is not protection after Mongo restore and cannot revoke a paused sender at a provider without fencing. A witnessed intent alone also does not suffice (W8-D1-03). A recovered claim on a new process is uncertain; receipt retrieval is not renewed dispatch authority. Retry requires actual provider idempotency or positive provider reconciliation, with the same logical operation identity. No blanket retry on timeout, lease expiry or unknown commit.
 
-Caller lanes use the frozen [W8 core contract](SECURITY_W8_CORE_CONTRACT.md): bounded whole-transaction contention retries, same-transaction unknown-commit retries, safe typed T/O reservation, two-slot I, consumed dispatch permit, terminal/uncertain completion and existing server-side actor/owner ACLs. Ordinary Mongo contention must never become `AuditIntegrityConflict`. No lane starts before PM reviews this contract's concurrency and throughput evidence.
+Caller lanes use the frozen [W8 core contract](SECURITY_W8_CORE_CONTRACT.md): bounded whole-transaction contention retries, same-transaction unknown-commit retries, safe typed T/O reservation, two-slot I, consumed dispatch permit, terminal/uncertain completion and existing server-side actor/owner ACLs. Ordinary Mongo contention must never become `AuditIntegrityConflict`. PM accepted this contract's concurrency/throughput evidence at `ec2eeb13f`; lane fanout is live as listed below.
 
 ## Workflow ownership and dispositions
 
@@ -124,7 +124,8 @@ Workflow totals (each row counted once by its primary boundary): **16 T**, **30 
 | W8-4 configured relay, admin-custody enrollment pin, observed history recovery and quiet-chain renewal; supports 45–47 | tested | Complete explicit config; no startup network dependency; canonical local-row comparison; durable conditional request before send; authenticated observed acknowledgment atomically releases outbox capacity; stale restart/removal preserves policy; persisted incident latch. Replica-set signed-provider tests passed for response loss/restart/deletion/request tamper and authenticated sibling-claim predecessor consumption, within 29 passing runtime tests. Full retained verification remains W8-5, and no caller completion is inferred. |
 | W8-4 intent/outcome reservations and one-shot claim foundation; supports I workflows | tested | Two slots and business mutation in one caller transaction; unused terminal slot participates in backlog; terminal/uncertain outcome consumes reserved capacity; committed attempt before independent claim; process-generation-bound non-reusable permit rechecks admission before send; recovered attempts become uncertain without resend. Replica-set signed-provider-fake tests passed for response loss, pause/restart, closure and witness-free C1 operation, within 29 passing runtime tests. Per-owner conversion/provider reconciliation remains pending. |
 | W8-4 replica/protocol readiness and proxy admission telemetry exclusion | tested | Approved focused commits `f1e955c26` / `fbb72d046`: first adoption requires a complete compatible/drained executing roster plus separate audit acknowledgment; persisted adoption needs no repeated audit gate. Existing capability gates are unchanged. Readiness 9 passed / 0 failed / 1 existing child entrypoint ignored and exercised by its passing parent; full `audit_` library 26 / backend 150 passed, zero failures/ignored, including 13003/13004 telemetry exclusion and both repaired transactional fixtures. No caller completion inferred. |
-| Frozen W8-6 core contract and ordinary head-contention retry boundary | tested | W8-4 acceptance condition: bounded DB-only runner (32 body / 8 same-transaction commit calls), replay-aware admitted T/O reservation, two-slot I/consumed permit/outcome API and server-resolved actor/owner rules. Replica load: 256 mixed appends / 16 tasks, 831 body attempts, maximum 18 per append, zero integrity errors, contiguous valid head/chain/outbox. Full `audit_`: library 26 and backend 155 passed, zero failed; one requested manual benchmark ignored and then run separately (1 passed). Final three-round median previous/durable appends/sec: 247.19/156.48 at one task (1.58x), 344.52/197.26 at 16 tasks (1.75x); all final operations succeeded. Earlier legacy retry exhaustion remains documented in the W8 log. PM core-contract review still precedes fanout; no caller completion inferred. |
+| Frozen W8-6 core contract and ordinary head-contention retry boundary | tested | W8-4 acceptance condition: bounded DB-only runner (32 body / 8 same-transaction commit calls), replay-aware admitted T/O reservation, two-slot I/consumed permit/outcome API and server-resolved actor/owner rules. Replica load: 256 mixed appends / 16 tasks, 831 body attempts, maximum 18 per append, zero integrity errors, contiguous valid head/chain/outbox. Full `audit_`: library 26 and backend 155 passed, zero failed; one requested manual benchmark ignored and then run separately (1 passed). Final three-round median previous/durable appends/sec: 247.19/156.48 at one task (1.58x), 344.52/197.26 at 16 tasks (1.75x); all final operations succeeded. Earlier legacy retry exhaustion remains documented in the W8 log. PM accepted core contract `ec2eeb13f` and activated fanout; no caller completion inferred. |
+| Coordinator machine-principal/service-history extension | implemented | Typed Node/OracleWorker/ServiceAccount/ApiKey identities, v4/bounded-worker validation, separate owner and machine materialization; explicit journal owner shares 32/8 budgets/112 classification/jitter, implicit owner uses core runner, complete journal/business/audit boundary retained. Five new focused tests added; execution/Clippy validation is blocked by concurrent ID/ASSIST signature migrations. No caller completion inferred. |
 | W8-5 protected retention/billing evidence/key transitions and local external verification | pending | Witness currently refuses arbitrary key-version changes and has no checkpoint/delete API; implement authenticated transitions/checkpoints without rewriting v1. |
 | W8-3b S3-compatible compliance-mode Object Lock witness provider; supports 45–47 and I workflows | pending | Scheduled after W8-5. Independent retention protects committed evidence even from the sink service UID. Protect enrollment, receipts, dispatch claims, checkpoints and transitions; reject version shadowing/forks. Test actual locked storage if available, otherwise a faithful fake plus coordinated hosted CI. Provisioning/policy remain deployment prerequisites. |
 
@@ -304,7 +305,7 @@ through missing Mongo/witness prerequisites. Production provisioning stays with
 operators. W8-3b follows accepted W8-5, with compliance retention and exact-version
 anti-shadowing for every new checkpoint/transition/claim record.
 
-## Approved W8-6 parallel ownership (awaiting PM fanout)
+## Approved W8-6 parallel ownership (PM fanout live)
 
 Use three additional workers plus stream B as coordinator. The 57 pending
 workflow IDs have exactly one completion owner; accepted row 54 stays tested.
@@ -312,18 +313,23 @@ The **Proposed W8-6 editor** column in the per-function source index below assig
 each of its **479 exact source paths to one editor**: ID 95, ASSIST 199, NODE 67,
 CORE 118. The existing workflow-ID and function columns remain unchanged. These
 are exclusive file sets, not overlapping conceptual scopes, and no worker is
-being spawned or authorized by this document. PM must clear current A/D/C
-ownership before a lane starts. PM will spawn ID/ASSIST/NODE after accepting
-W8-4 and the frozen core contract. Approval backend ownership transfers from A;
+being spawned or authorized by this document. PM accepted W8-4 and core contract
+`ec2eeb13f` and activated the lanes.
+ID: heca `01a1586e-aa94-7cc2-90f2-e42c087d3ab6`; ASSIST: heca
+`01a1586e-efea-7ff3-b003-c2a29730d24c`; NODE: stream D `01a15674`.
+CORE maintains this inventory from PM-relayed accepted completion evidence.
+Interface changes flow through PM. ID temporarily owns
+`routes/service_inventory_tests.rs` and `routes/org_membership_tests.rs`.
+Approval backend ownership transfers from A;
 NODE handles 11/12/18/40 first and machine workflows 36–39 only after D-5 finishes.
 A completion owner accepts dependencies from
 other file editors; it does not gain permission to edit their files.
 
 | Lane | Workflow completion IDs (count) | Scope and order within the lane |
 | --- | --- | --- |
-| ID: extra worker 1 | 01–10, 13, 16, 17, 50 (14) | First session/auth/MFA transaction boundaries and Narrowing; then keys/org/roles/invites/device grants; then OAuth/provider connections, refresh and service-account effects. Own all ID-labeled exact files, including shared login-approval wrappers, `services/admin_user_service.rs` and org cascade functions. Preserve existing sender/epoch/source invalidation, one-time delivery and refresh fences. |
-| ASSIST: extra worker 2 | 19–35 (17) | First assistant policy/resource/learning/action T boundaries; then turn/upload/voice/call effects; then channel/platform lifecycle and send/recovery; then trigger/scheduled dispatch. Own all ASSIST-labeled files, including `services/assistant_agent_credential_service.rs` and `services/org_agent_service.rs`, despite their identity/org callers. This is the largest lane: deliver those four reviewable sub-batches in order, rather than one large commit. |
-| NODE: extra worker 3 | 11, 12, 18, 36–40 (8) | First node authority/pending credential delivery; then approval and machine source/consent/owner control; then machine jobs/update/remote lifecycle; then Oracle command/task/login dispatch and cleanup. Own all NODE-labeled files, including node transport/WS managers and `services/machine_oauth_consent_service.rs`. No `cli/src/node/**` changes. |
+| ID: assigned worker | 01–10, 13, 16, 17, 50 (14) | First session/auth/MFA transaction boundaries and Narrowing; then keys/org/roles/invites/device grants; then OAuth/provider connections, refresh and service-account effects. Own all ID-labeled exact files, including shared login-approval wrappers, `services/admin_user_service.rs` and org cascade functions. Preserve existing sender/epoch/source invalidation, one-time delivery and refresh fences. |
+| ASSIST: assigned worker | 19–35 (17) | First assistant policy/resource/learning/action T boundaries; then turn/upload/voice/call effects; then channel/platform lifecycle and send/recovery; then trigger/scheduled dispatch. Own all ASSIST-labeled files, including `services/assistant_agent_credential_service.rs` and `services/org_agent_service.rs`, despite their identity/org callers. This is the largest lane: deliver those four reviewable sub-batches in order, rather than one large commit. |
+| NODE: stream D | 11, 12, 18, 36–40 (8) | First node authority/pending credential delivery; then approval and machine source/consent/owner control; then machine jobs/update/remote lifecycle; then Oracle command/task/login dispatch and cleanup. Own all NODE-labeled files, including node transport/WS managers and `services/machine_oauth_consent_service.rs`. No `cli/src/node/**` changes. |
 | CORE: stream B | 14, 15, 41–49, 51–53, 55–58 (18) | Audit API/runtime/version/retention and stable-purpose API; catalog/provider/service history; billing and required notification/erasure sinks; shared proxy/MCP/LLM/SSH transport; startup/maintenance and derived/read-only exclusions. Row 58 implements in W8-7; rows 46/47 retain W8-5 evidence, followed by integration acceptance. Own all CORE-labeled files and shared registries/docs; additional approval remains required for each registry edit. |
 
 Additional exact production paths outside that source-index snapshot are CORE:
@@ -883,3 +889,106 @@ This index covers every matched production owner in the stated module graph, inc
 | [services/webhook_delivery_service.rs](../backend/src/services/webhook_delivery_service.rs#L114) | 42 | CORE | **E(1)** `deliver_with_policy@78` |
 | [ssh_cli.rs](../backend/src/ssh_cli.rs#L174) | 53 | CORE | **E(4)** `run_proxy@147`, `issue_certificate@270` |
 | [telemetry/mod.rs](../backend/src/telemetry/mod.rs#L128) | 49, 56 | CORE | **E(2)** `delete_person@192`, `drain_loop@234`<br>**S(1)** `from_config@72` |
+
+### Coordinator follow-up: machine identity and service-history ownership
+
+Machine principals and the service-history owner now implement the frozen
+contract extension described in `SECURITY_W8_CORE_CONTRACT.md`: explicit node,
+Oracle-worker, service-account and API-key attribution, immutable replay, and
+whole domain/journal/audit callback retry at the existing session boundary.
+Caller workflow rows remain pending until their lanes supply accepted boundary
+evidence; infrastructure acceptance alone does not complete workflows 11/12/18/40.
+
+### Proposed CORE-B transfer to stream C (awaiting PM confirmation)
+
+Agree with moving completion ownership of 14, 15, 42, 48 and 56 to CORE-B.
+The exact transfer below contains 44 currently CORE-labeled source-index files
+plus seven supporting service-history module/test files (51 total). Effective
+only after PM confirms; the owner index above still describes current custody.
+Service-history custody transfers after the coordinator principal/retry follow-up
+is committed/reviewed. Existing same-module test descendants follow their
+production editor under the existing rule; additional cross-domain suites and
+registries still require exact PM approval.
+
+`user_endpoint_service.rs` and `user_service_service.rs` both move to C: they
+join catalog/startup/credentials/preferences at the business boundary. ID supplies
+its credential/session hooks; C joins them in the domain transaction and gives
+ASSIST its service mutation API. Whole-file custody also moves catalog/provider
+seed/reconcile functions and pool health/concurrency functions in the listed
+mixed 14/15+43/51 files; CORE retains startup orchestration and consumes C's
+accepted evidence for the relevant 43/51 dispositions. `telemetry/mod.rs` moves
+whole to C, including its derived ingest/drain code; CORE retains billing/usage
+row 49 and consumes the derived-telemetry disposition from C. No concurrent
+function-level split is proposed. Shared `handlers/admin.rs` stays CORE; C
+requests exact provider/admin hook changes through PM. Stable-purpose row 52
+remains CORE, with C migrating consumers in C-owned files against CORE's API.
+
+Exact proposed paths (all relative to repo root):
+
+```text
+backend/src/handlers/admin_anonymous_endpoints.rs
+backend/src/handlers/admin_platform_credentials.rs
+backend/src/handlers/admin_utility_inference.rs
+backend/src/handlers/catalog_curation.rs
+backend/src/handlers/developer_apps.rs
+backend/src/handlers/notifications.rs
+backend/src/handlers/providers.rs
+backend/src/handlers/service_concurrency.rs
+backend/src/handlers/service_requirements.rs
+backend/src/handlers/services.rs
+backend/src/services/anonymous_endpoint_service.rs
+backend/src/services/cae_webhook_service.rs
+backend/src/services/catalog_delegation_service.rs
+backend/src/services/catalog_editor_service.rs
+backend/src/services/catalog_icon_service.rs
+backend/src/services/catalog_identity_service.rs
+backend/src/services/catalog_mutation_service.rs
+backend/src/services/catalog_skill_service.rs
+backend/src/services/catalog_spec_sync.rs
+backend/src/services/developer_webhook_service.rs
+backend/src/services/inference_service.rs
+backend/src/services/notification_service.rs
+backend/src/services/platform_credential_service.rs
+backend/src/services/platform_settings_service.rs
+backend/src/services/provider_link_service.rs
+backend/src/services/provider_service.rs
+backend/src/services/push_service.rs
+backend/src/services/retired_service_service.rs
+backend/src/services/service_concurrency_service.rs
+backend/src/services/service_endpoint_service.rs
+backend/src/services/service_history/context.rs
+backend/src/services/service_history/coordinator_tests.rs
+backend/src/services/service_history/definitions.rs
+backend/src/services/service_history/mod.rs
+backend/src/services/service_history/mutation.rs
+backend/src/services/service_history/projection.rs
+backend/src/services/service_history/read.rs
+backend/src/services/service_history/relay.rs
+backend/src/services/service_history/tests.rs
+backend/src/services/service_history/transaction.rs
+backend/src/services/service_pool_health_service.rs
+backend/src/services/service_pool_service.rs
+backend/src/services/telegram_service.rs
+backend/src/services/telemetry_erasure_service.rs
+backend/src/services/tool_publication_service.rs
+backend/src/services/tools_manager_service.rs
+backend/src/services/user_endpoint_service.rs
+backend/src/services/user_service_service.rs
+backend/src/services/utility_inference_service.rs
+backend/src/services/webhook_delivery_service.rs
+backend/src/telemetry/mod.rs
+```
+
+C supplies required notification/delivery O+I sink interfaces to ID/ASSIST/NODE
+first: stable product operation/dedupe IDs, transaction-aware enqueue, explicit
+principal/owner, intent context/consumed permit, safe terminal/uncertain outcomes,
+and recovery that cannot resend a restored claim. Producers pass the same
+logical context; shared transport must not reserve a second intent. C owns
+email/push/Telegram/generic-webhook delivery and service-history journal/relay
+interfaces; lane callers keep their source-domain mutations and authority fences.
+CORE supplies the frozen reservation/admission/claim API, protected-verification
+and retained-HMAC lookup APIs, and the upcoming stable-purpose key API. C's
+service-history relay must use the shared append/version lookup rather than
+cache one mutable signing key or re-sign history. C requests focused registry/
+startup/admin/test registrations through PM; CORE performs them. C sends accepted
+completion evidence through PM; CORE alone updates workflow statuses.

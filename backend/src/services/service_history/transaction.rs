@@ -1,11 +1,14 @@
 //! A session accepted by the journal can only be created by starting a transaction.
 use mongodb::{ClientSession, Database, error::Result};
 
+use crate::services::{audit_runtime::transaction as audit_transaction, audit_state_service};
+
 #[derive(Debug)]
 pub(super) struct ConcurrentHeadCreation;
 pub(super) fn retryable(error: &mongodb::error::Error) -> bool {
-    error.contains_label("TransientTransactionError")
-        || error.get_custom::<ConcurrentHeadCreation>().is_some()
+    !error.contains_label("UnknownTransactionCommitResult")
+        && (audit_transaction::retryable_database(error)
+            || error.get_custom::<ConcurrentHeadCreation>().is_some())
 }
 
 pub struct Transaction {
@@ -36,34 +39,57 @@ where
         session: db.client().start_session().await?,
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        transaction.session.start_transaction().await?;
+    for attempt in 1..=audit_transaction::MAX_BODY_ATTEMPTS {
+        transaction
+            .session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(audit_state_service::majority())
+            .await?;
         match callback(&mut transaction).await {
-            Ok(value) => loop {
-                match transaction.session.commit_transaction().await {
-                    Ok(()) => return Ok(value),
-                    Err(error)
-                        if error.contains_label("UnknownTransactionCommitResult")
-                            && tokio::time::Instant::now() < deadline =>
-                    {
-                        continue;
+            Ok(value) => {
+                for commit_attempt in 1..=audit_transaction::MAX_COMMIT_ATTEMPTS {
+                    match transaction.session.commit_transaction().await {
+                        Ok(()) => return Ok(value),
+                        Err(error)
+                            if error.contains_label("UnknownTransactionCommitResult")
+                                && commit_attempt < audit_transaction::MAX_COMMIT_ATTEMPTS
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            audit_transaction::backoff(commit_attempt).await;
+                            continue;
+                        }
+                        // Uncertainty dominates transient labeling; never abort or
+                        // replay a possibly committed callback, including at budget.
+                        Err(error) if error.contains_label("UnknownTransactionCommitResult") => {
+                            return Err(error);
+                        }
+                        Err(error)
+                            if retryable(&error)
+                                && attempt < audit_transaction::MAX_BODY_ATTEMPTS
+                                && tokio::time::Instant::now() < deadline =>
+                        {
+                            let _ = transaction.session.abort_transaction().await;
+                            break;
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error)
-                        if error.contains_label("TransientTransactionError")
-                            && tokio::time::Instant::now() < deadline =>
-                    {
-                        break;
-                    }
-                    Err(error) => return Err(error),
                 }
-            },
+            }
             Err(error) => {
+                if error.contains_label("UnknownTransactionCommitResult") {
+                    return Err(error);
+                }
                 let _ = transaction.session.abort_transaction().await;
-                if !retryable(&error) || tokio::time::Instant::now() >= deadline {
+                if !retryable(&error)
+                    || attempt == audit_transaction::MAX_BODY_ATTEMPTS
+                    || tokio::time::Instant::now() >= deadline
+                {
                     return Err(error);
                 }
             }
         }
-        tokio::task::yield_now().await;
+        audit_transaction::backoff(attempt).await;
     }
+    unreachable!("last bounded body attempt returns")
 }

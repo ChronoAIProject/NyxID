@@ -29,14 +29,33 @@ where
 pub(crate) async fn run_observed<C, T, F, O>(
     db: &Database,
     context: &C,
-    mut body: F,
-    mut observe: O,
+    body: F,
+    observe: O,
 ) -> AppResult<T>
 where
     C: Sync,
     T: Send,
     F: for<'a> FnMut(&'a mut ClientSession, &'a C) -> BoxFuture<'a, AppResult<T>> + Send,
     O: FnMut(u32, u32) + Send,
+{
+    run_classified(db, context, body, observe, retryable).await
+}
+
+/// Existing owners can add a typed, definite-abort contention signal without
+/// copying this loop. Unknown commit and all budgets remain enforced here.
+pub(in crate::services) async fn run_classified<C, T, F, O, P>(
+    db: &Database,
+    context: &C,
+    mut body: F,
+    mut observe: O,
+    retry_body: P,
+) -> AppResult<T>
+where
+    C: Sync,
+    T: Send,
+    F: for<'a> FnMut(&'a mut ClientSession, &'a C) -> BoxFuture<'a, AppResult<T>> + Send,
+    O: FnMut(u32, u32) + Send,
+    P: Fn(&AppError) -> bool + Send,
 {
     let mut session = db.client().start_session().await?;
     let mut commits = 0;
@@ -67,7 +86,10 @@ where
             }
             Err(error) => {
                 let _ = session.abort_transaction().await;
-                if attempt == MAX_BODY_ATTEMPTS || !retryable(&error) {
+                if attempt == MAX_BODY_ATTEMPTS
+                    || !matches!(&error, AppError::DatabaseError(_))
+                    || !retry_body(&error)
+                {
                     return Err(error);
                 }
                 backoff(attempt).await;
@@ -81,6 +103,11 @@ pub(super) fn retryable(error: &AppError) -> bool {
     let AppError::DatabaseError(error) = error else {
         return false;
     };
+    retryable_database(error)
+}
+
+/// Existing typed transaction owners share the core contention classification.
+pub(in crate::services) fn retryable_database(error: &mongodb::error::Error) -> bool {
     if error.contains_label("UnknownTransactionCommitResult") {
         return false;
     }
