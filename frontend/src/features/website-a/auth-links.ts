@@ -1,4 +1,5 @@
 import publicRoutes from "./generated/routes.json";
+import { solutionStartTarget } from "./solution-availability";
 // Preserve the landing page's existing invitation attribution and full query.
 const REDDIT_DEFAULT_INVITE_CODE = "NYX-QJGT6NHN";
 
@@ -55,6 +56,8 @@ export function legacyDestination(
     return siteHref(target + (query ? `?${query}` : ""), search);
   }
   if (pathname === "/start" || pathname === "/done") {
+    const solution = solutionStartTarget(query);
+    if (solution) return siteHref(solution, search);
     // Mock provisioning fragments (including `t`) are not real auth state.
     // Preserve only the original outer query when entering real registration.
     return authHref("register", search);

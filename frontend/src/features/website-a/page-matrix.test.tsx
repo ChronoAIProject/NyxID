@@ -197,22 +197,12 @@ it("filters integrations, reports no results, and restores the catalogue", async
   expect(cards()).toHaveLength(total);
 });
 
-it("filters blog posts and preserves a usable featured article destination", async () => {
+it("withholds unapproved articles and newsletter promises", async () => {
   const { container } = await openPage("/blog");
-  const filter = container.querySelector<HTMLButtonElement>(
-    '#blogF button[data-v]:not([data-v="all"])',
-  )!;
-  fireEvent.click(filter);
-  const visible = [
-    ...container.querySelectorAll<HTMLElement>("#blogGrid > [data-category]"),
-  ].filter((el) => !el.hidden);
-  expect(visible.length).toBeGreaterThan(0);
-  expect(
-    visible.every((card) => card.dataset.category === filter.dataset.v),
-  ).toBe(true);
-  expect(
-    container.querySelector<HTMLAnchorElement>(".featpost")?.pathname,
-  ).toMatch(/^\/blog\//);
+  expect(container.querySelector(".featpost")).toBeNull();
+  expect(container.querySelector("#blogF")).toBeNull();
+  expect(container.querySelector("#blogGrid")).toHaveTextContent(/review/);
+  expect(container.querySelector(".nl-form")).toBeNull();
 });
 
 it("switches website language without dropping the nested return destination", async () => {

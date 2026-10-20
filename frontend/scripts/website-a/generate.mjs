@@ -10,6 +10,8 @@ import { format } from "prettier";
 import { fixPrimaryButtonPaint } from "./primary-button-css.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
+const publication = JSON.parse(fs.readFileSync(path.join(root, "content/publication.json"), "utf8"));
+const approvedArticles = new Set(publication.pages.filter(p => p.route.startsWith("/blog/") && p.publication === "published" && p.approval === "approved").map(p => p.route.slice(6)));
 const source = fs.readFileSync(
   process.argv[2] ??
     path.resolve(root, "../docs/plans/website-review/nyxid-site-preview.html"),
@@ -100,6 +102,7 @@ function jsx(el) {
     id = el.id,
     cls = el.getAttribute("class") ?? "";
   if (el.hasAttribute("data-skip")) return "";
+  if (tag === "a" && el.getAttribute("href")?.startsWith("#/start?")) return "<SolutionActivation />";
   if (currentRoute === "contact" && tag === "div" && cls.split(" ").includes("contact")) {
     return `<ContactSection>${jsx(el.querySelector(".discord-card"))}</ContactSection>`;
   }
@@ -320,7 +323,7 @@ for (locale of ["en", "zh"]) {
     entries[r] = run(`pages[${q(r === "" ? "home" : r)}]()`);
   for (const slug of run("SOL.map(s=>s.slug)"))
     entries["solutions/" + slug] = run(`pages.solution(${q(slug)})`);
-  for (const slug of run("POSTS.map(s=>s.slug)"))
+  for (const slug of run("POSTS.map(s=>s.slug)").filter(slug => approvedArticles.has(slug)))
     entries["blog/" + slug] = run(`pages.post(${q(slug)})`);
   const integrations = run("INTEGRATIONS");
   if (locale === "en")
@@ -375,6 +378,17 @@ for (locale of ["en", "zh"]) {
   for (const [route, markup] of Object.entries(entries)) {
     currentRoute = route;
     const tree = html(markup);
+    tree.querySelectorAll('a[href^="#/blog/"]').forEach(link => {
+      const slug = link.getAttribute("href").slice(7);
+      if (!approvedArticles.has(slug)) {
+        link.setAttribute("href", slug === "scoped-keys" ? "/docs/ai/guides/agent-isolation" : "/blog");
+      }
+    });
+    if (route === "blog" && approvedArticles.size === 0) {
+      tree.querySelector(".featpost")?.remove();
+      tree.querySelector("#blogF")?.remove();
+      tree.querySelector("#blogGrid").innerHTML = `<p class="sub">${locale === "zh" ? "文章正在等待内容审核，审核通过后将在这里发布。" : "Articles are awaiting editorial review. Approved articles will be published here."}</p>`;
+    }
     // Remove internal review links and prototype-only pending forms.
     if (route === "nav") {
       tree.querySelector(".links").insertAdjacentHTML(
@@ -425,7 +439,7 @@ for (locale of ["en", "zh"]) {
       );
     }
     const blogGrid = tree.querySelector("#blogGrid");
-    if (blogGrid) {
+    if (blogGrid && approvedArticles.size > 0) {
       blogGrid.innerHTML = run(
         `POSTS.filter(p=>!p.feat).map(postCard).join('')`,
       );
@@ -436,11 +450,9 @@ for (locale of ["en", "zh"]) {
     }
     const newsletter = tree.querySelector(".nl-form");
     if (newsletter) {
-      newsletter.querySelector("input").setAttribute("disabled", "");
-      const button = newsletter.querySelector("button");
-      button.disabled = true;
-      button.textContent =
-        locale === "zh" ? "订阅暂未开放" : "Subscriptions coming soon";
+      const card = newsletter.closest(".card");
+      const discord = newsletter.querySelector('a[href^="https://discord.gg/"]');
+      card.replaceChildren(discord);
     }
     tree.querySelectorAll("p").forEach((p) => {
       if (/\[Placeholder:|［占位：/.test(p.textContent))
@@ -488,6 +500,7 @@ for (locale of ["en", "zh"]) {
       imports + visualImports +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
       (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
+      (body.includes("<SolutionActivation") ? "import {SolutionActivation} from '../../solution-activation';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
     fs.writeFileSync(
       path.join(outDir, locale, component + ".tsx"),

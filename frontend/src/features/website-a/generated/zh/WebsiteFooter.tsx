@@ -59,7 +59,9 @@ export default function WebsiteFooter() {
           <div>
             <h4>{"接入智能体"}</h4>
             <a href={s.siteHref("/agents")}>{"接入你的智能体"}</a>
-            <a href={s.siteHref("/blog/scoped-keys")}>{"限权密钥指南"}</a>
+            <a href={s.siteHref("/docs/ai/guides/agent-isolation")}>
+              {"限权密钥指南"}
+            </a>
             <a href={s.siteHref("/docs")}>{"Docs"}</a>
             <a href={s.siteHref("/docs/cli/getting-started/install")}>
               {"CLI"}

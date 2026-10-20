@@ -40,14 +40,6 @@ const SolutionsXLeadCatcherPage = lazy(
 const SolutionsBackOfficeClerkPage = lazy(
   () => import("./en/SolutionsBackOfficeClerkPage"),
 );
-const BlogWhatIsNyxidPage = lazy(() => import("./en/BlogWhatIsNyxidPage"));
-const BlogLunaBistroPage = lazy(() => import("./en/BlogLunaBistroPage"));
-const BlogNeverSharePasswordsPage = lazy(
-  () => import("./en/BlogNeverSharePasswordsPage"),
-);
-const BlogFiveJobsPage = lazy(() => import("./en/BlogFiveJobsPage"));
-const BlogScopedKeysPage = lazy(() => import("./en/BlogScopedKeysPage"));
-const BlogXDmsLivePage = lazy(() => import("./en/BlogXDmsLivePage"));
 const pages = {
   "/nav": WebsiteHeader,
   "/footer": WebsiteFooter,
@@ -71,12 +63,6 @@ const pages = {
   "/solutions/desk-researcher": SolutionsDeskResearcherPage,
   "/solutions/x-lead-catcher": SolutionsXLeadCatcherPage,
   "/solutions/back-office-clerk": SolutionsBackOfficeClerkPage,
-  "/blog/what-is-nyxid": BlogWhatIsNyxidPage,
-  "/blog/luna-bistro": BlogLunaBistroPage,
-  "/blog/never-share-passwords": BlogNeverSharePasswordsPage,
-  "/blog/five-jobs": BlogFiveJobsPage,
-  "/blog/scoped-keys": BlogScopedKeysPage,
-  "/blog/x-dms-live": BlogXDmsLivePage,
 };
 const titles: Record<string, string> = {
   "/": "AI that does more than chat.",
@@ -99,14 +85,6 @@ const titles: Record<string, string> = {
   "/solutions/desk-researcher": "Desk researcher",
   "/solutions/x-lead-catcher": "X lead catcher",
   "/solutions/back-office-clerk": "Back-office clerk",
-  "/blog/what-is-nyxid":
-    "What is an “agent gateway”? A plain-English guide for business owners",
-  "/blog/luna-bistro":
-    "How a 40-seat bistro stopped missing late-night bookings",
-  "/blog/never-share-passwords": "Why your AI should never see your passwords",
-  "/blog/five-jobs": "Five repetitive jobs to hand off to an AI this month",
-  "/blog/scoped-keys": "Scoped keys: give agents only what they need",
-  "/blog/x-dms-live": "Product update: X (Twitter) DMs are live",
 };
 export default function WebsiteContent() {
   const s = useWebsite();

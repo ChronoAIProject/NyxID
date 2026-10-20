@@ -100,7 +100,7 @@ describe("legacy authentication fragment context", () => {
           "?code=REAL&return_to=%2Fkeys&lang=zh&utm_source=campaign",
         ),
       ).toBe(
-        "/register?code=REAL&return_to=%2Fkeys&lang=zh&utm_source=campaign",
+        "/solutions/restaurant-manager?code=REAL&return_to=%2Fkeys&lang=zh&utm_source=campaign",
       );
     },
   );
@@ -122,7 +122,7 @@ it("only migrates recognized prototype paths and cannot become an external redir
   ).toBe("/solutions/restaurant-manager?code=INVITE");
   expect(
     legacyDestination("#/start?t=restaurant-manager", "?code=INVITE"),
-  ).toBe("/register?code=INVITE");
+  ).toBe("/solutions/restaurant-manager?code=INVITE");
   expect(legacyDestination("#/login", "?return_to=%2Fkeys")).toBe(
     "/login?return_to=%2Fkeys",
   );

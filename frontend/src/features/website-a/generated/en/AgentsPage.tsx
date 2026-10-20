@@ -34,7 +34,10 @@ export default function AgentsPage() {
             >
               {"Get an agent key"}
             </VisualLink>
-            <a className="btn lg" href={s.siteHref("/blog/scoped-keys")}>
+            <a
+              className="btn lg"
+              href={s.siteHref("/docs/ai/guides/agent-isolation")}
+            >
               {"Read: scoped keys"}
             </a>
           </div>

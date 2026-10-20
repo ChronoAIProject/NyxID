@@ -1,3 +1,5 @@
+import { solutionStartTarget } from "./features/website-a/solution-availability";
+import { siteHref, authHref } from "./features/website-a/auth-links";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
@@ -145,7 +147,6 @@ import {
   OrgDeveloperAppDetailPage,
   OrgJoinPage,
   BlogDetailPage,
-  BlogPreviewPage,
   DesignSystemPage,
   DocsIndexPage,
   DocsPage,
@@ -338,6 +339,12 @@ const website8Route = createRoute({
   component: LandingPage,
 });
 
+const legacyStartRoute = createRoute({
+ path: "/start", getParentRoute: () => rootRoute,
+ beforeLoad: () => { const target = solutionStartTarget(window.location.search); window.location.replace(target ? siteHref(target) : authHref("register")); },
+ component: () => null,
+});
+
 const blogIndexRoute = createRoute({
   path: "/blog",
   getParentRoute: () => rootRoute,
@@ -353,7 +360,7 @@ const blogDetailRoute = createRoute({
 const blogPreviewRoute = createRoute({
   path: "/preview/$id",
   getParentRoute: () => rootRoute,
-  component: BlogPreviewPage,
+  component: AppNotFound,
 });
 
 const docsIndexRoute = createRoute({
@@ -1265,6 +1272,7 @@ const routeTree = rootRoute.addChildren([
   platformOnboardingRoute,
   platformBindingReviewRoute,
   landingRoute,
+  legacyStartRoute,
   website0Route,
   website1Route,
   website2Route,

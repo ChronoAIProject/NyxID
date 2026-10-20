@@ -40,14 +40,6 @@ const SolutionsXLeadCatcherPage = lazy(
 const SolutionsBackOfficeClerkPage = lazy(
   () => import("./zh/SolutionsBackOfficeClerkPage"),
 );
-const BlogWhatIsNyxidPage = lazy(() => import("./zh/BlogWhatIsNyxidPage"));
-const BlogLunaBistroPage = lazy(() => import("./zh/BlogLunaBistroPage"));
-const BlogNeverSharePasswordsPage = lazy(
-  () => import("./zh/BlogNeverSharePasswordsPage"),
-);
-const BlogFiveJobsPage = lazy(() => import("./zh/BlogFiveJobsPage"));
-const BlogScopedKeysPage = lazy(() => import("./zh/BlogScopedKeysPage"));
-const BlogXDmsLivePage = lazy(() => import("./zh/BlogXDmsLivePage"));
 const pages = {
   "/nav": WebsiteHeader,
   "/footer": WebsiteFooter,
@@ -71,12 +63,6 @@ const pages = {
   "/solutions/desk-researcher": SolutionsDeskResearcherPage,
   "/solutions/x-lead-catcher": SolutionsXLeadCatcherPage,
   "/solutions/back-office-clerk": SolutionsBackOfficeClerkPage,
-  "/blog/what-is-nyxid": BlogWhatIsNyxidPage,
-  "/blog/luna-bistro": BlogLunaBistroPage,
-  "/blog/never-share-passwords": BlogNeverSharePasswordsPage,
-  "/blog/five-jobs": BlogFiveJobsPage,
-  "/blog/scoped-keys": BlogScopedKeysPage,
-  "/blog/x-dms-live": BlogXDmsLivePage,
 };
 const titles: Record<string, string> = {
   "/": "AI，超越聊天。",
@@ -99,12 +85,6 @@ const titles: Record<string, string> = {
   "/solutions/desk-researcher": "案头研究员",
   "/solutions/x-lead-catcher": "X 线索捕手",
   "/solutions/back-office-clerk": "后台文员",
-  "/blog/what-is-nyxid": "什么是“智能体网关”？写给企业主的通俗指南",
-  "/blog/luna-bistro": "一家 40 座小酒馆如何不再错过深夜订位",
-  "/blog/never-share-passwords": "为什么你的 AI 永远不该看到你的密码",
-  "/blog/five-jobs": "本月就可以交给 AI 的五项重复工作",
-  "/blog/scoped-keys": "限权密钥：只给智能体它需要的权限",
-  "/blog/x-dms-live": "产品更新：X（推特）私信已上线",
 };
 export default function WebsiteContent() {
   const s = useWebsite();

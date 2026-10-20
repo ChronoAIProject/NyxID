@@ -1,6 +1,7 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
 import { VisualLink } from "../../visuals/elements";
+import { SolutionActivation } from "../../solution-activation";
 import { useWebsite } from "../../website-context";
 export default function SolutionsAppointmentBookerPage() {
   const s = useWebsite();
@@ -62,13 +63,7 @@ export default function SolutionsAppointmentBookerPage() {
                 marginTop: "28px",
               }}
             >
-              <VisualLink
-                className="btn p lg"
-                href={s.authHref("register")}
-                effect="button"
-              >
-                {"Use this solution"}
-              </VisualLink>
+              <SolutionActivation />
               <a className="btn lg" href={s.siteHref("/how-it-works")}>
                 {"How it works"}
               </a>

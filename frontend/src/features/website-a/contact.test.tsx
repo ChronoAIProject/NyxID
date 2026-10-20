@@ -86,29 +86,12 @@ describe("Contact email-client handoff", () => {
     },
   );
 
-  it("keeps a draft while the scripted bundle answer selects the form topic", () => {
-    state.searchStr = "?topic=unsupported";
-    render(
-      <ContactSection>
-        <a href="https://discord.gg/QMvcs8UQBW">Discord</a>
-      </ContactSection>,
-    );
-    expect(screen.getByLabelText("Topic")).toHaveValue("");
-    fireEvent.change(screen.getByLabelText("Message"), {
-      target: { value: "Keep this draft" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "I need a custom bundle" }),
-    );
+  it("keeps only the form and Discord, without scripted chat", () => {
+    render(<ContactSection><a href="https://discord.gg/QMvcs8UQBW">Discord</a></ContactSection>);
     expect(screen.getByLabelText("Topic")).toHaveValue("bundle");
-    expect(screen.getByLabelText("Message")).toHaveValue("Keep this draft");
-    expect(screen.getByRole("log")).toHaveTextContent(
-      "Custom bundle is selected",
-    );
-    expect(screen.getByText(/Scripted FAQ demo/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Sign in to use NyxBot" }),
-    ).toHaveAttribute("href", "/login?code=qa");
+    expect(screen.queryByRole("log")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Scripted FAQ demo/)).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Discord" })).toBeInTheDocument();
   });
 
   it("keeps the draft and direct email link when client launch fails", async () => {

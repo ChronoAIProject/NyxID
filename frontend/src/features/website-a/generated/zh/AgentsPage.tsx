@@ -34,7 +34,10 @@ export default function AgentsPage() {
             >
               {"获取智能体密钥"}
             </VisualLink>
-            <a className="btn lg" href={s.siteHref("/blog/scoped-keys")}>
+            <a
+              className="btn lg"
+              href={s.siteHref("/docs/ai/guides/agent-isolation")}
+            >
               {"阅读：限权密钥"}
             </a>
           </div>
