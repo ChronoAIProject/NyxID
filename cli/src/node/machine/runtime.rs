@@ -1,6 +1,9 @@
 mod authority;
 pub mod browser;
 mod browser_input;
+mod browser_layout;
+#[cfg(target_os = "linux")]
+mod browser_probe;
 mod cancellation;
 #[cfg(target_os = "linux")]
 mod context_dispatch;

@@ -232,8 +232,19 @@ impl Runtime {
             .as_ref()
             .is_some_and(|c| c.container)
         {
-            super::context_policy::prepare(std::path::Path::new("/"), context.dev.uid)
-                .context(Stage("native_policy"))?;
+            super::context_policy::prepare(
+                std::path::Path::new("/"),
+                super::browser_layout::Layout::detect(
+                    &self
+                        .config
+                        .managed_browser
+                        .as_ref()
+                        .context("managed browser missing")?
+                        .binary,
+                )?,
+                context.dev.uid,
+            )
+            .context(Stage("native_policy"))?;
         }
         let resources = context
             .browsers(self.browser_identity.gid, dev_policy.gid)

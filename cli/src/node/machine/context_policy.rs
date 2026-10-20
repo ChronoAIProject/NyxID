@@ -102,7 +102,7 @@ fn open(path: &Path) -> Result<File> {
         .open(path)
         .context("context_policy_unavailable")
 }
-pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
+pub fn prepare(root: &Path, layout: super::browser_layout::Layout, dev_uid: u32) -> Result<()> {
     ensure!(
         unsafe { libc::geteuid() } == 0 && dev_uid >= nyxid_machine::context::FIRST_UID,
         "context_policy_supervisor_required"
@@ -127,7 +127,7 @@ pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
     );
     // Private dev policy is installed before the new UID can launch Chromium.
     // Existing secure users cannot read it; their system policy stays intact.
-    let directory = root.join("etc/chromium/policies/managed");
+    let directory = root.join(layout.policies());
     super::browser::protected_runtime_parent(&directory)?;
     let path = directory.join("nyxid-context-dev.json");
     let expected = serde_json::to_vec(&super::browser::dev_policy())?;
@@ -146,8 +146,8 @@ pub fn prepare(root: &Path, dev_uid: u32) -> Result<()> {
     );
     named_access(&policy, dev_uid, 4)?;
     for path in [
-        "etc/chromium/policies/managed/nyxid.json",
-        "etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json",
+        &format!("{}/nyxid.json", layout.policies()),
+        &format!("{}/dev.nyxid.machine_filler.json", layout.native_hosts()),
         "opt/nyxid/machine-browser/native-host",
         "opt/nyxid/machine-browser/nyxid-native-host",
     ] {
@@ -196,8 +196,23 @@ mod tests {
             command.output().unwrap().status.success()
         };
         for uid in [65534, 65532, 65534] {
-            prepare(root.path(), uid).unwrap();
+            prepare(
+                root.path(),
+                super::super::browser_layout::Layout::DebianChromium,
+                uid,
+            )
+            .unwrap();
         }
+        let binary = root.path().join("test-cli");
+        std::fs::write(&binary, b"test executable").unwrap();
+        super::super::browser::install(
+            root.path(),
+            &binary,
+            "http://127.0.0.1:12345/update.xml",
+            false,
+            super::super::browser_layout::Layout::DebianChromium,
+        )
+        .unwrap();
         for name in protected {
             let path = root.path().join(name);
             assert!(readable(65533, &path), "legacy/secure reader retained");

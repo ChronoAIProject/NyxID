@@ -25,6 +25,7 @@ fn separate_users(supervisor: u32, command: (u32, u32), browsers: &[(u32, u32)])
 enum Probe {
     CommandSeccomp,
     Landlock,
+    BrowserPolicy,
     SecureBrowser,
     DeveloperBrowser,
 }
@@ -46,10 +47,21 @@ where
     for probe in [
         Probe::CommandSeccomp,
         Probe::Landlock,
+        Probe::BrowserPolicy,
         Probe::SecureBrowser,
         Probe::DeveloperBrowser,
     ] {
+        let started = std::time::Instant::now();
         let result = run(probe).await;
+        eprintln!(
+            "separation_probe mechanism={probe:?} elapsed_ms={} outcome={}",
+            started.elapsed().as_millis(),
+            if result.is_ok() {
+                "confirmed"
+            } else {
+                "failed"
+            }
+        );
         let succeeded = result.is_ok();
         if let Err(error) = result {
             evidence.probe_timed_out = error.is::<super::process::ProbeTimeout>();
@@ -57,6 +69,7 @@ where
         match probe {
             Probe::CommandSeccomp => evidence.command_seccomp = Some(succeeded),
             Probe::Landlock => evidence.landlock_enforced = Some(succeeded),
+            Probe::BrowserPolicy => evidence.managed_browser_policy = Some(succeeded),
             Probe::SecureBrowser | Probe::DeveloperBrowser => {
                 evidence.managed_browser_sandbox = Some(succeeded);
             }
@@ -70,7 +83,7 @@ where
 
 /// Read Chromium's built-in renderer sandbox diagnostics after launching the
 /// configured executable. Unknown/partial pages and duplicate rows fail closed.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn chromium_sandbox_active(output: &[u8]) -> bool {
     static ROW: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
@@ -96,55 +109,6 @@ fn chromium_sandbox_active(output: &[u8]) -> bool {
         let mut matches = rows.iter().filter(|row| row.0 == name);
         matches.next().is_some_and(|row| row.1 == value) && matches.next().is_none()
     })
-}
-
-#[cfg(target_os = "linux")]
-async fn probe_browser(
-    browser: &nyxid_machine::config::ManagedBrowserConfig,
-    identity: &Identity,
-) -> anyhow::Result<()> {
-    use anyhow::ensure;
-    use std::os::fd::AsRawFd;
-    ensure!(identity.uid != 0, "separated_browser_requires_non_root");
-    // A fresh private profile never opens the owner's tabs, cookies or native
-    // messaging sockets. Chromium's own exec/zygote path performs namespace
-    // creation, so AppArmor attaches the real binary's policy before the probe.
-    let profile = tempfile::Builder::new()
-        .prefix(".nyxid-sandbox-probe-")
-        .tempdir()?;
-    let directory = std::fs::File::open(profile.path())?;
-    if unsafe { libc::geteuid() } == 0 {
-        ensure!(
-            unsafe { libc::fchown(directory.as_raw_fd(), identity.uid, identity.gid) } == 0,
-            "separated_browser_probe_profile_owner"
-        );
-    }
-    let mut command = tokio::process::Command::new(&browser.binary);
-    // Same UID/GID, supplementary groups, NNP and executable as the separated
-    // runtime. Never apply the namespace-denying command filter to Chromium.
-    identity.prepare(&mut command)?;
-    command
-        .arg(format!("--user-data-dir={}", profile.path().display()))
-        .args([
-            "--headless=new",
-            // Chromium 123+ requires this for headless chrome:// diagnostics.
-            "--allow-chrome-scheme-url",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--disable-background-networking",
-            "--disable-breakpad",
-            "--disable-crash-reporter",
-            "--password-store=basic",
-            "--dump-dom",
-            "chrome://sandbox",
-        ]);
-    let output = super::process::probe_output(command).await?;
-    ensure!(
-        chromium_sandbox_active(&output),
-        "separated_browser_sandbox_probe_failed"
-    );
-    Ok(())
 }
 
 pub(super) async fn observe(
@@ -191,6 +155,10 @@ pub(super) async fn observe(
             match probe {
                 Probe::CommandSeccomp => process::probe_command_seccomp(command).await,
                 Probe::Landlock => process::context_sandbox::probe(command).await,
+                Probe::BrowserPolicy => match config.managed_browser.as_ref() {
+                    Some(browser) => super::browser_probe::observe(browser, secure, true).await,
+                    None => anyhow::bail!("separated_browser_identity_missing"),
+                },
                 Probe::SecureBrowser | Probe::DeveloperBrowser => {
                     let identity = if probe == Probe::SecureBrowser {
                         Some(secure)
@@ -198,7 +166,9 @@ pub(super) async fn observe(
                         developer
                     };
                     match (config.managed_browser.as_ref(), identity) {
-                        (Some(browser), Some(identity)) => probe_browser(browser, identity).await,
+                        (Some(browser), Some(identity)) => {
+                            super::browser_probe::observe(browser, identity, false).await
+                        }
                         _ => anyhow::bail!("separated_browser_identity_missing"),
                     }
                 }
@@ -277,6 +247,7 @@ mod tests {
         let probes = [
             Probe::CommandSeccomp,
             Probe::Landlock,
+            Probe::BrowserPolicy,
             Probe::SecureBrowser,
             Probe::DeveloperBrowser,
         ];
@@ -298,6 +269,7 @@ mod tests {
                 Some(match failed {
                     Probe::CommandSeccomp => "separated_seccomp_probe_failed",
                     Probe::Landlock => "separated_landlock_probe_failed",
+                    Probe::BrowserPolicy => "separated_browser_policy_not_effective",
                     _ => "separated_browser_sandbox_probe_failed",
                 })
             );
@@ -319,6 +291,7 @@ mod tests {
             [
                 Probe::CommandSeccomp,
                 Probe::Landlock,
+                Probe::BrowserPolicy,
                 Probe::SecureBrowser,
                 Probe::DeveloperBrowser
             ]
@@ -330,6 +303,7 @@ mod tests {
         for timed_out in [
             Probe::CommandSeccomp,
             Probe::Landlock,
+            Probe::BrowserPolicy,
             Probe::SecureBrowser,
             Probe::DeveloperBrowser,
         ] {
@@ -348,7 +322,11 @@ mod tests {
             assert!(!evidence.support().available);
             assert_eq!(
                 evidence.support().reason.as_deref(),
-                Some("separated_probe_timeout")
+                Some(if timed_out == Probe::BrowserPolicy {
+                    "separated_browser_policy_not_effective"
+                } else {
+                    "separated_probe_timeout"
+                })
             );
         }
     }

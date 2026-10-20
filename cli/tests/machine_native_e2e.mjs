@@ -98,10 +98,26 @@ try{
  assert.equal(setupCode,0,setupOutput.replaceAll(token,'[test-registration-token]'));
  checkpoint('fresh native --separate-users required setup and registration');
  launch();await waitFor(()=>profile,'native capability report',60000);
- assert.equal(profile.separation_choice,'require_separated');assert.equal(profile.separation_evidence.version,2);assert.equal(profile.separated.available,true,JSON.stringify(profile.separated));
+ assert.equal(profile.separation_choice,'require_separated');assert.equal(profile.separation_evidence.version,3);assert.equal(profile.separated.available,true,JSON.stringify(profile.separated));
  if(process.env.NYXID_TEST_REQUIRE_APPARMOR_USERNS==='1')assert.equal(profile.separation_evidence.apparmor_userns_restricted,true);
  console.log('EVIDENCE',JSON.stringify({separation_choice:profile.separation_choice,separation_evidence:profile.separation_evidence,separated:profile.separated}));
- checkpoint('positive v2 evidence through real managed Chromium');
+ checkpoint('positive v3 evidence through real managed Chromium');
+ // A written policy is insufficient: prove the live negative control before
+ // any context exists, then restore the exact protected inode in all cases.
+ await stop();
+ const resolvedBrowser=await fs.realpath('/usr/bin/chromium');
+ const policyDirectory=resolvedBrowser.startsWith('/snap/chromium/')?'/etc/chromium-browser/policies/managed':'/etc/chromium/policies/managed';
+ const policyFile=`${policyDirectory}/nyxid.json`,policyBackup=`${policyFile}.native-acceptance-disabled`;
+ assert(!(await fs.access(policyBackup).then(()=>true,()=>false)),'pre-existing policy test backup');
+ await fs.rename(policyFile,policyBackup);
+ try {
+  const probe=run(binary,['node','setup','--probe-separation','--config',directory]);
+  const unsupported=JSON.parse(probe);
+  assert.equal(unsupported.version,3);assert.equal(unsupported.managed_browser_policy,false);
+  assert.notEqual(unsupported.managed_browser_sandbox,true);
+ } finally {await fs.rename(policyBackup,policyFile);}
+ const beforePolicyRestart=receivedProfile;launch();await waitFor(()=>receivedProfile>beforePolicyRestart,'restored effective policy',60000);assert.equal(profile.separation_evidence.managed_browser_policy,true);assert.equal(profile.separated.available,true);
+ checkpoint('missing secure policy refuses separation; restored policy is effective');
  await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart},checkpoint});
  const journal=JSON.parse(await fs.readFile(`${directory}/machine-contexts.json`,'utf8'));
  const roles=Object.values(journal.contexts).flatMap(c=>Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid]));

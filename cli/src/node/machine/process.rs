@@ -421,6 +421,62 @@ pub(super) async fn probe_output(mut command: Command) -> Result<Vec<u8>> {
     }
 }
 
+/// Observe a live disposable child without using a DevTools transport. Output
+/// is bounded and private; every exit path sweeps helpers and reaps the parent.
+#[cfg(any(target_os = "linux", test))]
+pub(super) async fn probe_running(
+    mut command: Command,
+    bound: std::time::Duration,
+    mut observe: impl FnMut(u32, &[u8]) -> Result<bool>,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    command
+        .kill_on_drop(true)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    let pid = child.id().context("separated_probe_pid_missing")?;
+    let mut group = ProbeGroup(pid as i32);
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("separated_probe_stderr_missing")?;
+    let result = tokio::time::timeout(bound, async {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let mut eof = false;
+        loop {
+            anyhow::ensure!(child.try_wait()?.is_none(), "separated_mechanism_probe_exited");
+            if observe(pid, &output)? {
+                anyhow::ensure!(child.try_wait()?.is_none(), "separated_mechanism_probe_exited");
+                return Ok(());
+            }
+            tokio::select! {
+                bytes = stderr.read(&mut buffer), if !eof => {
+                    let bytes = bytes?;
+                    eof = bytes == 0;
+                    anyhow::ensure!(output.len() + bytes <= 64 * 1024, "separated_probe_output_limit");
+                    output.extend_from_slice(&buffer[..bytes]);
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+        }
+    }).await;
+    let swept = group.kill();
+    if child.id().is_some() {
+        let killed = child.start_kill();
+        child.wait().await?;
+        killed?;
+    }
+    swept?;
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(ProbeTimeout.into()),
+    }
+}
+
 #[cfg(target_os = "linux")]
 async fn probe_status(command: Command) -> Result<()> {
     probe_output(command).await.map(|_| ())
@@ -494,6 +550,46 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn live_probe_sweeps_on_observation_and_timeout() {
+        for ready in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("pid");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "probe"])
+                .arg(&pid_file);
+            let result = probe_running(command, std::time::Duration::from_millis(200), |_, _| {
+                Ok(ready && pid_file.exists())
+            })
+            .await;
+            if ready {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().is::<ProbeTimeout>());
+            }
+            let pid: i32 = std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn successful_probe_sweeps_surviving_grandchildren() {

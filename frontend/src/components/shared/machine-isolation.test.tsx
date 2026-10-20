@@ -55,9 +55,9 @@ const supported: MachineProfile = {
   separation_choice: "shared_legacy",
   separated: { available: true, landlock_abi: 8, reason: null },
   separation_evidence: {
-    version: 2, os: "linux", landlock_abi: 8, separate_users: true,
+    version: 3, os: "linux", landlock_abi: 8, separate_users: true,
     managed_browser_configured: true, command_seccomp: true,
-    landlock_enforced: true, managed_browser_sandbox: true,
+    landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true,
   },
 };
 
@@ -67,7 +67,7 @@ it("shows confirmed support without changing the owner's existing legacy choice"
   expect(screen.getByText(/existing shared legacy assignments stay shared/)).toBeVisible();
 });
 
-it.each([undefined, null, { ...supported.separation_evidence!, version: 1 }, { ...supported.separation_evidence!, version: 3 }])(
+it.each([undefined, null, { ...supported.separation_evidence!, version: 1 }, { ...supported.separation_evidence!, version: 2 }, { ...supported.separation_evidence!, version: 4 }])(
   "does not treat old booleans or unsupported evidence versions as confirmation (%j)",
   separation_evidence => {
     render(<MachineSeparationSupport machine={{ ...supported, separation_evidence }} />);
@@ -77,7 +77,7 @@ it.each([undefined, null, { ...supported.separation_evidence!, version: 1 }, { .
   },
 );
 
-it.each(["separate_users", "managed_browser_configured", "command_seccomp", "landlock_enforced", "managed_browser_sandbox"] as const)(
+it.each(["separate_users", "managed_browser_configured", "command_seccomp", "landlock_enforced", "managed_browser_sandbox", "managed_browser_policy"] as const)(
   "requires positive evidence for %s and displays a failed prerequisite separately",
   field => {
     const view = render(<MachineSeparationSupport machine={{ ...supported, separation_evidence: { ...supported.separation_evidence!, [field]: null } }} />);
@@ -91,6 +91,7 @@ it.each([
   [{ os: "macos" }, /macOS has no supported per-agent sandbox/],
   [{ landlock_abi: 5 }, /Working Landlock ABI 6/],
   [{ managed_browser_sandbox: false }, /actual managed Chromium.*AppArmor/],
+  [{ managed_browser_policy: false }, /actual managed secure browser.*blocks DevTools/],
 ] as const)("explains the actual host prerequisite (%j)", (patch, message) => {
   render(<MachineSeparationSupport machine={{ ...supported, separation_evidence: { ...supported.separation_evidence!, ...patch } }} />);
   expect(screen.getByText("Separation prerequisites not met")).toBeVisible();

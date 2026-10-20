@@ -3011,6 +3011,7 @@ fn supported_evidence() -> nyxid_machine::context::Evidence {
         command_seccomp: Some(true),
         landlock_enforced: Some(true),
         managed_browser_sandbox: Some(true),
+        managed_browser_policy: Some(true),
         ..Default::default()
     }
 }

@@ -26,18 +26,20 @@ pub struct Evidence {
     pub managed_browser_configured: Option<bool>,
     pub command_seccomp: Option<bool>,
     pub landlock_enforced: Option<bool>,
-    /// The configured Chromium executable reports namespace, PID, network and
-    /// seccomp sandboxing under both browser identities, with NNP enforced.
+    /// Live renderer namespace, identity, NNP and additional seccomp filters
+    /// observed under both configured browser identities.
     pub managed_browser_sandbox: Option<bool>,
+    /// The secure identity positively refused DevTools without opening a listener.
+    pub managed_browser_policy: Option<bool>,
     /// Diagnostic only: actual browser launch decides support under AppArmor.
     pub apparmor_userns_restricted: Option<bool>,
     /// Diagnostic classification of a failed probe; never evidence of support.
     pub probe_timed_out: bool,
 }
 
-// v1 probed namespaces before exec and could not observe AppArmor's browser
-// attachment. Only v2's real Chromium sandbox result can select a new default.
-pub const EVIDENCE_VERSION: u32 = 2;
+// v1 inferred pre-exec namespaces; v2 used DevTools-backed DOM diagnostics
+// incompatible with secure policy. v3 observes live OS sandbox and policy effects.
+pub const EVIDENCE_VERSION: u32 = 3;
 pub const MIN_LANDLOCK_ABI: u32 = 6;
 
 impl Evidence {
@@ -47,6 +49,9 @@ impl Evidence {
         }
         if self.os != "linux" {
             return Some("separated_requires_linux");
+        }
+        if self.managed_browser_policy == Some(false) {
+            return Some("separated_browser_policy_not_effective");
         }
         if self.probe_timed_out {
             return Some("separated_probe_timeout");
@@ -62,6 +67,10 @@ impl Evidence {
             ),
             (self.command_seccomp, "separated_seccomp_probe_failed"),
             (self.landlock_enforced, "separated_landlock_probe_failed"),
+            (
+                self.managed_browser_policy,
+                "separated_browser_policy_not_effective",
+            ),
             (
                 self.managed_browser_sandbox,
                 "separated_browser_sandbox_probe_failed",
@@ -115,6 +124,9 @@ pub fn unavailable_message(reason: &str) -> &'static str {
     match reason {
         "separated_probe_timeout" => {
             "A separation capability probe exceeded its five-second bound. A cold Chromium start can cause this; rerun setup when the host is less busy. Separation remains unavailable until every probe succeeds."
+        }
+        "separated_browser_policy_not_effective" => {
+            "The actual managed secure browser did not confirm that its policy blocks DevTools. Reinstall managed browser policies for this executable and rerun setup; separation remains unavailable until the live policy check succeeds."
         }
         "separated_requires_linux" => {
             "This runtime supports per-agent separation only on Linux; macOS has no supported per-agent sandbox. Use a supported Linux host."
@@ -373,6 +385,7 @@ mod tests {
             command_seccomp: Some(true),
             landlock_enforced: Some(true),
             managed_browser_sandbox: Some(true),
+            managed_browser_policy: Some(true),
             apparmor_userns_restricted: None,
             probe_timed_out: false,
         }
@@ -394,6 +407,22 @@ mod tests {
         for evidence in [None, Some(Evidence::default()), Some(confirmed())] {
             assert_eq!(
                 select_new(Choice::SharedLegacy, evidence.as_ref()),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        for version in [0, 1, 2, EVIDENCE_VERSION + 1] {
+            let old = Evidence {
+                version,
+                ..confirmed()
+            };
+            for choice in [Choice::Automatic, Choice::RequireSeparated] {
+                assert_eq!(
+                    select_new(choice, Some(&old)),
+                    Err("separated_probe_version_unsupported")
+                );
+            }
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&old)),
                 Ok(Mode::SharedLegacy)
             );
         }
@@ -435,6 +464,10 @@ mod tests {
             ),
             ("command_seccomp", "separated_seccomp_probe_failed"),
             ("landlock_enforced", "separated_landlock_probe_failed"),
+            (
+                "managed_browser_policy",
+                "separated_browser_policy_not_effective",
+            ),
             (
                 "managed_browser_sandbox",
                 "separated_browser_sandbox_probe_failed",

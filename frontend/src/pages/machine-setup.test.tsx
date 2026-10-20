@@ -406,8 +406,8 @@ it("reviews an old omitted choice as automatic and clears legacy consent when th
 
 it.each([
   [undefined, "Separation support unknown"],
-  [{ version: 2, os: "macos" }, "Separation prerequisites not met"],
-  [{ version: 2, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true }, "Separation support confirmed"],
+  [{ version: 3, os: "macos" }, "Separation prerequisites not met"],
+  [{ version: 3, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true }, "Separation support confirmed"],
 ] as const)("shows the observed support after connection (%j)", (separation_evidence, label) => {
   mock.setup = { id: "intent", choices, status: "connected", machine: {
     shell: true, files: true, authority_versions: [2], separation_evidence,

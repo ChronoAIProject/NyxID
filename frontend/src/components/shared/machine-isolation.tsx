@@ -44,6 +44,7 @@ export function MachineSharingBadge() {
 }
 
 const supportReasons: Record<string, string> = {
+  separated_browser_policy_not_effective: "The actual managed secure browser did not confirm that its policy blocks DevTools. Reinstall managed policies for this executable and rerun setup. Separation remains unavailable until the live policy check succeeds.",
   separated_requires_linux: "This runtime supports per-agent separation only on Linux. macOS has no supported per-agent sandbox. Use a supported Linux host.",
   separated_requires_landlock_abi_6: "Working Landlock ABI 6 or newer is required. Upgrade the Linux kernel or use a supported host.",
   separated_requires_separate_users: "A root supervisor and distinct non-root command, secure-browser and developer-browser users are required. On Linux, rerun setup with sudo and --separate-users.",

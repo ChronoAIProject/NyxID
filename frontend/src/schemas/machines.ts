@@ -739,6 +739,7 @@ export interface MachineProfile {
     command_seccomp?: boolean | null;
     landlock_enforced?: boolean | null;
     managed_browser_sandbox?: boolean | null;
+    managed_browser_policy?: boolean | null;
     probe_timed_out?: boolean;
   } | null;
   version: number;
@@ -771,13 +772,14 @@ export interface MachineProfile {
 }
 
 /** Display only. The server remains authoritative for assignment selection.
- * Raw node profiles may carry the old support boolean without v2 evidence. */
+ * Raw node profiles may carry the old support boolean without v3 evidence. */
 export function machineSeparationSupport(machine: MachineProfile) {
   const evidence = machine.separation_evidence;
   const unavailable = (reason: string) => ({ available: false, reason });
   if (!evidence) return unavailable("separated_capabilities_not_reported");
-  if (evidence.version !== 2) return unavailable("separated_probe_version_unsupported");
+  if (evidence.version !== 3) return unavailable("separated_probe_version_unsupported");
   if (evidence.os !== "linux") return unavailable("separated_requires_linux");
+  if (evidence.managed_browser_policy === false) return unavailable("separated_browser_policy_not_effective");
   if (evidence.probe_timed_out) return unavailable("separated_probe_timeout");
   if (!Number.isInteger(evidence.landlock_abi) || (evidence.landlock_abi ?? 0) < 6)
     return unavailable("separated_requires_landlock_abi_6");
@@ -786,6 +788,7 @@ export function machineSeparationSupport(machine: MachineProfile) {
     [evidence.managed_browser_configured, "separated_requires_managed_browser"],
     [evidence.command_seccomp, "separated_seccomp_probe_failed"],
     [evidence.landlock_enforced, "separated_landlock_probe_failed"],
+    [evidence.managed_browser_policy, "separated_browser_policy_not_effective"],
     [evidence.managed_browser_sandbox, "separated_browser_sandbox_probe_failed"],
   ] as const) {
     if (observed === false) return unavailable(reason);

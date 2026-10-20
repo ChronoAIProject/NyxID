@@ -49,7 +49,7 @@ pub struct Setup {
     pub separation: Option<Separation>,
     /// Disposable Docker preflight: report real capabilities without pairing,
     /// registration, persistent volumes or service startup.
-    #[arg(long, hide = true, requires = "container")]
+    #[arg(long, hide = true)]
     pub probe_separation: bool,
     /// Used by the machine image, which supplies the two users and display.
     #[arg(long, hide = true)]
@@ -341,7 +341,24 @@ pub async fn run(mut args: Setup) -> Result<()> {
     if args.probe_separation {
         // The Docker caller uses the same image, identities and seccomp policy
         // as startup. Setup will probe again after actual provisioning.
-        println!("{}", serde_json::to_string(&container_evidence().await?)?);
+        let evidence = if args.container {
+            container_evidence().await?
+        } else {
+            let directory = crate::node::config::resolve_config_dir_with_profile(
+                args.config.as_deref(),
+                args.profile.as_deref(),
+            )?;
+            let config = crate::node::config::NodeConfig::load(&directory.join("config.toml"))?;
+            let command = super::process::Identity::resolve(config.machine.agent_user.as_deref())?;
+            let secure = super::process::Identity::resolve(config.machine.browser_user.as_deref())?;
+            let developer = config
+                .machine
+                .effective_dev_browser_user()
+                .map(|name| super::process::Identity::resolve(Some(name)))
+                .transpose()?;
+            super::separation::observe(&config.machine, &command, &secure, developer.as_ref()).await
+        };
+        println!("{}", serde_json::to_string(&evidence)?);
         return Ok(());
     }
     if args.node_only_machine_preset {
@@ -414,6 +431,10 @@ pub async fn run(mut args: Setup) -> Result<()> {
             reason,
         )?);
         persist_setup_choice(&directory, &mut existing, choice)?;
+    }
+    #[cfg(target_os = "linux")]
+    if args.browser.unwrap_or(args.computer) && !args.skip_browser_policy {
+        super::browser_layout::Layout::detect(&browser_binary()?)?;
     }
     eprintln!(
         "Agents act with their OS user's access; prompt injection is possible. Use a separate machine container or VM per agent for full isolation."
@@ -736,17 +757,23 @@ pub fn install_browser(port: u16) -> Result<()> {
     if port == 0 {
         bail!("Managed extension update port must be fixed");
     }
+    let layout = if cfg!(target_os = "linux") {
+        super::browser_layout::Layout::detect(&browser_binary()?)?
+    } else {
+        super::browser_layout::Layout::GoogleChrome
+    };
     let installed = install_supervisor_binary()?;
     super::browser::install(
         Path::new("/"),
         &installed,
         &format!("http://127.0.0.1:{port}/update.xml"),
         cfg!(target_os = "macos"),
+        layout,
     )?;
     if cfg!(target_os = "linux") && std::env::var_os("NYXID_MACHINE_CONTAINER").is_some() {
         let secure = super::process::Identity::resolve(Some("browser"))?;
         let dev = super::process::Identity::resolve(Some("devbrowser"))?;
-        super::browser::install_container_policies(Path::new("/"), secure.gid, dev.gid)?;
+        super::browser::install_container_policies(Path::new("/"), layout, secure.gid, dev.gid)?;
     }
     Ok(())
 }
