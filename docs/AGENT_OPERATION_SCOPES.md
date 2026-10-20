@@ -45,7 +45,7 @@ permission engine uses:
   `required` stops a filter from being dropped, and authentication, method
   override and NyxID routing parameters cannot be declared;
 - `body`: when present, a closed JSON schema (`object`, `array`, `string`,
-  `integer`, `boolean`, `exact`, `one_of`; every object closed, bounded depth).
+  `integer`, `number`, `boolean`, `exact`, `one_of`; every object closed, bounded depth).
 
 Absent parts stay unconstrained. Limits are validated at save time against the
 operation's method and template, and checked by `check_inputs` against the final
@@ -58,6 +58,28 @@ operations that stay selected.
 The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
 catalog identity and operations, excluding the revision. A selection that
 carries `contract_digest` fails with a conflict if it now compiles differently.
+
+### Decimal number limits
+
+`number` accepts finite JSON numbers, including integers, within inclusive
+`minimum` and `maximum` bounds (both signed 64-bit integers). Its
+`max_fraction_digits` must be between 0 and 12; the minimum cannot exceed the
+maximum. Strings such as `"12.34"` are refused. Use `integer` for dates expressed
+as milliseconds.
+
+For example, an Amount property in a closed receipt `fields` object can use:
+
+```json
+{"type":"number","minimum":0,"maximum":1000000,"max_fraction_digits":2}
+```
+
+Fraction precision is checked on serde_json's canonical decimal representation
+of the parsed value, with exponents expanded and insignificant trailing decimal
+zeros removed. `12.34` and `12.340` have two fractional digits; `12.345` has three
+and is refused by this example. `12.0` and `1e2` have none. `1.5e-3` expands to
+`0.0015` and has four. The original byte spelling does not preserve extra
+precision after JSON parsing. Bounds are compared as scaled integers so the
+inclusive i64 edges do not widen through floating-point conversion.
 
 ## Execution and discovery
 
@@ -180,6 +202,13 @@ routes because they require a live conversation. Rollback starts by disabling th
 current binaries, so remove scopes (or the keys/specialists holding them) before
 returning traffic to old binaries. Older writers of `grants` cannot erase
 sibling scopes.
+
+**Upgrade all replicas before saving a scope that uses `number`**
+(`JsonShape::Number`). A previous enum reader cannot deserialize this variant;
+the typed API-key load fails closed instead of discarding the input limits or
+falling back to unrestricted access. This may surface as an authentication or
+database error on an old replica. Remove every Number scope, including its
+compiled copies on keys, before rolling back to a binary without this variant.
 
 Scopes contain no person-specific ownership assumptions; execution and billing
 remain the acting person's.
