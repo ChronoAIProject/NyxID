@@ -129,143 +129,6 @@ pub fn stored_projection(
     Some(trusted.unwrap_or(candidate))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::mcp_service::{endpoint_contract_digest, prepare_proxy_tool_call};
-
-    fn service() -> super::super::mcp_service::McpToolService {
-        super::super::mcp_service::McpToolService {
-            workspace_destinations_pending: false,
-            service_id: "catalog".into(),
-            service_name: "Lark".into(),
-            service_slug: "api-lark".into(),
-            description: None,
-            service_category: "connection".into(),
-            endpoints: Vec::new(),
-            durable_endpoint_metadata: Default::default(),
-            source: super::super::mcp_service::McpToolSource::Platform {
-                downstream_service_id: "catalog".into(),
-            },
-            executable: true,
-            is_generic_proxy: false,
-            invalid_openapi_contract: false,
-            recommended_skills: Vec::new(),
-            recommended_skill_refs: None,
-            skills_revision: None,
-            proxy_operation_policy: None,
-        }
-    }
-
-    fn compiled(slug: &str) -> (DownstreamService, McpToolEndpoint) {
-        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
-        catalog.slug = slug.into();
-        catalog.created_by = "system".into();
-        let spec = catalog_spec_registry::spec_for_slug(slug).unwrap();
-        let input = catalog_spec_sync::destination_endpoint_inputs(&catalog, &spec)
-            .unwrap()
-            .into_iter()
-            .find(|input| input.name == UPLOAD_OPERATION)
-            .unwrap();
-        let endpoint = McpToolEndpoint {
-            endpoint_id: "upload".into(),
-            name: input.name,
-            method: input.method,
-            path: input.path,
-            target_id: input.target_id,
-            parameters: input.parameters,
-            request_body_schema: input.request_body_schema,
-            request_content_type: input.request_content_type,
-            request_body_required: input.request_body_required,
-            response: input.response,
-            ..Default::default()
-        };
-        (catalog, endpoint)
-    }
-
-    #[test]
-    fn lark_attachment_projection_requires_system_identity_and_all_execution_inputs() {
-        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
-            let (catalog, endpoint) = compiled(slug);
-            assert!(matches!(
-                stored_projection(Some(&catalog), &endpoint),
-                Some(Projection::Stored(_))
-            ));
-            let mut custom = catalog.clone();
-            custom.created_by = "user".into();
-            assert_eq!(
-                stored_projection(Some(&custom), &endpoint),
-                Some(Projection::Refused)
-            );
-            custom.created_by = "system".into();
-            custom.slug = "custom-lark".into();
-            assert_eq!(
-                stored_projection(Some(&custom), &endpoint),
-                Some(Projection::Refused)
-            );
-            assert_eq!(
-                stored_projection(None, &endpoint),
-                Some(Projection::Refused)
-            );
-            let mut variants = Vec::new();
-            let mut edited = endpoint.clone();
-            edited.path = "/other".into();
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.method = "PUT".into();
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.parameters = Some(
-                json!([{"name":"evil","in":"query","required":true,"schema":{"type":"string"}}]),
-            );
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.request_body_schema.as_mut().unwrap()["properties"]["size"]["type"] =
-                json!("string");
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.request_content_type = Some("application/json".into());
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.request_body_required = false;
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.target_id = Some("foreign-origin".into());
-            variants.push(edited);
-            let mut edited = endpoint.clone();
-            edited.name = "other".into();
-            variants.push(edited);
-            for mut edited in variants {
-                edited.attachment_input = stored_projection(Some(&catalog), &edited);
-                assert_eq!(edited.attachment_input, Some(Projection::Refused));
-                assert!(prepare_proxy_tool_call(&service(), &edited, &json!({})).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn lark_attachment_projection_is_versioned_and_absent_contract_digest_is_unchanged() {
-        let (catalog, mut endpoint) = compiled("api-lark");
-        let old = endpoint_contract_digest(&endpoint);
-        let legacy = json!({"contract_version":"nyxid-exact-endpoint.v1","endpoint_id":endpoint.endpoint_id,
-            "method":endpoint.method,"path":endpoint.path,"parameters":endpoint.parameters,
-            "request_body_schema":endpoint.request_body_schema,"request_content_type":endpoint.request_content_type,
-            "request_body_required":endpoint.request_body_required,"response":endpoint.response});
-        assert_eq!(old, super::super::mcp_service::canonical_sha256(legacy));
-        endpoint.attachment_input = stored_projection(Some(&catalog), &endpoint);
-        assert_ne!(old, endpoint_contract_digest(&endpoint));
-        let before = endpoint_contract_digest(&endpoint);
-        if let Some(Projection::Stored(contract)) = &mut endpoint.attachment_input {
-            contract.version += 1;
-        }
-        assert_ne!(before, endpoint_contract_digest(&endpoint));
-        let schema = endpoint.request_body_schema.as_ref().unwrap();
-        assert!(validate_mark(&json!({"field":"size","size_field":"size","filename_field":"file_name","version":1}),schema).is_err());
-        assert!(validate_mark(&json!({"field":"file","size_field":"size","filename_field":"file_name","version":2}),schema).is_err());
-        assert!(schema.get(MARK).is_none());
-    }
-}
-
 mod multipart;
 use super::assistant_acknowledgement_service::ChatAuthority;
 use super::assistant_upload_service::{self as uploads, byte_budget};
@@ -460,4 +323,141 @@ pub fn validate_response(status: u16, text: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::mcp_service::{endpoint_contract_digest, prepare_proxy_tool_call};
+
+    fn service() -> super::super::mcp_service::McpToolService {
+        super::super::mcp_service::McpToolService {
+            workspace_destinations_pending: false,
+            service_id: "catalog".into(),
+            service_name: "Lark".into(),
+            service_slug: "api-lark".into(),
+            description: None,
+            service_category: "connection".into(),
+            endpoints: Vec::new(),
+            durable_endpoint_metadata: Default::default(),
+            source: super::super::mcp_service::McpToolSource::Platform {
+                downstream_service_id: "catalog".into(),
+            },
+            executable: true,
+            is_generic_proxy: false,
+            invalid_openapi_contract: false,
+            recommended_skills: Vec::new(),
+            recommended_skill_refs: None,
+            skills_revision: None,
+            proxy_operation_policy: None,
+        }
+    }
+
+    fn compiled(slug: &str) -> (DownstreamService, McpToolEndpoint) {
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.slug = slug.into();
+        catalog.created_by = "system".into();
+        let spec = catalog_spec_registry::spec_for_slug(slug).unwrap();
+        let input = catalog_spec_sync::destination_endpoint_inputs(&catalog, &spec)
+            .unwrap()
+            .into_iter()
+            .find(|input| input.name == UPLOAD_OPERATION)
+            .unwrap();
+        let endpoint = McpToolEndpoint {
+            endpoint_id: "upload".into(),
+            name: input.name,
+            method: input.method,
+            path: input.path,
+            target_id: input.target_id,
+            parameters: input.parameters,
+            request_body_schema: input.request_body_schema,
+            request_content_type: input.request_content_type,
+            request_body_required: input.request_body_required,
+            response: input.response,
+            ..Default::default()
+        };
+        (catalog, endpoint)
+    }
+
+    #[test]
+    fn lark_attachment_projection_requires_system_identity_and_all_execution_inputs() {
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let (catalog, endpoint) = compiled(slug);
+            assert!(matches!(
+                stored_projection(Some(&catalog), &endpoint),
+                Some(Projection::Stored(_))
+            ));
+            let mut custom = catalog.clone();
+            custom.created_by = "user".into();
+            assert_eq!(
+                stored_projection(Some(&custom), &endpoint),
+                Some(Projection::Refused)
+            );
+            custom.created_by = "system".into();
+            custom.slug = "custom-lark".into();
+            assert_eq!(
+                stored_projection(Some(&custom), &endpoint),
+                Some(Projection::Refused)
+            );
+            assert_eq!(
+                stored_projection(None, &endpoint),
+                Some(Projection::Refused)
+            );
+            let mut variants = Vec::new();
+            let mut edited = endpoint.clone();
+            edited.path = "/other".into();
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.method = "PUT".into();
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.parameters = Some(
+                json!([{"name":"evil","in":"query","required":true,"schema":{"type":"string"}}]),
+            );
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.request_body_schema.as_mut().unwrap()["properties"]["size"]["type"] =
+                json!("string");
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.request_content_type = Some("application/json".into());
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.request_body_required = false;
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.target_id = Some("foreign-origin".into());
+            variants.push(edited);
+            let mut edited = endpoint.clone();
+            edited.name = "other".into();
+            variants.push(edited);
+            for mut edited in variants {
+                edited.attachment_input = stored_projection(Some(&catalog), &edited);
+                assert_eq!(edited.attachment_input, Some(Projection::Refused));
+                assert!(prepare_proxy_tool_call(&service(), &edited, &json!({})).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn lark_attachment_projection_is_versioned_and_absent_contract_digest_is_unchanged() {
+        let (catalog, mut endpoint) = compiled("api-lark");
+        let old = endpoint_contract_digest(&endpoint);
+        let legacy = json!({"contract_version":"nyxid-exact-endpoint.v1","endpoint_id":endpoint.endpoint_id,
+            "method":endpoint.method,"path":endpoint.path,"parameters":endpoint.parameters,
+            "request_body_schema":endpoint.request_body_schema,"request_content_type":endpoint.request_content_type,
+            "request_body_required":endpoint.request_body_required,"response":endpoint.response});
+        assert_eq!(old, super::super::mcp_service::canonical_sha256(legacy));
+        endpoint.attachment_input = stored_projection(Some(&catalog), &endpoint);
+        assert_ne!(old, endpoint_contract_digest(&endpoint));
+        let before = endpoint_contract_digest(&endpoint);
+        if let Some(Projection::Stored(contract)) = &mut endpoint.attachment_input {
+            contract.version += 1;
+        }
+        assert_ne!(before, endpoint_contract_digest(&endpoint));
+        let schema = endpoint.request_body_schema.as_ref().unwrap();
+        assert!(validate_mark(&json!({"field":"size","size_field":"size","filename_field":"file_name","version":1}),schema).is_err());
+        assert!(validate_mark(&json!({"field":"file","size_field":"size","filename_field":"file_name","version":2}),schema).is_err());
+        assert!(schema.get(MARK).is_none());
+    }
 }

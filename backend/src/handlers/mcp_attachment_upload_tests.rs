@@ -491,11 +491,15 @@ async fn lark_attachment_discovery_chat_flag_matrix_config_and_exact_keep_plain_
                 enabled,
                 "{search}"
             );
-            if !enabled {
-                for meta in [false, true] {
-                    assert_error(&call(&u, &auth, meta, args(&u.attachment_id)).await);
-                }
+            let before = u.server.received_requests().await.unwrap().len();
+            for meta in [false, true] {
+                let response = call(&u, &auth, meta, args(&u.attachment_id)).await;
+                assert_eq!(response["result"]["isError"], !enabled, "{response}");
             }
+            assert_eq!(
+                u.server.received_requests().await.unwrap().len(),
+                before + usize::from(enabled) * 2
+            );
         }
     }
     let config = crate::handlers::mcp::get_mcp_config(State(u.f.state.clone()), u.f.auth.clone())
@@ -538,7 +542,7 @@ async fn lark_attachment_discovery_chat_flag_matrix_config_and_exact_keep_plain_
     for meta in [false, true] {
         assert_error(&call(&u, &auth, meta, args(&u.attachment_id)).await);
     }
-    assert_no_requests(&u).await;
+    assert_eq!(u.server.received_requests().await.unwrap().len(), 4);
     u.f.state.db.drop().await.unwrap();
 }
 
@@ -816,6 +820,23 @@ async fn lark_attachment_body_scopes_and_unsupported_preparation_fail_closed_bef
     })).unwrap();
     auth.assistant_operation_scopes
         .insert(u.instance.clone(), scope);
+    let prepared = mcp_service::prepare_chat_proxy_tool_call(
+        &u.f.state.db,
+        &u.f.state.encryption_keys,
+        auth.chat.as_ref(),
+        &service,
+        endpoint,
+        &args(&u.attachment_id),
+    )
+    .await
+    .unwrap();
+    let error = prepared
+        .authorize_agent_operations(&auth.assistant_operation_scopes, &service, endpoint)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("Operation scope input limit"),
+        "{error}"
+    );
     for meta in [false, true] {
         assert_error(&call(&u, &auth, meta, args(&u.attachment_id)).await);
     }
@@ -1217,4 +1238,53 @@ async fn lark_attachment_actual_send_revalidates_after_delayed_credential_prepar
         );
         u.f.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn lark_attachment_unmarked_multipart_keeps_existing_local_refusal_on_both_dispatch_paths() {
+    let u = setup("attachment_unmarked_multipart").await;
+    let auth = authenticate(&u.f).await;
+    let mut ordinary = u.endpoint.clone();
+    ordinary.id = Uuid::new_v4().to_string();
+    ordinary.name = "ordinary_upload".into();
+    ordinary.path = "/ordinary".into();
+    u.f.state
+        .db
+        .collection::<ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
+        .insert_one(&ordinary)
+        .await
+        .unwrap();
+    for meta in [false, true] {
+        let name = "receipts__ordinary_upload";
+        let arguments = json!({"body":"raw multipart"});
+        let params = if meta {
+            json!({"name":"nyx__call_tool","arguments":{"tool_name":name,"arguments_json":arguments.to_string()}})
+        } else {
+            json!({"name":name,"arguments":arguments})
+        };
+        let response = rpc(&u.f, &auth, "tools/call", Some(params)).await;
+        assert_error(&response);
+        assert!(
+            text(&response).contains("multipart/form-data request bodies are not yet supported"),
+            "{response}"
+        );
+    }
+    assert_no_requests(&u).await;
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_attachment_public_discovery_excludes_upload_and_keeps_ordinary_endpoints() {
+    let u = setup("attachment_public_discovery").await;
+    u.f.state.db.collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+        .update_one(doc! {"_id":&u.catalog.id},doc! {"$set":{"anonymous_endpoints":[
+            {"id":"upload","enabled":true,"method":"POST","path_pattern":"/open-apis/drive/v1/medias/upload_all","daily_quota":100},
+            {"id":"ordinary","enabled":true,"method":"GET","path_pattern":"/ordinary","daily_quota":100}
+        ]}}).await.unwrap();
+    let services = mcp_service::load_public_tools(&u.f.state.db).await.unwrap();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].endpoints.len(), 1);
+    assert_eq!(services[0].endpoints[0].path, "/ordinary");
+    assert_no_requests(&u).await;
+    u.f.state.db.drop().await.unwrap();
 }
