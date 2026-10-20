@@ -1,14 +1,14 @@
 {
   "schema": "nyxid.shipped-composition.v1",
   "component": "wizard",
-  "source_lock_sha256": "e965ec23434aa7a7c1d37edab6ea0e06924dd2ee2091e1902107b5fa6cf4af9a",
+  "source_lock_sha256": "8d1e43db5dbce77bc84da721d8464fb2ee0c2d0125dff4e90a259c2edf590818",
   "graphs": [
     {
       "path": "embedded-rendered-graph",
-      "sha256": "2c53d3dacc1363ac22aada756f3d254b7e517bfe3522daa8d9e909485c1a207c",
+      "sha256": "d0dc22281ed775aa389a0af3881a8f2366fb53edf92920ded9d43ffa4f286e17",
       "schema": "nyxid.rendered-composition.v1",
       "component": "wizard",
-      "lock_sha256": "e965ec23434aa7a7c1d37edab6ea0e06924dd2ee2091e1902107b5fa6cf4af9a",
+      "lock_sha256": "8d1e43db5dbce77bc84da721d8464fb2ee0c2d0125dff4e90a259c2edf590818",
       "chunks": [
         {
           "path": "index.html",

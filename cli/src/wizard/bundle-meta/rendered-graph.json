@@ -1,7 +1,7 @@
 {
   "schema": "nyxid.rendered-composition.v1",
   "component": "wizard",
-  "lock_sha256": "e965ec23434aa7a7c1d37edab6ea0e06924dd2ee2091e1902107b5fa6cf4af9a",
+  "lock_sha256": "8d1e43db5dbce77bc84da721d8464fb2ee0c2d0125dff4e90a259c2edf590818",
   "chunks": [
     {
       "path": "wizard.html",
