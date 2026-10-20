@@ -6,7 +6,7 @@ use crate::{
         api_key_credential::ApiKeyCredentialKind,
         downstream_service::test_helpers::dummy_service,
         role::{COLLECTION_NAME as ROLES, Role},
-        user::UserType,
+        user::{COLLECTION_NAME as USERS, User, UserType},
     },
     test_utils::{connect_test_database, test_user, test_user_service},
 };
@@ -195,7 +195,7 @@ impl Fixture {
             name: "User".into(),
             slug: "user".into(),
             description: None,
-            permissions: vec!["cma:sandboxes:use-own".into()],
+            permissions: vec!["cma:sandbox:use".into()],
             is_default: false,
             is_system: false,
             client_id: Some(client.id.clone()),
@@ -282,7 +282,7 @@ async fn resource_server_receives_live_permissions_and_exact_owner() {
     let evidence = f.evidence().await.unwrap();
     assert_eq!(evidence.subject, f.owner);
     assert_eq!(evidence.service_id, f.service);
-    assert_eq!(evidence.permissions, ["cma:sandboxes:use-own"]);
+    assert_eq!(evidence.permissions, ["cma:sandbox:use"]);
     assert_eq!(evidence.expires_at, None);
     f.db.collection::<Role>(ROLES)
         .update_one(doc! {"_id": &f.role}, doc! {"$set": {"permissions": []}})
@@ -405,3 +405,5 @@ async fn child_credential_expiry_and_revocation_are_enforced() {
             .is_err()
     );
 }
+
+mod restrictions;

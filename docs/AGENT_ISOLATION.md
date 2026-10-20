@@ -426,13 +426,36 @@ RBAC `permissions`. `exp` is the earlier parent/child credential expiry; it is
 omitted only for a nonexpiring credential. The resource server must validate
 the audience and credential type before accepting permissions.
 
-Verification requires an active owner, a general-purpose key with `proxy` scope,
-an active owner-bound connection to the catalog, and a current key service grant.
-It includes explicitly enabled auto-connected grants. It does not provision
-connections or widen service scopes. Restricted scheduled-invocation keys remain
-ineligible. Invalid, revoked, expired and out-of-scope keys return `active: false`;
+Verification reuses the live API-key authentication constructor and requires an
+active owner, a general-purpose key with `proxy` scope, an active owner-bound
+HTTP connection to the catalog, and a current key service grant. Connection IDs
+and catalog grants remain distinct; auto-connected and platform-bound connections
+also retain their current eligibility and platform access checks. Verification
+does not provision connections or widen service scopes.
+
+Only self-authenticating HTTP resource servers are eligible: the catalog must use
+`auth_method: none`, must not require a user credential, and must have no provider
+configuration or provider requirements. The live connection must likewise use
+`auth_method: none` with no attached user credential or node route. Credential-bearing proxy
+transports are refused even when their catalog has no explicit operation policy;
+introspection cannot substitute for their credential admission. No-auth platform
+ACLs still apply.
+
+This is whole-service evidence. Keys with operation scopes, actual assistant
+conversation authority, organization-specialist or group authority are refused;
+their method, input, turn, guest and approval restrictions cannot be represented
+by an audience and owner permissions alone. Restricted key purposes, Tool
+offerings, provider services, retired services and services with a proxy operation
+policy are also ineligible. This endpoint by itself therefore does **not** enable
+NyxBot calls to an external resource server. Those calls require a separate proof
+bound to the actual authorized request, preserving the existing proxy admission
+and deferred-command authority. An ordinary-key success must not be reported as
+NyxBot compatibility.
+
+Invalid, revoked, expired, unsupported and out-of-scope keys return `active: false`;
 unexpected database failures in agent-key verification return 503 so consumers
-can distinguish an outage from revocation.
+can distinguish an outage from revocation. Existing JWT introspection remains
+unchanged, apart from the additive optional audience field.
 
 ### NyxBot access authority
 
