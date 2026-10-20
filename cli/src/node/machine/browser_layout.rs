@@ -120,9 +120,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     fn put(root: &Path, path: &str, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
+        std::fs::write(&path, text).unwrap();
+        // Package metadata is immutable to other users, independent of the
+        // test runner's umask (Lima's regular login defaults to group writable).
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
     #[test]
     fn package_layouts_follow_resolved_executables_and_reject_unknowns() {
