@@ -36,17 +36,30 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
-    for (collection, keys, name) in [
-        (STATE, doc! {"singleton": 1}, "audit_single_head"),
-        (
-            OUTBOX,
-            doc! {"chain_id": 1, "order": 1},
-            "audit_outbox_order",
-        ),
-        (OUTBOX, doc! {"chain_id": 1, "seq": 1}, "audit_outbox_seq"),
-    ] {
-        db.collection::<mongodb::bson::Document>(collection)
-            .create_index(
+    db.collection::<AuditState>(STATE)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"singleton": 1})
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_single_head".to_owned())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    // Build each collection's indexes in one server operation. Repeated calls
+    // still consult Mongo rather than a process cache (a restored/recreated DB
+    // must regain its constraints), but need only one durable DDL per collection.
+    db.collection::<AuditOutbox>(OUTBOX)
+        .create_indexes(
+            [
+                (doc! {"chain_id": 1, "order": 1}, "audit_outbox_order"),
+                (doc! {"chain_id": 1, "seq": 1}, "audit_outbox_seq"),
+            ]
+            .into_iter()
+            .map(|(keys, name)| {
                 mongodb::IndexModel::builder()
                     .keys(keys)
                     .options(
@@ -55,12 +68,17 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                             .unique(true)
                             .build(),
                     )
+                    .build()
+            })
+            .chain(std::iter::once(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {"witnessed_at": 1, "order": 1})
                     .build(),
-            )
-            .await?;
-    }
+            )),
+        )
+        .await?;
     db.collection::<PendingAuditEvent>(PENDING)
-        .create_index(
+        .create_indexes([
             mongodb::IndexModel::builder()
                 .keys(doc! {"event.operation_id": 1, "event.stage": 1})
                 .options(
@@ -70,21 +88,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                         .build(),
                 )
                 .build(),
-        )
-        .await?;
-    db.collection::<PendingAuditEvent>(PENDING)
-        .create_index(
             mongodb::IndexModel::builder()
                 .keys(doc! {"materialized_seq": 1, "order": 1})
                 .build(),
-        )
-        .await?;
-    db.collection::<AuditOutbox>(OUTBOX)
-        .create_index(
-            mongodb::IndexModel::builder()
-                .keys(doc! {"witnessed_at": 1, "order": 1})
-                .build(),
-        )
+        ])
         .await?;
     db.collection::<bson::Document>(crate::models::audit_effect_intent::COLLECTION_NAME)
         .create_index(
@@ -148,14 +155,36 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         .read_concern(mongodb::options::ReadConcern::snapshot())
         .write_concern(majority())
         .await?;
+    let result = initialize_in_session(db, key, config, &mut session).await;
+    match result {
+        // Preserve uncertainty: abort/replay cannot resolve a lost commit ack.
+        Err(AppError::DatabaseError(error))
+            if error.contains_label("UnknownTransactionCommitResult") =>
+        {
+            Err(AppError::DatabaseError(error))
+        }
+        Err(error) => {
+            let _ = session.abort_transaction().await;
+            Err(error)
+        }
+        success => success,
+    }
+}
+
+async fn initialize_in_session(
+    db: &Database,
+    key: &[u8],
+    config: &AuditConfig,
+    session: &mut ClientSession,
+) -> AppResult<AuditState> {
     if let Some(mut state) = db
         .collection::<AuditState>(STATE)
         .find_one(doc! {"singleton": true})
-        .session(&mut session)
+        .session(&mut *session)
         .await?
     {
         validate_identity(&state, config)?;
-        validate_tail(db, &mut session, key, &state).await?;
+        validate_tail(db, session, key, &state).await?;
         if config.witness.is_some() && !state.witness_enrolled {
             // The protected pin proves enrollment, not live contact. Persist
             // policy activation before serving, even if the first observation
@@ -165,9 +194,9 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
                     doc! {"_id": &state.id},
                     doc! {"$set": {"witness_enrolled": true}},
                 )
-                .session(&mut session)
+                .session(&mut *session)
                 .await?;
-            commit(&mut session).await?;
+            commit(session).await?;
             state.witness_enrolled = true;
         } else {
             session.abort_transaction().await?;
@@ -178,6 +207,7 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         .collection::<AuditLog>(AUDIT_LOG)
         .find_one(doc! {"seq": {"$exists": true}})
         .sort(doc! {"seq": -1})
+        .session(&mut *session)
         .await?;
     if tail.is_some() && !config.cutover_drained {
         return Err(AppError::AuditCutoverRequired);
@@ -186,15 +216,25 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         super::security_readiness_service::require_audit_cutover(db, config.cutover_drained)
             .await?;
     }
-    let mut from = None;
-    loop {
-        let report = chain::verify_chain(db, key, from, None, None).await?;
-        if report.break_info.is_some() {
-            return Err(AppError::AuditIntegrityConflict);
-        }
-        match report.next_from_seq {
-            Some(next) => from = Some(next),
-            None => break,
+    if tail.is_some() {
+        let mut from = 1;
+        loop {
+            let report = chain::verify_chain_in_session(
+                db,
+                key,
+                from,
+                None,
+                chain::DEFAULT_VERIFY_LIMIT,
+                session,
+            )
+            .await?;
+            if report.break_info.is_some() {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            match report.next_from_seq {
+                Some(next) => from = next,
+                None => break,
+            }
         }
     }
     let (seq, hash) = match tail {
@@ -229,13 +269,14 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         adopted_at: Utc::now(),
         adopted_v1_seq: seq,
     };
-    // Detect a writer racing the inspection. Drain remains mandatory because
-    // old writers do not update the state and cannot be fenced by this CAS.
+    // Publish only the boundary inspected in this snapshot; the unique head
+    // fences concurrent adopters. Drain remains mandatory because old writers
+    // do not update the state and cannot be fenced by this protocol.
     let current = db
         .collection::<AuditLog>(AUDIT_LOG)
         .find_one(doc! {"seq": {"$exists": true}})
         .sort(doc! {"seq": -1})
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
     if current.as_ref().and_then(|e| e.seq).unwrap_or(0) != seq
         || current
@@ -248,9 +289,9 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
     }
     db.collection::<AuditState>(STATE)
         .insert_one(&state)
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
-    commit(&mut session).await?;
+    commit(session).await?;
     Ok(state)
 }
 

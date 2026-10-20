@@ -190,18 +190,43 @@ pub async fn verify_chain(
         .start_transaction()
         .read_concern(mongodb::options::ReadConcern::snapshot())
         .await?;
+    let result = verify_chain_in_session(db, key, from_seq, to_seq, limit, &mut session).await;
+    // A dropped ClientSession only schedules asynchronous abort. In a short
+    // runtime (nextest/worker shutdown) that task can be cancelled, leaving
+    // snapshot locks until Mongo's transaction reaper runs. Finish while the
+    // owning runtime is alive, including every broken/error return below.
+    let closed = session.abort_transaction().await;
+    match result {
+        Err(error) => Err(error),
+        Ok(report) => {
+            closed?;
+            Ok(report)
+        }
+    }
+}
+
+/// The existing owner closes the snapshot. Startup adoption uses this same
+/// transaction, avoiding an independently owned nested read transaction.
+pub(super) async fn verify_chain_in_session(
+    db: &mongodb::Database,
+    key: &[u8],
+    from_seq: i64,
+    to_seq: Option<i64>,
+    limit: i64,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<AuditChainVerifyReport> {
     let collection = db.collection::<AuditLog>(AUDIT_LOG);
     let pre_chain_count = collection
         .count_documents(doc! { "seq": { "$exists": false } })
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
-    let tail = read_tail(db, &mut session).await?;
+    let tail = read_tail(db, session).await?;
     let durable = db
         .collection::<crate::models::audit_state::AuditState>(
             crate::models::audit_state::COLLECTION_NAME,
         )
         .find_one(doc! {"singleton": true})
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
     if let Some(state) = &durable {
         let actual_seq = tail.as_ref().map_or(0, |t| t.seq);
@@ -240,16 +265,16 @@ pub async fn verify_chain(
         .find(filter)
         .sort(doc! { "seq": 1 })
         .limit(limit)
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
-    let entries: Vec<AuditLog> = cursor.stream(&mut session).try_collect().await?;
+    let entries: Vec<AuditLog> = cursor.stream(&mut *session).try_collect().await?;
 
     let mut checked_count = 0_u64;
     let mut expected_seq = from_seq;
     let mut expected_prev_hash = if from_seq == 1 {
         GENESIS_PREV_HASH.to_string()
     } else {
-        match load_entry_by_seq(db, &mut session, from_seq - 1).await? {
+        match load_entry_by_seq(db, session, from_seq - 1).await? {
             Some(previous) => previous.entry_hash.unwrap_or_default(),
             None => {
                 return Ok(broken_report(

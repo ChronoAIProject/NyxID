@@ -409,3 +409,257 @@ async fn unknown_commit_acknowledgment_retries_same_transaction_and_event_identi
         );
     }
 }
+
+/// A read-only verification must release its snapshot before returning. Relying
+/// on ClientSession::drop races short-runtime teardown and can pin DDL until
+/// the server's transaction reaper, including after broken/error reports.
+#[tokio::test]
+async fn audit_verification_closes_snapshot_on_success_break_and_database_error() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let observed = aborts.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "audit_snapshot_close",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Succeeded(event) = event
+                && event.command_name == "abortTransaction"
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }),
+    )
+    .await;
+    let event = chain::append_chained_entry(&db, entry(), &KEY)
+        .await
+        .unwrap();
+    aborts.store(0, Ordering::SeqCst);
+    let report = chain::verify_chain(&db, &KEY, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(report.status, chain::AuditChainStatus::Ok);
+    assert_eq!(
+        aborts.load(Ordering::SeqCst),
+        1,
+        "success must await its own abort"
+    );
+
+    db.collection::<bson::Document>(AUDIT_LOG)
+        .update_one(
+            doc! {"_id": &event.id},
+            doc! {"$set": {"event_type": "changed"}},
+        )
+        .await
+        .unwrap();
+    aborts.store(0, Ordering::SeqCst);
+    let report = chain::verify_chain(&db, &KEY, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(report.status, chain::AuditChainStatus::Broken);
+    assert_eq!(
+        aborts.load(Ordering::SeqCst),
+        1,
+        "broken report must await its own abort"
+    );
+
+    db.collection::<bson::Document>(AUDIT_LOG)
+        .update_one(doc! {"_id": &event.id}, doc! {"$set": {"event_type": 17}})
+        .await
+        .unwrap();
+    aborts.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        chain::verify_chain(&db, &KEY, None, None, None).await,
+        Err(AppError::DatabaseError(_))
+    ));
+    assert_eq!(
+        aborts.load(Ordering::SeqCst),
+        1,
+        "database error must await its own abort"
+    );
+}
+
+#[tokio::test]
+async fn audit_initialization_closes_rejected_snapshot_and_preserves_head() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let aborts = Arc::new(AtomicUsize::new(0));
+    let observed = aborts.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "audit_rejected_snapshot",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Succeeded(event) = event
+                && event.command_name == "abortTransaction"
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }),
+    )
+    .await;
+    chain::append_chained_entry(&db, entry(), &KEY)
+        .await
+        .unwrap();
+    let before = load(&db).await.unwrap();
+    aborts.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        initialize(&db, &[3; 32], &AuditConfig::default()).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+    assert_eq!(aborts.load(Ordering::SeqCst), 1);
+    let after = load(&db).await.unwrap();
+    assert_eq!(after.head_seq, before.head_seq);
+    assert_eq!(after.head_hash, before.head_hash);
+    assert_eq!(after.pending_count, before.pending_count);
+}
+
+#[tokio::test]
+async fn audit_batched_indexes_preserve_constraints_and_repair_removed_index() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let builds = Arc::new(AtomicUsize::new(0));
+    let observed = builds.clone();
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "audit_batched_indexes",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "createIndexes"
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }),
+    )
+    .await;
+    builds.store(0, Ordering::SeqCst);
+    ensure_indexes(&db).await.unwrap();
+    assert_eq!(builds.load(Ordering::SeqCst), 5);
+    for (collection, name, keys, partial) in [
+        (
+            AUDIT_LOG,
+            "audit_log_seq_unique",
+            doc! {"seq": 1},
+            Some(doc! {"seq": {"$exists": true}}),
+        ),
+        (STATE, "audit_single_head", doc! {"singleton": 1}, None),
+        (
+            OUTBOX,
+            "audit_outbox_order",
+            doc! {"chain_id": 1, "order": 1},
+            None,
+        ),
+        (
+            OUTBOX,
+            "audit_outbox_seq",
+            doc! {"chain_id": 1, "seq": 1},
+            None,
+        ),
+        (
+            PENDING,
+            "audit_operation_stage",
+            doc! {"event.operation_id": 1, "event.stage": 1},
+            None,
+        ),
+    ] {
+        let indexes: Vec<_> = db
+            .collection::<bson::Document>(collection)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let index = indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some(name)
+            })
+            .unwrap();
+        assert_eq!(index.keys, keys);
+        let options = index.options.as_ref().unwrap();
+        assert_eq!(options.unique, Some(true));
+        assert_eq!(options.partial_filter_expression, partial);
+    }
+    for (collection, name, keys) in [
+        (
+            OUTBOX,
+            "witnessed_at_1_order_1",
+            doc! {"witnessed_at": 1, "order": 1},
+        ),
+        (
+            PENDING,
+            "materialized_seq_1_order_1",
+            doc! {"materialized_seq": 1, "order": 1},
+        ),
+        (
+            crate::models::audit_effect_intent::COLLECTION_NAME,
+            "terminal_stage_1_terminal_order_1",
+            doc! {"terminal_stage": 1, "terminal_order": 1},
+        ),
+    ] {
+        let indexes: Vec<_> = db
+            .collection::<bson::Document>(collection)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let index = indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some(name)
+            })
+            .unwrap();
+        assert_eq!(index.keys, keys);
+        assert_ne!(index.options.as_ref().unwrap().unique, Some(true));
+    }
+    db.collection::<bson::Document>(OUTBOX)
+        .drop_index("audit_outbox_order")
+        .await
+        .unwrap();
+    builds.store(0, Ordering::SeqCst);
+    ensure_indexes(&db).await.unwrap();
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        5,
+        "no process readiness cache may hide lost constraints"
+    );
+    let indexes: Vec<_> = db
+        .collection::<bson::Document>(OUTBOX)
+        .list_indexes()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert!(
+        indexes
+            .iter()
+            .any(|index| index
+                .options
+                .as_ref()
+                .is_some_and(
+                    |options| options.name.as_deref() == Some("audit_outbox_order")
+                        && options.unique == Some(true)
+                ))
+    );
+}
+
+#[cfg(test)]
+#[path = "audit_profile_tests.rs"]
+mod profile;
