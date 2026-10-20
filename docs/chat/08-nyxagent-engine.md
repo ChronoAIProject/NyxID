@@ -789,9 +789,8 @@ key, and retention checks, and tool images retain their producing-turn fence.
 Ordinary Agent Keys, external OAuth plugin connections, exact/durable/async execution,
 and mounted copies of the OpenAPI document cannot use this capability.
 
-The managed `bitable_record_create_with_attachments` release contract is being
-implemented separately; use it only when the deployed server advertises it.
-It accepts closed `{fields, attachments}` JSON, validates the schema and
+The managed `bitable_record_create_with_attachments` accepts closed
+`{fields, attachments}` JSON, validates the schema and
 complete source photo set, reserves the content digests, uploads, then creates
 one record. One composite action card, when confirmation is required, binds
 the canonical JSON and all dependency contracts. Child requests run under the
@@ -802,11 +801,24 @@ agent override. The standalone upload does not provide these record-replay
 guarantees.
 
 The dispatch barrier durably records `dispatching` before the create send.
-There is no automatic create resend after that barrier. An `uncertain` result
-means **check the Base; NyxID will not create it again**. Do not retry through
-plain create or another connection. Successful replays return the stored
-record; duplicate-photo refusals name the existing record or write state.
-Terminal metadata protects identical photos for 400 days within the same
+There is no automatic create resend after that barrier. Success returns
+`{record_id, already_created:false}`; an authorized identical replay returns
+`{record_id, already_created:true}`, even after credential rotation. Active
+writes report `in progress; try again shortly`. An `uncertain` result reports
+`outcome unknown; check the Base; NyxID will not create it again`. Do not retry
+through plain create or another connection. Proven `failed_pre_dispatch` and
+`failed_definite` outcomes release reservations; `failed_definite` with
+`last_code: not_sent` means the create request never left NyxID, so a corrected
+new call may create once. Earlier uploads may have completed. A conflicting
+succeeded photo reports `Photo already belongs to record <record_id>; use
+bitable_record_update to change its fields`.
+
+An incomplete inbound photo set refuses with `N of M photos from that message
+could not be read; ask the owner to resend`. Attachment destinations must be
+attachment fields, number values must be finite JSON numbers, and selects must
+use existing options; receipt-specific bounds come from operation scopes.
+Managed permission errors identify the outbound service slug and connection
+label. Terminal metadata protects identical photos for 400 days within the same
 owner, Base, and table. See the [Lark Base guide](../site/cli/guides/connect-a-service.md#lark-base)
 for permissions, flag combinations, and the Receipt-Bot recipe, and
 [API discovery](../API_DISCOVERY.md) for trusted projection and discovery

@@ -101,12 +101,11 @@ This uses the user OAuth `/tasks/forward` API. The older `/tasks/transfer` opera
 
 ## Lark Base
 
-The standalone `bitable_media_upload` tool is implemented in this revision.
-`bitable_fields_list` and `bitable_record_create_with_attachments` describe the
-managed receipt-write release contract below; their publication and executor
-are being added separately. Use the managed workflow only after your deployed
-server advertises the composite. An absent tool is not permission to recreate
-it with raw uploads and record-create calls.
+NyxID provides `bitable_fields_list`, standalone `bitable_media_upload`, and
+managed `bitable_record_create_with_attachments` for Lark/Feishu Base workflows.
+Discover the tools on the selected connection. Attachment operations require
+the live owner-chat authority and feature flag described below; an absent tool
+is not permission to recreate it with raw uploads and record-create calls.
 
 ### Connect the account and grant Base access
 
@@ -157,9 +156,7 @@ the service connection access to write a Base.
 ### Enable only the required capabilities
 
 Both flags are per person and default off. Upgrade every replica and drain
-pre-release workers before enabling either flag. The matrix describes the
-completed release; attachment writes also require the corresponding tools and
-executor to be deployed.
+pre-release workers before enabling either flag.
 
 | `assistant:channel-media` | `assistant:attachment-writes` | Behavior |
 | --- | --- | --- |
@@ -185,10 +182,20 @@ MCP names and schemas instead of guessing a service prefix.
 
 The composite's JSON body is `{fields: object, attachments: {<field name>:
 [attachment_id, ...]}}`. It requires a nonempty attachment map and nonempty
-arrays, at most ten unique IDs and 50 MiB total, and complete photo sets from
-each inbound message. Set attachment fields through `attachments`, not
-`fields`. Use current dropdown options; an unknown option is refused rather
-than silently created. The managed route is
+arrays, at most ten unique IDs, 20 MiB per file and 50 MiB total, and complete
+photo sets from each inbound message. Missing or omitted source photos refuse
+the write with `N of M photos from that message could not be read; ask the
+owner to resend`. Repeated IDs or identical content under different IDs are
+refused before provider calls.
+
+The server reads at most five pages of 100 field definitions before uploading.
+Every referenced field must exist. Set attachment fields through `attachments`;
+they must have Base attachment type 17 and cannot also appear in `fields`.
+Number fields require finite JSON numbers; single-select strings and
+multi-select arrays must use existing option names. Unknown options are
+refused with `Base select option does not exist; options will not be created`.
+Receipt-specific required values, amount bounds and decimal precision come
+from the operation scope in the recipe below. The managed route is
 `POST /nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records` inside
 NyxID's trusted MCP execution, not a public Lark HTTP endpoint to call directly.
 
@@ -203,11 +210,27 @@ OpenAPI document cannot grant access to chat attachments.
 
 Managed create identifies photos by content within the same owner, Base app,
 and table, even when they are uploaded again in another conversation. An
-authorized identical successful replay returns the stored record. A changed
-receipt or overlapping batch containing a reserved photo is refused and names
-the existing record or write state. Use the existing record for corrections;
-there is no duplicate-photo override. Add a deliberate duplicate manually in
-Lark if needed.
+authorized identical successful replay returns the stored record even after
+credential rotation, without uploading or creating again. A changed receipt or
+overlapping batch containing a succeeded photo is refused with `Photo already
+belongs to record <record_id>; use bitable_record_update to change its fields`.
+Use that record for corrections; there is no duplicate-photo override. Add a
+deliberate duplicate manually in Lark if needed.
+
+| Result or recorded state | Meaning and next action |
+| --- | --- |
+| `{record_id, already_created:false}` | One new record was created. |
+| `{record_id, already_created:true}` | An identical successful write already created this record, including after credential rotation. |
+| `uploading` / `dispatching` before the deadline | `A Base write for this photo is in progress; try again shortly`. |
+| `uncertain` | `Base write outcome unknown; check the Base; NyxID will not create it again`. Check manually and stop. |
+| `failed_pre_dispatch` | No record create was dispatched; correcting the cause permits a new call. |
+| `failed_definite` | A documented provider refusal proves no record was created. Fix the cause before a new call. |
+| `failed_definite` with `last_code: not_sent` | The record-create request did not leave NyxID. Earlier reads/uploads may have completed; after fixing the local rejection, a new call may create once. |
+
+Permission failures for managed field reads, uploads and provider create
+refusals name the **outbound service slug and connection label**, with the
+numeric provider code. Fix that connection's scopes and Base access; inbound
+bot permissions do not supply outbound write authority.
 
 Identical-photo resend protection has a **400-day horizon**, independent of
 upload retention. Terminal write metadata and photo reservations remain for
@@ -215,10 +238,13 @@ upload retention. Terminal write metadata and photo reservations remain for
 both. These rules do not apply to records created outside the managed tool.
 
 After the create dispatch barrier, NyxID never automatically resends a create.
-For `uncertain`, **check the Base; NyxID will not create it again**. Do not
-re-call the composite, use plain create, change connections, or split the batch
-to work around that result. A definite refusal can be corrected only when the
-reported state proves no record was created.
+For `uncertain`, **outcome unknown; check the Base; NyxID will not create it
+again**. Do not re-call the composite, use plain create, change connections, or
+split the batch to work around that result. Failed pre-dispatch and definite
+attempts release their photo reservations; succeeded and uncertain attempts
+retain them. A retry reuses uploaded tokens only under the same connection,
+credential generation and operation contracts; rotation cannot reuse those
+tokens, while an already-succeeded identical replay still returns its record.
 
 ### Restrict a Receipt-Bot specialist
 

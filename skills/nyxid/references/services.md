@@ -87,12 +87,12 @@ idempotent read until access is proven.
 
 ## Lark Base receipt photos
 
-The standalone `bitable_media_upload` is implemented. The managed composite
-and `bitable_fields_list` are being added separately; discover them on the
-deployed server before offering a managed receipt-write workflow. Operation
-IDs are not complete MCP tool names: use the discovered name and schema for
-the exact connection. Do not emulate a missing composite with raw upload and
-record-create requests.
+NyxID provides `bitable_fields_list`, `bitable_media_upload`, and
+`bitable_record_create_with_attachments` on trusted Lark/Feishu catalog
+connections. Operation IDs are not complete MCP tool names: use the discovered
+name and schema for the exact connection. Attachment tools require the live
+owner chat and flag below. Do not emulate a missing composite with raw upload
+and record-create requests.
 
 Use `api-lark`/`api-feishu` for user OAuth or
 `api-lark-bot`/`api-feishu-bot` for app tenant tokens. Enable
@@ -113,18 +113,31 @@ In a live, non-guest NyxAgent owner chat:
    `bitable_record_create_with_attachments` with `{fields, attachments}`.
    Each attachment field maps to chat attachment IDs, not file URLs or raw
    provider handles. The composite requires a complete, nonempty photo set,
-   at most ten unique IDs and 50 MiB total, and validates fields before create.
+   at most ten unique IDs, 20 MiB per file and 50 MiB total. All field names
+   must exist; attachment destinations must be attachment fields, number values
+   must be finite JSON numbers, and select values must match current options.
+   Unknown options are refused, never created. An incomplete source set reports
+   `N of M photos from that message could not be read; ask the owner to resend`.
+   Ask for a complete resend; do not omit unreadable photos to force a create.
 3. Use standalone `bitable_media_upload` only when the task needs a
    `file_token` without creating a record. Supply `attachment_id`,
    `parent_type` (`bitable_image` or `bitable_file`), and `parent_node` (the
    Base app token). NyxID derives size, defaults the sanitized filename, and
    supplies `extra.drive_route_token`. This tool has no managed record ledger.
-4. After a composite `uncertain` outcome, check the Base and stop. **NyxID
-   will not create it again.** Never re-call, switch connections, split the
-   photos, or use plain `bitable_record_create` to bypass that decision.
-5. An identical successful replay returns the stored record. A conflicting
-   duplicate names the existing record or write state; use that record for
-   corrections rather than asking the owner to resend the same photo.
+4. Success returns `{record_id, already_created:false}`; an authorized
+   identical replay returns `{record_id, already_created:true}`, even after
+   credential rotation. Use the returned record as proof of the result.
+5. An active write reports `in progress; try again shortly`. For `uncertain`,
+   follow `outcome unknown; check the Base; NyxID will not create it again`.
+   Never re-call, switch connections, split the photos, or use plain
+   `bitable_record_create` to bypass uncertainty or a duplicate barrier. A
+   conflicting succeeded photo reports `Photo already belongs to record
+   <record_id>; use bitable_record_update to change its fields`.
+6. `failed_pre_dispatch` and `failed_definite` release reservations. The latter
+   includes `last_code: not_sent`: the create request did not leave NyxID,
+   although earlier uploads may have completed. A corrected new call may create
+   once. Managed permission errors name the outbound service slug and connection
+   label; fix that principal's scopes and Base access.
 
 Managed identical-photo protection lasts 400 days within the same owner,
 Base app, and table. It uses content bytes, so a new attachment ID or another
@@ -147,7 +160,7 @@ create or standalone upload as a workaround. The complete JSON and supported
 API/CLI authoring routes are in
 [the operation-scope recipe](https://github.com/ChronoAIProject/NyxID/blob/main/docs/AGENT_OPERATION_SCOPES.md#receipt-bot-recipe).
 The [Lark Base guide](https://github.com/ChronoAIProject/NyxID/blob/main/docs/site/cli/guides/connect-a-service.md#lark-base)
-defines the flag matrix and deployment status. Human owners author nested
+defines the flag matrix and rollout/rollback procedure. Human owners author nested
 limits through the API; the grants UI preserves them when selecting operations.
 
 ## OAuth consent service grants and resource URIs
