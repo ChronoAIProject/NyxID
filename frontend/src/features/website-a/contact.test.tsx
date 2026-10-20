@@ -1,3 +1,4 @@
+import { renderToString } from "react-dom/server";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContactSection } from "./contact";
@@ -53,9 +54,7 @@ describe("Contact email-client handoff", () => {
       );
       expect(screen.getByLabelText(topic!)).toHaveValue("bundle");
       expect(screen.getByLabelText(new RegExp(company!))).not.toBeRequired();
-      fireEvent.click(
-        screen.getByRole("button", { name: submit }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: submit }));
       expect(await screen.findAllByRole("alert")).toHaveLength(3);
       expect(openContactMailto).not.toHaveBeenCalled();
       fireEvent.change(screen.getByLabelText(name!), {
@@ -67,9 +66,7 @@ describe("Contact email-client handoff", () => {
       fireEvent.change(screen.getByLabelText(message!), {
         target: { value: "A bundle question" },
       });
-      fireEvent.click(
-        screen.getByRole("button", { name: submit }),
-      );
+      fireEvent.click(screen.getByRole("button", { name: submit }));
       expect(await screen.findByRole("status")).toHaveTextContent(
         language === "zh" ? "尚未发送" : "has not been sent",
       );
@@ -87,7 +84,11 @@ describe("Contact email-client handoff", () => {
   );
 
   it("keeps only the form and Discord, without scripted chat", () => {
-    render(<ContactSection><a href="https://discord.gg/QMvcs8UQBW">Discord</a></ContactSection>);
+    render(
+      <ContactSection>
+        <a href="https://discord.gg/QMvcs8UQBW">Discord</a>
+      </ContactSection>,
+    );
     expect(screen.getByLabelText("Topic")).toHaveValue("bundle");
     expect(screen.queryByRole("log")).not.toBeInTheDocument();
     expect(screen.queryByText(/Scripted FAQ demo/)).not.toBeInTheDocument();
@@ -125,4 +126,26 @@ describe("Contact email-client handoff", () => {
       screen.queryByText(/Thanks, message sent|已发送，谢谢/),
     ).not.toBeInTheDocument();
   });
+});
+
+it("F01 leaves the SSR form inert with an independent email fallback", () => {
+  const html = renderToString(
+    <ContactSection>
+      <span>Discord</span>
+    </ContactSection>,
+  );
+  const root = document.createElement("div");
+  root.innerHTML = html;
+  const form = root.querySelector("form")!;
+  expect(form.getAttribute("action")).toBe(
+    "mailto:" + websiteConfig.contactEmail,
+  );
+  expect(form.getAttribute("method")).toBe("post");
+  expect(form.querySelector("fieldset")).toHaveAttribute("disabled");
+  expect(form.querySelector('button[type="submit"]')).toHaveAttribute(
+    "disabled",
+  );
+  expect(
+    root.querySelector(`a[href="mailto:${websiteConfig.contactEmail}"]`),
+  ).toBeTruthy();
 });

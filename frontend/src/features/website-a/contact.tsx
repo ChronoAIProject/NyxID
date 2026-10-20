@@ -24,6 +24,11 @@ const noSubscribe = () => () => {};
 function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
   const { language } = useWebsite();
   const zh = language === "zh";
+  const interactive = useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  );
   const [mailClient, setMailClient] = useState<
     "idle" | "requested" | "unavailable"
   >("idle");
@@ -73,102 +78,112 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
       <form
         id="cForm"
         noValidate
+        action={contactEmailHref(websiteConfig.contactEmail)}
+        method="post"
+        encType="text/plain"
         aria-describedby="contact-delivery-note"
         onSubmit={form.handleSubmit(composeMessage)}
       >
-        <div className="f2">
+        <fieldset disabled={!interactive} style={{ display: "contents" }}>
+          <div className="f2">
+            <div>
+              <label className="auth-label" htmlFor="cName">
+                {zh ? "姓名" : "Name"}
+              </label>
+              <input
+                id="cName"
+                className="c-input"
+                autoComplete="name"
+                required
+                {...form.register("name")}
+                {...field("name")}
+              />
+              {error("name")}
+            </div>
+            <div>
+              <label className="auth-label" htmlFor="cEmail">
+                {zh ? "工作邮箱" : "Work email"}
+              </label>
+              <input
+                id="cEmail"
+                className="c-input"
+                type="email"
+                autoComplete="email"
+                required
+                {...form.register("email")}
+                {...field("email")}
+              />
+              {error("email")}
+            </div>
+          </div>
+          <div className="f2">
+            <div>
+              <label className="auth-label" htmlFor="cCo">
+                {zh ? "公司" : "Company"}{" "}
+                <span className="small">{zh ? "（选填）" : "(optional)"}</span>
+              </label>
+              <input
+                id="cCo"
+                className="c-input"
+                autoComplete="organization"
+                {...form.register("company")}
+              />
+              {error("company")}
+            </div>
+            <div>
+              <label className="auth-label" htmlFor="cTopic">
+                {zh ? "主题" : "Topic"}
+              </label>
+              <select
+                id="cTopic"
+                className="c-input"
+                {...form.register("topic")}
+                {...field("topic")}
+              >
+                <option value="">{zh ? "选择主题" : "Choose a topic"}</option>
+                {contactTopics.map(([value, en, cn]) => (
+                  <option key={value} value={value}>
+                    {zh ? cn : en}
+                  </option>
+                ))}
+              </select>
+              {error("topic")}
+            </div>
+          </div>
           <div>
-            <label className="auth-label" htmlFor="cName">
-              {zh ? "姓名" : "Name"}
+            <label className="auth-label" htmlFor="cMsg">
+              {zh ? "留言" : "Message"}
             </label>
-            <input
-              id="cName"
+            <textarea
+              id="cMsg"
               className="c-input"
-              autoComplete="name"
+              rows={5}
               required
-              {...form.register("name")}
-              {...field("name")}
+              {...form.register("message")}
+              {...field("message")}
             />
-            {error("name")}
+            {error("message")}
           </div>
-          <div>
-            <label className="auth-label" htmlFor="cEmail">
-              {zh ? "工作邮箱" : "Work email"}
-            </label>
-            <input
-              id="cEmail"
-              className="c-input"
-              type="email"
-              autoComplete="email"
-              required
-              {...form.register("email")}
-              {...field("email")}
-            />
-            {error("email")}
-          </div>
-        </div>
-        <div className="f2">
-          <div>
-            <label className="auth-label" htmlFor="cCo">
-              {zh ? "公司" : "Company"}{" "}
-              <span className="small">{zh ? "（选填）" : "(optional)"}</span>
-            </label>
-            <input
-              id="cCo"
-              className="c-input"
-              autoComplete="organization"
-              {...form.register("company")}
-            />
-            {error("company")}
-          </div>
-          <div>
-            <label className="auth-label" htmlFor="cTopic">
-              {zh ? "主题" : "Topic"}
-            </label>
-            <select
-              id="cTopic"
-              className="c-input"
-              {...form.register("topic")}
-              {...field("topic")}
-            >
-              <option value="">{zh ? "选择主题" : "Choose a topic"}</option>
-              {contactTopics.map(([value, en, cn]) => (
-                <option key={value} value={value}>
-                  {zh ? cn : en}
-                </option>
-              ))}
-            </select>
-            {error("topic")}
-          </div>
-        </div>
-        <div>
-          <label className="auth-label" htmlFor="cMsg">
-            {zh ? "留言" : "Message"}
-          </label>
-          <textarea
-            id="cMsg"
-            className="c-input"
-            rows={5}
-            required
-            {...form.register("message")}
-            {...field("message")}
-          />
-          {error("message")}
-        </div>
-        <button className="btn p lg" type="submit" style={{ width: "100%" }}>
-          {zh ? "打开邮件客户端" : "Open email app"}
-        </button>
-        {mailClient !== "idle" && (
-          <p className="small" role="status">
-            {mailClient === "requested"
-              ? zh
-                ? "已请求打开邮件客户端，邮件尚未发送。请在客户端确认并发送；若未打开，可使用上方邮箱链接。"
-                : "Email app requested; your message has not been sent. Review and send in your email app, or use the address above if it did not open."
-              : zh
-                ? "未能打开邮件客户端。请使用上方邮箱链接联系团队，填写内容仍留在此页。"
-                : "Could not open your email app. Use the address above; your entries remain on this page."}
-          </p>
-        )}
+          <button
+            disabled={!interactive}
+            className="btn p lg"
+            type="submit"
+            style={{ width: "100%" }}
+          >
+            {zh ? "打开邮件客户端" : "Open email app"}
+          </button>
+          {mailClient !== "idle" && (
+            <p className="small" role="status">
+              {mailClient === "requested"
+                ? zh
+                  ? "已请求打开邮件客户端，邮件尚未发送。请在客户端确认并发送；若未打开，可使用上方邮箱链接。"
+                  : "Email app requested; your message has not been sent. Review and send in your email app, or use the address above if it did not open."
+                : zh
+                  ? "未能打开邮件客户端。请使用上方邮箱链接联系团队，填写内容仍留在此页。"
+                  : "Could not open your email app. Use the address above; your entries remain on this page."}
+            </p>
+          )}
+        </fieldset>
       </form>
     </div>
   );

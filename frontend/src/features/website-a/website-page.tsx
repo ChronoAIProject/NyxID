@@ -30,7 +30,13 @@ import { VisualMotionProvider } from "./visuals/motion-provider";
 const English = lazy(() => import("./generated/en"));
 const Chinese = lazy(() => import("./generated/zh"));
 
-function Website({ children }: { children?: ReactNode }) {
+function Website({
+  children,
+  navigationRevision,
+}: {
+  children?: ReactNode;
+  navigationRevision?: number;
+}) {
   const { mode } = useVisualMotion();
   const location = useLocation();
   // Canonical HTML has no visitor query. The first client tree must match it;
@@ -42,6 +48,9 @@ function Website({ children }: { children?: ReactNode }) {
   }, [location.pathname, location.searchStr, location.hash]);
   const { locale: language, route } = parsePublicPath(location.pathname);
   const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [navigationRevision]);
   const [filters, setFilters] = useState<Record<string, string>>({
     catF: "all",
     chF: "",
@@ -191,10 +200,16 @@ function Website({ children }: { children?: ReactNode }) {
   );
 }
 
-export function WebsitePage({ children }: { children?: ReactNode }) {
+export function WebsitePage({
+  children,
+  navigationRevision,
+}: {
+  children?: ReactNode;
+  navigationRevision?: number;
+}) {
   return (
     <VisualMotionProvider>
-      <Website>{children}</Website>
+      <Website navigationRevision={navigationRevision}>{children}</Website>
     </VisualMotionProvider>
   );
 }

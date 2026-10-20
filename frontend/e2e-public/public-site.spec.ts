@@ -160,3 +160,190 @@ test("retains authenticated home redirects and Docs controls", async ({
   ).toBeVisible();
   await expect(page.locator('aside a[href^="#"]')).not.toHaveCount(0);
 });
+
+test("F01 contact remains inert without entry JavaScript and never submits personal data to the origin", async ({
+  browser,
+  page,
+}) => {
+  for (const mode of ["disabled", "failed", "delayed"] as const) {
+    const context = await browser.newContext({
+      javaScriptEnabled: mode !== "disabled",
+    });
+    const target = await context.newPage();
+    let release = () => {};
+    if (mode !== "disabled") {
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await target.route(/\/assets\/index-[^/]+\.js/, async (route) => {
+        if (mode === "delayed") await held;
+        await route.abort();
+      });
+    }
+    const submissions: string[] = [];
+    target.on("request", (request) => {
+      if (
+        request.url().includes("PERSONAL_SENTINEL") ||
+        request.postData()?.includes("PERSONAL_SENTINEL")
+      )
+        submissions.push(request.url());
+    });
+    try {
+      await target.goto("http://127.0.0.1:4188/contact", {
+        waitUntil: "commit",
+      });
+      await expect(target.locator("#cForm fieldset")).toBeDisabled();
+      await expect(
+        target.locator('#cForm button[type="submit"]'),
+      ).toBeDisabled();
+      await target.locator("#cName").evaluate((input: HTMLInputElement) => {
+        input.value = "PERSONAL_SENTINEL";
+      });
+      for (const control of await target
+        .locator("#cForm input,#cForm select,#cForm textarea")
+        .all())
+        await expect(control).toBeDisabled();
+      await expect(target.locator("#cForm")).toHaveAttribute(
+        "action",
+        "mailto:contact@chrono-ai.fun",
+      );
+      await target.keyboard.press("Enter");
+      await expect(
+        target.locator('a[href="mailto:contact@chrono-ai.fun"]').first(),
+      ).toBeVisible();
+      expect(submissions).toEqual([]);
+      expect(new URL(target.url()).search).toBe("");
+    } finally {
+      release();
+      await context.close();
+    }
+  }
+  await page.goto("/contact");
+  await expect(page.locator('#cForm button[type="submit"]')).toBeEnabled();
+  await page.locator("#cName").fill("PERSONAL_SENTINEL");
+  await page.locator("#cEmail").fill("personal@example.test");
+  await page.locator("#cTopic").selectOption("bundle");
+  await page.locator("#cMsg").fill("A message to test the email handoff.");
+  const leaked: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.url().startsWith("http://127.0.0.1:4188") &&
+      (request.url().includes("PERSONAL_SENTINEL") ||
+        request.postData()?.includes("PERSONAL_SENTINEL"))
+    )
+      leaked.push(request.url());
+  });
+  await page.locator("#cName").press("Enter");
+  await expect(page.getByRole("status")).toContainText("Email app requested");
+  expect(leaked).toEqual([]);
+  expect(new URL(page.url()).search).toBe("");
+});
+
+test("F02 and F04 preserve ordered query strings, document identity and mobile menu behavior", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 700, height: 900 });
+  const query =
+    "?code=123&flag=true&nil=null&json=%7B%22a%22%3A1%7D&tag=first&x=middle&tag=second&encoded=a%2Bb%20c&return_to=%2Fkeys%3Ftab%3Dactive";
+  const entries = Array.from(new URLSearchParams(query));
+  await page.goto("/" + query);
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+  await page.evaluate(() => {
+    (window as unknown as { identity: string }).identity = "same-document";
+  });
+  for (const selector of [
+    'nav a[data-nav="security"]',
+    'nav a[data-nav="solutions"]',
+    'nav a[data-lang="zh"]',
+  ]) {
+    await page.locator("#burger").click();
+    await expect(page.locator("#burger")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    const link = page.locator(selector);
+    expect(
+      Array.from(
+        new URL((await link.getAttribute("href"))!, page.url()).searchParams,
+      ),
+    ).toEqual(entries);
+    await link.click();
+    await expect(page.locator("#burger")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(Array.from(new URL(page.url()).searchParams)).toEqual(entries);
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { identity: string }).identity,
+      ),
+    ).toBe("same-document");
+  }
+  for (const direction of ["goBack", "goForward"] as const) {
+    await page.locator("#burger").click();
+    await page[direction]();
+    await expect(page.locator("#burger")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(Array.from(new URL(page.url()).searchParams)).toEqual(entries);
+  }
+  await page.locator("#burger").click();
+  await page
+    .locator('nav a[data-nav="security"]')
+    .click({ modifiers: ["Control"] });
+  await expect(page.locator("#burger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  const login = page.locator('nav a[href^="/login"]').first();
+  expect(
+    Array.from(
+      new URL((await login.getAttribute("href"))!, page.url()).searchParams,
+    ),
+  ).toEqual(entries);
+});
+
+test("F03 retries a failed Docs fetch and recovers a failed route import by explicit reload", async ({
+  page,
+}) => {
+  let recovered = false,
+    reads = 0;
+  await page.route("**/docs/ai/guides/agent-isolation.md", async (route) => {
+    reads++;
+    if (!recovered)
+      await route.fulfill({ status: 503, body: "Temporarily unavailable" });
+    else await route.continue();
+  });
+  await page.goto("/docs");
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+  await page
+    .locator('a[href="/docs/ai/guides/agent-isolation"]')
+    .first()
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("header")).toBeVisible();
+  const before = reads;
+  recovered = true;
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.locator("h1")).toContainText("Agent");
+  expect(reads).toBe(before + 1);
+  let imports = 0,
+    allow = false;
+  await page.route(/\/assets\/SecurityPage-[^/]+\.js/, async (route) => {
+    imports++;
+    if (allow) await route.continue();
+    else await route.abort();
+  });
+  await page.goto("/security");
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeVisible();
+  const rejected = imports;
+  allow = true;
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.locator("h1")).toContainText("passwords");
+  expect(imports).toBeGreaterThan(rejected);
+});

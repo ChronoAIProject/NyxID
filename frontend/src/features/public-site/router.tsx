@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import {
   createRootRoute,
@@ -8,7 +8,15 @@ import {
   Outlet,
   useLoaderData,
   useLocation,
+  useRouter,
 } from "@tanstack/react-router";
+import {
+  PublicSearchContext,
+  parsePublicSearch,
+  stringifyPublicSearch,
+} from "./search";
+import { isAssetLoadError, retryAfterAssetError } from "@/lib/chunk-recovery";
+import { DocsLayout } from "../docs/docs-layout-view";
 import { WebsitePage } from "../website-a/website-page";
 import { PublicDocument, parseDoc } from "./public-document";
 import { parsePublicPath, publishedRoute } from "./publication";
@@ -100,12 +108,60 @@ function Content() {
 }
 function PublicLayout() {
   const location = useLocation();
+  const router = useRouter();
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  useEffect(
+    () =>
+      router.subscribe("onResolved", () => {
+        if (router.state.matches.every((match) => match.status === "success"))
+          setNavigationRevision((value) => value + 1);
+      }),
+    [router],
+  );
+  return (
+    <PublicSearchContext.Provider value={true}>
+      {docPaths.has(location.pathname) ? (
+        <Outlet />
+      ) : (
+        <WebsitePage navigationRevision={navigationRevision}>
+          <Outlet />
+        </WebsitePage>
+      )}
+    </PublicSearchContext.Provider>
+  );
+}
+function PublicError({ error, reset }: { error: unknown; reset: () => void }) {
+  const router = useRouter();
+  const location = useLocation();
+  const [retrying, setRetrying] = useState(false);
+  async function retry() {
+    if (isAssetLoadError(error)) {
+      retryAfterAssetError();
+      return;
+    }
+    setRetrying(true);
+    try {
+      await router.invalidate({ sync: true });
+      reset();
+    } finally {
+      setRetrying(false);
+    }
+  }
+  const body = (
+    <section className="p-12" role="alert">
+      <h1>Page unavailable</h1>
+      <p>Please retry loading this page.</p>
+      <button disabled={retrying} onClick={() => void retry()}>
+        Retry
+      </button>
+      <a href="/">NyxID home</a>
+    </section>
+  );
+  const tab = docTabForSlug(location.pathname.slice(6));
   return docPaths.has(location.pathname) ? (
-    <Outlet />
+    <DocsLayout activeTab={tab === "shared" ? "ai" : tab}>{body}</DocsLayout>
   ) : (
-    <WebsitePage>
-      <Outlet />
-    </WebsitePage>
+    body
   );
 }
 export function publicRouter(
@@ -125,22 +181,13 @@ export function publicRouter(
     staleTime: Infinity,
     component: Content,
     pendingComponent: () => <p role="status">Loading NyxID…</p>,
-    errorComponent: ({ error, reset }) => (
-      <main className="p-12">
-        <h1>Page unavailable</h1>
-        <p>
-          {error instanceof Error
-            ? "Please retry loading this page."
-            : "Please reload."}
-        </p>
-        <button onClick={reset}>Retry</button>
-        <a href="/">NyxID home</a>
-      </main>
-    ),
+    errorComponent: PublicError,
   });
   return createRouter({
     routeTree: root.addChildren([content]),
     history: path ? createMemoryHistory({ initialEntries: [path] }) : undefined,
+    parseSearch: parsePublicSearch,
+    stringifySearch: stringifyPublicSearch,
     defaultPreload: false,
     defaultPendingMs: 10000,
     scrollRestoration: true,
