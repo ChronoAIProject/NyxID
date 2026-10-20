@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { OutputAsset, OutputBundle, OutputChunk } from "rollup";
 import type { Plugin } from "vite";
+import { frontendSourceIdentity } from "../scripts/source-identity.ts";
 import {
   CREDENTIAL_ACCEPT_FINGERPRINT_PREFIX,
   CREDENTIAL_ACCEPT_HTML_ROLE,
@@ -169,6 +170,7 @@ function assertHtmlScriptsCovered(html: string, expectedScripts: Iterable<string
 }
 
 export function releaseIntegrityPlugin(): Plugin {
+  const identity = frontendSourceIdentity();
   return {
     name: "nyxid-release-integrity",
     enforce: "post",
@@ -215,13 +217,9 @@ export function releaseIntegrityPlugin(): Plugin {
         htmlBytes,
         scripts: scriptBytes,
         appVersion: process.env.npm_package_version ?? "0.0.0",
-        gitCommit:
-          process.env.GITHUB_SHA ??
-          process.env.SOURCE_COMMIT ??
-          process.env.NYXID_GIT_COMMIT ??
-          process.env.VITE_GIT_COMMIT ??
-          "unknown",
-        generatedAt: releaseBuildTime(),
+        gitCommit: identity.commit ?? "unknown",
+        generatedAt: identity.source_date_epoch === null ? new Date().toISOString() :
+          new Date(identity.source_date_epoch * 1000).toISOString(),
       });
 
       this.emitFile({
@@ -241,11 +239,4 @@ export function releaseIntegrityPlugin(): Plugin {
       fs.rmSync(placeholder, { force: true });
     },
   };
-}
-
-function releaseBuildTime(): string {
-  const epoch = process.env.SOURCE_DATE_EPOCH;
-  if (!epoch) return new Date().toISOString();
-  if (!/^\d{1,10}$/.test(epoch)) throw new Error("Invalid SOURCE_DATE_EPOCH");
-  return new Date(Number(epoch) * 1000).toISOString();
 }

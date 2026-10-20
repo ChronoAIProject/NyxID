@@ -14,7 +14,12 @@ use std::io::{BufRead, BufReader, Write};
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
+mod build_identity {
+    include!(concat!(env!("OUT_DIR"), "/nyxid_build_identity.rs"));
+}
+
 fn main() -> std::io::Result<()> {
+    build_identity::retain();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let reader = BufReader::new(stdin.lock());

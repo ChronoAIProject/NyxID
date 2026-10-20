@@ -102,6 +102,10 @@ RUN --mount=type=cache,id=nyxid-machine-target-${TARGETARCH},target=/build/targe
 # Ubuntu LTS with signed Debian Chromium packages (Ubuntu's chromium is a snap).
 # Debian bookworm packages use an older glibc ABI compatible with Ubuntu noble.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS desktop
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/

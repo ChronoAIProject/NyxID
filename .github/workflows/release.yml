@@ -203,6 +203,14 @@ jobs:
           python3 scripts/run-dist-build.py --export "$RUNNER_TEMP/release-source" \
             --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --mode local --target "$TARGET" \
             --evidence "$RUNNER_TEMP/build-evidence/$TARGET"
+      - name: Require final stripped CLI archive source identity
+        env:
+          TARGET: ${{ matrix.targets[0] }}
+        run: |
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          python3 scripts/check-cli-archive-identity.py --plan "$RUNNER_TEMP/release-plan/publication-plan.json" \
+            --artifacts "$RUNNER_TEMP/build-evidence/$TARGET/artifacts" --target "$TARGET" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
       - name: "Upload artifacts"
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

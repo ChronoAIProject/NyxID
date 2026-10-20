@@ -45,6 +45,10 @@ ARG TARGETARCH
 RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
 
 FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS runtime
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 
 USER root
 COPY scripts/apk-input-install.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/

@@ -8,9 +8,9 @@ not claim upstream image signatures. Dockerfiles retain readable version tags
 alongside the immutable index digests. Dependabot proposes updates; changed
 pins also require refreshed resolution receipts and validation.
 
-The repository toolchain is Rust 1.98.1. Pinning dtolnay's Action requires an
-explicit `toolchain` input because its full commit no longer communicates a
-version tag. Rust builds enforce Cargo.lock, including dependency-cache builds.
+The repository toolchain is Rust 1.98.1. dtolnay's Action uses the reviewed
+version-specific commit and supported component inputs; its pinned implementation
+selects 1.98.1. Rust builds enforce Cargo.lock, including dependency-cache builds.
 The separately locked machine context spike retains its own lockfile.
 
 `scripts/bootstrap-build-tool.py` installs cargo-dist 0.30.0 from a committed
@@ -33,6 +33,50 @@ The Glama reference image builds the supplied reviewed source context with a
 pinned Rust image and Cargo.lock. Operators copying this definition into its
 external UI must select the same immutable repository revision. It no longer
 clones a moving default branch or executes an unverified Rust installer.
+Use `scripts/build-local-image.py --file Dockerfile.glama --tag <local-tag>`
+from a clean checkout to export the exact committed source and supply both the
+full commit and commit epoch. Direct external builders must supply the same
+`NYXID_GIT_HASH` and `SOURCE_DATE_EPOCH` arguments from that committed export.
+An empty, abbreviated or conflicting identity fails the build.
+
+Application images retain `org.opencontainers.image.revision` and
+`io.nyxid.source-date-epoch` labels. These labels are checked against an
+independent source export and the actual final executable or assets. Backend,
+CLI, updater and mcp-demo executables retain the shared versioned identity
+section after stripping. The verifier requires the exact package/version,
+architecture/ABI, full commit, epoch and `exported` source state; local
+`git-unverified`, dirty and unknown identities cannot pass a publication check.
+The scratch updater additionally requires a static ELF without an interpreter.
+
+The frontend emits `build-identity.json` from the same commit/epoch used for
+its credential manifest. Final-image checks require matching update metadata,
+existing initial assets, the complete final composition file set and hashes,
+and the committed frontend lock hash. Developer builds can remain explicitly
+unverified. Identity metadata identifies a build; authenticated signatures and
+actual-artifact SBOMs remain separate required release controls.
+
+`Artifact Packaging` is required by PR `CI Pipeline` and runs weekly with
+read-only permissions and no private context or secrets. It extracts the actual
+backend/frontend runtime images on both native Linux architectures, checks
+credential-page parity and verifies each final image identity. `Shipped Image
+Identity` covers node, machine, updater production, machine-node-only,
+machine-hosted's public desktop stage and mcp-demo on both architectures.
+`CLI Archive Identity` builds the real stripped release archives on all four
+planned Darwin/GNU targets and inspects their packaged executable bytes.
+Changes to these verifiers and public docs build inputs select the PR jobs too.
+The public image publisher repeats identity inspection on each exact built
+digest before attestation/tag promotion; the CLI release producer checks its
+stripped archive before uploading it.
+
+PR evidence for `cli/Dockerfile.machine-hosted` ends at the real public
+`desktop` stage. A publisher with private CMA context must invoke
+`scripts/check-image-identity.py --component machine-hosted` on the final
+`hosted` image after all private layers and before publication, supplying the
+same exported source root, commit, epoch, native architecture and locked
+`nyxid-artifact-info` inspector. The repository's current `Publish Images`
+matrix covers five public components and has no private hosted publisher;
+the final private publisher must be identified and its required gate wired
+before that coverage can be accepted. Private patch bytes remain external.
 
 The two machine test Dockerfiles deliberately accept `MACHINE_IMAGE` from the
 exact same CI build, rather than claiming a preexisting release digest. The

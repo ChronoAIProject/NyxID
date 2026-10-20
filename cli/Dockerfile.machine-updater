@@ -36,6 +36,10 @@ RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/bui
     --mount=type=cache,id=nyxid-machine-registry,target=/usr/local/cargo/registry,sharing=locked \
     cargo auditable build --locked --release -p nyxid-machine-updater && cp target/release/nyxid-machine-updater /nyxid-machine-updater
 FROM scratch AS production
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 COPY --from=builder /nyxid-machine-updater /nyxid-machine-updater
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 ENTRYPOINT ["/nyxid-machine-updater"]

@@ -45,6 +45,10 @@ RUN cargo auditable build --locked --release -p nyxid-cli --bin nyxid \
 # Ubuntu LTS gives the fixed profile the ordinary shell/file tooling required
 # by the MVP while keeping the process non-root for command execution.
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 ENV DEBIAN_FRONTEND=noninteractive \
     NYXID_MACHINE_MANAGED=1 \
     NYXID_MACHINE_CONTAINER=1 \

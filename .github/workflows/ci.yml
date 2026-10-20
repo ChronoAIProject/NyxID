@@ -64,6 +64,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       backend_image: ${{ steps.filter.outputs.backend_image }}
+      packaging: ${{ steps.filter.outputs.packaging }}
       apt: ${{ steps.filter.outputs.apt }}
       apk: ${{ steps.filter.outputs.apk }}
       catalogs: ${{ steps.filter.outputs.catalogs }}
@@ -94,6 +95,14 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            packaging:
+              - 'scripts/*identity*'
+              - 'scripts/*artifacts*'
+              - 'scripts/*packaging*'
+              - 'scripts/*credential*'
+              - 'scripts/*publication*'
+              - 'scripts/*build*.py'
+              - 'docs/site/**'
             catalogs:
               - 'scripts/*catalog*'
               - 'scripts/*build-input*'
@@ -660,7 +669,7 @@ jobs:
   artifact-packaging:
     name: Artifact Packaging
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true'
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/artifact-packaging.yml

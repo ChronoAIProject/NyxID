@@ -122,6 +122,10 @@ RUN npm run build:credential-accept
 
 # ── Runtime ─────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 
 COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- ca-certificates curl

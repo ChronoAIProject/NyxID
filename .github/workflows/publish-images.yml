@@ -162,6 +162,21 @@ jobs:
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
 
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - name: Require final publication image source identity before attestation and promotion
+        env:
+          IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          docker pull --platform "$PLATFORM" "$IMAGE"
+          python3 scripts/check-image-identity.py --image "$IMAGE" --component "$COMPONENT" \
+            --arch "${PLATFORM#linux/}" --source-root "$RUNNER_TEMP/image-source/source" \
+            --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
       - name: Verify machine browser and desktop
         if: matrix.component == 'nyxid-node-machine'
         timeout-minutes: 10

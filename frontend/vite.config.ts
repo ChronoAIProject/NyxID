@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import { frontendSourceIdentity, sourceIdentityPlugin } from "./scripts/source-identity.ts"
 import { defineConfig, type Plugin } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
@@ -244,7 +245,7 @@ function docsSync(): Plugin {
 // reload, while a reload landing on the SAME build stops instead of looping.
 // `SOURCE_COMMIT` lets a build pipeline pin it to a commit; otherwise the config
 // evaluation time is enough, since a new evaluation means a new build.
-const SOURCE_COMMIT = process.env.SOURCE_COMMIT || process.env.NYXID_GIT_HASH || null
+const SOURCE_COMMIT = frontendSourceIdentity().commit
 const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
@@ -252,6 +253,7 @@ export default defineConfig({
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(frontendRoot),
     buildVersion(BUILD_ID, SOURCE_COMMIT),
+    sourceIdentityPlugin(),
     shippedComposition("spa"),
   ],
   define: {

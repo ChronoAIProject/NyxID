@@ -53,6 +53,10 @@ RUN cargo auditable build --locked --release -p nyxid-cli
 
 # -- Stage 2: Runtime -------------------------------------------------------
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+ARG NYXID_GIT_HASH
+ARG SOURCE_DATE_EPOCH
+LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
+      io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 
 # Only ca-certificates needed at runtime. No libdbus -- keychain is not
 # usable in Docker (no secret-service daemon). Node agent uses the file

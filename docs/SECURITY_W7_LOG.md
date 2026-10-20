@@ -97,3 +97,16 @@
 - A fresh locked scratch npm install and actual credential build pass; all five output files validate. Shared dependency symlinks were unsuitable for source attribution and were replaced only in scratch.
 - Docker extraction and native image builds require Artifact Packaging Policy and Backend Credential Packaging (amd64/arm64) on the PR.
 - Signature verification remains C-7; this check binds the actual credential manifest bytes that signing must consume.
+
+## C-4b — final application source identity
+- All application runtime images carry full revision/epoch labels; mcp-demo retains the shared versioned identity section after stripping.
+- Frontend emits strict commit/epoch metadata; credential manifests share the same validated source identity and deterministic timestamp.
+- Actual extracted executables must match package/version/commit/epoch/exported state and native architecture/ABI; scratch updater must be static.
+- Actual frontend assets require matching metadata, initial assets, exact composition closure/hashes and committed source-lock binding.
+- Required read-only PR/weekly jobs build eight public image subjects on both arches (backend/frontend together), plus four actual stripped CLI archives.
+- Public image publication repeats final identity inspection before attestation/promotion; CLI release checks the packaged binary before upload.
+- Local suites: identity16, credential21, helpers26, pins20, image caller3, APT21, APK43, hosted20, wiring10, YAML9, source7, inspector2, archives5, dist6, Node4 (213/0).
+- Actual locked scratch frontend/credential builds and final-file verification pass; actual mcp-demo build/strip retains git-dirty local identity; no official artifact claim.
+- YAML/permissions/input policies, Python syntax, Rust 2024 formatting and diff checks pass; no local Docker, backend suite, push or remote workflow execution.
+- Private hosted final-image checker is ready; no private hosted publisher exists in this checkout or workflow inventory. Caller identification/integration remains pending PM.
+- C-4c built-image worklet/CSP and C-4d real Docker CLI paths remain next; private CMA patch bytes and other streams' paths are untouched.
