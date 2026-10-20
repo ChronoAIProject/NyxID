@@ -70,6 +70,10 @@ def require_gates(data):
                      '--compare-image nyxid-credential-frontend:ci', '--source-root', '--commit', '--epoch'):
         if required not in text:
             raise ValueError('actual image credential extraction/parity required')
+    health = [step for step in jobs['credentials']['steps'] if 'scripts/check-backend-health.py' in step.get('run', '')]
+    if len(health) != 1 or 'if' in health[0] or health[0].get('continue-on-error') or any(
+            text not in health[0]['run'] for text in ('start-test-mongodb.sh', '--image nyxid-credential-backend:ci', '--database-url')):
+        raise ValueError('both final backend images must run a real server and its shell-free health check')
     if set(jobs['packaging-pass']['needs']) != set(jobs) - {'packaging-pass'}:
         raise ValueError('packaging aggregator must require every job')
     if 'credential-parity' not in publisher['jobs']['merge']['needs'] or \
@@ -149,6 +153,17 @@ def require_gates(data):
 
 
 class PackagingWorkflows(unittest.TestCase):
+    def test_running_backend_health_gate_cannot_be_removed_or_made_optional(self):
+        for mutation in ('removed', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['artifact-packaging']['jobs']['credentials']['steps']
+            step = next(step for step in steps if 'scripts/check-backend-health.py' in step.get('run', ''))
+            if mutation == 'removed': steps.remove(step)
+            elif mutation == 'conditional': step['if'] = 'false'
+            else: step['continue-on-error'] = True
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'real server|packaging step cannot be warning-only'):
+                require_gates(data)
+
     def test_real_cli_secret_service_step_cannot_be_removed_or_made_optional(self):
         for mutation in ('removed', 'conditional', 'warning'):
             data = workflows()

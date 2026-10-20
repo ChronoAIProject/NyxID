@@ -244,3 +244,44 @@ KeychainBackend also passed these operations in Tokio; that small fixture does
 not replace the hosted actual-CLI check. Both Linux archive checks parse the
 actual ELF dependencies, and every final CLI image executes version/help and
 its real entrypoint. Node additionally proves no-config startup exits 1.
+
+## Backend minimal runtime and operator health probes
+
+The CI82 final backend baseline had **106 OS packages and 71 blocking findings**.
+Its package inventory included curl/libcurl, OpenSSL, shell and core utilities,
+APT/dpkg executables, util-linux/mount, Perl, ncurses and their dependencies.
+The replacement copies the same five signed-snapshot packages used by the node
+rootfs, retaining their dpkg status/file lists plus the snapshot CA bundle:
+
+| Runtime package | Verified native arm64 version | Purpose |
+| --- | --- | --- |
+| base-files | 12.4+deb12u15 | Distro identity and standard filesystem layout |
+| libc6 | 2.36-9+deb12u14 | Dynamic loader and C/math runtime |
+| libgcc-s1 | 12.2.0-14+deb12u1 | Rust unwinding runtime |
+| netbase | 6.4 | Standard service/protocol tables |
+| tzdata | 2026c-0+deb12u1 | Time zone data |
+
+A native offline package-rootfs build from the verified snapshot-input stage
+contains exactly these five packages. Trivy 0.76.0 with a freshly fetched
+advisory DB reports **zero HIGH/CRITICAL/UNKNOWN** findings (26 LOW/MEDIUM).
+This package-only proof does not replace final per-architecture scans of the
+current backend binary, embedded Cargo inventory and real credential assets.
+No backend finding has a disposition. Added/missing/duplicate service-image
+packages fail policy, and the final ELF may link only the declared C runtime.
+
+The current both-KMS Linux dependency graph has no openssl-sys crate; no backend
+TLS feature change accompanies this packaging repair. The published 0.73.0
+main baseline did link libssl/libcrypto, so its binary must not be substituted
+for a current-branch final-image check. The image preserves non-root UID/GID
+999, `/app/keys`, the mode-0700 TUF state directory and independent volume,
+and the exact credential dist/manifest bytes.
+
+**Operator upgrade:** curl and the shell leave the backend image. Custom Compose
+and Kubernetes exec probes that invoke curl must change before upgrading. Use
+`/usr/local/bin/nyxid-server health-check`; Kubernetes should normally use an
+HTTP probe against `/health` on the configured port. See the deployment note in
+[ENV.md](ENV.md#server) for the fixed loopback target, PORT validation, three-second
+limit and stable failure behavior. Production Compose already uses the binary
+command. Required Backend Credential Packaging jobs start each native final
+image against disposable MongoDB and require the real binary probe to pass
+even with deliberately invalid application/key configuration in that exec.

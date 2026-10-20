@@ -22,6 +22,7 @@ jobs:
       - run: python3 scripts/test-elf-runtime.py
       - run: python3 scripts/test-node-rootfs.py
       - run: python3 scripts/test-native-secret-service-runner.py
+      - run: python3 scripts/test-backend-health-runner.py
       - run: python3 scripts/test-image-dispositions.py
       - run: python3 scripts/test-image-runtime.py
       - run: python3 scripts/test-image-entrypoint-dispatch.py
@@ -134,6 +135,11 @@ jobs:
               --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
               --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
           done
+      - name: Require shell-free health check against the final running backend
+        run: |
+          bash .github/scripts/start-test-mongodb.sh
+          python3 scripts/check-backend-health.py --image nyxid-credential-backend:ci \
+            --database-url 'mongodb://127.0.0.1:27017/nyxid_health?replicaSet=rs0&directConnection=true'
       - name: Install checksummed actual image vulnerability tools
         run: |
           python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"

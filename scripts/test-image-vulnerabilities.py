@@ -56,7 +56,7 @@ class ImageVulnerabilities(unittest.TestCase):
         self.assertEqual(subject['runnable'][0]['config'], self.image_id)
         self.report = dict(SchemaVersion=2, ArtifactType='container_image', Metadata={'ImageID': self.image_id},
                            Results=[dict(Target='fixture distro', Class='os-pkgs', Type='debian',
-                                         Packages=[{'Name': 'fixture', 'Version': '1.0'}]),
+                                         Packages=[{'Name': name, 'Version': '1.0'} for name in sorted(policy.MINIMAL_DEBIAN_RUNTIME)]),
                                     dict(Target='usr/local/bin/nyxid-server', Class='lang-pkgs', Type='rustbinary',
                                          Packages=[{'Name': 'nyxid', 'Version': '1.0'}])])
         self.report_path = self.stage / 'trivy.json'
@@ -117,6 +117,20 @@ class ImageVulnerabilities(unittest.TestCase):
             report['Results'][0]['Vulnerabilities'] = [dict(VulnerabilityID='CVE-synthetic', PkgName='fixture',
                 InstalledVersion='1.0', Severity=severity)]
             with self.subTest(severity=severity): self.assertEqual(len(policy.evaluate(report, self.image_id, 'backend')), 1)
+
+    def test_minimal_service_package_additions_omissions_and_duplicates_fail(self):
+        for component in ('backend', 'node-agent'):
+            for mutation in ('extra', 'missing', 'duplicate'):
+                report = copy.deepcopy(self.report)
+                if component == 'node-agent':
+                    report['Results'][1]['Target'] = 'usr/local/bin/nyxid'
+                    report['Results'][1]['Packages'][0]['Name'] = 'nyxid-cli'
+                packages = report['Results'][0]['Packages']
+                if mutation == 'extra': packages.append({'Name': 'curl', 'Version': '1'})
+                elif mutation == 'missing': packages.pop()
+                else: packages.append(copy.deepcopy(packages[0]))
+                with self.subTest(component=component, mutation=mutation), self.assertRaisesRegex(ValueError, 'five-package'):
+                    policy.evaluate(report, self.image_id, component)
 
     def test_wrong_subject_missing_inventory_and_eol_fail(self):
         for mutation in ('config', 'empty', 'packages', 'eol'):

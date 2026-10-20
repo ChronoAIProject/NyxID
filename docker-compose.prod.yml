@@ -58,7 +58,7 @@ services:
       mongodb-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      test: ["CMD", "/usr/local/bin/nyxid-server", "health-check"]
       interval: 10s
       timeout: 5s
       retries: 3

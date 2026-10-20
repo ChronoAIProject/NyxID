@@ -18,6 +18,7 @@ mod db;
 mod downstream_disconnect;
 mod errors;
 mod handlers;
+mod health_check;
 mod login_cli;
 mod models;
 mod mw;
@@ -334,6 +335,10 @@ mod build_identity {
 
 fn main() {
     build_identity::retain();
+    // This packaging probe must bypass AppConfig, dotenv, tracing, keys and DB.
+    if std::env::args().nth(1).as_deref() == Some("health-check") {
+        std::process::exit(health_check::run());
+    }
     if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
         services::attachment_extraction::worker();
         return;

@@ -392,3 +392,14 @@
 - Targeted entrypoint 5/5 and existing keychain 5/5 pass using nyxid-387c312571c94c44; all-target node-proxy-test Clippy has only A’s cutover.rs unused_unit/chunks_exact_to_as_chunks lints; PM accepts the gate with no compile/owned diagnostics.
 - Cargo audit: only the two existing RSA findings; 3/3 exact lock-subgraph dispositions validate. No new exception or RSA source refresh.
 - PR: CLI Test; Rust Clippy; both Linux CLI Archive Identity; node-agent Shipped Image Identity both arches; Artifact Packaging Policy; Every Dependency Root Audit.
+
+## W7 CI82 follow-up — backend minimal rootfs and binary health probe
+- Replace the 106-package Debian runtime (71 retained baseline findings) with the five signed-snapshot packages, snapshot CA and real dpkg inventory; no backend dispositions.
+- Preserve non-root 999:999, key/TUF directories, independent TUF state and exact credential bytes; enforce the final ELF's declared C-runtime linkage.
+- Add early shell-free health-check dispatch: PORT-only fixed loopback /health, no proxy/redirect, three-second bound, 2xx only and stable one-line failures before config/keys/DB/tracing.
+- Production Compose uses the binary; ENV.md documents the curl/shell removal, custom-probe upgrade and Kubernetes HTTP probe.
+- Native arm64 offline package-rootfs: base-files 12.4+deb12u15, libc6 2.36-9+deb12u14, libgcc-s1 12.2.0-14+deb12u1, netbase 6.4, tzdata 2026c-0+deb12u1; Trivy 0.76.0 reports zero HIGH/CRITICAL/UNKNOWN (26 LOW/MEDIUM).
+- This package-only proof does not replace current final-image evidence; the both-KMS Linux graph has no openssl-sys, with no backend TLS feature edit.
+- Reuse D's nyxid_server-91bd2f1ee51e6e06 (driver 21:09 after last source edit 21:07): health tests 5/5. Reuse ID's both-KMS all-target Clippy /tmp/nyxid-w8-id-oauth-corrected-clippy.log (drivers 21:25): exit 0 at 21:32:44.
+- Local policy: rootfs 7/7, backend runner 2/2, runtime 10/10, vulnerabilities 15/15, packaging 19/19, credential 21/21, scanner 7/7, SBOM 3/3; pinned actionlint and diff whitespace pass.
+- PR: Artifact Packaging / Backend Credential Packaging amd64+arm64 must start the real final server and require the binary probe with invalid application/key env; Artifact Packaging Policy; APT Dockerfile Layers; Scanner Policy.

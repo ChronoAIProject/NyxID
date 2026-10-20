@@ -15,6 +15,7 @@ DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
 BLOCKED = {'HIGH', 'CRITICAL', 'UNKNOWN'}
 # Only reviewed static, shell-free final images may omit a distro inventory.
 SCRATCH_COMPONENTS = frozenset({'nyxid-machine-updater', 'mcp-demo'})
+MINIMAL_DEBIAN_RUNTIME = frozenset({'libc6', 'libgcc-s1', 'base-files', 'netbase', 'tzdata'})
 
 
 def sha(path):
@@ -52,6 +53,11 @@ def evaluate(report, image_id, component, *, platform=None, evidence=None, downl
     if component not in SCRATCH_COMPONENTS and not any(
             item.get('Class') == 'os-pkgs' and item.get('Packages') for item in report['Results']):
         raise ValueError('missing final distribution package inventory')
+    if component in ('node-agent', 'backend'):
+        packages = [package['Name'] for item in report['Results'] if item.get('Class') == 'os-pkgs'
+                    for package in item.get('Packages') or []]
+        if len(packages) != len(MINIMAL_DEBIAN_RUNTIME) or set(packages) != MINIMAL_DEBIAN_RUNTIME:
+            raise ValueError('final service image differs from the declared five-package runtime')
     if package and not any(item.get('Class') == 'lang-pkgs' and item.get('Type') == 'rustbinary' and
                            item.get('Target', '').lstrip('/') == binary.lstrip('/') and
                            any(pkg.get('Name') == package for pkg in item.get('Packages') or [])

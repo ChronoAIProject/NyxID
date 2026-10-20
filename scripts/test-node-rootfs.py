@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('node_rootfs', Path(__file__).with_name('export-node-rootfs.py'))
 rootfs = importlib.util.module_from_spec(spec)
@@ -42,6 +43,24 @@ class NodeRootfs(unittest.TestCase):
         self.assertEqual((self.dest / 'lib/aarch64-linux-gnu/libc.so.6').read_bytes(), b'ELF fixture')
         self.assertEqual((self.dest / 'etc/ssl/certs/ca-certificates.crt').read_text(), 'public test CA')
         self.assertTrue((self.dest / 'var/lib/dpkg/info/libc6:arm64.list').is_file())
+
+    def test_backend_retains_nonroot_identity_keys_and_private_tuf_directory(self):
+        with patch.object(rootfs.os, 'chown') as chown:
+            rootfs.export(self.dest, self.source, self.query, component='backend')
+        self.assertEqual((self.dest / 'var/lib/dpkg/status').read_text().count('Package: '), 5)
+        self.assertEqual((self.dest / 'etc/passwd').read_text(), 'nyxid:x:999:999::/app:/sbin/nologin\n')
+        self.assertEqual((self.dest / 'etc/group').read_text(), 'nyxid:x:999:\n')
+        self.assertEqual([call.args for call in chown.call_args_list], [
+            (self.dest / 'app/keys', 999, 999), (self.dest / 'var/lib/nyxid/tuf', 999, 999)])
+        self.assertEqual((self.dest / 'var/lib/nyxid/tuf').stat().st_mode & 0o777, 0o700)
+        self.assertTrue((self.dest / 'app/keys').is_dir())
+        self.assertFalse((self.dest / 'usr/bin/curl').exists())
+        self.assertFalse((self.dest / 'bin/sh').exists())
+
+    def test_undeclared_component_is_rejected_before_export(self):
+        with self.assertRaisesRegex(ValueError, 'undeclared'):
+            rootfs.export(self.dest, self.source, self.query, component='other')
+        self.assertFalse(self.dest.exists())
 
     def test_slim_excluded_documentation_is_recorded_but_runtime_files_must_exist(self):
         self.files['base-files'].append('/usr/share/doc/base-files/README')

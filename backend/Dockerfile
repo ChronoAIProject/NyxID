@@ -120,18 +120,21 @@ ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build:credential-accept
 
-# ── Runtime ─────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+# ── Snapshot-bound runtime export ───────────────────────────────────────────
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-inputs
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
+RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- python3 libc6 libgcc-s1 base-files netbase tzdata ca-certificates
+COPY scripts/export-node-rootfs.py /opt/nyxid-rootfs/export-node-rootfs.py
+RUN python3 /opt/nyxid-rootfs/export-node-rootfs.py --component backend --destination /rootfs
+
+# ── Minimal runtime ────────────────────────────────────────────────────────
+FROM scratch
 ARG NYXID_GIT_HASH
 ARG SOURCE_DATE_EPOCH
 LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
       io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
 
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
-RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- ca-certificates curl
-
-# Create a non-root user
-RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
+COPY --from=runtime-inputs /rootfs/ /
 
 WORKDIR /app
 
@@ -143,17 +146,12 @@ COPY --from=builder /build/target/release/nyxid-server /usr/local/bin/nyxid-serv
 COPY --from=credential-builder /build/frontend/dist/credential-accept /app/frontend/dist/credential-accept
 COPY --from=credential-builder /build/frontend/dist/release-integrity /app/frontend/dist/release-integrity
 
-# Create directory for JWT keys (mounted at runtime)
-RUN mkdir -p /app/keys /var/lib/nyxid/tuf \
-    && chown nyxid:nyxid /app/keys /var/lib/nyxid/tuf \
-    && chmod 0700 /var/lib/nyxid/tuf
-
 # Retain authenticated TUF rollback floors independently of the image/HOME.
 ENV NYXID_SERVER_TUF_STATE_DIR=/var/lib/nyxid/tuf
 VOLUME ["/var/lib/nyxid/tuf"]
 
-USER nyxid
+USER 999:999
 
 EXPOSE 3001
 
-ENTRYPOINT ["nyxid-server"]
+ENTRYPOINT ["/usr/local/bin/nyxid-server"]

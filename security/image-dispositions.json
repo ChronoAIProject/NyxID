@@ -1,6 +1,7 @@
 {
   "schema": "nyxid.image-dispositions.v1",
   "declared_runtime": {
+    "backend": ["libc6", "libgcc-s1", "base-files", "netbase", "tzdata"],
     "node-agent": [
       "libc6",
       "libgcc-s1",

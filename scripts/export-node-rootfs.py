@@ -8,6 +8,7 @@ package control records and file lists so OS scanners inventory what ships.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -20,7 +21,9 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def export(destination, source=Path('/'), query=subprocess.check_output):
+def export(destination, source=Path('/'), query=subprocess.check_output, component='node-agent'):
+    if component not in ('node-agent', 'backend'):
+        raise ValueError('undeclared minimal rootfs component')
     if destination.exists():
         raise ValueError('rootfs destination must not already exist')
     # Query exact installed binary package identities; never parse a source
@@ -97,13 +100,26 @@ def export(destination, source=Path('/'), query=subprocess.check_output):
     evidence = destination / 'usr/share/nyxid/build-inputs'
     evidence.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source / 'usr/share/nyxid/build-inputs/apt', evidence / 'apt')
-    (evidence / 'node-rootfs.json').write_text(json.dumps(dict(schema='nyxid.node-rootfs.v1',
+    (evidence / 'node-rootfs.json').write_text(json.dumps(dict(schema='nyxid.node-rootfs.v1', component=component,
         packages=manifests, ca_package_control=ca_control, ca_sha256=digest(ca_target)), indent=2) + '\n')
-    (destination / 'app/config').mkdir(parents=True)
-    print('Exported node runtime: ' + ', '.join(PACKAGES) + '; snapshot CA bundle; retained dpkg inventory')
+    if component == 'backend':
+        # Preserve the Debian image's system nyxid UID/GID without shipping
+        # useradd, a shell, or any of their runtime dependency closure.
+        (destination / 'etc/passwd').write_text('nyxid:x:999:999::/app:/sbin/nologin\n')
+        (destination / 'etc/group').write_text('nyxid:x:999:\n')
+        for directory in ('app/keys', 'var/lib/nyxid/tuf'):
+            target = destination / directory
+            target.mkdir(parents=True)
+            os.chown(target, 999, 999)
+        (destination / 'var/lib/nyxid/tuf').chmod(0o700)
+    else:
+        (destination / 'app/config').mkdir(parents=True)
+    print('Exported ' + component + ' runtime: ' + ', '.join(PACKAGES) + '; snapshot CA bundle; retained dpkg inventory')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--destination', type=Path, required=True)
-    export(parser.parse_args().destination.resolve())
+    parser.add_argument('--component', choices=('node-agent', 'backend'), default='node-agent')
+    args = parser.parse_args()
+    export(args.destination.resolve(), component=args.component)

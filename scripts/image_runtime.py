@@ -47,6 +47,8 @@ def check(image_id, component, binary=None):
         if component == 'node-agent':
             probe(image_id, None, [], expected_code=1, required='No node config found')
     elif component == 'backend':
+        if set(elf['needed']) - NODE_LIBRARIES:
+            raise ValueError('minimal backend image has undeclared shared libraries: ' + ', '.join(sorted(set(elf['needed']) - NODE_LIBRARIES)))
         probe(image_id, '/usr/local/bin/nyxid-server', ['--version'], required='nyxid ')
         probe(image_id, None, ['--help'], required='Usage:')
     elif component == 'frontend':

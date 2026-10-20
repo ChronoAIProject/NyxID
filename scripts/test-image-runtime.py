@@ -64,6 +64,13 @@ class Runtime(unittest.TestCase):
                     image_runtime.check(self.image, component, self.binary)
                 probe.assert_not_called()
 
+    def test_minimal_backend_rejects_openssl_or_any_undeclared_shared_library(self):
+        for library in ('libssl.so.3', 'libcrypto.so.3', 'libdbus-1.so.3', 'libcurl.so.4'):
+            self.binary.write_bytes(elf([library]))
+            with self.subTest(library=library), patch.object(image_runtime, 'probe') as probe, self.assertRaisesRegex(ValueError, 'backend image has undeclared'):
+                image_runtime.check(self.image, 'backend', self.binary)
+            probe.assert_not_called()
+
     def test_all_cli_images_execute_version_help_and_the_real_entrypoint(self):
         for component in ('node-agent', 'nyxid-node-machine', 'machine-node-only', 'machine-hosted-desktop', 'machine-hosted'):
             with self.subTest(component=component), patch.object(image_runtime, 'probe') as probe:
