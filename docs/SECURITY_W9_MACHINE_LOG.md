@@ -154,3 +154,20 @@
 - Guest mutations: temporary diagnostic archive/build/logs, read-only fixture mounts and disposable --rm containers only; zero live containers, two pre-existing anonymous volumes unchanged; no sysctl/AppArmor/persistent runtime changes.
 - Hosted Docker28/amd64 diagnosis and 100-sample calibration remain gates. Five-second bound retained. Production capability/profile edits require PM's explicit ownership/contract decision; no seccomp/profile/workflow edit in this batch.
 - PM's browser-override clarification is committed in MACHINE_NODES.md by `d35a25a5c`: only recognized resolved package layouts, never an arbitrary privileged installer path. ENV.md and CLAUDE.md remain untouched by D.
+
+## D-5 v4 custody consumers and rollout guidance (2026-10-20)
+- Code `88d0f2099`: frontend requires current v4 plus credential_custody=true; absent/null/false custody has actionable node_custody_unverified. Earlier v1/v2/v3 and unknown reports cannot select new automatic/required separation; existing legacy assignments retain their mode.
+- Scoped frontend Vitest: 72 passed/0 failed; TypeScript build and scoped ESLint pass. Persistent logs: ~/.cache/nyxid-stream-d/recovery/v4-frontend-{tests,tsc,eslint}.log.
+- Acceptance `5f29bed1e`: every calibration sample and initial/restored/restarted native report requires v4 and positive custody; all existing policy, renderer, namespace and lifecycle assertions retained.
+- Node/Python syntax pass; browser-selector tests 8/0/0; scripts/test-machine-acceptance-ci.py 9/0/0 after restoring PyYAML6.0.3 to D's private cached Python environment (initial system Python lacked yaml).
+- Docs `0d6ba246c` and `238a10a84` describe the frozen v4 field, public preflight sentinels and repair guidance. NYXID_NODE used git add -p: only D's evidence hunk staged/reviewed/committed; A's storage/custody prose remained unstaged.
+- Production Rust custody implementation and real v4 Linux execution belong to A and remain pending; these consumer checks do not claim that gate. Hosted native/Docker100-sample and lifecycle gates remain pending.
+
+## D-5 no-capability container observation investigation (2026-10-20)
+- Production probe unchanged from `3f343ee33`; no capability grant or profile relaxation. PM rejected supervisor SYS_PTRACE because ordinary proc open/read could expose browser memory despite syscall denials.
+- Real full image0.41.0/DebianChromium154 on Lima Ubuntu24.04.5/aarch64/kernel7.0, normal init/512m/seccomp/docker-default: status/stat/cgroup/uid_map/gid_map/net tables readable without added capabilities; renderer exe/ns links deny EACCES13, including matching-fsuid reads of nondumpable zygote/renderers.
+- Real renderer: UID/GID1001 in all fields, NNP1, Seccomp2, filters2 vs browser1, NSpid94/12/1, CapEff0; restricted UID/GID maps and different net/dev inode from browser. Main browser exe is readable under matching fsuid; its re-execed zygote is not.
+- Negative control: unrelated helper named chromium with renderer argv, same UID/GID, NNP1, Seccomp2, filters3 vs parent1, nested PID IDs and CapEff0 retains the parent's network namespace. Four diagnostic assertions pass/0 fail, demonstrating status-only predicates are insufficient.
+- Remaining essential proof: exact renderer executable and distinct user/net namespace identities; Name/argv/cgroup do not establish them. UID maps and per-network proc inodes need kernel-contract validation and do not establish executable identity. Policy listener association also currently needs protected fd links.
+- Reproduction sources/logs: ~/.cache/nyxid-stream-d/recovery/no-cap-proc-observe.py, no-cap-proc-observe{,-ancestry}.log, status-only-negative.{c,py,log}. C helper built with gcc -O2 -Wall -Wextra -Werror; normal --rm containers, read-only public fixture mounts, no token/identity/workspace mounts.
+- Guest mutations: only /tmp/w94-no-cap-* and /tmp/w94-status-only-negative* fixtures; no packages/accounts/policies/sysctls/AppArmor changes. No live containers; Lima slot returned to A. Hosted Docker28/amd64 cause awaits diagnostic output after PM's next push; latest hosted head remains82e7605bb.
