@@ -462,6 +462,13 @@ NyxID audit-log rows created after this feature is enabled are tamper-evident. E
 | `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
 | `AUDIT_CHAIN_ID` | *(persisted UUID v4 on first local initialization)* | Optional fixed UUID v4 for the audit chain. All replicas must agree. Later independent witness enrollment must use this exact persisted identity; a changed UUID never resets history. |
 | `AUDIT_CUTOVER_DRAINED` | `false` | Set to `true` for the first upgrade over an existing v1 audit chain, after draining all old HTTP, worker, scheduler and maintenance writers. The verified cutover is persisted; subsequent boots do not require this flag. A fresh database does not require acknowledgment. Do not restart old binaries after cutover. |
+| `AUDIT_WITNESS_FRESH_SECS` | `60` | Soft alarm since the last process-local authenticated witness exchange; never a DB-only refusal timer. A restarted process has unknown freshness until a new challenge completes. Positive, at most 604800. |
+| `AUDIT_WITNESS_PENDING_AGE_SECS` | `30` | Soft alarm for the oldest persisted pending reservation, measured against Mongo server time. Positive; no higher than either hard age ceiling. |
+| `AUDIT_WITNESS_PENDING_COUNT` | `10000` | Soft pending-reservation count alarm. Positive; no higher than either hard count ceiling. |
+| `AUDIT_ADMISSION_STANDARD_MAX_PENDING_AGE_SECS` | `3600` | Configured-witness Standard hard age ceiling; at equality new Standard work refuses, while Narrowing remains allowed and Availability uses its own ceiling. Positive, soft <= Standard <= Availability <= 604800. |
+| `AUDIT_ADMISSION_STANDARD_MAX_PENDING_COUNT` | `100000` | Configured-witness Standard hard pending count ceiling. Positive, soft <= Standard <= Availability; bounded to Mongo signed 64-bit count. |
+| `AUDIT_ADMISSION_AVAILABILITY_MAX_PENDING_AGE_SECS` | `86400` | Configured-witness Availability hard age ceiling, including during divergence. Positive, Standard <= Availability <= 604800; no disable value. |
+| `AUDIT_ADMISSION_AVAILABILITY_MAX_PENDING_COUNT` | `1000000` | Configured-witness Availability hard count ceiling. Positive and at least Standard. Narrowing is never refused for witness reasons. |
 
 The persistent head, append transaction and delivery outbox are always active.
 No witness is required for local development or existing deployments to operate:
@@ -469,6 +476,9 @@ without witness configuration, the security state is explicitly `unwitnessed`.
 This means local HMAC continuity, not independently verified history. Witness
 freshness/backlog admission policy applies only to configured/enrolled witnesses.
 See [the rollout decisions](SECURITY_AUDIT_WITNESS.md#w8-4-rollout-decisions).
+
+Configured audit witness admission has a production rollout prerequisite: an
+independently owned and rehearsed [replacement/DR recovery runbook](SECURITY_AUDIT_WITNESS.md#admin-custody-replacement-and-dr-restore), including the accepted W8-5 recovery checkpoint protocol. No application API clears divergence. Witness outages must leave `/health` HTTP 200 with categorical degradation, unknown restart freshness and per-tier backlog decisions; no stored receipt renews freshness. These limits are parsed at startup; workflow admission becomes effective only as the living W8 inventory conversions land. With no configured or enrolled witness, C1 local `unwitnessed` operation has no witness admission ceiling. Do not remove configured enrollment to bypass a refusal.
 
 ### Key selection rules
 

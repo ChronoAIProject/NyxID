@@ -76,4 +76,25 @@
 - Added 17 focused tests: atomic abort/commit, replay/conflict, concurrency, cutover/restart/tamper, uncertain commit, materialization/recovery, safe projections and categorical health; execution pending compilation on own Mongo 8 replica port 50012, nofile 60000.
 - Preliminary both-KMS `cargo check` passed before final outbox edits; final replica tests and all-target Clippy remain pending, with no pass/count claim. Superseded test compilation exposed seven AppConfig literals; resolved within owned files, then own superseded compilers terminated.
 - Scoped `rustfmt --edition 2024 --config skip_children=true --check` and `git diff --check` passed.
-- External relay/readiness, sticky pinned enrollment, protected intent/claim integration, Integrity DTO/UI and workflow conversions remain pending; no W8-4 completion claim. C2 admission table and admin handler edit await PM approval; fixture requests withdrawn.
+- External relay/readiness, sticky pinned enrollment, protected intent/claim integration and workflow conversions remain pending; no W8-4 completion claim. C2 was pending at this commit and is superseded by approved W8-4c below; PM approved the focused admin evidence DTO edit for the next group; fixture requests withdrawn.
+
+## W8-4b — categorical evidence in verify and Integrity (2026-10-20)
+
+- PM approved focused `handlers/admin.rs`; full shared-file diff inspected, only W8 response/test hunks. Local continuity remains separate from categorical independent evidence in audit/billing verify and rolling Integrity.
+- Missing persistent state is unavailable; stored enrollment alone is unverified; no witness is unwitnessed. UI labels local results, shows pending evidence, treats older replica responses as unavailable and never toasts fully verified success from local checks.
+- Added two replica-set handler tests (unwitnessed/enrolled and missing-state) plus six UI cases and one schema case. Frontend focused tests after the C2 card extension: 15 passed, 0 failed/ignored; focused ESLint and TypeScript build passed.
+- Backend rerun uses exactly PM's shared target/jobs/incremental/dev-debug/test-debug env; own obsolete Cargo/rustc stopped. Mongo is forked in the background, own port 50012, writable replica, nofile 60000.
+- Backend `audit_` retry exited 101 before tests: seven E0433 dependency-resolution errors in other-owned `machine/src/bootstrap.rs` (`aws_lc_rs`/`pkcs8`/`pkcs1`); no tests ran. Both-KMS all-target Clippy exited 101 on four other-owned CLI `needless_borrow` lints; audit tests retrying after shared manifest repair. Earlier transient own E0658 (`key.as_slice()`) was corrected before this retry; no pass claim.
+
+## W8-4c — approved C2 policy and operator foundation (2026-10-20)
+
+- Implemented operation tiers and one shared decision function: Narrowing always passes witness policy; Availability/Standard use separate pending age/count ceilings; contact age only alarms DB-only work; Effect can only seek a witnessed one-shot claim when fresh.
+- Seven positive configurable defaults match the PM decision; validation bounds/order, exact ceilings, no disable value. Registered 13003/13004 as generic retryable 503s with operator-only reasons; documented in the reserved CLAUDE block.
+- Runtime starts with no contact; stored enrollment/cursor cannot renew it. Diagnostics read persisted age against Mongo time. Both direct and deferred reservation clocks now come from Mongo, with replay/head/bookkeeping validation preserved.
+- Transaction admission checks the caller's snapshot and complete reservation bundle; future W8-6 callers must reserve terminal capacity in the same transaction. No endpoint conversion or configured relay activation is inferred.
+- Health remains HTTP 200 with categorical audit state, per-tier decisions, counts/ages/seqs/effective limits and top-level degraded. Integrity adds witness card, tier closure times, divergence detail, transition reason/time and recovery link.
+- Transition monitor commits system events through the ordinary safe outbox before publishing transition metadata; stable operation/event retry identities; at most one error log per minute, fixed status/count/age/seq metadata only. Local materialization retains witness backlog.
+- Added policy matrix/exact-boundary/config tests, replica-set restart/backlog/bundle/divergence/HTTP-200 tests and transition/dedup/rate-limit tests; backend execution awaits shared builds. No backend pass/count claim yet.
+- Added operation-specific tier column to all 58 inventory rows; workflow status remains 57 pending / 1 tested. Recovery runbook requires independent custody/rehearsal plus accepted W8-5 checkpoint/epoch support before production configured admission; no app reset/clear-divergence route.
+- Frontend focused tests: 15 passed, 0 failed/ignored; ESLint and TypeScript passed. Scoped rustfmt/inventory structure checks passed. Backend command results/commit identities follow once validation ends.
+- External relay/pinned enrollment, live observation renewal, protected intent/claim runtime and workflow conversions remain pending W8-4/W8-6 work. Focused proxy-fault telemetry and API-doc ownership requests remain pending PM clearance.

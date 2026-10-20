@@ -30,13 +30,55 @@ provision that exact identity. A configured witness never automatically enrolls
 or resets itself from MongoDB, and removing its configuration after enrollment
 must report unavailable instead of reverting to optional unwitnessed mode.
 
-PM condition C2 requires separate approval before coding configured-witness
-admission. Proposed defaults are 60 seconds fresh contact, 30 seconds oldest
-unacknowledged reservation and 10,000 pending events. The pending decision table
-is recorded in the living inventory; no policy implementation is implied by
-the head/outbox foundation. S3 compliance-mode Object Lock is scheduled as
-W8-3b after W8-5, including retained-version anti-shadowing and storage-level
-writer-denial tests.
+PM approved C2's four-tier policy. Pending **age and count** gate DB-only
+admission; contact freshness raises alarms and gates live-claim effects. The
+former 30-second authentication-refusal proposal is superseded. The seven
+positive limits below are configurable; soft limits must not exceed their hard
+ceilings, Standard must not exceed Availability, and no age can exceed seven days.
+No zero/disable value is accepted. A ceiling is reached at `>=`, so admission
+cannot reserve the next event when its existing backlog is already at the ceiling.
+
+| Tier | Fresh | Stale (any soft limit reached) | Own hard ceiling reached | Authenticated divergence |
+| --- | --- | --- | --- | --- |
+| Narrowing: revoke/disable/deny/logout-all | allow | allow + alarm | allow + alarm | allow + incident alarm |
+| Availability: login/refresh/MFA enable/verify/recovery redemption/password change/polling/DB-only maintenance | allow | allow + alarm | refuse 13003 | allow + incident alarm, subject to the same hard ceiling |
+| Standard: key create/rotate/grants/device approval/MFA disable/recovery regeneration/authority seeds/DB-only money movement | allow | allow + alarm | refuse 13003 | refuse + alarm 13004 |
+| Effect: irreversible external dispatch | witnessed intent + live one-shot claim | defer, no dispatch | defer | refuse 13004, no claim |
+
+Soft defaults are 60 seconds since authenticated contact, 30 seconds oldest
+pending reservation, and 10,000 pending events. Standard's hard defaults are
+3,600 seconds / 100,000 events; Availability's are 86,400 seconds / 1,000,000
+events. Each worker inherits its actual operation's tier. Already admitted work
+keeps reserved terminal-record capacity; completing it is not a new admission.
+MFA disable is Standard despite its name, because it widens account access.
+Narrowing is never refused for witness reasons; its ordinary database transaction
+and security controls still apply. See the living inventory for mixed workflows.
+
+An enrolled/configured process starting while the witness is unreachable starts
+stale with unknown contact freshness; an older persisted backlog can additionally
+be backlogged. It loads pending age from persisted `oldest_pending_at`, compared
+with Mongo server time. Neither a restart, stored receipt, nor idempotent receipt
+retry renews contact freshness. An authenticated challenge observation and
+matching independent history are required. Quiet chains renew observations too.
+A configured sink outage must not prevent process startup or drain every replica
+from the load balancer. `/health` stays HTTP 200 and reports `degraded` plus an
+`audit` object with witness state, per-tier decisions, counts, ages, sequences and
+effective limits; unavailable local audit state is explicit. Integrity labels
+local continuity separately and shows per-tier closure times. A quiet chain with
+no pending reservations has no running pending-age deadline. Count limits may
+close a tier sooner than its displayed age deadline.
+
+13003/13004 return generic temporarily-unavailable 503 responses with
+`Retry-After: 30`. Backlogged/witness-unavailable reasons remain operator-only;
+these are admission controls, not proxy server faults. The runtime must record
+categorical closure/divergence transitions as system audit events and emit
+error-level transition/repeat logs at most once per minute, with recovery at info.
+Logs contain fixed status/count/age/sequence metadata and never event bodies.
+The policy/diagnostic foundation does not itself convert a workflow: transactional
+admission/reservations, authenticated relay and intent/claim consumption remain
+tracked integration work. Production activation requires the recovery gate below.
+S3 compliance-mode Object Lock remains scheduled as W8-3b after W8-5, including
+retained-version anti-shadowing and storage-level writer-denial tests.
 
 The first W8-4 implementation group supplies local allocation and reservations:
 `audit_chain_state` is the sole allocator for direct and caller-session appends;
@@ -49,8 +91,17 @@ setup and compatibility migrations run after the allocator is initialized.
 The original v1 canonical bytes and existing business transactions are retained.
 
 This group does not yet connect the external relay or implement configured
-witness admission. Categorical evidence is available in local verification and
-health; the admin Integrity DTO/UI must also carry it before W8-4 is complete.
+witness admission. Categorical evidence is available in health and in the admin
+verification/Integrity responses and UI. The audit and billing verify endpoints
+use `status` for categorical evidence (`unwitnessed`, `unverified`, `unavailable`
+or `broken`) and `local_status` for their existing local HMAC/anchor result.
+Their `external_evidence` object and the same object on the rolling Integrity
+response report local head, stored witness cursor, pending count and oldest
+pending time independently of local continuity. A stored enrolled cursor is
+`unverified` until a fresh process observation authenticates it. A missing head
+is `unavailable`, including an empty local history. Older responses without an
+evidence field display as unavailable; neither local success nor a missing field
+produces a fully verified success message.
 The immutable external cursor, replica/protocol observations, protected intent
 dispatch and caller conversions remain explicit integration work. The local
 head detects disagreement with a deleted tail, but a coordinated Mongo rollback
@@ -304,3 +355,70 @@ live local-row verification against the witness, retention/checkpoint and
 key-version transitions, provider dispatch one-shot consumption/reconciliation,
 full restored-Mongo/paused-provider tests, scoped audit UI, and the remaining
 critical workflow conversions. Keep these pending in the living inventory.
+
+## Admin-custody replacement and DR restore
+
+**Production rollout gate:** do not enable configured-witness admission until an
+independent administrator owns this runbook, has inventoried the chain UUID,
+original enrollment public pin, protected receipt/checkpoint history and retention
+policy outside the application/Mongo hosts, and has rehearsed replacement and DR
+restore in an isolated replica-set environment. W8-5's protected recovery
+checkpoint/epoch protocol and its tests must be accepted before this gate can
+pass. The current reference sink has no recovery/checkpoint mutation interface;
+the steps requiring that protocol are prerequisites, not executable recovery
+features of the W8-3 sink. A document acknowledgment alone does not authorize an
+arbitrary re-sign, reset, fresh genesis or new pin. Keep normal witness-free local
+development available under C1.
+
+There is **no application endpoint to clear divergence**. Application credentials
+cannot enroll/re-enroll, choose a new pin, delete prior evidence, or approve a
+recovery checkpoint. Operators must not change Mongo's `witness_enrolled` flag,
+remove witness configuration, rewrite the local head, truncate the outbox, raise
+ceilings to bypass an incident, or restore the witness from the same rollbackable
+backup as Mongo. Preserve the incident evidence even if the application/HMAC
+signing material is compromised.
+
+1. **Contain and preserve.** Stop new Standard/Effect work through the existing
+   admission fence. Keep Narrowing and bounded Availability available for
+   investigation. Capture independent signed observations/history, protected
+   checkpoints and dispatch claims under administrator custody; retain the local
+   database and diagnostics without exporting bodies or secrets. If effects are
+   in flight, classify them uncertain and reconcile with the provider using their
+   stable logical identity. A fresh process never reuses a retrieved claim to send.
+2. **Establish the last trusted boundary.** From a separate verification host,
+   retain the original chain UUID/pin and authenticate every receipt from the
+   independent enrollment/checkpoint through the latest obtainable observation.
+   Compare local canonical HMAC links, sequence/hash and retained billing anchors
+   to that history. Historical HMAC keys can sign and cannot independently prove
+   that a replacement local tail is authentic. If any externally recorded segment
+   is missing, recover it or document the unresolved gap; do not invent events.
+3. **Destroyed witness, intact authenticated local history.** Provision a new
+   independent protected sink with fresh administrator-owned custody and signing
+   pin. Authenticate the proposed local boundary against surviving independent
+   receipts/checkpoints plus the incident investigation; an unwitnessed suffix
+   requires explicit independent review and remains a disclosed evidence gap.
+   Under W8-5's approved recovery protocol, create an administrator-authorized
+   replacement checkpoint/epoch binding the original identity and pin, last
+   protected receipt, reviewed local head, new pin and reason. Preserve both
+   historical verification paths; never replace original history with newly signed
+   versions. Distribute the approved enrollment/epoch and public trust change
+   outside Mongo to every drained replica. The app append credential cannot do it.
+4. **Legitimate Mongo DR restore behind the witness.** Retain the witness and its
+   monotonic history. Restore the missing local suffix from protected recovery
+   sources and prove the local head/claims match it. If suffix recovery is
+   impossible, remain diverged until a W8-5 administrator-approved DR checkpoint
+   explicitly records the rollback boundary, lost interval and protected old
+   history in a new recovery epoch. Restored dispatched work remains uncertain;
+   leases and missing Mongo outcomes never release protected operation claims.
+   Reconcile billing balances/anchors before admitting new money movement.
+5. **Resume and verify.** With old writers drained, verify the authorized checkpoint
+   and retained key versions, obtain a new challenge-bound observation, reconcile
+   pending reservations without dropping them, and verify each tier's diagnostics
+   and time to closure. Re-enable Standard/Effect only after fresh authenticated
+   agreement and a successful one-shot claim rehearsal. Keep the incident's
+   system audit transitions and administrator recovery authorization permanently
+   verifiable under the applicable retention policy.
+
+If no independent trusted boundary or valid recovery authorization survives,
+there is no safe automatic recovery path. Continue investigation with protected
+Narrowing/Availability access; do not report the recovered deployment as verified.
