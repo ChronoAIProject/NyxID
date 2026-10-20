@@ -583,6 +583,19 @@ pub async fn rotate_my_oauth_client_secret(
     }))
 }
 
+fn connection_webhook_principal(auth: &AuthUser) -> crate::models::audit_outbox::AuditPrincipal {
+    use crate::models::audit_outbox::AuditPrincipal;
+    match &auth.api_key_id {
+        Some(id) => AuditPrincipal::ApiKey {
+            id: id.clone(),
+            owner_id: auth.user_id.to_string(),
+        },
+        None => AuditPrincipal::Person {
+            id: auth.user_id.to_string(),
+        },
+    }
+}
+
 /// PUT /api/v1/developer/oauth-clients/:client_id/connection-webhook
 pub async fn configure_connection_webhook(
     State(state): State<AppState>,
@@ -591,21 +604,17 @@ pub async fn configure_connection_webhook(
     Json(body): Json<ConfigureConnectionWebhookRequest>,
 ) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
     let actor = auth_user.user_id.to_string();
-    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
+    let principal = connection_webhook_principal(&auth_user);
     let (client, signing_secret, key_id) = developer_webhook_service::configure(
         &state.db,
+        &state.audit_runtime,
         &state.encryption_keys,
+        &principal,
+        &actor,
         &client_id,
-        &owner,
         &body.url,
     )
     .await?;
-    crate::services::audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "connection_webhook_configured",
-        Some(serde_json::json!({ "app_id": &client.id })),
-    );
     Ok(Json(ConnectionWebhookSecretResponse {
         client_id: client.id,
         connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
@@ -622,20 +631,16 @@ pub async fn rotate_connection_webhook_secret(
     Path(client_id): Path<String>,
 ) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
     let actor = auth_user.user_id.to_string();
-    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
+    let principal = connection_webhook_principal(&auth_user);
     let (client, signing_secret, key_id) = developer_webhook_service::rotate_secret(
         &state.db,
+        &state.audit_runtime,
         &state.encryption_keys,
+        &principal,
+        &actor,
         &client_id,
-        &owner,
     )
     .await?;
-    crate::services::audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "connection_webhook_secret_rotated",
-        Some(serde_json::json!({ "app_id": &client.id })),
-    );
     Ok(Json(ConnectionWebhookSecretResponse {
         client_id: client.id,
         connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
@@ -652,14 +657,15 @@ pub async fn disable_connection_webhook(
     Path(client_id): Path<String>,
 ) -> AppResult<Json<DeveloperOAuthClientResponse>> {
     let actor = auth_user.user_id.to_string();
-    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
-    let client = developer_webhook_service::disable(&state.db, &client_id, &owner).await?;
-    crate::services::audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "connection_webhook_disabled",
-        Some(serde_json::json!({ "app_id": &client.id })),
-    );
+    let principal = connection_webhook_principal(&auth_user);
+    let client = developer_webhook_service::disable(
+        &state.db,
+        &state.audit_runtime,
+        &principal,
+        &actor,
+        &client_id,
+    )
+    .await?;
     Ok(Json(to_response(client, None)))
 }
 

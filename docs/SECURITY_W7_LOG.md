@@ -413,3 +413,13 @@
 - Reuse shared required-env both-KMS all-target Clippy (backend drivers22:05:52/53, after delivery source freeze22:01:09): exit0 at22:10:20, zero diagnostics; one test no-run exit0 at22:20:45 (driver22:10:43). Persistent logs: ~/Library/Caches/nyxid-coreb/gates/post-reboot-shared-rerun-{clippy,test-no-run}.log.
 - Actual nyxid_server-483e6416bf263370 executable (mtime22:20:43) passes all11 delivery tests with four threads, plus four concurrent separate-process invocations of the two hosted failures; no retry wrapper. Evidence: delivery-suite.log, delivery-process-{0,1,2,3}.log and delivery-results.json in the same persistent gates directory.
 - Required hosted evidence: Backend Test and Coverage (Backend); no push from this lane.
+
+
+## CORE-B-1 — transactional developer-webhook configuration
+- Configure, rotate and disable now commit the OAuth client mutation and typed safe audit event together through the bounded transaction owner; handler-side best-effort audit calls are removed.
+- Verify Person/API-key actor binding and personal/org write authority in the transaction; fence owner and org-admin membership so concurrent revocation retries the complete authorization snapshot.
+- Prepare one signing secret and stable operation/event IDs outside retry callbacks; return raw secret only after definite commit. Audit evidence contains the client target, verified actor and server-resolved owner, without URL, key ID, raw secret or ciphertext.
+- Configure/rotation use Standard admission; local disable uses Narrowing and clears credential material even when new Standard admission is closed. Effective repeated disable creates no fabricated audit event.
+- Reused shared both-KMS all-target Clippy exit0 at23:06:15 (drivers22:49:58/22:50:00) and test driver62951 started23:06:45, preserved executable mtime00:10:54. Both owned sources match their pre-build hashes and have not changed since19:17:49.
+- Full developer_webhook_service filter: 8 passed/0 failed/0 ignored,9.12s on owned Mongo50044; covers atomic abort/commit, admission closure, safe attribution, org roles/revocation and existing signature/failure assertions. Scoped rustfmt/check and diff whitespace pass.
+- Evidence: ~/Library/Caches/nyxid-coreb/gates/followup-coreb-{config-results.json,webhooks.log}; provider send conversion and notification-settings caller fixtures remain separate pending units. No push.

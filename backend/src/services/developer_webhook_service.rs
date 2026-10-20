@@ -1,7 +1,7 @@
 //! Developer-app connection lifecycle webhook configuration and delivery.
 
 use chrono::{DateTime, Utc};
-use mongodb::{Database, bson::doc, options::ReturnDocument};
+use mongodb::{ClientSession, Database, bson::doc, options::ReturnDocument};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -11,10 +11,15 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
+use crate::models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::services::audit_service;
 use crate::services::coordination_service::RateWindowStore;
 use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
+use crate::services::{
+    audit_outbox_service::{self, AuditEvent},
+    audit_runtime::{AuditRuntime, policy::AuditTier, transaction},
+};
 
 pub const CONNECTION_WEBHOOK_SECRET_PREFIX: &str = "nyx_cwh_";
 pub const CONNECTION_WEBHOOK_MAX_BODY_BYTES: usize = 16 * 1024;
@@ -335,98 +340,317 @@ pub async fn record_terminal_delivery_failure(
 
 pub async fn configure(
     db: &Database,
+    runtime: &AuditRuntime,
     encryption_keys: &EncryptionKeys,
+    principal: &AuditPrincipal,
+    actor_id: &str,
     client_id: &str,
-    created_by: &str,
     url: &str,
 ) -> AppResult<(OauthClient, String, String)> {
     let url = webhook_delivery_service::validate_webhook_url(url, "connection_webhook_url").await?;
-    store_configuration(db, encryption_keys, client_id, created_by, &url).await
-}
-
-async fn store_configuration(
-    db: &Database,
-    encryption_keys: &EncryptionKeys,
-    client_id: &str,
-    created_by: &str,
-    url: &str,
-) -> AppResult<(OauthClient, String, String)> {
-    let raw_secret = format!(
-        "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
-        generate_random_token()
-    );
-    let encrypted_secret = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
-    let key_id = webhook_delivery_service::generate_signing_key_id();
-    let updated = db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one_and_update(
-            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-            doc! { "$set": {
-                "connection_webhook_url": url,
-                "connection_webhook_secret_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted_secret,
-                },
-                "connection_webhook_key_id": &key_id,
-                "connection_webhook_enabled": true,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }},
-        )
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))?;
-    Ok((updated, raw_secret, key_id))
-}
-
-pub async fn rotate_secret(
-    db: &Database,
-    encryption_keys: &EncryptionKeys,
-    client_id: &str,
-    created_by: &str,
-) -> AppResult<(OauthClient, String, String)> {
-    let existing = db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! {
-            "_id": client_id,
-            "created_by": created_by,
-            "is_active": true,
-            "connection_webhook_enabled": true,
-            "connection_webhook_url": { "$type": "string" },
-            "connection_webhook_secret_encrypted": { "$type": "binData" },
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Connection webhook not configured".to_string()))?;
     store_configuration(
         db,
+        runtime,
         encryption_keys,
+        principal,
+        actor_id,
         client_id,
-        created_by,
-        existing
-            .connection_webhook_url
-            .as_deref()
-            .unwrap_or_default(),
+        &url,
     )
     .await
 }
 
-pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppResult<OauthClient> {
-    db.collection::<OauthClient>(OAUTH_CLIENTS)
+struct WebhookSecret {
+    raw: Zeroizing<String>,
+    encrypted: Zeroizing<Vec<u8>>,
+    key_id: String,
+}
+
+impl WebhookSecret {
+    async fn prepare(keys: &EncryptionKeys) -> AppResult<Self> {
+        let raw = Zeroizing::new(format!(
+            "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
+            generate_random_token()
+        ));
+        Ok(Self {
+            encrypted: Zeroizing::new(keys.encrypt(raw.as_bytes()).await?),
+            raw,
+            key_id: webhook_delivery_service::generate_signing_key_id(),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WebhookChange<'a> {
+    Configure(&'a str),
+    Rotate,
+    Disable,
+}
+
+struct WebhookConfiguration<'a> {
+    db: &'a Database,
+    runtime: &'a AuditRuntime,
+    principal: &'a AuditPrincipal,
+    actor_id: &'a str,
+    client_id: &'a str,
+    change: WebhookChange<'a>,
+    secret: Option<&'a WebhookSecret>,
+    event_id: Uuid,
+    operation_id: Uuid,
+    at: DateTime<Utc>,
+}
+
+impl<'a> WebhookConfiguration<'a> {
+    fn new(
+        db: &'a Database,
+        runtime: &'a AuditRuntime,
+        principal: &'a AuditPrincipal,
+        actor_id: &'a str,
+        client_id: &'a str,
+        change: WebhookChange<'a>,
+        secret: Option<&'a WebhookSecret>,
+    ) -> Self {
+        Self {
+            db,
+            runtime,
+            principal,
+            actor_id,
+            client_id,
+            change,
+            secret,
+            event_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            at: Utc::now(),
+        }
+    }
+
+    async fn commit(&self) -> AppResult<OauthClient> {
+        transaction::run(self.db, self, |session, change| {
+            Box::pin(configuration_in_session(session, change))
+        })
+        .await
+    }
+}
+
+async fn store_configuration(
+    db: &Database,
+    runtime: &AuditRuntime,
+    encryption_keys: &EncryptionKeys,
+    principal: &AuditPrincipal,
+    actor_id: &str,
+    client_id: &str,
+    url: &str,
+) -> AppResult<(OauthClient, String, String)> {
+    let secret = WebhookSecret::prepare(encryption_keys).await?;
+    let updated = WebhookConfiguration::new(
+        db,
+        runtime,
+        principal,
+        actor_id,
+        client_id,
+        WebhookChange::Configure(url),
+        Some(&secret),
+    )
+    .commit()
+    .await?;
+    // No secret is returned until the business mutation and safe audit commit.
+    Ok((updated, secret.raw.to_string(), secret.key_id))
+}
+
+pub async fn rotate_secret(
+    db: &Database,
+    runtime: &AuditRuntime,
+    encryption_keys: &EncryptionKeys,
+    principal: &AuditPrincipal,
+    actor_id: &str,
+    client_id: &str,
+) -> AppResult<(OauthClient, String, String)> {
+    let secret = WebhookSecret::prepare(encryption_keys).await?;
+    let updated = WebhookConfiguration::new(
+        db,
+        runtime,
+        principal,
+        actor_id,
+        client_id,
+        WebhookChange::Rotate,
+        Some(&secret),
+    )
+    .commit()
+    .await?;
+    Ok((updated, secret.raw.to_string(), secret.key_id))
+}
+
+pub async fn disable(
+    db: &Database,
+    runtime: &AuditRuntime,
+    principal: &AuditPrincipal,
+    actor_id: &str,
+    client_id: &str,
+) -> AppResult<OauthClient> {
+    WebhookConfiguration::new(
+        db,
+        runtime,
+        principal,
+        actor_id,
+        client_id,
+        WebhookChange::Disable,
+        None,
+    )
+    .commit()
+    .await
+}
+
+async fn configuration_in_session(
+    session: &mut ClientSession,
+    change: &WebhookConfiguration<'_>,
+) -> AppResult<OauthClient> {
+    use crate::models::{org_membership, user};
+    use crate::services::org_service::{self, OwnerAccess};
+
+    let db = change.db;
+    let acting_owner = match change.principal {
+        AuditPrincipal::Person { id } => id,
+        AuditPrincipal::ApiKey { owner_id, .. } => owner_id,
+        _ => return Err(AppError::Forbidden("Developer app owner required".into())),
+    };
+    if acting_owner != change.actor_id {
+        return Err(AppError::Forbidden("Developer app owner required".into()));
+    }
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! {"_id": change.client_id, "is_active": true})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".into()))?;
+    let owner_id = client
+        .created_by
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".into()))?;
+    let access =
+        org_service::resolve_owner_access_in_session(db, session, change.actor_id, owner_id)
+            .await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("OAuth client not found".into()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this OAuth client".into(),
+        ));
+    }
+    let owner = db
+        .collection::<user::User>(user::COLLECTION_NAME)
+        .find_one(doc! {"_id": owner_id, "is_active": true})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".into()))?;
+    if matches!(change.change, WebhookChange::Rotate)
+        && (!client.connection_webhook_enabled
+            || client.connection_webhook_url.is_none()
+            || client.connection_webhook_secret_encrypted.is_none())
+    {
+        return Err(AppError::NotFound(
+            "Connection webhook not configured".into(),
+        ));
+    }
+    if matches!(change.change, WebhookChange::Disable)
+        && !client.connection_webhook_enabled
+        && client.connection_webhook_secret_encrypted.is_none()
+        && client.connection_webhook_key_id.is_none()
+    {
+        return Ok(client);
+    }
+    // Snapshot reads alone do not fence a concurrent membership revocation or
+    // owner deletion. Touch the same documents so contention retries the entire
+    // authority check and mutation in a fresh snapshot.
+    if let OwnerAccess::AsOrgAdmin { membership_id, .. } = access {
+        let fenced = db
+            .collection::<bson::Document>(org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": membership_id, "revoked_at": bson::Bson::Null, "role": "admin"},
+                doc! {"$inc": {"audit_mutation_fence": 1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        if fenced.matched_count != 1 {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+    }
+    let fenced = db
+        .collection::<bson::Document>(user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": owner_id, "is_active": true},
+            doc! {"$inc": {"audit_mutation_fence": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if fenced.matched_count != 1 {
+        return Err(AppError::AuditIntegrityConflict);
+    }
+    let mut set = doc! {"updated_at": bson::DateTime::from_chrono(change.at)};
+    let (action, tier, update) = match change.change {
+        WebhookChange::Disable => {
+            set.insert("connection_webhook_enabled", false);
+            (
+                "connection_webhook_disabled",
+                AuditTier::Narrowing,
+                doc! {
+                    "$set": set,
+                    "$unset": {"connection_webhook_secret_encrypted": "", "connection_webhook_key_id": ""},
+                },
+            )
+        }
+        WebhookChange::Configure(_) | WebhookChange::Rotate => {
+            let secret = change.secret.ok_or(AppError::AuditIntegrityConflict)?;
+            set.insert(
+                "connection_webhook_secret_encrypted",
+                bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: secret.encrypted.to_vec(),
+                },
+            );
+            set.insert("connection_webhook_key_id", &secret.key_id);
+            set.insert("connection_webhook_enabled", true);
+            let action = if let WebhookChange::Configure(url) = change.change {
+                set.insert("connection_webhook_url", url);
+                "connection_webhook_configured"
+            } else {
+                "connection_webhook_secret_rotated"
+            };
+            (action, AuditTier::Standard, doc! {"$set": set})
+        }
+    };
+    let updated = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one_and_update(
-            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-            doc! {
-                "$set": {
-                    "connection_webhook_enabled": false,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                },
-                "$unset": {
-                    "connection_webhook_secret_encrypted": "",
-                    "connection_webhook_key_id": "",
-                },
-            },
+            doc! {"_id": change.client_id, "created_by": owner_id, "is_active": true},
+            update,
         )
         .return_document(ReturnDocument::After)
+        .session(&mut *session)
         .await?
-        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))
+        .ok_or(AppError::AuditIntegrityConflict)?;
+    let event = AuditEvent {
+        operation_id: change.operation_id.to_string(),
+        stage: AuditStage::Committed,
+        principal: change.principal.clone(),
+        owner: if owner.user_type.is_org() {
+            AuditOwner::Org { id: owner.id }
+        } else {
+            AuditOwner::Person { id: owner.id }
+        },
+        action,
+        target_id: Some(client.id),
+    };
+    audit_outbox_service::enqueue_admitted_in_session(
+        db,
+        session,
+        change.runtime,
+        tier,
+        &change.event_id,
+        &event,
+    )
+    .await?;
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -543,12 +767,23 @@ mod tests {
             .await
             .expect("insert client");
         let keys = test_encryption_keys();
+        let runtime = AuditRuntime::new(Default::default(), false);
+        let principal = AuditPrincipal::Person { id: owner.clone() };
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
 
         let (configured, first_secret, first_key_id) = store_configuration(
             &db,
+            &runtime,
             &keys,
-            &client_id,
+            &principal,
             &owner,
+            &client_id,
             "https://receiver.example.test/events",
         )
         .await
@@ -572,9 +807,10 @@ mod tests {
         );
         assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
 
-        let (rotated, second_secret, second_key_id) = rotate_secret(&db, &keys, &client_id, &owner)
-            .await
-            .expect("rotate webhook secret");
+        let (rotated, second_secret, second_key_id) =
+            rotate_secret(&db, &runtime, &keys, &principal, &owner, &client_id)
+                .await
+                .expect("rotate webhook secret");
         assert_ne!(first_secret, second_secret);
         assert_ne!(first_key_id, second_key_id);
         let stored_second = Zeroizing::new(
@@ -589,13 +825,13 @@ mod tests {
         );
         assert_eq!(stored_second.as_slice(), second_secret.as_bytes());
 
-        let disabled = disable(&db, &client_id, &owner)
+        let disabled = disable(&db, &runtime, &principal, &owner, &client_id)
             .await
             .expect("disable webhook");
         assert!(!disabled.connection_webhook_enabled);
         assert!(disabled.connection_webhook_secret_encrypted.is_none());
         assert!(matches!(
-            rotate_secret(&db, &keys, &client_id, &owner).await,
+            rotate_secret(&db, &runtime, &keys, &principal, &owner, &client_id).await,
             Err(AppError::NotFound(_))
         ));
     }
@@ -778,5 +1014,274 @@ mod tests {
         assert!(!serialized.contains(raw_secret));
         assert!(!serialized.contains(&address.to_string()));
         assert!(!serialized.contains("private-event-payload"));
+    }
+    async fn w8_coreb_configuration_fixture() -> (Database, String, String, EncryptionKeys) {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_coreb_webhook_config").await;
+        let owner = Uuid::new_v4().to_string();
+        let app = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(client(&app, &owner))
+            .await
+            .unwrap();
+        (db, owner, app, test_encryption_keys())
+    }
+
+    #[tokio::test]
+    async fn w8_coreb_webhook_configuration_abort_commit_and_safe_attribution() {
+        use crate::models::audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent};
+        let (db, owner, app, keys) = w8_coreb_configuration_fixture().await;
+        let runtime = AuditRuntime::new(Default::default(), false);
+        let principal = AuditPrincipal::ApiKey {
+            id: Uuid::new_v4().to_string(),
+            owner_id: owner.clone(),
+        };
+        let secret = WebhookSecret::prepare(&keys).await.unwrap();
+        let change = WebhookConfiguration::new(
+            &db,
+            &runtime,
+            &principal,
+            &owner,
+            &app,
+            WebhookChange::Configure("https://receiver.example.test/events"),
+            Some(&secret),
+        );
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        configuration_in_session(&mut session, &change)
+            .await
+            .unwrap();
+        session.abort_transaction().await.unwrap();
+        drop(session);
+        let unchanged = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! {"_id": &app})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unchanged.connection_webhook_enabled);
+        assert!(unchanged.connection_webhook_secret_encrypted.is_none());
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let saved = change.commit().await.unwrap();
+        assert!(saved.connection_webhook_enabled);
+        let pending = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"_id": change.event_id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.event.principal, principal);
+        assert_eq!(
+            pending.event.owner,
+            AuditOwner::Person { id: owner.clone() }
+        );
+        assert_eq!(pending.event.target_id.as_deref(), Some(app.as_str()));
+        let evidence = serde_json::to_string(&pending).unwrap();
+        for forbidden in [
+            secret.raw.as_str(),
+            secret.key_id.as_str(),
+            "https://receiver.example.test/events",
+            "encrypted",
+        ] {
+            assert!(!evidence.contains(forbidden));
+        }
+        assert_eq!(
+            crate::services::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            1
+        );
+        disable(&db, &runtime, &principal, &owner, &app)
+            .await
+            .unwrap();
+        disable(&db, &runtime, &principal, &owner, &app)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::services::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_coreb_webhook_rotation_is_standard_and_disable_survives_closed_admission() {
+        use crate::services::audit_runtime::policy::{AdmissionLimits, TierLimit};
+        let (db, owner, app, keys) = w8_coreb_configuration_fixture().await;
+        let principal = AuditPrincipal::Person { id: owner.clone() };
+        let defaults = AdmissionLimits::default();
+        let runtime = AuditRuntime::new(
+            AdmissionLimits {
+                pending_count: 1,
+                standard: TierLimit {
+                    pending_count: 1,
+                    ..defaults.standard
+                },
+                ..defaults
+            },
+            true,
+        );
+        let (configured, _, _) = store_configuration(
+            &db,
+            &runtime,
+            &keys,
+            &principal,
+            &owner,
+            &app,
+            "https://receiver.example.test/events",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rotate_secret(&db, &runtime, &keys, &principal, &owner, &app).await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        let current = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! {"_id": &app})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.connection_webhook_secret_encrypted,
+            configured.connection_webhook_secret_encrypted
+        );
+        assert_eq!(
+            current.connection_webhook_key_id,
+            configured.connection_webhook_key_id
+        );
+        let disabled = disable(&db, &runtime, &principal, &owner, &app)
+            .await
+            .unwrap();
+        assert!(!disabled.connection_webhook_enabled);
+        assert!(disabled.connection_webhook_secret_encrypted.is_none());
+        assert!(disabled.connection_webhook_key_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn w8_coreb_webhook_owner_acl_and_principal_binding_are_transactional() {
+        use crate::models::{
+            org_membership::{self, OrgRole},
+            user::{self, UserType},
+        };
+        let (db, owner, app, keys) = w8_coreb_configuration_fixture().await;
+        let runtime = AuditRuntime::new(Default::default(), false);
+        for principal in [
+            AuditPrincipal::Node { id: owner.clone() },
+            AuditPrincipal::ApiKey {
+                id: Uuid::new_v4().to_string(),
+                owner_id: Uuid::new_v4().to_string(),
+            },
+        ] {
+            assert!(matches!(
+                store_configuration(
+                    &db,
+                    &runtime,
+                    &keys,
+                    &principal,
+                    &owner,
+                    &app,
+                    "https://receiver.example.test/events"
+                )
+                .await,
+                Err(AppError::Forbidden(_))
+            ));
+        }
+        let stranger = Uuid::new_v4().to_string();
+        assert!(matches!(
+            store_configuration(
+                &db,
+                &runtime,
+                &keys,
+                &AuditPrincipal::Person {
+                    id: stranger.clone()
+                },
+                &stranger,
+                &app,
+                "https://receiver.example.test/events"
+            )
+            .await,
+            Err(AppError::NotFound(_))
+        ));
+        let org = Uuid::new_v4().to_string();
+        db.collection::<user::User>(user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(doc! {"_id": &app}, doc! {"$set": {"created_by": &org}})
+            .await
+            .unwrap();
+        let member = crate::test_utils::test_membership(&org, &owner, OrgRole::Member, None);
+        db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME)
+            .insert_one(&member)
+            .await
+            .unwrap();
+        let principal = AuditPrincipal::Person { id: owner.clone() };
+        assert!(matches!(
+            store_configuration(
+                &db,
+                &runtime,
+                &keys,
+                &principal,
+                &owner,
+                &app,
+                "https://receiver.example.test/events"
+            )
+            .await,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+        db.collection::<bson::Document>(org_membership::COLLECTION_NAME)
+            .update_one(doc! {"_id": &member.id}, doc! {"$set": {"role": "admin"}})
+            .await
+            .unwrap();
+        store_configuration(
+            &db,
+            &runtime,
+            &keys,
+            &principal,
+            &owner,
+            &app,
+            "https://receiver.example.test/events",
+        )
+        .await
+        .unwrap();
+        let pending = db
+            .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+                crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+            )
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.event.owner, AuditOwner::Org { id: org });
+        assert_eq!(pending.event.principal, principal);
+        db.collection::<bson::Document>(org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &member.id},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            rotate_secret(&db, &runtime, &keys, &principal, &owner, &app).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 }
