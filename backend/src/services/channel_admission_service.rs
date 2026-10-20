@@ -119,22 +119,34 @@ pub(crate) async fn store_current_owner(
     db: &mongodb::Database,
     message: ChannelMessage,
 ) -> AppResult<Option<ChannelMessage>> {
-    let mut tx = db.client().start_session().await?;
-    tx.start_transaction()
-        .write_concern(mongodb::options::WriteConcern::majority())
-        .await?;
-    let result: AppResult<Option<ChannelMessage>> = async {
-        let owner = db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":&message.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
-                doc! {"$inc":{"channel_metadata_admission_revision":1_i64}},
-            ).session(&mut tx).await?;
-        if owner.matched_count != 1 { return Ok(None); }
-        db.collection::<ChannelMessage>(super::channel_activity_service::collection(&message))
-            .insert_one(&message).session(&mut tx).await?;
-        Ok(Some(message))
-    }.await;
-    super::org_membership_authority::finish(tx, result).await
+    // Concurrent deliveries contend on the same live-owner fence. Retry only
+    // definitely aborted DB work; callback I/O stays outside this transaction.
+    super::transaction_service::run_db_only(db, &(db.clone(), message), |tx, (db, message)| {
+        Box::pin(async move {
+            let owner_filter = doc! {
+                "_id": &message.user_id,
+                "is_active": true,
+                "platform_personal_deleting": {"$ne": true},
+            };
+            let owner = db
+                .collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .update_one(
+                    owner_filter,
+                    doc! {"$inc": {"channel_metadata_admission_revision": 1_i64}},
+                )
+                .session(&mut *tx)
+                .await?;
+            if owner.matched_count != 1 {
+                return Ok(None);
+            }
+            db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
+                .insert_one(message)
+                .session(&mut *tx)
+                .await?;
+            Ok(Some(message.clone()))
+        })
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -221,6 +233,55 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_non_deduplicated_messages_retry_the_live_owner_fence() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "channel_metadata_concurrent_owner_fence",
+        )
+        .await;
+        let mut inbound = message("telegram-message");
+        inbound.platform = "telegram".into();
+        seed_owner(&db, &inbound.user_id).await;
+        let deliveries = 16;
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(deliveries));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..deliveries {
+            let db = db.clone();
+            let start = start.clone();
+            let mut inbound = inbound.clone();
+            inbound.id = uuid::Uuid::new_v4().to_string();
+            tasks.spawn(async move {
+                start.wait().await;
+                store_current_owner(&db, inbound).await
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            assert!(result.unwrap().unwrap().is_some());
+        }
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            deliveries as u64,
+            "every independent message must survive contention on its live owner"
+        );
+        let owner = db
+            .collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id": &inbound.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            owner
+                .get_i64("channel_metadata_admission_revision")
+                .unwrap(),
+            deliveries as i64,
+            "each admitted message must commit the owner fence exactly once"
         );
         db.drop().await.unwrap();
     }
