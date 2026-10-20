@@ -178,6 +178,8 @@ pub enum AuditDetail {
         old: Option<super::assistant_settings::AccessMode>,
         new: Option<super::assistant_settings::AccessMode>,
     },
+    /// The binding model accepts the complete i32 range; lower sorts first.
+    NodeBindingPriorityChange { old: i32, new: i32 },
     OrgRoleChange {
         old: super::org_membership::OrgRole,
         new: super::org_membership::OrgRole,

@@ -626,6 +626,33 @@ mod tests {
     }
 
     #[test]
+    fn audit_detail_node_binding_priority_has_frozen_v1_canonical_bytes() {
+        use crate::models::audit_outbox::AuditDetail;
+        let detail = AuditDetail::NodeBindingPriorityChange {
+            old: i32::MIN,
+            new: i32::MAX,
+        };
+        let entry = test_entry(Some(serde_json::to_value(detail).unwrap()));
+        let fields: [String; 11] = [
+            "1".into(),
+            GENESIS_PREV_HASH.into(),
+            "entry-1".into(),
+            entry.user_id.clone().unwrap(),
+            "login".into(),
+            r#"{"kind":"node_binding_priority_change","new":2147483647,"old":-2147483648}"#.into(),
+            entry.ip_address.clone().unwrap(),
+            entry.user_agent.clone().unwrap(),
+            entry.api_key_id.clone().unwrap_or_default(),
+            entry.api_key_name.clone().unwrap_or_default(),
+            "1700000000123".into(),
+        ];
+        assert_eq!(
+            canonical_audit_bytes(&entry).unwrap(),
+            fields.join("\u{1e}").as_bytes()
+        );
+    }
+
+    #[test]
     fn canonical_audit_bytes_include_empty_optional_fields_and_millis() {
         let entry = AuditLog {
             user_id: None,

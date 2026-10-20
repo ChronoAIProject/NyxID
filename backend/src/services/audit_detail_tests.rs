@@ -90,6 +90,10 @@ fn valid_details() -> Vec<AuditDetail> {
         ),
         access(AccessModeScope::Agent, Some(AccessMode::Nyxmode), None),
         access(AccessModeScope::Agent, None, Some(AccessMode::Nyxmode)),
+        AuditDetail::NodeBindingPriorityChange {
+            old: i32::MIN,
+            new: i32::MAX,
+        },
         AuditDetail::OrgRoleChange {
             old: OrgRole::Viewer,
             new: OrgRole::Admin,
@@ -201,6 +205,56 @@ fn audit_detail_acknowledgement_inventory_and_approvers_are_closed() {
             }
         }
     }
+}
+
+#[test]
+fn audit_detail_node_binding_priority_preserves_model_bounds_and_exact_bytes() {
+    for (old, new) in [(i32::MIN, i32::MAX), (i32::MAX, i32::MIN), (-1, 0)] {
+        let detail = AuditDetail::NodeBindingPriorityChange { old, new };
+        validate_detail(&detail).unwrap();
+        let json = serde_json::to_vec(&detail).unwrap();
+        assert_eq!(
+            json,
+            format!(r#"{{"kind":"node_binding_priority_change","old":{old},"new":{new}}}"#)
+                .as_bytes()
+        );
+        assert_eq!(
+            serde_json::from_slice::<AuditDetail>(&json).unwrap(),
+            detail
+        );
+        assert_eq!(
+            bson::from_slice::<AuditDetail>(&bson::to_vec(&detail).unwrap()).unwrap(),
+            detail
+        );
+    }
+    for value in [i32::MIN, 0, i32::MAX] {
+        // Binding PATCH already permits idempotent updates. Preserve that
+        // domain behavior; the AccessMode-specific no-change rule is separate.
+        validate_detail(&AuditDetail::NodeBindingPriorityChange {
+            old: value,
+            new: value,
+        })
+        .unwrap();
+    }
+    for field in ["old", "new"] {
+        for invalid in [
+            serde_json::json!(-2_147_483_649_i64),
+            serde_json::json!(2_147_483_648_i64),
+            serde_json::json!("1"),
+            serde_json::json!(1.5),
+        ] {
+            let mut detail =
+                serde_json::json!({"kind": "node_binding_priority_change", "old": 0, "new": 1});
+            detail[field] = invalid;
+            assert!(serde_json::from_value::<AuditDetail>(detail).is_err());
+        }
+    }
+    assert!(
+        serde_json::from_str::<AuditDetail>(
+            r#"{"kind":"node_binding_priority_change","old":0,"new":1,"label":"forbidden"}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]

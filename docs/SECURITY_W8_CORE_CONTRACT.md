@@ -165,6 +165,7 @@ rewritten or re-signed; the witness still receives hashes only.
 | Variant | Fields / meaning |
 | --- | --- |
 | `AccessModeChange` | `scope: Workspace/Agent`, `old/new: Option<assistant_settings::AccessMode>` (`autopilot/nyxmode/ask_every_time`). **None = inherited from workspace** for agent scope. Workspace requires both Some; equal old/new (including None/None) is rejected. This is the current settings enum, not the retired conversation Ask/Full enum. |
+| `NodeBindingPriorityChange` | `old/new: i32`, the binding model's full -2,147,483,648–2,147,483,647 range (no narrower product bound). Lower values sort first; equal values preserve idempotent binding updates. Derive the old value from the binding loaded inside the transaction. |
 | `OrgRoleChange` | Existing `OrgRole` old/new (`admin/member/viewer`). |
 | `ApprovalModeChange` | `AuditApprovalMode` old/new (`writes_only/all/off`); `writes_only` preserves the global stored tri-state None, rather than treating it as off. |
 | `ServiceApprovalModeChange` | Existing per-service `ApprovalMode` old/new (`per_request/grant`). |
