@@ -544,6 +544,10 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
 
+A missing global preference defaults to **Writes only**: read operations can proceed; write and destructive operations require approval. Explicit stored true selects **All requests**, false selects **Off**. Lazy settings/channel and tool-approval creation leave the preference absent. Existing stored booleans keep their meaning, including unmarked true rows from the unreleased W9.3 build. Users can deliberately reset to Writes only through settings. This default has no environment toggle, and notification availability never suspends required approval.
+
+Drain and upgrade **every** backend replica and participating worker before accepting traffic under the new-user writes-only guarantee. Main-era replicas allow writes when the preference is missing; earlier W9.3 replicas gate reads and lazily persist true. Mixed versions therefore do not implement the guarantee. Publish the three-choice clients after backend cutover, and drain affected traffic before rollback. See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md#required-approval-and-delivery).
+
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
 ## Hosted Connect Links
