@@ -107,7 +107,9 @@ try{
  await stop();
  const resolvedBrowser=await fs.realpath('/usr/bin/chromium');
  const policyDirectory=resolvedBrowser.startsWith('/snap/chromium/')?'/etc/chromium-browser/policies/managed':'/etc/chromium/policies/managed';
- const policyFile=`${policyDirectory}/nyxid.json`,policyBackup=`${policyFile}.native-acceptance-disabled`;
+ // Chromium reads policy files regardless of their extension. Move the inode
+ // outside managed/, keeping it on the same filesystem for exact restoration.
+ const policyFile=`${policyDirectory}/nyxid.json`,policyBackup=path.join(policyDirectory,'../nyxid.native-acceptance-disabled');
  assert(!(await fs.access(policyBackup).then(()=>true,()=>false)),'pre-existing policy test backup');
  await fs.rename(policyFile,policyBackup);
  try {
