@@ -4039,66 +4039,72 @@ fn prepare_proxy_tool_call_inner(
 
 /// Only live chat dispatch can materialize attachment references. Ordinary,
 /// exact, descriptor and background preparation continues to refuse candidates.
-pub async fn prepare_chat_proxy_tool_call(
-    db: &mongodb::Database,
-    keys: &EncryptionKeys,
-    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
-    service: &McpToolService,
-    endpoint: &McpToolEndpoint,
-    args: &serde_json::Value,
-) -> AppResult<PreparedProxyCall> {
-    if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
-        return prepare_proxy_tool_call(service, endpoint, args);
-    }
-    if matches!(
-        endpoint.attachment_input,
-        Some(super::lark_attachment_tool::Projection::Managed(_))
-    ) {
-        let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
-        let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
-        let key = db
-            .collection::<crate::models::api_key::ApiKey>("api_keys")
-            .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
-            .await?
-            .ok_or_else(super::lark_attachment_tool::refused)?;
-        let body: serde_json::Value =
-            serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
-                .map_err(|_| super::lark_attachment_tool::refused())?;
-        prepared.body = Some(
-            serde_json::to_vec(&canonical_json(body.clone()))
-                .map_err(|_| super::lark_attachment_tool::refused())?
-                .into(),
-        );
-        prepared.authorize_agent_operations(&key.assistant_operation_scopes, service, endpoint)?;
-        prepared.managed_base = Some(
-            Box::pin(super::lark_base_writes::prepare(
-                db,
-                keys,
-                Some(chat),
+pub fn prepare_chat_proxy_tool_call<'a>(
+    db: &'a mongodb::Database,
+    keys: &'a EncryptionKeys,
+    chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    args: &'a serde_json::Value,
+) -> futures::future::BoxFuture<'a, AppResult<PreparedProxyCall>> {
+    Box::pin(async move {
+        if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
+            return prepare_proxy_tool_call(service, endpoint, args);
+        }
+        if matches!(
+            endpoint.attachment_input,
+            Some(super::lark_attachment_tool::Projection::Managed(_))
+        ) {
+            let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
+            let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+            let key = db
+                .collection::<crate::models::api_key::ApiKey>("api_keys")
+                .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
+                .await?
+                .ok_or_else(super::lark_attachment_tool::refused)?;
+            let body: serde_json::Value =
+                serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
+                    .map_err(|_| super::lark_attachment_tool::refused())?;
+            prepared.body = Some(
+                serde_json::to_vec(&canonical_json(body.clone()))
+                    .map_err(|_| super::lark_attachment_tool::refused())?
+                    .into(),
+            );
+            prepared.authorize_agent_operations(
+                &key.assistant_operation_scopes,
                 service,
                 endpoint,
-                args,
-                &body,
-            ))
-            .await?,
-        );
-        return Ok(prepared);
-    }
-    let materialized = Box::pin(super::lark_attachment_tool::materialize(
-        db, keys, chat, service, endpoint, args,
-    ))
-    .await?;
-    // Reuse route/policy preparation with no caller body. This private copy
-    // changes only body construction; consent and identity keep the real endpoint.
-    let mut route = endpoint.clone();
-    route.request_content_type = None;
-    route.request_body_schema = None;
-    route.request_body_required = false;
-    let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
-    prepared.body = Some(materialized.body);
-    prepared.body_content_type = Some(materialized.content_type);
-    prepared.attachment_binding = Some(materialized.binding);
-    Ok(prepared)
+            )?;
+            prepared.managed_base = Some(
+                Box::pin(super::lark_base_writes::prepare(
+                    db,
+                    keys,
+                    Some(chat),
+                    service,
+                    endpoint,
+                    args,
+                    &body,
+                ))
+                .await?,
+            );
+            return Ok(prepared);
+        }
+        let materialized = Box::pin(super::lark_attachment_tool::materialize(
+            db, keys, chat, service, endpoint, args,
+        ))
+        .await?;
+        // Reuse route/policy preparation with no caller body. This private copy
+        // changes only body construction; consent and identity keep the real endpoint.
+        let mut route = endpoint.clone();
+        route.request_content_type = None;
+        route.request_body_schema = None;
+        route.request_body_required = false;
+        let mut prepared = prepare_proxy_tool_call_inner(service, &route, &serde_json::json!({}))?;
+        prepared.body = Some(materialized.body);
+        prepared.body_content_type = Some(materialized.content_type);
+        prepared.attachment_binding = Some(materialized.binding);
+        Ok(prepared)
+    })
 }
 
 /// Prepare an exact-approved call with a server-owned provider idempotency
