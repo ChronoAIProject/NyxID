@@ -72,6 +72,41 @@ Keep existing business replay receipts, unique constraints, funding IDs,
 credential epochs, generation fences and first-writer rules. Transaction retry
 does not supply cross-request business idempotency by itself.
 
+## Replica fault-injection ownership
+
+MongoDB's `failCommand` state (including its app-name selector) is server-global.
+A process-local mutex does not isolate nextest processes. Tests must use
+`crate::test_utils::fail_command::Guard::acquire(&fixture_db, command_handler)`
+(`command_handler` is `None` or the existing Mongo command observer). Keep the
+guard through every fault assertion. Execute the tested operations through
+`guard.database().clone()`; that client has a unique guard-owned `appName`.
+
+Arm with `guard.arm(doc! {"times": 2}, doc! {"failCommands": ["update"],
+"errorCode": 112, "errorLabels": []}).await?`, or `"alwaysOn"` as the mode.
+The guard inserts its own app-name restriction, rejects caller-defined scope,
+and holds the shared kernel file lock across the complete script. Use
+`guard.disarm().await?` between phases when useful. Scope exit and panic also
+reset the server on a joined independent runtime before releasing ownership;
+do not rely on a spawned reset that a short-lived Tokio runtime can cancel.
+The lock serializes fault scripts; it does not change normal test parallelism.
+An unrelated client's readiness/business writes must succeed while it is armed.
+Do not add raw `configureFailPoint` calls or a new local mutex in lane files.
+
+For an exact command boundary in a synchronous `CommandEvent::Started`
+observer, install `guard.controller()` in the observer's `Arc<OnceLock<_>>`
+before executing the tested operation. Its cloneable `FailCommandController`
+offers blocking `arm(mode, data)` and `disarm()` with the same guard-owned
+scope. Control commands run on a separate thread/runtime and a dedicated
+single-connection client, without the tested client's callback or pool. The
+monitored client also has exactly one pooled connection: a Started observer
+arms while its target owns that connection, and concurrent operations queue
+behind it. An asynchronous arm before racing two matching commands does not
+select one by identity; use the target's Started boundary for that case. Calls
+serialize with each other and teardown; Drop tracks even uncertain arming,
+resets and joins the controller before unlocking. Controller clones retained
+after Drop return an error and cannot arm another script. The controller does
+not extend the guard's lifetime or transfer the kernel lock to a lane.
+
 ## Safe event and actor/owner construction
 
 `audit_outbox_service::AuditEvent` accepts only:

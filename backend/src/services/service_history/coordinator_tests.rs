@@ -63,47 +63,33 @@ async fn mutation(
 async fn audit_service_history_complete_transaction_retries_raw_conflict_and_unknown_commit_with_bounds()
  {
     use std::sync::atomic::{AtomicU32, Ordering};
-    let _guard = crate::services::audit_state_service::tests::FAIL_COMMAND
-        .lock()
-        .await;
     let (base, service) = fixture().await;
     base.collection::<UserService>("user_services")
         .insert_one(&service)
         .await
         .unwrap();
-    let app = format!("audit-service-history-{}", Uuid::new_v4());
     let commands = Arc::new(Mutex::new(Vec::new()));
     let capture = commands.clone();
-    let mut options =
-        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-    options.app_name = Some(app.clone());
-    options.command_event_handler = Some(EventHandler::callback(move |event| {
-        if let CommandEvent::Started(event) = event
-            && matches!(
-                event.command_name.as_str(),
-                "commitTransaction" | "abortTransaction"
-            )
-        {
-            capture
-                .lock()
-                .unwrap()
-                .push((event.command_name, event.command));
-        }
-    }));
-    let db = mongodb::Client::with_options(options)
-        .unwrap()
-        .database(base.name());
-    let admin = base.client().database("admin");
+    let mut fault = crate::test_utils::fail_command::Guard::acquire(
+        &base,
+        Some(EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && matches!(
+                    event.command_name.as_str(),
+                    "commitTransaction" | "abortTransaction"
+                )
+            {
+                capture
+                    .lock()
+                    .unwrap()
+                    .push((event.command_name, event.command));
+            }
+        })),
+    )
+    .await;
+    let db = fault.database().clone();
     for labeled in [false, true] {
-        admin
-            .run_command(
-                doc! {"configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
-                    "failCommands": ["update"], "appName": &app, "errorCode": 112,
-                    "errorLabels": if labeled {vec!["TransientTransactionError"]} else {vec![]}
-                }},
-            )
+        fault.arm(doc! {"times": 2}, doc! {"failCommands": ["update"], "errorCode": 112, "errorLabels": if labeled {vec!["TransientTransactionError"]} else {vec![]}})
             .await
             .unwrap();
         let attempts = AtomicU32::new(0);
@@ -111,36 +97,25 @@ async fn audit_service_history_complete_transaction_retries_raw_conflict_and_unk
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
     assert_eq!(events(&db, &service.id).await.len(), 2);
-    admin
-        .run_command(
-            doc! {"configureFailPoint": "failCommand", "mode": "alwaysOn", "data": {
-                "failCommands": ["update"], "appName": &app, "errorCode": 112, "errorLabels": []
-            }},
+    fault
+        .arm(
+            "alwaysOn",
+            doc! {"failCommands": ["update"], "errorCode": 112, "errorLabels": []},
         )
         .await
         .unwrap();
     let attempts = AtomicU32::new(0);
     let exhausted = mutation(&db, &service, &attempts).await;
-    admin
-        .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-        .await
-        .unwrap();
+    fault.disarm().await.unwrap();
     assert!(exhausted.is_err());
     assert_eq!(attempts.load(Ordering::SeqCst), core::MAX_BODY_ATTEMPTS);
     assert_eq!(events(&db, &service.id).await.len(), 2);
     for persistent in [false, true] {
-        admin.run_command(doc! {"configureFailPoint": "failCommand", "mode": if persistent {bson::Bson::String("alwaysOn".into())} else {bson::Bson::Document(doc! {"times": 1})}, "data": {
-            "failCommands": ["commitTransaction"], "appName": &app,
-            "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
-            "errorLabels": ["UnknownTransactionCommitResult", "TransientTransactionError"]
-        }}).await.unwrap();
+        fault.arm(if persistent {bson::Bson::String("alwaysOn".into())} else {bson::Bson::Document(doc! {"times": 1})}, doc! {"failCommands": ["commitTransaction"], "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult", "TransientTransactionError"]}).await.unwrap();
         commands.lock().unwrap().clear();
         let attempts = AtomicU32::new(0);
         let result = mutation(&db, &service, &attempts).await;
-        admin
-            .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-            .await
-            .unwrap();
+        fault.disarm().await.unwrap();
         assert_eq!(
             attempts.load(Ordering::SeqCst),
             1,
@@ -193,29 +168,17 @@ async fn audit_service_history_complete_transaction_retries_raw_conflict_and_unk
 
 #[tokio::test]
 async fn audit_service_history_implicit_owner_retries_raw_conflict_without_splitting_journal() {
-    let _guard = crate::services::audit_state_service::tests::FAIL_COMMAND
-        .lock()
-        .await;
     let (base, service) = fixture().await;
     base.collection::<UserService>("user_services")
         .insert_one(&service)
         .await
         .unwrap();
-    let app = format!("audit-service-history-implicit-{}", Uuid::new_v4());
-    let mut options =
-        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-    options.app_name = Some(app.clone());
-    let db = mongodb::Client::with_options(options)
-        .unwrap()
-        .database(base.name());
-    base.client()
-        .database("admin")
-        .run_command(
-            doc! {"configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
-                "failCommands": ["update"], "appName": app, "errorCode": 112, "errorLabels": []
-            }},
+    let mut fault = crate::test_utils::fail_command::Guard::acquire(&base, None).await;
+    let db = fault.database().clone();
+    fault
+        .arm(
+            doc! {"times": 2},
+            doc! {"failCommands": ["update"], "errorCode": 112, "errorLabels": []},
         )
         .await
         .unwrap();

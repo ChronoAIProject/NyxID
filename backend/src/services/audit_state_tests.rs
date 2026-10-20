@@ -3,7 +3,9 @@ use crate::test_utils::connect_transaction_test_database;
 use futures::TryStreamExt;
 
 const KEY: [u8; 32] = [2; 32];
-pub(crate) static FAIL_COMMAND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// Compatibility for lanes migrating their existing scripts; new scripts use
+// test_utils::fail_command::Guard, which owns the scoped client and reset.
+pub(crate) use crate::test_utils::fail_command::PROCESS_LOCK as FAIL_COMMAND;
 
 fn entry() -> AuditLog {
     AuditLog {
@@ -345,40 +347,27 @@ async fn restart_rejects_wrong_chain_key_or_changed_tail() {
 
 #[tokio::test]
 async fn unknown_commit_acknowledgment_retries_same_transaction_and_event_identity() {
-    let _guard = FAIL_COMMAND.lock().await;
     use mongodb::event::{EventHandler, command::CommandEvent};
     use std::sync::{Arc, Mutex};
 
     let base = connect_transaction_test_database("audit_commit_unknown").await;
-    let app = format!("audit-commit-{}", Uuid::new_v4());
     let commands = Arc::new(Mutex::new(Vec::new()));
     let captured = commands.clone();
-    let mut options = mongodb::options::ClientOptions::parse(
-        std::env::var("NYXID_TEST_DATABASE_URL").expect("MongoDB test URL"),
+    let mut fault = crate::test_utils::fail_command::Guard::acquire(
+        &base,
+        Some(EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "commitTransaction"
+            {
+                captured.lock().unwrap().push(event.command);
+            }
+        })),
     )
-    .await
-    .unwrap();
-    options.app_name = Some(app.clone());
-    options.command_event_handler = Some(EventHandler::callback(move |event| {
-        if let CommandEvent::Started(event) = event
-            && event.command_name == "commitTransaction"
-        {
-            captured.lock().unwrap().push(event.command);
-        }
-    }));
-    let client = mongodb::Client::with_options(options).unwrap();
-    let db = client.database(base.name());
+    .await;
+    let db = fault.database().clone();
     // Mongo executes the commit, then injects an uncertain durability response.
     // Scope to this client's application name; other test clients are unaffected.
-    base.client()
-        .database("admin")
-        .run_command(doc! {
-            "configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
-                "failCommands": ["commitTransaction"], "appName": &app,
-                "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
-                "errorLabels": ["UnknownTransactionCommitResult"]
-            }
-        })
+    fault.arm(doc! {"times": 1}, doc! {"failCommands": ["commitTransaction"], "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult"]})
         .await
         .expect("own Mongo must enable test commands; no skipped fault evidence");
     let event = entry();

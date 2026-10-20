@@ -99,7 +99,7 @@ async fn current_workload(db: &Database, tasks: usize, per_task: usize) -> Workl
                 }
                 assert!(
                     result.is_ok(),
-                    "ordinary contention must retry transparently: {result:?}"
+                    "ordinary contention must retry transparently: bodies={bodies} commits={commits} result={result:?}"
                 );
                 stats.appends += 1;
                 stats.body_attempts += bodies;
@@ -226,38 +226,35 @@ async fn audit_transaction_integrity_failure_aborts_once_without_retry() {
 async fn audit_transaction_write_conflict_and_unknown_commit_are_bounded_without_body_replay() {
     use mongodb::event::{EventHandler, command::CommandEvent};
     use std::sync::Mutex;
-    let _guard = state::tests::FAIL_COMMAND.lock().await;
     let base = connect_transaction_test_database("audit_retry_faults").await;
     base.create_collection("business").await.unwrap();
-    let app = format!("audit-retry-{}", Uuid::new_v4());
     let commands = Arc::new(Mutex::new(Vec::new()));
     let capture = commands.clone();
-    let mut options =
-        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
-            .await
-            .unwrap();
-    options.app_name = Some(app.clone());
-    options.command_event_handler = Some(EventHandler::callback(move |event| {
-        if let CommandEvent::Started(event) = event
-            && event.command_name == "commitTransaction"
-        {
-            capture.lock().unwrap().push(event.command);
-        }
-    }));
-    let db = mongodb::Client::with_options(options)
-        .unwrap()
-        .database(base.name());
+    let mut fault = crate::test_utils::fail_command::Guard::acquire(
+        &base,
+        Some(EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command_name == "commitTransaction"
+            {
+                capture.lock().unwrap().push(event.command);
+            }
+        })),
+    )
+    .await;
+    let db = fault.database().clone();
     for labeled in [true, false] {
         let labels = if labeled {
             vec!["TransientTransactionError"]
         } else {
             vec![]
         };
-        base.client().database("admin").run_command(doc! {
-            "configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
-                "failCommands": ["update"], "appName": &app, "errorCode": 112, "errorLabels": labels
-            }
-        }).await.unwrap();
+        fault
+            .arm(
+                doc! {"times": 2},
+                doc! {"failCommands": ["update"], "errorCode": 112, "errorLabels": labels},
+            )
+            .await
+            .unwrap();
         let event = entry();
         let mut attempts = 0;
         run_observed(
@@ -281,14 +278,7 @@ async fn audit_transaction_write_conflict_and_unknown_commit_are_bounded_without
             "two real conflicts must replay the entire aborted business transaction"
         );
     }
-    base.client()
-        .database("admin")
-        .run_command(doc! {
-            "configureFailPoint": "failCommand", "mode": "alwaysOn", "data": {
-                "failCommands": ["update"], "appName": &app, "errorCode": 112,
-                "errorLabels": ["TransientTransactionError"]
-            }
-        })
+    fault.arm("alwaysOn", doc! {"failCommands": ["update"], "errorCode": 112, "errorLabels": ["TransientTransactionError"]})
         .await
         .unwrap();
     let mut attempts = 0;
@@ -306,24 +296,12 @@ async fn audit_transaction_write_conflict_and_unknown_commit_are_bounded_without
         |b, _| attempts = b,
     )
     .await;
-    base.client()
-        .database("admin")
-        .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-        .await
-        .unwrap();
+    fault.disarm().await.unwrap();
     assert!(matches!(result, Err(AppError::DatabaseError(_))));
     assert_eq!(attempts, MAX_BODY_ATTEMPTS);
     assert_eq!(state::load(&base).await.unwrap().head_seq, 2);
     // Successful commit with uncertain acknowledgment: callback executes once.
-    base.client()
-        .database("admin")
-        .run_command(doc! {
-            "configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
-                "failCommands": ["commitTransaction"], "appName": &app,
-                "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
-                "errorLabels": ["UnknownTransactionCommitResult"]
-            }
-        })
+    fault.arm(doc! {"times": 1}, doc! {"failCommands": ["commitTransaction"], "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult"]})
         .await
         .unwrap();
     commands.lock().unwrap().clear();
@@ -353,15 +331,7 @@ async fn audit_transaction_write_conflict_and_unknown_commit_are_bounded_without
     }
     // All eight commit attempts are unknown: return raw uncertainty, never
     // replay a possibly committed mutation or turn it into integrity failure.
-    base.client()
-        .database("admin")
-        .run_command(doc! {
-            "configureFailPoint": "failCommand", "mode": "alwaysOn", "data": {
-                "failCommands": ["commitTransaction"], "appName": &app,
-                "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
-                "errorLabels": ["UnknownTransactionCommitResult"]
-            }
-        })
+    fault.arm("alwaysOn", doc! {"failCommands": ["commitTransaction"], "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult"]})
         .await
         .unwrap();
     let mut counts = (0, 0);
@@ -379,11 +349,7 @@ async fn audit_transaction_write_conflict_and_unknown_commit_are_bounded_without
         |b, c| counts = (b, c),
     )
     .await;
-    base.client()
-        .database("admin")
-        .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-        .await
-        .unwrap();
+    fault.disarm().await.unwrap();
     assert!(
         matches!(result, Err(AppError::DatabaseError(ref error)) if error.contains_label("UnknownTransactionCommitResult"))
     );

@@ -29,6 +29,7 @@ use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
+pub(crate) mod fail_command;
 mod mongo_readiness;
 
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
