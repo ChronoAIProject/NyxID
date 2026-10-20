@@ -81,20 +81,28 @@ for (const [url, target] of [
   await check(url, 301, (r) => assert.equal(r.headers.get("location"), target));
 await check("/security?lang=en&lang=zh", 400);
 await check("/security?lang=zh&LANG=en", 400);
-await check("/security?LANG=zh", 301, r => assert.equal(r.headers.get("location"),"/zh/security"));
+await check("/security?LANG=zh", 301, (r) =>
+  assert.equal(r.headers.get("location"), "/zh/security"),
+);
 await check("/security?lang=invalid", 200);
 await check("/llms.txt", 200, async (r) => {
   assert.match(r.headers.get("content-type"), /text\/plain/);
   assert.match(await r.text(), /^# NyxID/);
 });
 for (const url of [
-  "/api/__probe?code=fixture", "/api/v1/proxy/fixture/config.conf",
+  "/api/__probe?code=fixture",
+  "/api/v1/proxy/fixture/config.conf",
   "/oauth/__probe?state=fixture",
   "/.well-known/__probe",
   "/mcp/__probe",
   "/health",
 ])
   await check(url, 200, async (r) => assert.equal((await r.json()).url, url));
+const privacyProbe = await fetch(
+  base + "/security?code=nyxid-ci-log-privacy-check&return_to=%2Fkeys",
+  { headers: { Referer: base + "/?code=nyxid-ci-log-privacy-check" } },
+);
+assert.equal(privacyProbe.status, 200);
 const page = await check("/security", 200);
 const etag = page.headers.get("etag");
 assert.ok(etag);

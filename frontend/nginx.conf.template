@@ -1,5 +1,7 @@
 # Claim links carry a short-lived bearer. Redact them before access logging and
 # suppress the initial document's referrer before the browser loads any assets.
+# All other request queries and query-bearing referrers are omitted too: public
+# pages preserve invitation/return context in the browser, never in access logs.
 map $request_uri $nyxid_has_claim {
     default 0;
     ~[?&]claim(?:=|&|$) 1;
@@ -9,12 +11,12 @@ map $nyxid_has_claim $nyxid_referrer_policy {
     default "no-referrer";
 }
 map $nyxid_has_claim $nyxid_access_request {
-    0 $request;
+    0 "$request_method $uri $server_protocol";
     default "$request_method $uri?claim=REDACTED $server_protocol";
 }
 map $http_referer $nyxid_access_referrer {
     default $http_referer;
-    ~[?&]claim= "REDACTED";
+    ~[?] "REDACTED";
 }
 log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
     '"$nyxid_access_request" $status $body_bytes_sent '

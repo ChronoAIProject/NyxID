@@ -38,6 +38,7 @@ jobs:
           for i in $(seq 1 30); do curl --fail --silent http://127.0.0.1:4188/security >/dev/null && break; sleep 1; done
           docker exec nyxid-public-test nginx -t
           node scripts/verify-public-http.mjs
+          node scripts/verify-public-log-privacy.mjs
       - run: npx playwright install --with-deps chromium
       - name: Single browser acceptance
         run: npx playwright test --config public-playwright.config.ts
