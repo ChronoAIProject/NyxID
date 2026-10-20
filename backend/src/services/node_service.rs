@@ -4107,16 +4107,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let base = crate::test_utils::connect_transaction_test_database("w8_node_retry").await;
         let f = seed_acl_fixture(&base, AccessCase::Direct).await;
-        let app_name = format!("w8-node-{}", Uuid::new_v4());
         let commands = Arc::new(Mutex::new(Vec::new()));
         let capture = commands.clone();
-        let mut options = mongodb::options::ClientOptions::parse(
-            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
-        )
-        .await
-        .unwrap();
-        options.app_name = Some(app_name.clone());
-        options.command_event_handler = Some(EventHandler::callback(move |event| {
+        let handler = EventHandler::callback(move |event| {
             if let CommandEvent::Started(event) = event
                 && matches!(event.command_name.as_str(), "update" | "commitTransaction")
             {
@@ -4125,31 +4118,26 @@ mod tests {
                     .unwrap()
                     .push((event.command_name, event.command));
             }
-        }));
-        let db = mongodb::Client::with_options(options)
-            .unwrap()
-            .database(base.name());
+        });
+        let mut guard = crate::test_utils::fail_command::Guard::acquire(&base, Some(handler)).await;
+        let db = guard.database().clone();
         let runtime = node_audit_runtime(false);
         for labeled in [false, true] {
             commands.lock().unwrap().clear();
-            base.client()
-                .database("admin")
-                .run_command(
-                    doc! {"configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
-                        "failCommands": ["update"], "appName": &app_name, "errorCode": 112,
+            guard
+                .arm(
+                    doc! {"times": 2},
+                    doc! {
+                        "failCommands": ["update"], "errorCode": 112,
                         "errorLabels": if labeled {vec!["TransientTransactionError"]} else {vec![]},
-                    }},
+                    },
                 )
                 .await
                 .unwrap();
             let result = NodeMutationAudit::new(&runtime, &f.actor_id)
                 .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
                 .await;
-            base.client()
-                .database("admin")
-                .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-                .await
-                .unwrap();
+            guard.disarm().await.unwrap();
             let (auth, _) = result.unwrap();
             let updates: Vec<_> = commands
                 .lock()
@@ -4184,18 +4172,21 @@ mod tests {
             );
         }
         commands.lock().unwrap().clear();
-        base.client().database("admin").run_command(doc! {"configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
-            "failCommands": ["commitTransaction"], "appName": &app_name,
-            "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult"],
-        }}).await.unwrap();
+        guard
+            .arm(
+                doc! {"times": 1},
+                doc! {
+                    "failCommands": ["commitTransaction"],
+                    "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
+                    "errorLabels": ["UnknownTransactionCommitResult"],
+                },
+            )
+            .await
+            .unwrap();
         let result = NodeMutationAudit::new(&runtime, &f.actor_id)
             .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
             .await;
-        base.client()
-            .database("admin")
-            .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-            .await
-            .unwrap();
+        guard.disarm().await.unwrap();
         let (auth, _) = result.unwrap();
         {
             let commands = commands.lock().unwrap();
