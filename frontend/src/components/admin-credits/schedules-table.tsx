@@ -37,8 +37,8 @@ export function SchedulesTable({
 }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
-      <Table>
-        <TableHeader>
+      <Table className="max-sm:block">
+        <TableHeader className="max-sm:hidden">
           <TableRow>
             <TableHead>Amount</TableHead>
             <TableHead>Recurrence</TableHead>
@@ -51,9 +51,12 @@ export function SchedulesTable({
             ) : null}
           </TableRow>
         </TableHeader>
-        <TableBody>
+        <TableBody className="max-sm:block">
           {schedules.map((schedule) => (
-            <TableRow key={schedule.id}>
+            <TableRow
+              key={schedule.id}
+              className="max-sm:grid max-sm:gap-1 max-sm:p-3 max-sm:[&>td]:min-w-0 max-sm:[&>td]:whitespace-normal max-sm:[&>td]:break-words max-sm:[&>td]:px-0"
+            >
               <TableCell className="font-medium">
                 {formatExactCredits(
                   exactCredits(
@@ -61,6 +64,7 @@ export function SchedulesTable({
                     schedule.amount_credits,
                     "whole",
                   ) ?? "0",
+                  12,
                 )}{" "}
                 credits
               </TableCell>
@@ -70,6 +74,24 @@ export function SchedulesTable({
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
               <TableCell>
                 <div>{billingTargetLabel(schedule)}</div>
+                <p className="text-11 text-muted-foreground">
+                  {schedule.scope.all_services
+                    ? "All services"
+                    : schedule.scope.service_slugs.join(", ")}
+                </p>
+                {schedule.service_limits?.map((rule) => (
+                  <p
+                    key={rule.key}
+                    className="max-w-sm whitespace-normal break-words text-11"
+                  >
+                    {rule.label || "Service limit"}:{" "}
+                    {rule.service_slugs.join(", ")} · up to{" "}
+                    <span className="break-all">
+                      {formatExactCredits(rule.limit, 12)}
+                    </span>{" "}
+                    credits per issuance
+                  </p>
+                ))}
                 <RolloutSummary schedule={schedule} />
               </TableCell>
               <TableCell>
@@ -94,6 +116,8 @@ export function SchedulesTable({
                       size="icon"
                       variant="ghost"
                       title="Edit schedule"
+                      aria-label="Edit schedule"
+                      disabled={updatePending}
                       onClick={() => onEdit(schedule)}
                     >
                       <Pencil className="h-4 w-4" />

@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     #[serde(default)]
     pub authored_skill: Option<AuthoredSkillReview>,
     #[serde(rename = "_id")]

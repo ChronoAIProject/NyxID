@@ -829,6 +829,83 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
 }
 
 #[tokio::test]
+async fn personal_channel_repeat_cannot_join_an_owner_invocation() {
+    use crate::services::assistant_invocation_service as invocations;
+    let f = fixture("source_invocation_repeat").await;
+    let home = owner_gateway_home(&f).await;
+    invocations::ensure_indexes(&f.state.db).await.unwrap();
+    let start = engine::TurnStart::from(&request(&home.id, "same private question"));
+    let admission = Box::pin(invocations::admit(
+        &f.state.db,
+        OWNER,
+        &Uuid::new_v4().to_string(),
+        "source-repeat-test",
+        &start,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let turn_id = admission.invocation.turn_id.clone();
+    let a = source(&f, "invocation-repeat").await;
+    assert!(queue(&f, &a, "same private question").await);
+    let current = row(&f).await;
+    let active = current.active_turn.as_ref().unwrap();
+    assert_eq!(active.turn_id, turn_id);
+    assert_eq!(
+        active.invocation_id.as_deref(),
+        Some(admission.invocation.id.as_str())
+    );
+    assert!(active.channel_event_id.is_none());
+    assert_eq!(current.pending_events.len(), 1);
+    assert_eq!(
+        current.pending_events[0].source_event_ids,
+        vec![a.id.clone()]
+    );
+    assert!(current.pending_events[0].invocation_id.is_none());
+    assert!(record(&f, &a.id).await.turn_id.is_none());
+    let origin = &a.delivery.as_ref().unwrap().origin;
+    assert!(
+        !engine::also_deliver(&f.state.db, OWNER, &home.id, &turn_id, origin)
+            .await
+            .unwrap()
+    );
+    let mut continuation = team::event("notice", "private follow-up".into(), None)
+        .for_invocation(Some(&admission.invocation.id));
+    continuation.question_key = engine::question_key("private follow-up question");
+    let key = continuation.question_key.clone().unwrap();
+    engine::push_events(&f.state.db, OWNER, &home.id, vec![continuation])
+        .await
+        .unwrap();
+    assert!(
+        !engine::also_reply_to_queued(&f.state.db, OWNER, &home.id, &key, origin)
+            .await
+            .unwrap()
+    );
+    invocations::cancel(&f.state, OWNER, &admission.invocation.idempotency_key)
+        .await
+        .unwrap();
+    let mut next = engine::TurnStart::from(&request(&home.id, ""));
+    next.origin = TurnOrigin::Event;
+    let next = Box::pin(engine::begin_turn(
+        &f.state.db,
+        OWNER,
+        &next,
+        &f.state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let next_turn = next.active_turn.as_ref().unwrap();
+    assert!(next_turn.invocation_id.is_none());
+    assert_ne!(next_turn.turn_id, turn_id);
+    assert_eq!(
+        record(&f, &a.id).await.turn_id.as_deref(),
+        Some(next_turn.turn_id.as_str())
+    );
+    assert!(sends(&f).await.is_empty());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn original_route_revocation_prunes_only_that_source_before_event_execution() {
     use crate::models::channel_conversation::COLLECTION_NAME as ROUTES;
     for change in [

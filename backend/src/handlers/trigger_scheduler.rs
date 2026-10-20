@@ -406,6 +406,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     };
     let start = engine::TurnStart {
         media_event_ids: Vec::new(),
+        invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,

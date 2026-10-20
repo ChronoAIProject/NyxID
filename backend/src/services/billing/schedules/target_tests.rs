@@ -60,6 +60,9 @@ async fn exercise_member_pages(kind: BillingTargetKind) {
     let mut schedule = create_schedule(
         &db,
         CreateScheduleInput {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::EndOfPeriod,
@@ -257,6 +260,9 @@ async fn selected_schedule_creation_validates_users_in_one_query() {
     let schedule = create_schedule(
         &db,
         CreateScheduleInput {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
             expiry: CreditExpiryPolicy::Never,

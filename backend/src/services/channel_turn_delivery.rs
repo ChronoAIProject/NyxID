@@ -166,6 +166,7 @@ pub(crate) async fn enqueue_in_session(
     let active = engine::live_turn(&row, Utc::now())
         .filter(|turn| {
             !turn.stop_requested
+                && turn.invocation_id.is_none()
                 && !row.guest_turn
                 && row.group_id.is_none()
                 && turn.platform_origin.is_none()
@@ -226,7 +227,8 @@ pub(crate) async fn enqueue_in_session(
         .await?;
         bound_turn = Some(turn);
     } else if let Some(pending) = row.pending_events.iter_mut().find(|e| {
-        !e.source_event_ids.is_empty()
+        e.invocation_id.is_none()
+            && !e.source_event_ids.is_empty()
             && matching(e.question_key.as_deref())
             && compatible_sources(e.reply_to.first(), event.reply_to.first())
     }) {

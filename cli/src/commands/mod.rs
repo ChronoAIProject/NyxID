@@ -147,3 +147,11 @@ mod tests {
 pub mod catalog_tools;
 
 pub mod admin_tools;
+
+pub mod admin_billing;
+pub mod admin_credits;
+pub mod admin_usage;
+pub mod billing_executions;
+pub(crate) mod billing_support;
+mod managed_billing;
+pub mod nyxbot;

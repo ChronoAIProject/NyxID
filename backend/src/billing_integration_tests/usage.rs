@@ -181,6 +181,9 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         if grant_micros > 0 {
             db.collection::<CreditGrant>(GRANTS)
                 .insert_one(CreditGrant {
+                    service_limits: Vec::new(),
+                    revoke_requested_at: None,
+                    revoke_requested_by: None,
                     id: grant_id.clone(),
                     batch_id: Uuid::new_v4().to_string(),
                     schedule_origin: None,
@@ -341,6 +344,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
             quantity: 20,
         }],
         grant_consumptions: vec![GrantConsumptionAllocation {
+            service_limit_key: None,
             operation_id: "g".into(),
             grant_id: "g".into(),
             amount: crate::models::credits::Credits::from_micros(50),
@@ -446,6 +450,7 @@ fn reservation_priced(quantity: i64, pico: Option<i64>, micros: i64, owner: &str
 
 fn grant_consumption(amount: Credits) -> crate::models::usage_meter::GrantConsumptionAllocation {
     crate::models::usage_meter::GrantConsumptionAllocation {
+        service_limit_key: None,
         operation_id: Uuid::new_v4().to_string(),
         grant_id: Uuid::new_v4().to_string(),
         amount,

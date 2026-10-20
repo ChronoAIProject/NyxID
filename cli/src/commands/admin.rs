@@ -7,6 +7,9 @@ use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands, OutputFor
 
 pub async fn run(command: AdminCommands) -> Result<()> {
     match command {
+        AdminCommands::Billing { command } => super::admin_billing::run(command).await,
+        AdminCommands::Credits { command } => super::admin_credits::run(command).await,
+        AdminCommands::Usage(args) => super::admin_usage::run(args).await,
         AdminCommands::PlatformCredentials { command } => {
             super::admin_platform_credentials::run(command).await
         }
@@ -19,7 +22,7 @@ pub async fn run(command: AdminCommands) -> Result<()> {
 }
 
 /// Resolve a user UUID or an exact email address to a user ID.
-async fn resolve_user_id(api: &mut ApiClient, reference: &str) -> Result<String> {
+pub(crate) async fn resolve_user_id(api: &mut ApiClient, reference: &str) -> Result<String> {
     if uuid::Uuid::parse_str(reference).is_ok() {
         return Ok(reference.to_string());
     }

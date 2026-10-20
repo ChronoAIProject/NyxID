@@ -114,6 +114,7 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         media_event_ids: Vec::new(),
         media_declared: None,
         media_sent_at: None,
+        invocation_id: None,
         id: Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
@@ -560,6 +561,8 @@ async fn create_thread_with_kind(
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        invocation_controlled: false,
+        credential_invocation_id: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,

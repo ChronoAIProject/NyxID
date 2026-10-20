@@ -65,6 +65,20 @@ retry either observes the entire committed split or recomputes both together.
 A worker that outlives its claim returns the committed wallet share together
 with its committed Lago quantity, never its stale computed share.
 
+### Allocation-local service ceilings and reclaim
+
+An allocation remains one `CreditGrant` and one journal account. Optional disjoint `service_limits` contain server-resolved catalog IDs, compatibility slugs, a stable key, and exact `limit`, `consumed`, and `reserved` Decimal128 credit counters. A shared total of 10,000 with Twitter up to 500 and OpenAI+Anthropic up to 300 does not earmark 800 credits: unspecified eligible services may use the shared total. Other allocations and purchased credits fund excess independently. Canonical IDs take precedence over slugs; a historical user-connection ID is not treated as a catalog identity. Missing policy fields mean uncapped, not pending reclaim.
+
+Ordinary and durable public/pool/managed admission commit total/rule holds, allowance/wallet holds and all meter rows in the same transaction. Machine windows use their existing caller-owned lifecycle transaction. Reservation excludes an active resource operation; relevant operations are helped before admission, and contention fails closed rather than silently changing funding order. Existing frozen rates, public/managed dispatch gates, pool leases, machine finite/no-overdraft/evidence/reserved-only settlement and carry transactions remain authoritative.
+
+`revoke_requested_at` immediately fences new holds and unreserved extra usage. Existing holds and acquired durable locks finish. Finalization requires zero reservations and no resource lock, atomically captures exact remaining value as `terminal_amount`, and confirms the existing balanced `grant-revoked:{id}` journal movement once. Release, settlement and reconciliation retry it. Reclaim never debits another allocation or wallet. Expiry uses its own terminal movement and remains distinct from reclaim. Effective `held` includes unapplied extra lock commitments; raw `reserved` fields remain unchanged, including per-rule responses.
+
+Resource lock acquisition checks durable operation history and writes the usage row under its immutable invocation claim in the same transaction. Takeover drains locks for the usage, including exhausted resources, before recomputing coverage. Allowance and grant coverage comes from recorded histories, so a competing consumer reducing an extra operation cannot reduce wallet funding incorrectly. New admissions cannot create a hold without recoverable usage intent. Historical orphan holds without durable intent are not automatically inferred or released.
+
+Optional actor-scoped UUID submission keys freeze exact payloads and recipient/policy snapshots. Deterministic per-recipient IDs resume partial/concurrent retries without resetting spent, held or reclaimed state; a changed payload conflicts. Schedule periods preserve their existing deterministic identities, recipient cutoffs and frozen policies; every issuance gets fresh counters. Sparse pause/note edits do not re-resolve unchanged rules after catalog retirement.
+
+Enable `BILLING_ALLOCATIONS_ENABLED` only after every API replica and billing worker is upgraded and old writers drained. Dedicated authoring routes prevent old servers silently ignoring policy fields; the flag does not attest worker versions. Disabling authoring cannot make already-persisted policies safe for old binaries. No migration invents allocation balances.
+
 ## D3. Balanced journal and account verification
 
 New entries use `event_type: accounting_v2`, a `movement`, and ordered positive

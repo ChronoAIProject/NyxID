@@ -194,6 +194,18 @@ struct OperationStall {
     duration: std::time::Duration,
 }
 
+#[cfg(test)]
+struct ReadyPublicationObservation(std::sync::Arc<OperationStall>);
+
+#[cfg(test)]
+impl Drop for ReadyPublicationObservation {
+    fn drop(&mut self) {
+        self.0
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn lease_duration() -> std::time::Duration {
     let duration = std::time::Duration::from_secs(LEASE_SECONDS as u64);
     #[cfg(test)]
@@ -328,6 +340,17 @@ async fn ensure_until(db: &Database, stop_before_retire: bool) -> AppResult<()> 
         prepare_and_retire(db, &lease, stop_before_retire).await?;
         renew(db, &lease).await?;
         let now = chrono::Utc::now();
+        // Publication can become visible to renewal before this await resolves.
+        #[cfg(test)]
+        let publication = TEST_READY_PUBLICATION_STALL
+            .try_with(std::sync::Arc::clone)
+            .ok()
+            .map(|stall| {
+                stall
+                    .entered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                ReadyPublicationObservation(stall)
+            });
         let completed = markers
             .update_one(
                 doc! {"_id":VERSION,"schema_version":2,"state":"preparing",
@@ -340,8 +363,8 @@ async fn ensure_until(db: &Database, stop_before_retire: bool) -> AppResult<()> 
             return Err(conflict());
         }
         #[cfg(test)]
-        if let Ok(stall) = TEST_READY_PUBLICATION_STALL.try_with(std::sync::Arc::clone) {
-            operation_stall(stall).await;
+        if let Some(publication) = &publication {
+            tokio::time::sleep(publication.0.duration).await;
         }
         Ok(())
     })

@@ -188,6 +188,13 @@ const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_INVOCATIONS_FLAG_KEY: &str = "assistant:owner-invocations";
+const ASSISTANT_INVOCATIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_INVOCATIONS_FLAG_KEY,
+    description: "Admit owner CLI/API invocations only after every replica supports their lineage. After first admission, use forward fixes; disabling admission and draining work do not permit older binaries to return.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_LIVE_TURN_GATE_FLAG_KEY: &str = "assistant:live-turn-gate";
 const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
@@ -290,6 +297,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
@@ -326,6 +334,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    ASSISTANT_INVOCATIONS_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
@@ -2502,6 +2511,7 @@ mod tests {
                 "assistant:channel-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",
+                "assistant:owner-invocations",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:agent-learning",

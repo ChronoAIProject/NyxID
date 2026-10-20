@@ -850,6 +850,8 @@ jobs:
     # Resource samples record whether compilation approaches runner limits.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # Merge per-test coverage into four profiles per binary to bound disk use.
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -872,7 +874,7 @@ jobs:
           key: coverage-backend
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov@0.9.1
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
 
       # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
       # a one-line summary JSON. The threshold is enforced as the final step in
@@ -880,8 +882,11 @@ jobs:
       # produced — even on a regression — and surface in the PR comment.
       # `report` is package-scoped so the % isn't diluted by the rest of the
       # workspace (whose tests this job does not run).
+      # Match backend-test's process isolation and bounded, no-retry CI profile.
       - name: Measure (head)
-        run: python3 .github/scripts/ci_resources.py coverage-test cargo llvm-cov --package nyxid --no-report
+        run: >-
+          python3 .github/scripts/ci_resources.py coverage-test
+          cargo llvm-cov nextest --package nyxid --profile ci --no-report
       - name: Test MongoDB diagnostics
         if: failure() || cancelled()
         continue-on-error: true
@@ -949,6 +954,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6
       - name: Identify coverage measurement inputs
@@ -988,11 +994,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
-          tool: cargo-llvm-cov@0.9.1
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
       - name: Measure base branch
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
-        run: python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test cargo llvm-cov --package nyxid --no-report
+        run: >-
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
+          cargo llvm-cov nextest --package nyxid --profile ci --no-report
       - name: Test MongoDB diagnostics
         if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
         continue-on-error: true

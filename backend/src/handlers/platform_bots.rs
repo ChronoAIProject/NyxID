@@ -1270,6 +1270,9 @@ impl PublicReadinessResponse {
     fn unavailable(reason: manager_contract::UnavailableReason) -> Self {
         use manager_contract::UnavailableReason::*;
         let reason = match reason {
+            ConfirmationRejected => "confirmation_rejected",
+            ControlInvalid => "control_invalid",
+            ControlRateLimited => "control_rate_limited",
             ModeDisabled => "mode_disabled",
             ManagerUnavailable => "manager_unavailable",
             EmergencyStopped => "emergency_stopped",
@@ -1331,6 +1334,7 @@ fn runtime_response(
         None => UnavailableReason::RuntimeUninitialized,
         Some(r) if r.retired => UnavailableReason::ManagerUnavailable,
         Some(r) if r.emergency_stopped => UnavailableReason::EmergencyStopped,
+        Some(r) if !r.public_enabled => UnavailableReason::PublicDisabled,
         _ => UnavailableReason::PublicNotReady,
     };
     ManagerRuntimeResponse {
@@ -1553,6 +1557,25 @@ mod runtime_input_tests {
     use serde_json::json;
     fn base() -> serde_json::Value {
         json!({"initialize":true,"expected_profile_generation":7,"expected_manager_authority_epoch":0,"expected_personal_control_revision":0,"expected_public_policy_revision":0,"personal_enabled":true,"public_enabled":false})
+    }
+    #[tokio::test]
+    async fn personal_only_status_reports_disabled_public_without_an_ai_blocker() {
+        let (db, update, _) = crate::services::platform_personal_binding_service::tests::fixture(
+            "personal_only_runtime_status",
+        )
+        .await;
+        let runtime = runtime_controls::get(&db, &update.profile_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.personal_enabled && !runtime.public_enabled);
+        let response =
+            serde_json::to_value(runtime_status(&db, Some(runtime)).await.unwrap()).unwrap();
+        assert_eq!(response["state"], "active");
+        assert_eq!(response["runtime"]["personal_enabled"], true);
+        assert_eq!(response["public_readiness"]["status"], "unavailable");
+        assert_eq!(response["public_readiness"]["reason"], "public_disabled");
+        db.drop().await.unwrap();
     }
     #[test]
     fn control_patches_reject_null_scalars_and_unknown_fields() {

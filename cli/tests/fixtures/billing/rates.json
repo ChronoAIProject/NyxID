@@ -1,0 +1,272 @@
+[
+  {
+    "id": "platform_bytes:*",
+    "lago_metric_code": "platform_bytes",
+    "model": null,
+    "credits_per_unit": "0",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_requests:*",
+    "lago_metric_code": "platform_requests",
+    "model": null,
+    "credits_per_unit": "0",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok",
+    "model": null,
+    "credits_per_unit": "0.05",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_channel_chat_received:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_chat_received",
+    "model": null,
+    "credits_per_unit": "0.01",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_channel_dm_received:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_dm_received",
+    "model": null,
+    "credits_per_unit": "0.01",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_channel_dm_send:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_dm_send",
+    "model": null,
+    "credits_per_unit": "0.015",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_channel_post_received:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_channel_post_received",
+    "model": null,
+    "credits_per_unit": "0.005",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_create_tweet:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_create_tweet",
+    "model": null,
+    "credits_per_unit": "0.015",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_byok_op_get_me:*",
+    "lago_metric_code": "platform_svc_api-twitter_byok_op_get_me",
+    "model": null,
+    "credits_per_unit": "0.01",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_api-twitter_pk:*",
+    "lago_metric_code": "platform_svc_api-twitter_pk",
+    "model": null,
+    "credits_per_unit": "0.05",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_chrono-llm-public_pk:*",
+    "lago_metric_code": "platform_svc_chrono-llm-public_pk",
+    "model": null,
+    "credits_per_unit": "0.000005",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_chrono-llm-public_pk_cache_read_tokens:*",
+    "lago_metric_code": "platform_svc_chrono-llm-public_pk_cache_read_tokens",
+    "model": null,
+    "credits_per_unit": "0.0000008",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_chrono-llm-public_pk_cache_write_tokens:*",
+    "lago_metric_code": "platform_svc_chrono-llm-public_pk_cache_write_tokens",
+    "model": null,
+    "credits_per_unit": "0.000006",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_chrono-llm-public_pk_images:*",
+    "lago_metric_code": "platform_svc_chrono-llm-public_pk_images",
+    "model": null,
+    "credits_per_unit": "0.2",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_chrono-llm-public_pk_output_tokens:*",
+    "lago_metric_code": "platform_svc_chrono-llm-public_pk_output_tokens",
+    "model": null,
+    "credits_per_unit": "0.00002",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-deepseek_pk:*",
+    "lago_metric_code": "platform_svc_llm-deepseek_pk",
+    "model": null,
+    "credits_per_unit": "0.000001",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk",
+    "model": null,
+    "credits_per_unit": "0.00084",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk_cache_read_tokens:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk_cache_read_tokens",
+    "model": null,
+    "credits_per_unit": "0.000001",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk_cache_write_tokens:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk_cache_write_tokens",
+    "model": null,
+    "credits_per_unit": "0.0000125",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk_images:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk_images",
+    "model": null,
+    "credits_per_unit": "0.00425",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk_input_tokens:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk_input_tokens",
+    "model": null,
+    "credits_per_unit": "0.00001",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_llm-openai_pk_output_tokens:*",
+    "lago_metric_code": "platform_svc_llm-openai_pk_output_tokens",
+    "model": null,
+    "credits_per_unit": "0.00005",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_tools-elevenlabs_pk:*",
+    "lago_metric_code": "platform_svc_tools-elevenlabs_pk",
+    "model": null,
+    "credits_per_unit": "0.1",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_tools-firecrawl_pk:*",
+    "lago_metric_code": "platform_svc_tools-firecrawl_pk",
+    "model": null,
+    "credits_per_unit": "0.1",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_tools-twilio_pk:*",
+    "lago_metric_code": "platform_svc_tools-twilio_pk",
+    "model": null,
+    "credits_per_unit": "0.1",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_svc_tools-x_pk:*",
+    "lago_metric_code": "platform_svc_tools-x_pk",
+    "model": null,
+    "credits_per_unit": "0.1",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  },
+  {
+    "id": "platform_tokens:*",
+    "lago_metric_code": "platform_tokens",
+    "model": null,
+    "credits_per_unit": "0.000005",
+    "synced_at": "2026-10-19T17:16:07.081Z",
+    "stale_after": "2026-10-19T17:31:07.081Z",
+    "stale": false,
+    "retired_at": null
+  }
+]

@@ -42,6 +42,9 @@ export const publicReadinessSchema = z
     status: z.enum(["ready", "faq_ready", "unavailable"]),
     reason: z
       .enum([
+        "confirmation_rejected",
+        "control_invalid",
+        "control_rate_limited",
         "mode_disabled",
         "manager_unavailable",
         "emergency_stopped",

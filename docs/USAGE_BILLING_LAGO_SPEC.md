@@ -475,49 +475,46 @@ fail-closed.
 (== the owner's overdraft-cap slice), flush + true-up periodically, and kill the stream when
 cumulative flushed bytes exceed `available`.
 
-### 5.1 Atomic reserve + idempotent settle (no DB transactions — R3.2)
+### 5.1 Atomic reserve + idempotent settle (current transaction contract)
 
-The repo has **no** `start_session`/`with_transaction` (only a TODO at `services.rs:2127`), so
-multi-doc atomicity is achieved with idempotent guards, mirroring `oracle_task_service.rs:959`.
+Ordinary and durable public/pool/managed admission reserve allowance units,
+allocation credits and wallet credits in the same MongoDB transaction as their
+complete usage-meter rows. Machine admission joins the caller-owned lifecycle
+transaction. No request forwards before this durable handoff commits. A failed
+transaction rolls back every hold; there is no independent compensation that
+could release another request's reservation. Concurrent duplicate admission
+reuses only matching, complete durable meters, preserving the route's live
+authority and provider-dispatch gates.
 
-**Reserve (prepaid):**
+Wallet capacity subtracts request reservations, locally settled pending provider
+debits and pending purchased-credit expiry. Overdraft requires a payment instrument
+and the configured cap. Grant-funded work may proceed with a negative wallet
+balance, but account suspension remains a gate before benefit funding. All money
+uses checked exact Credits and Decimal128; legacy integer projections never drive
+funding calculations.
 
-```rust
-db.collection::<BillingWallet>("billing_wallet").find_one_and_update(
-    doc!{ "owner_id": &owner, "suspended": false,
-          "$expr": { "$gte": [ { "$subtract": [ { "$subtract": ["$balance_credits","$reserved_credits"] },
-                                                 "$pending_lago_debits" ] }, est ] } },
-    doc!{ "$inc": { "reserved_credits": est }, "$set": { "updated_at": now } },
-).with_options(FindOneAndUpdateOptions::builder().return_document(ReturnDocument::After).build()).await?
-// Some(_) == reserved. MongoDB serializes writes on the single wallet doc → no over-commit. (Wallet docs
-// must default reserved_credits/pending_lago_debits to 0, else $subtract on a missing field → null → deny.)
-```
+Settlement owns a claim-fenced usage record. Grant and allowance resource locks
+carry durable operation IDs; applying a resource change and recording its usage
+history are recoverable steps. Acquiring a new operation conditionally writes the
+usage row so claim takeover conflicts with stale work. A successor drains that
+usage's existing resource locks before recomputing coverage from durable history.
+Wallet funding is the exact remainder after allowances and grants; the final
+split and cumulative Lago emission residue commit together. Resource locks and
+terminal lifecycle markers remain until the corresponding journal entry is
+durable. Recovery never repeats an already-recorded consume/release operation.
 
-**Overdraft reserve (card-backed):** same op with the cap-inclusive filter
-`{$gte:[{$subtract:[{$add:["$balance_credits","$overdraft_cap_credits"]}, {$add:["$reserved_credits","$pending_lago_debits"]}]}, est]}`
-AND `has_payment_instrument: true` — atomic so concurrent card-backed requests cannot exceed the cap.
+See [exact funding conservation and recovery](BILLING_EXACT_ACCOUNTING.md#d2-funding-conservation-and-recovery)
+for the authoritative rate, carry, journal and migration contract. Historical
+orphan holds without durable intent cannot be safely inferred from a concurrent
+sum of active usage rows and are not automatically freed.
 
-**Settle (idempotent, two steps):**
+### 5.2 Credit allocation policies (current exact implementation)
 
-```rust
-// 1. atomically claim the row's terminal transition (idempotent: a re-run finds status already Finalized)
-let claimed = usage_meter.find_one_and_update(
-    doc!{ "_id": &row_id, "status": { "$in": ["reserved","forwarded"] } },
-    doc!{ "$set": { "status":"finalized", "released": false, "quantity": actual,
-                    "finalized_at": now, "updated_at": now } },
-).with_options(FindOneAndUpdateOptions::builder().return_document(ReturnDocument::After).build()).await?;
-// 2. only if WE made the transition, move the wallet (release hold + local debit so availability drops now)
-if claimed.is_some() {
-    billing_wallet.update_one(doc!{ "owner_id": &owner },
-        doc!{ "$inc": { "reserved_credits": -est, "pending_lago_debits": actual } }).await?;
-    usage_meter.update_one(doc!{ "_id": &row_id }, doc!{ "$set": { "released": true } }).await?;
-}
-```
+The current transaction and claim-fencing contract is specified in [BILLING_EXACT_ACCOUNTING.md](BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim); earlier no-transaction rollout notes in this spec describe the original design, not current admission. All financial holds and meter creation now commit together, with caller-owned transactions retained for Machine lifecycle admission. Allocation ceilings use exact decimal credits, share one grant total, and never create earmarked pots or account-wide spending policies.
 
-A recovery sweep handles `status=Finalized && released=false` (crash between step 1 and step 2) by
-re-applying the wallet move. The `pending_lago_debits` is cleared by the balance sync once Lago
-confirms the burn (so the cap bounds total exposure across one full `BILLING_RECONCILE_INTERVAL_SECS`
-window of inflated balance, not just one request).
+Admin allocation API adds `GET /api/v1/admin/credits/allocations/summary`, `POST /api/v1/admin/credits/allocations`, `DELETE /api/v1/admin/credits/allocations/{grant_id}`, and `POST`/`PATCH /api/v1/admin/credits/allocations/schedules[/{schedule_id}]`. Existing grants/schedules/allowances endpoints and response identities remain supported. Authoring requests add optional canonical decimal `amount`, disjoint `service_limits` (`service_refs`, decimal `amount`, optional `label`) and stable UUID `request_id`. Read responses add rules and exact `held`, `reclaimed`, `terminal_amount` and `revoke_requested_at`; raw reservation and numeric legacy projections retain their contracts. Summary strings are exact and exclude future schedules and usage-unit allowances. Admin/Operator reads and one-time Credits Manager writes retain their existing ACLs; recurring and allowance writes are admin-only.
+
+New policy mutations require the explicit backend capability. See [ENV.md](ENV.md#billing) for the all-writer upgrade requirement. User billing routes, top-up and navigation are unchanged by this admin feature.
 
 ## 6. `BillingOwnerResolver` (consumes `OwnerAccess`) (§6)
 
@@ -638,7 +635,11 @@ unless the required modules are wired — fail-closed, not honor-system (Hard re
 - **Frontend (P4):** a **new** billing surface (credits, invoices, per-service cost). The existing
   `api-key-usage-dashboard.tsx` is an "Agent Activity" request-count view, not a billing UI — treat
   billing UI as new work.
-- **CLI:** `nyxid billing wallet`, `nyxid billing usage`.
+- **CLI:** `nyxid billing wallet|usage|topup`, `nyxid billing executions list|show`,
+  `nyxid admin billing config|overview|rates|service|ledger`, `nyxid admin usage`,
+  and `nyxid admin credits grant issue|list|revoke`. See the
+  [native command reference](../skills/nyxid/references/billing.md) for exact
+  prices, funding, readiness and execution correlation.
 
 ## 11. Migration / backfill + Lago spike
 

@@ -1175,6 +1175,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
                 error_field: None,
             },
             delivery: DeliveryBinding {
+                invocation_id: None,
                 platform_reply: destination.clone(),
                 platform_origin: proof.clone(),
                 origin: model::TurnOrigin::User,

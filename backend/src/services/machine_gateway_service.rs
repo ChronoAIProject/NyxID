@@ -764,6 +764,7 @@ pub async fn job_auth(
     } else if !assignment.legacy {
         return Err(AppError::MachineAuthorityStale);
     }
+    super::assistant_invocation_service::require_machine_job_active(db, job, &auth).await?;
     Ok(auth)
 }
 

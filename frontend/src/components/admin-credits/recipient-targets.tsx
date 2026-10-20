@@ -27,8 +27,10 @@ type RecipientTargetValues = {
 /** All credit dialogs provide these recipient fields through their Form. */
 export function RecipientTargetFields({
   description,
+  onLookupBlocked,
 }: {
   readonly description?: string;
+  readonly onLookupBlocked?: (blocked: boolean) => void;
 }) {
   const form = useFormContext<RecipientTargetValues>();
   const targetKind: BillingTargetKind = form.watch("target_kind");
@@ -44,6 +46,7 @@ export function RecipientTargetFields({
               value={field.value}
               onValueChange={(value) => {
                 field.onChange(value);
+                onLookupBlocked?.(false);
                 if (value !== "selected_users")
                   form.setValue("target_user_ids", []);
                 if (value !== "org_members")
@@ -92,6 +95,7 @@ export function RecipientTargetFields({
               <FormLabel>Organizations</FormLabel>
               <FormControl>
                 <OrgPicker
+                  onBlockedChange={onLookupBlocked}
                   selected={field.value ?? []}
                   onChange={field.onChange}
                 />
@@ -110,6 +114,7 @@ export function RecipientTargetFields({
               <FormLabel>Groups</FormLabel>
               <FormControl>
                 <GroupPicker
+                  onBlockedChange={onLookupBlocked}
                   selected={field.value ?? []}
                   onChange={field.onChange}
                 />
@@ -127,7 +132,11 @@ export function RecipientTargetFields({
             <FormItem>
               <FormLabel>Owners</FormLabel>
               <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
+                <UserPicker
+                  onBlockedChange={onLookupBlocked}
+                  selected={field.value}
+                  onChange={field.onChange}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>

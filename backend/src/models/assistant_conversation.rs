@@ -58,6 +58,8 @@ pub struct AgentEvent {
         skip_serializing_if = "Option::is_none"
     )]
     pub media_sent_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub id: String,
     /// `subagent_settled`, `permission_requested`, `permission_decided`, `skill_request_allowed`,
     /// `permission_expired`, `message`.
@@ -89,6 +91,11 @@ pub struct AgentEvent {
 }
 
 impl AgentEvent {
+    /// Carry the server-proven owner invocation family.
+    pub fn for_invocation(mut self, id: Option<&str>) -> Self {
+        self.invocation_id = id.map(str::to_owned);
+        self
+    }
     /// Mark the event as proved from a validated source. `None` means the
     /// causing work was proven not to report to NyxBot (new owner work).
     pub fn bound_to(mut self, report_to: Option<&str>) -> Self {
@@ -287,6 +294,8 @@ pub struct EngineWorkerInstance {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
     #[serde(default)]
     pub resource_refs: Vec<String>,
@@ -441,6 +450,12 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Invocation conversations always enforce live execution independently of the legacy rollout.
+    #[serde(default)]
+    pub invocation_controlled: bool,
+    /// The invocation generation allowed to reuse this encrypted credential.
+    #[serde(default)]
+    pub credential_invocation_id: Option<String>,
     #[serde(default)]
     pub platform_thread: Option<PlatformThread>,
     /// Internal conversion fence; typed settlement must preserve it until exact cleanup completes.

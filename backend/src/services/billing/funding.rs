@@ -24,8 +24,19 @@ use crate::models::usage_meter::{
 use super::reservation::LayerReservation;
 use super::route_context::BillingRouteContext;
 
+// Older meter rows used the user connection ID as service_id when no catalog
+// identity was supplied. It is not a canonical catalog ID; retain slug matching
+// for those callers without allowing a different canonical ID to reuse a slug.
+fn catalog_service_id(row: &UsageMeterRow) -> Option<&str> {
+    row.service_id
+        .as_deref()
+        .filter(|id| Some(*id) != row.user_service_id.as_deref())
+}
+
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
 const RESOURCE_LOCK_RETRIES: usize = 4;
+const BENEFIT_ADMISSION_BUSY: &str = "Issued or included credit settlement is completing; retry";
+const WALLET_ADMISSION_BUSY: &str = "Purchased credit settlement is completing; retry";
 
 mod machine;
 pub use machine::{
@@ -74,60 +85,135 @@ pub(super) async fn reserve_and_open_managed(
     reserve_and_open_durable(db, ctx, wallet, layers).await
 }
 
-async fn reserve_and_open_durable(
+pub(super) async fn reserve_and_open_ordinary(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     wallet: &crate::models::billing_wallet::BillingWallet,
     layers: Vec<LayerReservation>,
 ) -> AppResult<super::reservation::BillingReservation> {
-    let service_id = ctx
-        .catalog_service_id
-        .as_deref()
-        .or(ctx.user_service_id.as_deref());
-    let now = Utc::now();
-    let mut allowance_candidates = Vec::with_capacity(layers.len());
-    for layer in &layers {
-        let mut periods = Vec::new();
-        if layer.layer == BillingLayer::Platform {
-            for definition in super::allowances::applicable_allowances(
-                db,
-                &ctx.billing_owner_id,
-                service_id,
-                ctx.service_slug.as_deref(),
-                layer.metric,
-            )
-            .await?
-            {
-                // Period creation carries no reservation and can safely precede
-                // the transaction. Read its live availability inside it.
-                periods.push(
-                    super::allowances::ensure_current_period(
+    reserve_and_open_durable(db, ctx, wallet, layers).await
+}
+
+fn reserve_and_open_durable<'a>(
+    db: &'a mongodb::Database,
+    ctx: &'a BillingRouteContext,
+    wallet: &'a crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> futures::future::BoxFuture<'a, AppResult<super::reservation::BillingReservation>> {
+    Box::pin(async move {
+        for _ in 0..RESOURCE_LOCK_RETRIES {
+            let result = reserve_and_open_durable_once(db, ctx, wallet, layers.clone()).await;
+            match &result {
+                Err(AppError::Conflict(reason)) if reason == WALLET_ADMISSION_BUSY => {
+                    // Help only this wallet, outside the admission transaction.
+                    // Re-read its counters on retry; never reserve against an
+                    // unapplied actual debit or reject ordinary concurrent use
+                    // merely because its journal is still completing.
+                    super::reservation::finish_wallet_settlement(
                         db,
-                        &definition,
+                        &wallet.id,
                         &ctx.billing_owner_id,
-                        now,
                     )
-                    .await?,
-                );
+                    .await?;
+                }
+                Err(AppError::Conflict(reason)) if reason == BENEFIT_ADMISSION_BUSY => {
+                    // The next attempt reloads and helps relevant usable
+                    // candidates before acquiring a fresh transaction snapshot.
+                }
+                _ => return result,
             }
         }
-        periods.sort_by(|a, b| expiry_order(a.period_end, b.period_end));
-        allowance_candidates.push(periods);
-    }
-    let mut grants = super::grants::list_active_for_user(db, &ctx.billing_owner_id, now).await?;
-    grants.retain(|grant| {
-        super::grants::service_scope_applies(&grant.scope, service_id, ctx.service_slug.as_deref())
-    });
-    grants.sort_by(|a, b| {
-        expiry_order(a.expires_at, b.expires_at).then_with(|| a.created_at.cmp(&b.created_at))
-    });
-    let mut session = db.client().start_session().await?;
-    let db = db.clone();
-    let ctx = ctx.clone();
-    let wallet_id = wallet.id.clone();
-    let failure_db = db.clone();
-    let owner_id = ctx.billing_owner_id.clone();
-    let result = session.start_transaction().and_run2(async move |session| {
+        Err(AppError::Conflict(
+            "Billing settlement is busy; retry".into(),
+        ))
+    })
+}
+
+fn reserve_and_open_durable_once<'a>(
+    db: &'a mongodb::Database,
+    ctx: &'a BillingRouteContext,
+    wallet: &'a crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> futures::future::BoxFuture<'a, AppResult<super::reservation::BillingReservation>> {
+    Box::pin(async move {
+        let service_id = ctx.catalog_service_id.as_deref().map(str::to_owned);
+        let now = Utc::now();
+        let mut allowance_candidates = Vec::with_capacity(layers.len());
+        for layer in &layers {
+            let mut periods = Vec::new();
+            if layer.layer == BillingLayer::Platform {
+                for definition in super::allowances::applicable_allowances(
+                    db,
+                    &ctx.billing_owner_id,
+                    service_id.as_deref(),
+                    ctx.service_slug.as_deref(),
+                    layer.metric,
+                )
+                .await?
+                {
+                    // Period creation carries no reservation and can safely precede
+                    // the transaction. Read its live availability inside it.
+                    periods.push(
+                        super::allowances::ensure_current_period(
+                            db,
+                            &definition,
+                            &ctx.billing_owner_id,
+                            now,
+                        )
+                        .await?,
+                    );
+                }
+            }
+            periods.sort_by(|a, b| expiry_order(a.period_end, b.period_end));
+            allowance_candidates.push(periods);
+        }
+        let mut grants =
+            super::grants::list_active_for_user(db, &ctx.billing_owner_id, now).await?;
+        grants.retain(|grant| {
+            super::grants::service_scope_applies(
+                &grant.scope,
+                service_id.as_deref(),
+                ctx.service_slug.as_deref(),
+            )
+        });
+        grants.sort_by(|a, b| {
+            expiry_order(a.expires_at, b.expires_at).then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        for periods in &allowance_candidates {
+            for period in periods {
+                if super::allowances::available_period_quantity(period) > 0
+                    && let Some(lock) = &period.active_settlement
+                {
+                    complete_allowance_lock(db, &period.id, &period.allowance_id, lock).await?;
+                }
+            }
+        }
+        for grant in &grants {
+            if super::service_limits::available_for_service(
+                grant,
+                service_id.as_deref(),
+                ctx.service_slug.as_deref(),
+            )? > Credits::ZERO
+                && let Some(lock) = &grant.active_settlement
+            {
+                complete_grant_lock(db, &grant.id, lock).await?;
+            }
+        }
+        let mut session = db.client().start_session().await?;
+        let db = db.clone();
+        let ctx = ctx.clone();
+        let wallet_id = wallet.id.clone();
+        let expected_subscription = wallet.lago_subscription_id.clone();
+        let duplicate_reservation = super::reservation::BillingReservation {
+            owner_id: ctx.billing_owner_id.clone(),
+            wallet_id: wallet.id.clone(),
+            total_reserved_credits: Credits::ZERO,
+            layers: vec![],
+        };
+        let winner_ctx = ctx.clone();
+        let failure_db = db.clone();
+        let owner_id = ctx.billing_owner_id.clone();
+        let result = session.start_transaction().and_run2(async move |session| {
         let result: AppResult<super::reservation::BillingReservation> = async {
             let now = Utc::now();
             if let Some(admission) = &ctx.public_admission {
@@ -156,7 +242,7 @@ async fn reserve_and_open_durable(
                     .session(&mut *session).await?.matched_count != 1 {
                     return Err(AppError::Conflict("Managed funding authority changed".into()));
                 }
-            } else if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
+            } else if ctx.pool_attempt.as_ref().is_some_and(|attempt| attempt.lease_until <= now) {
                 return Err(AppError::BillingProviderUnavailable("Pool admission expired".into()));
             }
             let wallets = db.collection::<crate::models::billing_wallet::BillingWallet>(
@@ -166,6 +252,7 @@ async fn reserve_and_open_durable(
                 .session(&mut *session).await?
                 .ok_or_else(|| AppError::BillingNotConfigured("Wallet no longer exists".into()))?;
             if wallet.is_suspended() { return Err(AppError::WalletSuspended); }
+            if wallet.lago_subscription_id != expected_subscription { return Err(AppError::Conflict("Billing subscription changed; retry".into())); }
             let mut layers = layers.clone();
             for (layer, candidates) in layers.iter_mut().zip(&allowance_candidates) {
                 let mut remaining = layer.estimated_quantity.max(0);
@@ -174,6 +261,10 @@ async fn reserve_and_open_durable(
                     let periods = db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS);
                     let Some(period) = periods.find_one(doc! { "_id": &candidate.id })
                         .session(&mut *session).await? else { continue; };
+                    if super::allowances::available_period_quantity(&period) <= 0 { continue; }
+                    if period.active_settlement.is_some() {
+                        return Err(AppError::Conflict(BENEFIT_ADMISSION_BUSY.into()));
+                    }
                     if period.period_end.is_some_and(|end| end <= now) { continue; }
                     let wanted = remaining.min(super::allowances::available_period_quantity(&period));
                     if wanted <= 0 { continue; }
@@ -196,14 +287,17 @@ async fn reserve_and_open_durable(
                     let collection = db.collection::<CreditGrant>(CREDIT_GRANTS);
                     let Some(grant) = collection.find_one(doc! { "_id": &candidate.id })
                         .session(&mut *session).await? else { continue; };
-                    let wanted = remaining_cost.min(super::grants::available_grant(&grant)?);
+                    if super::service_limits::available_for_service(&grant, service_id.as_deref(), ctx.service_slug.as_deref())? <= Credits::ZERO { continue; }
+                    if grant.active_settlement.is_some() {
+                        return Err(AppError::Conflict(BENEFIT_ADMISSION_BUSY.into()));
+                    }
+                    if grant.revoke_requested_at.is_some() { continue; }
+                    let wanted = remaining_cost.min(super::service_limits::available_for_service(&grant, service_id.as_deref(), ctx.service_slug.as_deref())?);
                     if wanted <= Credits::ZERO { continue; }
-                    let changed = collection.update_one(spendable_grant_filter(&grant.id, wanted, now), doc! {
-                        "$inc": { "reserved": wanted },
-                        "$set": { "updated_at": bson::DateTime::from_chrono(now) },
-                    }).session(&mut *session).await?;
+                    let (filter, update, key) = super::service_limits::reservation_change(&grant, service_id.as_deref(), ctx.service_slug.as_deref(), wanted, now)?;
+                    let changed = collection.update_one(filter, update).session(&mut *session).await?;
                     if changed.modified_count == 0 { continue; }
-                    layer.grant_reservations.push(GrantReservationAllocation { grant_id: grant.id, amount: wanted });
+                    layer.grant_reservations.push(GrantReservationAllocation { grant_id: grant.id, amount: wanted, service_limit_key: key });
                     remaining_cost = remaining_cost.checked_sub(wanted)?;
                 }
                 layer.reserved_credits = remaining_cost;
@@ -211,6 +305,9 @@ async fn reserve_and_open_durable(
             let total = layers.iter().map(|layer| layer.reserved_credits)
                 .try_fold(Credits::ZERO, Credits::checked_add)?;
             if total > Credits::ZERO {
+                if db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME).find_one(doc! { "_id": &wallet.id, "active_settlement": { "$ne": Bson::Null } }).session(&mut *session).await?.is_some() {
+                    return Err(AppError::Conflict(WALLET_ADMISSION_BUSY.into()));
+                }
                 let prepaid = wallet.plan_kind == crate::models::billing_wallet::PlanKind::Prepaid;
                 let available = if !prepaid && wallet.has_payment_instrument {
                     wallet.available_with_overdraft_credits()?
@@ -278,6 +375,13 @@ async fn reserve_and_open_durable(
                         documents.push(document);
                     }
                     db.collection::<Document>(USAGE_METER).insert_many(documents).session(&mut *session).await?;
+                } else if let Some(admission) = &ctx.public_admission {
+                    let documents = rows.iter().map(|row| {
+                        let mut document = bson::to_document(row).map_err(|_| AppError::Internal("Public meter encoding failed".into()))?;
+                        document.insert("public_call_id", &admission.call_id);
+                        Ok(document)
+                    }).collect::<AppResult<Vec<_>>>()?;
+                    db.collection::<Document>(USAGE_METER).insert_many(documents).session(&mut *session).await?;
                 } else {
                     db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
                 }
@@ -286,221 +390,23 @@ async fn reserve_and_open_durable(
         }.await;
         crate::services::api_key_mutation_service::transaction_result(result)
     }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error);
-    if matches!(result, Err(AppError::WalletSuspended)) {
-        super::reservation::suspend_wallet(&failure_db, &owner_id).await?;
-    }
-    result
+        if result.is_err()
+            && super::meter::has_complete_funded_meter(&failure_db, &winner_ctx).await?
+        {
+            // The winning duplicate owns all holds. Never compensate or suspend it.
+            return Ok(duplicate_reservation);
+        }
+        if matches!(result, Err(AppError::WalletSuspended)) {
+            super::reservation::suspend_wallet(&failure_db, &owner_id).await?;
+        }
+        result
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FundingSettlement {
     pub wallet_charge_credits: Credits,
     pub lago_billable_quantity_micros: i64,
-}
-
-pub async fn reserve_estimated_funding(
-    db: &mongodb::Database,
-    ctx: &BillingRouteContext,
-    layers: &mut [LayerReservation],
-) -> AppResult<()> {
-    for index in 0..layers.len() {
-        let result = reserve_layer(db, ctx, &mut layers[index]).await;
-        if let Err(error) = result {
-            release_layer_reservations(db, &layers[..=index]).await?;
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-async fn reserve_layer(
-    db: &mongodb::Database,
-    ctx: &BillingRouteContext,
-    layer: &mut LayerReservation,
-) -> AppResult<()> {
-    let mut uncovered_quantity = layer.estimated_quantity.max(0);
-    if layer.layer == BillingLayer::Platform && uncovered_quantity > 0 {
-        layer.allowance_reservations = reserve_allowances(
-            db,
-            &ctx.billing_owner_id,
-            ctx.catalog_service_id
-                .as_deref()
-                .or(ctx.user_service_id.as_deref()),
-            ctx.service_slug.as_deref(),
-            layer.metric,
-            uncovered_quantity,
-        )
-        .await?;
-        let reserved_units: i64 = layer
-            .allowance_reservations
-            .iter()
-            .map(|allocation| allocation.quantity)
-            .sum();
-        uncovered_quantity = uncovered_quantity.saturating_sub(reserved_units);
-    }
-
-    let rate =
-        super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros);
-    let estimated = super::amounts::cost(rate, uncovered_quantity)?;
-    layer.grant_reservations = reserve_grants(
-        db,
-        &ctx.billing_owner_id,
-        ctx.catalog_service_id
-            .as_deref()
-            .or(ctx.user_service_id.as_deref()),
-        ctx.service_slug.as_deref(),
-        estimated,
-    )
-    .await?;
-    let grant = layer
-        .grant_reservations
-        .iter()
-        .map(|allocation| allocation.amount)
-        .try_fold(Credits::ZERO, Credits::checked_add)?;
-    layer.reserved_credits = estimated.checked_sub(grant)?;
-    Ok(())
-}
-
-async fn reserve_allowances(
-    db: &mongodb::Database,
-    owner_user_id: &str,
-    service_id: Option<&str>,
-    service_slug: Option<&str>,
-    metric: crate::models::service_billing::BillingMetric,
-    quantity: i64,
-) -> AppResult<Vec<AllowanceReservationAllocation>> {
-    let definitions = super::allowances::applicable_allowances(
-        db,
-        owner_user_id,
-        service_id,
-        service_slug,
-        metric,
-    )
-    .await?;
-    let now = Utc::now();
-    let mut candidates = Vec::new();
-    for definition in definitions {
-        let period =
-            super::allowances::ensure_current_period(db, &definition, owner_user_id, now).await?;
-        candidates.push((definition, period));
-    }
-    candidates.sort_by(|(_, left), (_, right)| expiry_order(left.period_end, right.period_end));
-
-    let mut needed = quantity.max(0);
-    let mut allocations = Vec::new();
-    for (allowance, period) in candidates {
-        if needed == 0 {
-            break;
-        }
-        let wanted = needed.min(super::allowances::available_period_quantity(&period));
-        if wanted <= 0 {
-            continue;
-        }
-        let updated = db
-            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
-            .update_one(
-                doc! {
-                    "_id": &period.id,
-                    "$expr": {
-                        "$gte": [
-                            {
-                                "$subtract": [
-                                    "$total_quantity",
-                                    { "$add": ["$consumed_quantity", "$reserved_quantity"] },
-                                ]
-                            },
-                            wanted,
-                        ]
-                    },
-                },
-                doc! {
-                    "$inc": { "reserved_quantity": wanted },
-                    "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-                },
-            )
-            .await?;
-        if updated.modified_count == 0 {
-            continue;
-        }
-        allocations.push(AllowanceReservationAllocation {
-            allowance_id: allowance.id,
-            period_id: period.id,
-            quantity: wanted,
-        });
-        needed -= wanted;
-    }
-    Ok(allocations)
-}
-
-async fn reserve_grants(
-    db: &mongodb::Database,
-    owner_user_id: &str,
-    service_id: Option<&str>,
-    service_slug: Option<&str>,
-    amount: Credits,
-) -> AppResult<Vec<GrantReservationAllocation>> {
-    let now = Utc::now();
-    let mut grants = super::grants::list_active_for_user(db, owner_user_id, now).await?;
-    grants.retain(|grant| {
-        super::grants::service_scope_applies(&grant.scope, service_id, service_slug)
-    });
-    grants.sort_by(|left, right| {
-        expiry_order(left.expires_at, right.expires_at)
-            .then_with(|| left.created_at.cmp(&right.created_at))
-    });
-
-    let mut needed = amount.max(Credits::ZERO);
-    let mut allocations = Vec::new();
-    for grant in grants {
-        if needed == Credits::ZERO {
-            break;
-        }
-        let wanted = needed.min(super::grants::available_grant(&grant)?);
-        if wanted <= Credits::ZERO {
-            continue;
-        }
-        let updated = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .update_one(
-                spendable_grant_filter(&grant.id, wanted, now),
-                doc! {
-                    "$inc": { "reserved": wanted },
-                    "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-                },
-            )
-            .await?;
-        if updated.modified_count == 0 {
-            continue;
-        }
-        allocations.push(GrantReservationAllocation {
-            grant_id: grant.id,
-            amount: wanted,
-        });
-        needed = needed.checked_sub(wanted)?;
-    }
-    Ok(allocations)
-}
-
-pub async fn release_layer_reservations(
-    db: &mongodb::Database,
-    layers: &[LayerReservation],
-) -> AppResult<()> {
-    if layers.iter().any(|layer| {
-        layer.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
-    }) {
-        return Err(AppError::BillingProviderUnavailable(
-            "Machine holds require evidence-backed settlement".into(),
-        ));
-    }
-    for layer in layers {
-        for reservation in &layer.allowance_reservations {
-            release_allowance_reservation(db, reservation).await?;
-        }
-        for reservation in &layer.grant_reservations {
-            release_grant_reservation(db, reservation).await?;
-        }
-    }
-    Ok(())
 }
 
 pub async fn release_usage_reservations(
@@ -545,6 +451,7 @@ pub async fn release_usage_reservations(
                 &operation_id,
                 reservation.amount.max(Credits::ZERO),
                 Credits::ZERO,
+                reservation.service_limit_key.as_deref(),
                 true,
             )
             .await?;
@@ -597,6 +504,62 @@ pub async fn recover_terminal_releases(db: &mongodb::Database) -> AppResult<u64>
 /// allocation is guarded by the operation id, and grant ledger appends are
 /// deduplicated. This also recovers locks on rows that exhausted the normal
 /// settlement retry budget before a later request needs the same benefit.
+async fn finish_usage_resource_locks(db: &mongodb::Database, usage_id: &str) -> AppResult<()> {
+    let mut periods = db
+        .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+        .find(doc! { "active_settlement.usage_row_id": usage_id })
+        .await?;
+    while let Some(period) = periods.try_next().await? {
+        if let Some(lock) = period.active_settlement {
+            complete_allowance_lock(db, &period.id, &period.allowance_id, &lock).await?;
+        }
+    }
+    let mut grants = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "active_settlement.usage_row_id": usage_id })
+        .await?;
+    while let Some(grant) = grants.try_next().await? {
+        if let Some(lock) = grant.active_settlement {
+            complete_grant_lock(db, &grant.id, &lock).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Conditional WRITE is essential: a snapshot read alone allows takeover and
+/// wallet settlement to commit concurrently on a different resource. The nonce
+/// guarantees a write conflict with takeover/finalization in either order.
+async fn fence_resource_operation(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    usage_id: &str,
+    expected_claim: Option<&str>,
+    release: bool,
+) -> mongodb::error::Result<()> {
+    let mut filter =
+        doc! { "_id": usage_id, "funding.settled": { "$ne": true }, "released": release };
+    if release {
+        filter.insert("status", doc! { "$in": ["failed", "abandoned"] });
+    } else {
+        let claim = expected_claim
+            .ok_or_else(|| mongodb::error::Error::custom("Usage settlement claim missing"))?;
+        filter.insert("funding.settlement_claim_id", claim);
+    }
+    let result = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            filter,
+            doc! { "$set": { "funding.resource_operation_fence": Uuid::new_v4().to_string() } },
+        )
+        .session(session)
+        .await?;
+    if result.modified_count != 1 {
+        return Err(mongodb::error::Error::custom(
+            "Usage settlement ownership changed",
+        ));
+    }
+    Ok(())
+}
 async fn recover_resource_settlement_locks(db: &mongodb::Database) -> AppResult<u64> {
     let allowance_periods: Vec<UsageAllowancePeriod> = db
         .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
@@ -631,51 +594,11 @@ async fn recover_resource_settlement_locks(db: &mongodb::Database) -> AppResult<
     Ok(recovered)
 }
 
-async fn release_allowance_reservation(
-    db: &mongodb::Database,
-    reservation: &AllowanceReservationAllocation,
-) -> AppResult<()> {
-    if reservation.quantity <= 0 {
-        return Ok(());
-    }
-    db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
-        .update_one(
-            doc! {
-                "_id": &reservation.period_id,
-                "reserved_quantity": { "$gte": reservation.quantity },
-            },
-            doc! {
-                "$inc": { "reserved_quantity": -reservation.quantity },
-                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-            },
-        )
-        .await?;
-    Ok(())
-}
-
-async fn release_grant_reservation(
-    db: &mongodb::Database,
-    reservation: &GrantReservationAllocation,
-) -> AppResult<()> {
-    if reservation.amount <= Credits::ZERO {
-        return Ok(());
-    }
-    db.collection::<CreditGrant>(CREDIT_GRANTS)
-        .update_one(
-            doc! {
-                "_id": &reservation.grant_id,
-                "reserved": { "$gte": reservation.amount },
-            },
-            doc! {
-                "$inc": { "reserved": -reservation.amount },
-                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
-            },
-        )
-        .await?;
-    Ok(())
-}
-
-fn spendable_grant_filter(grant_id: &str, amount: Credits, now: DateTime<Utc>) -> Document {
+pub(super) fn spendable_grant_filter(
+    grant_id: &str,
+    amount: Credits,
+    now: DateTime<Utc>,
+) -> Document {
     doc! {
         "_id": grant_id,
         "status": "active",
@@ -709,55 +632,56 @@ fn expiry_order(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Or
 /// lock. The resource mutation is applied first, then the operation id is
 /// persisted on the usage row before the lock is cleared. A retry can therefore
 /// finish either side of a crash without consuming the same benefit twice.
-pub async fn settle_usage_funding(
-    db: &mongodb::Database,
-    row: &UsageMeterRow,
-) -> AppResult<FundingSettlement> {
-    machine::validate_machine_settlement(row)?;
-    if let Some(funding) = row.funding.as_ref()
-        && funding.settled
-    {
-        return Ok(settlement_from_funding(funding));
-    }
-    if row.wallet_id.is_none() {
-        return Ok(FundingSettlement {
-            wallet_charge_credits: Credits::ZERO,
-            lago_billable_quantity_micros: 0,
-        });
-    }
-    // Legacy rows retain wallet-only semantics across retries.
-    if row.funding.is_none() {
-        if row.reserved_credits > Credits::ZERO
-            && super::reservation::find_rate(db, &row.lago_metric_code, row.model.as_deref())
-                .await?
-                .is_none()
+pub fn settle_usage_funding<'a>(
+    db: &'a mongodb::Database,
+    row: &'a UsageMeterRow,
+) -> futures::future::BoxFuture<'a, AppResult<FundingSettlement>> {
+    Box::pin(async move {
+        machine::validate_machine_settlement(row)?;
+        if let Some(funding) = row.funding.as_ref()
+            && funding.settled
         {
-            return Err(AppError::BillingNotConfigured(
-                "legacy settlement rate unavailable; retaining its hold for recovery".into(),
-            ));
+            return Ok(settlement_from_funding(funding));
         }
-        let funding = bson::to_bson(&UsageFunding {
-            wallet_only: true,
-            ..UsageFunding::default()
-        })
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-        db.collection::<UsageMeterRow>(USAGE_METER)
-            .update_one(
-                doc! { "_id": &row.id, "funding": Bson::Null },
-                doc! {
-                    "$set": {
-                        "funding": funding,
-                        "reserved_credits": row.reserved_credits,
+        if row.wallet_id.is_none() {
+            return Ok(FundingSettlement {
+                wallet_charge_credits: Credits::ZERO,
+                lago_billable_quantity_micros: 0,
+            });
+        }
+        // Legacy rows retain wallet-only semantics across retries.
+        if row.funding.is_none() {
+            if row.reserved_credits > Credits::ZERO
+                && super::reservation::find_rate(db, &row.lago_metric_code, row.model.as_deref())
+                    .await?
+                    .is_none()
+            {
+                return Err(AppError::BillingNotConfigured(
+                    "legacy settlement rate unavailable; retaining its hold for recovery".into(),
+                ));
+            }
+            let funding = bson::to_bson(&UsageFunding {
+                wallet_only: true,
+                ..UsageFunding::default()
+            })
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+            db.collection::<UsageMeterRow>(USAGE_METER)
+                .update_one(
+                    doc! { "_id": &row.id, "funding": Bson::Null },
+                    doc! {
+                        "$set": {
+                            "funding": funding,
+                            "reserved_credits": row.reserved_credits,
+                        },
                     },
-                },
-            )
-            .await?;
-    }
+                )
+                .await?;
+        }
 
-    let claim_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let stale_before = now - Duration::seconds(FUNDING_CLAIM_LEASE_SECS);
-    let claimed = db
+        let claim_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let stale_before = now - Duration::seconds(FUNDING_CLAIM_LEASE_SECS);
+        let claimed = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .find_one_and_update(
             doc! {
@@ -782,279 +706,313 @@ pub async fn settle_usage_funding(
                 .build(),
         )
         .await?;
-    let Some(mut claimed) = claimed else {
-        let current = db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .find_one(doc! { "_id": &row.id })
-            .await?
-            .ok_or_else(|| AppError::Internal("usage funding row disappeared".to_string()))?;
-        if let Some(funding) = current.funding.as_ref()
-            && funding.settled
-        {
-            return Ok(settlement_from_funding(funding));
-        }
-        return Err(AppError::Internal(format!(
-            "usage funding settlement is busy for row {}",
-            row.id
-        )));
-    };
-
-    machine::validate_machine_settlement(&claimed)?;
-    let reserved_only = machine::is_machine_runtime(&claimed);
-
-    let quantity = claimed.quantity.unwrap_or(0).max(0);
-    let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
-        rate.pico()
-    } else {
-        let rate = settlement_rate_pico(db, &claimed).await?;
-        let frozen = db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .update_one(
-                doc! { "_id": &claimed.id, "funding.settlement_claim_id": &claim_id },
-                doc! { "$set": { "funding.settlement_rate": Credits::from_pico(rate)? } },
-            )
-            .await?;
-        if frozen.matched_count != 1 {
-            return Err(AppError::Internal(
-                "funding rate freeze lost its settlement claim".into(),
-            ));
-        }
-        rate
-    };
-    let mut allowance_covered = claimed
-        .funding
-        .as_ref()
-        .map(|value| {
-            value
-                .allowance_consumptions
-                .iter()
-                .map(|allocation| allocation.quantity.max(0))
-                .sum::<i64>()
-        })
-        .unwrap_or(0)
-        .min(quantity);
-
-    let allowance_reservations = claimed
-        .funding
-        .as_ref()
-        .map(|value| value.allowance_reservations.clone())
-        .unwrap_or_default();
-    for reservation in allowance_reservations {
-        let operation_id = format!("{}:allowance:{}", claimed.id, reservation.period_id);
-        if has_allowance_operation(&claimed, &operation_id) {
-            finish_allowance_operation_if_locked(db, &reservation.period_id, &operation_id).await?;
-            continue;
-        }
-        let consume = reservation
-            .quantity
-            .max(0)
-            .min(quantity.saturating_sub(allowance_covered));
-        if settle_allowance_resource(
-            db,
-            &claimed,
-            &reservation.allowance_id,
-            &reservation.period_id,
-            &operation_id,
-            reservation.quantity.max(0),
-            consume,
-            true,
-        )
-        .await?
-        {
-            allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
-            refresh_claimed_funding(db, &mut claimed).await?;
-        } else if reserved_only {
-            return Err(AppError::BillingProviderUnavailable(
-                "Reserved Machine allowance requires reconciliation".into(),
-            ));
-        }
-    }
-
-    let wallet_only = claimed.funding.as_ref().is_some_and(|f| f.wallet_only);
-    if !reserved_only
-        && !wallet_only
-        && claimed.layer == BillingLayer::Platform
-        && allowance_covered < quantity
-    {
-        let definitions = super::allowances::applicable_allowances(
-            db,
-            &claimed.billing_owner_id,
-            claimed.service_id.as_deref(),
-            claimed.service_slug.as_deref(),
-            claimed.metric,
-        )
-        .await?;
-        let now = Utc::now();
-        let mut periods = Vec::new();
-        for definition in definitions {
-            let period = super::allowances::ensure_current_period(
-                db,
-                &definition,
-                &claimed.billing_owner_id,
-                now,
-            )
-            .await?;
-            periods.push((definition.id, period));
-        }
-        periods.sort_by(|(_, left), (_, right)| expiry_order(left.period_end, right.period_end));
-        for (allowance_id, period) in periods {
-            if allowance_covered >= quantity {
-                break;
+        let Some(mut claimed) = claimed else {
+            let current = db
+                .collection::<UsageMeterRow>(USAGE_METER)
+                .find_one(doc! { "_id": &row.id })
+                .await?
+                .ok_or_else(|| AppError::Internal("usage funding row disappeared".to_string()))?;
+            if let Some(funding) = current.funding.as_ref()
+                && funding.settled
+            {
+                return Ok(settlement_from_funding(funding));
             }
-            let operation_id = format!("{}:allowance-extra:{}", claimed.id, period.id);
+            return Err(AppError::Internal(format!(
+                "usage funding settlement is busy for row {}",
+                row.id
+            )));
+        };
+
+        finish_usage_resource_locks(db, &claimed.id).await?;
+        refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+        machine::validate_machine_settlement(&claimed)?;
+        let reserved_only = machine::is_machine_runtime(&claimed);
+
+        let quantity = claimed.quantity.unwrap_or(0).max(0);
+        let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
+            rate.pico()
+        } else {
+            let rate = settlement_rate_pico(db, &claimed).await?;
+            let frozen = db
+                .collection::<UsageMeterRow>(USAGE_METER)
+                .update_one(
+                    doc! { "_id": &claimed.id, "funding.settlement_claim_id": &claim_id },
+                    doc! { "$set": { "funding.settlement_rate": Credits::from_pico(rate)? } },
+                )
+                .await?;
+            if frozen.matched_count != 1 {
+                return Err(AppError::Internal(
+                    "funding rate freeze lost its settlement claim".into(),
+                ));
+            }
+            rate
+        };
+        let mut allowance_covered = claimed
+            .funding
+            .as_ref()
+            .map(|value| {
+                value
+                    .allowance_consumptions
+                    .iter()
+                    .map(|allocation| allocation.quantity.max(0))
+                    .sum::<i64>()
+            })
+            .unwrap_or(0)
+            .min(quantity);
+
+        let allowance_reservations = claimed
+            .funding
+            .as_ref()
+            .map(|value| value.allowance_reservations.clone())
+            .unwrap_or_default();
+        for reservation in allowance_reservations {
+            let operation_id = format!("{}:allowance:{}", claimed.id, reservation.period_id);
             if has_allowance_operation(&claimed, &operation_id) {
-                finish_allowance_operation_if_locked(db, &period.id, &operation_id).await?;
+                finish_allowance_operation_if_locked(db, &reservation.period_id, &operation_id)
+                    .await?;
                 continue;
             }
-            let consume = super::allowances::available_period_quantity(&period)
+            let consume = reservation
+                .quantity
+                .max(0)
                 .min(quantity.saturating_sub(allowance_covered));
-            if consume <= 0 {
-                continue;
-            }
             if settle_allowance_resource(
                 db,
                 &claimed,
-                &allowance_id,
-                &period.id,
+                &reservation.allowance_id,
+                &reservation.period_id,
                 &operation_id,
-                0,
+                reservation.quantity.max(0),
                 consume,
-                false,
+                true,
             )
             .await?
             {
-                allowance_covered = allowance_covered.saturating_add(consume).min(quantity);
-                refresh_claimed_funding(db, &mut claimed).await?;
+                refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                allowance_covered = allowance_consumed(&claimed)?.min(quantity);
+            } else if reserved_only {
+                return Err(AppError::BillingProviderUnavailable(
+                    "Reserved Machine allowance requires reconciliation".into(),
+                ));
             }
         }
-    }
 
-    let total = super::amounts::cost(rate, quantity)?;
-    let allowance = super::amounts::cost(rate, allowance_covered)?;
-    let charge_after_allowance = total.checked_sub(allowance)?;
-    let mut grant_covered = claimed
-        .funding
-        .as_ref()
-        .map(|value| {
-            value
-                .grant_consumptions
-                .iter()
-                .map(|allocation| allocation.amount.max(Credits::ZERO))
-                .try_fold(Credits::ZERO, Credits::checked_add)
-        })
-        .transpose()?
-        .unwrap_or(Credits::ZERO)
-        .min(charge_after_allowance);
-    let grant_reservations = claimed
-        .funding
-        .as_ref()
-        .map(|value| value.grant_reservations.clone())
-        .unwrap_or_default();
-    for reservation in grant_reservations {
-        let operation_id = format!("{}:grant:{}", claimed.id, reservation.grant_id);
-        if has_grant_operation(&claimed, &operation_id) {
-            finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
-            continue;
-        }
-        let consume = reservation
-            .amount
-            .max(Credits::ZERO)
-            .min(charge_after_allowance.checked_sub(grant_covered)?);
-        if settle_grant_resource(
-            db,
-            &claimed,
-            &reservation.grant_id,
-            &operation_id,
-            reservation.amount.max(Credits::ZERO),
-            consume,
-            true,
-        )
-        .await?
+        let wallet_only = claimed.funding.as_ref().is_some_and(|f| f.wallet_only);
+        if !reserved_only
+            && !wallet_only
+            && claimed.layer == BillingLayer::Platform
+            && allowance_covered < quantity
         {
-            grant_covered = grant_covered
-                .checked_add(consume)?
-                .min(charge_after_allowance);
-            refresh_claimed_funding(db, &mut claimed).await?;
-        } else if reserved_only {
-            return Err(AppError::BillingProviderUnavailable(
-                "Reserved Machine grant requires reconciliation".into(),
-            ));
-        }
-    }
-
-    if !reserved_only && !wallet_only && grant_covered < charge_after_allowance {
-        let now = Utc::now();
-        let mut grants =
-            super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
-        grants.retain(|grant| {
-            super::grants::service_scope_applies(
-                &grant.scope,
-                claimed.service_id.as_deref(),
+            let definitions = super::allowances::applicable_allowances(
+                db,
+                &claimed.billing_owner_id,
+                catalog_service_id(&claimed),
                 claimed.service_slug.as_deref(),
+                claimed.metric,
             )
-        });
-        grants.sort_by(|left, right| {
-            expiry_order(left.expires_at, right.expires_at)
-                .then_with(|| left.created_at.cmp(&right.created_at))
-        });
-        for grant in grants {
-            if grant_covered >= charge_after_allowance {
-                break;
+            .await?;
+            let now = Utc::now();
+            let mut periods = Vec::new();
+            for definition in definitions {
+                let period = super::allowances::ensure_current_period(
+                    db,
+                    &definition,
+                    &claimed.billing_owner_id,
+                    now,
+                )
+                .await?;
+                periods.push((definition.id, period));
             }
-            let operation_id = format!("{}:grant-extra:{}", claimed.id, grant.id);
+            periods
+                .sort_by(|(_, left), (_, right)| expiry_order(left.period_end, right.period_end));
+            for (allowance_id, period) in periods {
+                if allowance_covered >= quantity {
+                    break;
+                }
+                let operation_id = format!("{}:allowance-extra:{}", claimed.id, period.id);
+                if has_allowance_operation(&claimed, &operation_id) {
+                    finish_allowance_operation_if_locked(db, &period.id, &operation_id).await?;
+                    continue;
+                }
+                let consume = super::allowances::available_period_quantity(&period)
+                    .min(quantity.saturating_sub(allowance_covered));
+                if consume <= 0 {
+                    continue;
+                }
+                #[cfg(test)]
+                allocation_tests::pause_allowance_extra(&period.id).await;
+                if settle_allowance_resource(
+                    db,
+                    &claimed,
+                    &allowance_id,
+                    &period.id,
+                    &operation_id,
+                    0,
+                    consume,
+                    false,
+                )
+                .await?
+                {
+                    refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                    allowance_covered = allowance_consumed(&claimed)?.min(quantity);
+                }
+            }
+        }
+
+        let total = super::amounts::cost(rate, quantity)?;
+        let allowance = super::amounts::cost(rate, allowance_covered)?;
+        let charge_after_allowance = total.checked_sub(allowance)?;
+        let mut grant_covered = claimed
+            .funding
+            .as_ref()
+            .map(|value| {
+                value
+                    .grant_consumptions
+                    .iter()
+                    .map(|allocation| allocation.amount.max(Credits::ZERO))
+                    .try_fold(Credits::ZERO, Credits::checked_add)
+            })
+            .transpose()?
+            .unwrap_or(Credits::ZERO)
+            .min(charge_after_allowance);
+        let grant_reservations = claimed
+            .funding
+            .as_ref()
+            .map(|value| value.grant_reservations.clone())
+            .unwrap_or_default();
+        for reservation in grant_reservations {
+            let operation_id = format!("{}:grant:{}", claimed.id, reservation.grant_id);
             if has_grant_operation(&claimed, &operation_id) {
-                finish_grant_operation_if_locked(db, &grant.id, &operation_id).await?;
+                finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
                 continue;
             }
-            let consume = super::grants::available_grant(&grant)?
+            let consume = reservation
+                .amount
+                .max(Credits::ZERO)
                 .min(charge_after_allowance.checked_sub(grant_covered)?);
-            if consume <= Credits::ZERO {
-                continue;
-            }
             if settle_grant_resource(
                 db,
                 &claimed,
-                &grant.id,
+                &reservation.grant_id,
                 &operation_id,
-                Credits::ZERO,
+                reservation.amount.max(Credits::ZERO),
                 consume,
-                false,
+                reservation.service_limit_key.as_deref(),
+                true,
             )
             .await?
             {
-                grant_covered = grant_covered
-                    .checked_add(consume)?
-                    .min(charge_after_allowance);
-                refresh_claimed_funding(db, &mut claimed).await?;
+                refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                grant_covered = Credits::checked_sum(
+                    claimed
+                        .funding
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|f| f.grant_consumptions.iter().map(|a| a.amount)),
+                )?
+                .min(charge_after_allowance);
+            } else if reserved_only {
+                return Err(AppError::BillingProviderUnavailable(
+                    "Reserved Machine grant requires reconciliation".into(),
+                ));
             }
         }
-    }
 
-    let wallet = charge_after_allowance.checked_sub(grant_covered)?;
-    if reserved_only && wallet > claimed.reserved_credits {
-        return Err(AppError::BillingProviderUnavailable(
-            "Machine settlement exceeds its funded wallet window".into(),
-        ));
-    }
-    let wallet_charge_credits = wallet;
-    // Grant- and allowance-funded usage is deliberately absent from Lago's
-    // charging stream. Only the wallet-funded fraction is emitted, so Lago's
-    // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
-    // describe the same chargeable usage.
-    let settled_at = bson::DateTime::from_chrono(Utc::now());
-    let fields = doc! {
-        "funding.settled": true,
-        "funding.total_charge": total,
-        "funding.allowance_funded_quantity": allowance_covered,
-        "funding.allowance_funded": allowance,
-        "funding.grant_funded": grant_covered,
-        "funding.wallet_funded": wallet,
-        "funding.wallet_charge_credits": wallet_charge_credits,
-        "funding.settled_at": settled_at,
-        "updated_at": settled_at,
-    };
-    super::lago_carry::commit_settlement(db, &claimed, wallet, Credits::from_pico(rate)?, fields)
+        if !reserved_only && !wallet_only && grant_covered < charge_after_allowance {
+            let now = Utc::now();
+            let mut grants =
+                super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
+            grants.retain(|grant| {
+                super::grants::service_scope_applies(
+                    &grant.scope,
+                    catalog_service_id(&claimed),
+                    claimed.service_slug.as_deref(),
+                )
+            });
+            grants.sort_by(|left, right| {
+                expiry_order(left.expires_at, right.expires_at)
+                    .then_with(|| left.created_at.cmp(&right.created_at))
+            });
+            for grant in grants {
+                if grant_covered >= charge_after_allowance {
+                    break;
+                }
+                let operation_id = format!("{}:grant-extra:{}", claimed.id, grant.id);
+                if has_grant_operation(&claimed, &operation_id) {
+                    finish_grant_operation_if_locked(db, &grant.id, &operation_id).await?;
+                    continue;
+                }
+                let consume = super::service_limits::available_for_service(
+                    &grant,
+                    catalog_service_id(&claimed),
+                    claimed.service_slug.as_deref(),
+                )?
+                .min(charge_after_allowance.checked_sub(grant_covered)?);
+                if consume <= Credits::ZERO {
+                    continue;
+                }
+                if settle_grant_resource(
+                    db,
+                    &claimed,
+                    &grant.id,
+                    &operation_id,
+                    Credits::ZERO,
+                    consume,
+                    super::service_limits::rule_key(
+                        &grant,
+                        catalog_service_id(&claimed),
+                        claimed.service_slug.as_deref(),
+                    )
+                    .as_deref(),
+                    false,
+                )
+                .await?
+                {
+                    refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
+                    grant_covered = Credits::checked_sum(
+                        claimed
+                            .funding
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|f| f.grant_consumptions.iter().map(|a| a.amount)),
+                    )?
+                    .min(charge_after_allowance);
+                }
+            }
+        }
+
+        let wallet = charge_after_allowance.checked_sub(grant_covered)?;
+        if reserved_only && wallet > claimed.reserved_credits {
+            return Err(AppError::BillingProviderUnavailable(
+                "Machine settlement exceeds its funded wallet window".into(),
+            ));
+        }
+        let wallet_charge_credits = wallet;
+        // Grant- and allowance-funded usage is deliberately absent from Lago's
+        // charging stream. Only the wallet-funded fraction is emitted, so Lago's
+        // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
+        // describe the same chargeable usage.
+        let settled_at = bson::DateTime::from_chrono(Utc::now());
+        let fields = doc! {
+            "funding.settled": true,
+            "funding.total_charge": total,
+            "funding.allowance_funded_quantity": allowance_covered,
+            "funding.allowance_funded": allowance,
+            "funding.grant_funded": grant_covered,
+            "funding.wallet_funded": wallet,
+            "funding.wallet_charge_credits": wallet_charge_credits,
+            "funding.settled_at": settled_at,
+            "updated_at": settled_at,
+        };
+        super::lago_carry::commit_settlement(
+            db,
+            &claimed,
+            wallet,
+            Credits::from_pico(rate)?,
+            fields,
+        )
         .await
+    })
 }
 
 pub(super) fn settlement_from_funding(funding: &UsageFunding) -> FundingSettlement {
@@ -1094,13 +1052,29 @@ async fn settlement_rate_pico(db: &mongodb::Database, row: &UsageMeterRow) -> Ap
         .max(0))
 }
 
-async fn refresh_claimed_funding(db: &mongodb::Database, row: &mut UsageMeterRow) -> AppResult<()> {
+async fn refresh_claimed_funding(
+    db: &mongodb::Database,
+    row: &mut UsageMeterRow,
+    expected_claim: &str,
+) -> AppResult<()> {
     *row = db
         .collection::<UsageMeterRow>(USAGE_METER)
-        .find_one(doc! { "_id": &row.id })
+        .find_one(doc! { "_id": &row.id, "funding.settlement_claim_id": expected_claim, "funding.settled": { "$ne": true }, "released": false })
         .await?
         .ok_or_else(|| AppError::Internal("usage funding row disappeared".to_string()))?;
     Ok(())
+}
+
+fn allowance_consumed(row: &UsageMeterRow) -> AppResult<i64> {
+    row.funding
+        .as_ref()
+        .into_iter()
+        .flat_map(|f| f.allowance_consumptions.iter())
+        .try_fold(0_i64, |total, allocation| {
+            total
+                .checked_add(allocation.quantity)
+                .ok_or_else(|| AppError::Internal("Allowance consumption overflow".into()))
+        })
 }
 
 fn has_allowance_operation(row: &UsageMeterRow, operation_id: &str) -> bool {
@@ -1174,7 +1148,12 @@ async fn settle_allowance_resource(
     consume_quantity: i64,
     honor_reservation: bool,
 ) -> AppResult<bool> {
-    let lock = AllowanceSettlementLock {
+    let release = operation_id.contains(":allowance-release:");
+    let expected_claim = row
+        .funding
+        .as_ref()
+        .and_then(|f| f.settlement_claim_id.clone());
+    let proposed_lock = AllowanceSettlementLock {
         operation_id: operation_id.to_string(),
         usage_row_id: row.id.clone(),
         reserved_quantity,
@@ -1183,6 +1162,33 @@ async fn settle_allowance_resource(
         updated_at: Utc::now(),
     };
     for _ in 0..RESOURCE_LOCK_RETRIES {
+        let Some(period) = db
+            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+            .find_one(doc! { "_id": period_id })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if let Some(active) = period.active_settlement.as_ref() {
+            complete_allowance_lock(db, period_id, &period.allowance_id, active).await?;
+            if active.operation_id == operation_id {
+                return Ok(true);
+            }
+            continue;
+        }
+        let mut lock = proposed_lock.clone();
+        if !honor_reservation {
+            if period.period_end.is_some_and(|end| end <= Utc::now()) {
+                return Ok(false);
+            }
+            lock.consume_quantity = lock
+                .consume_quantity
+                .min(super::allowances::available_period_quantity(&period));
+            if lock.consume_quantity <= 0 {
+                return Ok(false);
+            }
+        }
+        let consume_quantity = lock.consume_quantity;
         let mut filter = doc! {
             "_id": period_id,
             "$or": [
@@ -1218,17 +1224,54 @@ async fn settle_allowance_resource(
         let lock_bson = bson::to_bson(&lock).map_err(|error| {
             AppError::Internal(format!("failed to encode allowance lock: {error}"))
         })?;
-        let result = db
-            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
-            .update_one(
-                filter,
-                doc! { "$set": {
-                    "active_settlement": lock_bson,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                } },
-            )
+        let tx_db = db.clone();
+        let usage_id = row.id.clone();
+        let op_id = operation_id.to_owned();
+        let expected_claim = expected_claim.clone();
+        let lock_update = doc! { "$set": { "active_settlement": lock_bson,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()) } };
+        let mut session = db.client().start_session().await?;
+        let (already_recorded, acquired) = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let current = tx_db
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! { "_id": &usage_id })
+                    .session(&mut *session)
+                    .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|r| has_allowance_operation(r, &op_id))
+                {
+                    return Ok((true, false));
+                }
+                // No usage row means no durable owner for this operation.
+                if current.is_none() {
+                    return Err(mongodb::error::Error::custom(
+                        "Usage funding owner disappeared",
+                    ));
+                }
+                fence_resource_operation(
+                    &tx_db,
+                    session,
+                    &usage_id,
+                    expected_claim.as_deref(),
+                    release,
+                )
+                .await?;
+                let result = tx_db
+                    .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+                    .update_one(filter.clone(), lock_update.clone())
+                    .session(&mut *session)
+                    .await?;
+                Ok((false, result.modified_count == 1))
+            })
             .await?;
-        if result.modified_count == 1 {
+        if already_recorded {
+            finish_allowance_operation_if_locked(db, period_id, operation_id).await?;
+            return Ok(true);
+        }
+        if acquired {
             complete_allowance_lock(db, period_id, allowance_id, &lock).await?;
             return Ok(true);
         }
@@ -1240,7 +1283,7 @@ async fn settle_allowance_resource(
             return Ok(false);
         };
         let Some(active) = period.active_settlement else {
-            return Ok(false);
+            continue;
         };
         complete_allowance_lock(db, period_id, &period.allowance_id, &active).await?;
         if active.operation_id == operation_id {
@@ -1314,6 +1357,23 @@ async fn complete_allowance_lock(
     Ok(())
 }
 
+fn add_rule_filter(filter: &mut Document, index: usize, reserved: Credits, consume: Credits) {
+    // Dot indexes in aggregation field paths do not index arrays; explicitly
+    // take the frozen element before comparing exact integer counters.
+    let rule = doc! { "$arrayElemAt": ["$service_limits", index as i64] };
+    let expression = doc! { "$let": { "vars": { "rule": rule }, "in": { "$and": [
+        { "$gte": ["$$rule.reserved", reserved] },
+        { "$gte": [{ "$add": [{ "$subtract": ["$$rule.limit", { "$add": ["$$rule.consumed", "$$rule.reserved"] }] }, reserved] }, consume] },
+    ] } } };
+    filter
+        .entry("$and".to_string())
+        .or_insert_with(|| Bson::Array(Vec::new()));
+    filter
+        .get_array_mut("$and")
+        .expect("and conditions")
+        .push(doc! { "$expr": expression }.into());
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn settle_grant_resource(
     db: &mongodb::Database,
@@ -1322,17 +1382,61 @@ async fn settle_grant_resource(
     operation_id: &str,
     reserved: Credits,
     consume: Credits,
+    service_limit_key: Option<&str>,
     honor_reservation: bool,
 ) -> AppResult<bool> {
-    let lock = CreditGrantSettlementLock {
+    let release = operation_id.contains(":grant-release:");
+    let expected_claim = row
+        .funding
+        .as_ref()
+        .and_then(|f| f.settlement_claim_id.clone());
+    let proposed_lock = CreditGrantSettlementLock {
         operation_id: operation_id.to_string(),
         usage_row_id: row.id.clone(),
         reserved,
         consume,
+        service_limit_key: service_limit_key.map(str::to_owned),
         applied: false,
         updated_at: Utc::now(),
     };
     for _ in 0..RESOURCE_LOCK_RETRIES {
+        let Some(grant) = db
+            .collection::<CreditGrant>(CREDIT_GRANTS)
+            .find_one(doc! { "_id": grant_id })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if let Some(active) = grant.active_settlement.as_ref() {
+            complete_grant_lock(db, grant_id, active).await?;
+            if active.operation_id == operation_id {
+                return Ok(true);
+            }
+            continue;
+        }
+        if grant.status != crate::models::credit_grant::CreditGrantStatus::Active {
+            return Ok(false);
+        }
+        let mut lock = proposed_lock.clone();
+        if !honor_reservation {
+            if grant.revoke_requested_at.is_some()
+                || grant.issued_ledgered_at.is_none()
+                || grant.expires_at.is_some_and(|end| end <= Utc::now())
+            {
+                return Ok(false);
+            }
+            lock.consume = lock
+                .consume
+                .min(super::service_limits::available_for_service(
+                    &grant,
+                    catalog_service_id(row),
+                    row.service_slug.as_deref(),
+                )?);
+            if lock.consume <= Credits::ZERO {
+                return Ok(false);
+            }
+        }
+        let consume = lock.consume;
         let mut filter = doc! {
             "_id": grant_id,
             "status": "active",
@@ -1364,19 +1468,78 @@ async fn settle_grant_resource(
                 ] }],
             );
         }
+        if !honor_reservation {
+            filter.insert("revoke_requested_at", Bson::Null);
+            filter.insert("issued_ledgered_at", doc! { "$type": "date" });
+        }
+        if let Some(key) = service_limit_key {
+            let index = grant
+                .service_limits
+                .iter()
+                .position(|r| r.key == key)
+                .ok_or_else(|| AppError::Internal("Reserved service limit is missing".into()))?;
+            add_rule_filter(&mut filter, index, reserved, consume);
+        } else if super::service_limits::matching_rule(
+            &grant,
+            catalog_service_id(row),
+            row.service_slug.as_deref(),
+        )
+        .is_some()
+        {
+            return Err(AppError::Internal(
+                "Service limit identity missing from settlement".into(),
+            ));
+        }
         let lock_bson = bson::to_bson(&lock)
             .map_err(|error| AppError::Internal(format!("failed to encode grant lock: {error}")))?;
-        let result = db
-            .collection::<CreditGrant>(CREDIT_GRANTS)
-            .update_one(
-                filter,
-                doc! { "$set": {
-                    "active_settlement": lock_bson,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                } },
-            )
+        let tx_db = db.clone();
+        let usage_id = row.id.clone();
+        let op_id = operation_id.to_owned();
+        let expected_claim = expected_claim.clone();
+        let lock_update = doc! { "$set": { "active_settlement": lock_bson,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()) } };
+        let mut session = db.client().start_session().await?;
+        let (already_recorded, acquired) = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let current = tx_db
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! { "_id": &usage_id })
+                    .session(&mut *session)
+                    .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|r| has_grant_operation(r, &op_id))
+                {
+                    return Ok((true, false));
+                }
+                // No usage row means no durable owner for this operation.
+                if current.is_none() {
+                    return Err(mongodb::error::Error::custom(
+                        "Usage funding owner disappeared",
+                    ));
+                }
+                fence_resource_operation(
+                    &tx_db,
+                    session,
+                    &usage_id,
+                    expected_claim.as_deref(),
+                    release,
+                )
+                .await?;
+                let result = tx_db
+                    .collection::<CreditGrant>(CREDIT_GRANTS)
+                    .update_one(filter.clone(), lock_update.clone())
+                    .session(&mut *session)
+                    .await?;
+                Ok((false, result.modified_count == 1))
+            })
             .await?;
-        if result.modified_count == 1 {
+        if already_recorded {
+            finish_grant_operation_if_locked(db, grant_id, operation_id).await?;
+            return Ok(true);
+        }
+        if acquired {
             complete_grant_lock(db, grant_id, &lock).await?;
             return Ok(true);
         }
@@ -1388,7 +1551,7 @@ async fn settle_grant_resource(
             return Ok(false);
         };
         let Some(active) = grant.active_settlement else {
-            return Ok(false);
+            continue;
         };
         complete_grant_lock(db, grant_id, &active).await?;
         if active.operation_id == operation_id {
@@ -1417,11 +1580,15 @@ async fn complete_grant_lock(
                 vec![doc! { "$set": {
                     "reserved": { "$subtract": ["$reserved", lock.reserved] },
                     "remaining": { "$subtract": ["$remaining", lock.consume] },
+                    "service_limits": { "$map": { "input": { "$ifNull": ["$service_limits", []] }, "as": "rule", "in": {
+                        "$cond": [{ "$eq": ["$$rule.key", lock.service_limit_key.as_deref()] },
+                            { "$mergeObjects": ["$$rule", {
+                                "reserved": { "$subtract": ["$$rule.reserved", lock.reserved] },
+                                "consumed": { "$add": ["$$rule.consumed", lock.consume] },
+                            }] }, "$$rule"]
+                    } } },
                     "status": { "$cond": [
-                        { "$lte": [
-                            { "$subtract": ["$remaining", lock.consume] },
-                            0_i64,
-                        ] },
+                        { "$and": [{ "$eq": [{ "$ifNull": ["$revoke_requested_at", Bson::Null] }, Bson::Null] }, { "$lte": [ { "$subtract": ["$remaining", lock.consume] }, Credits::ZERO ] }] },
                         "consumed",
                         "$status",
                     ] },
@@ -1444,6 +1611,7 @@ async fn complete_grant_lock(
         operation_id: lock.operation_id.clone(),
         grant_id: grant_id.to_string(),
         amount: lock.consume,
+        service_limit_key: lock.service_limit_key.clone(),
     };
     let allocation_bson = bson::to_bson(&allocation).map_err(|error| {
         AppError::Internal(format!("failed to encode grant consumption: {error}"))
@@ -1502,6 +1670,7 @@ async fn complete_grant_lock(
             },
         )
         .await?;
+    super::grants::finalize_reclaim(db, grant_id).await?;
     Ok(())
 }
 
@@ -1523,6 +1692,62 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     use super::*;
+
+    pub(super) async fn ordinary(
+        db: &mongodb::Database,
+        owner: &str,
+        service: Option<&str>,
+        slug: Option<&str>,
+        metric: crate::models::service_billing::BillingMetric,
+        quantity: i64,
+        rate: Credits,
+    ) -> AppResult<super::super::reservation::BillingReservation> {
+        use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS};
+        let now = bson::DateTime::now();
+        let wallet = match db
+            .collection::<BillingWallet>(WALLETS)
+            .find_one(doc! { "owner_id": owner })
+            .await?
+        {
+            Some(w) => w,
+            None => {
+                let w: BillingWallet = bson::from_document(doc! { "_id": Uuid::new_v4().to_string(), "owner_id": owner, "lago_customer_id": "customer", "plan_kind": "prepaid", "balance_credits": Credits::from_whole(1000000), "reserved_credits": Credits::ZERO, "collection_state": "good", "balance_synced_at": now, "created_at": now, "updated_at": now }).unwrap();
+                db.collection::<BillingWallet>(WALLETS)
+                    .insert_one(&w)
+                    .await?;
+                w
+            }
+        };
+        let ctx = BillingRouteContext::new(
+            super::super::BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.into(),
+            owner.into(),
+            None,
+            None,
+            service.map(str::to_owned),
+            slug.map(str::to_owned),
+            super::super::NodeIntent::Direct,
+            "bearer".into(),
+            crate::models::usage_meter::CredentialClass::UserOwned,
+            metric,
+            None,
+            false,
+        )
+        .with_platform_metering(true);
+        let layer = LayerReservation {
+            layer: BillingLayer::Platform,
+            metric,
+            lago_metric_code: ctx.platform_lago_metric_code.clone(),
+            estimated_quantity: quantity,
+            credits_per_unit_micros: 0,
+            credits_per_unit_pico: Some(rate.pico().try_into().unwrap()),
+            reserved_credits: rate.checked_mul(quantity)?,
+            allowance_reservations: vec![],
+            grant_reservations: vec![],
+        };
+        reserve_and_open_ordinary(db, &ctx, &wallet, vec![layer]).await
+    }
 
     #[test]
     fn expiring_resources_sort_before_non_expiring_resources() {
@@ -1617,6 +1842,9 @@ mod tests {
             .expect("insert allowance period");
         db.collection::<CreditGrant>(CREDIT_GRANTS)
             .insert_one(CreditGrant {
+                service_limits: Vec::new(),
+                revoke_requested_at: None,
+                revoke_requested_by: None,
                 id: grant_id.to_string(),
                 batch_id: "batch-1".to_string(),
                 schedule_origin: None,
@@ -1682,6 +1910,7 @@ mod tests {
                     quantity: 1,
                 }],
                 grant_reservations: vec![GrantReservationAllocation {
+                    service_limit_key: None,
                     grant_id: grant_id.to_string(),
                     amount: crate::models::credits::Credits::from_micros(500_000),
                 }],
@@ -1795,6 +2024,7 @@ mod tests {
             .unwrap();
         }
         let lock = CreditGrantSettlementLock {
+            service_limit_key: None,
             operation_id: allocation.operation_id.clone(),
             usage_row_id: row_id.to_string(),
             reserved: crate::models::credits::Credits::from_micros(0),
@@ -1930,7 +2160,7 @@ mod public_admission_tests {
         assert!(
             reserve_and_open_public(&db, &ctx, &wallet, layers)
                 .await
-                .is_err()
+                .is_ok()
         );
         assert_eq!(
             super::pool_tests::holds(&db).await,
@@ -1942,3 +2172,6 @@ mod public_admission_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod allocation_tests;

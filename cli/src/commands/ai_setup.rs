@@ -30,6 +30,7 @@ const REFERENCE_FILES: &[&str] = &[
     "triggers",
     "openclaw",
     "admin",
+    "billing",
 ];
 
 /// Claude Code plugin marketplace source: the NyxID repository itself
