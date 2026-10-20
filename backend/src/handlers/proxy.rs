@@ -82,6 +82,8 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::WsProxyDownstream(_) => (502, 8005),
         AppError::ClientDisconnected => (499, 8012),
         AppError::WorkspaceDestinationsNotActivated => (503, 12300),
+        AppError::AuditAdmissionClosed { .. } => (503, 13003),
+        AppError::AuditWitnessDiverged => (503, 13004),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -106,7 +108,12 @@ fn emit_proxy_error_telemetry(
     err: &AppError,
 ) {
     // Expected, operator-controlled rollout state is not a proxy server fault.
-    if matches!(err, AppError::WorkspaceDestinationsNotActivated) {
+    if matches!(
+        err,
+        AppError::WorkspaceDestinationsNotActivated
+            | AppError::AuditAdmissionClosed { .. }
+            | AppError::AuditWitnessDiverged
+    ) {
         return;
     }
     let (status, error_code) = proxy_error_telemetry_fields(err);
@@ -10192,6 +10199,72 @@ mod tests {
             proxy_error_telemetry_fields(&AppError::ApiKeyScopeForbidden("x".into())),
             (403, 9000)
         );
+    }
+
+    #[tokio::test]
+    async fn audit_admission_errors_are_503_and_do_not_emit_proxy_faults() {
+        use crate::errors::{AppError, AuditAdmissionReason};
+        use crate::telemetry::{TelemetryClient, TelemetryContext};
+        use axum::{Json, Router, extract::State, routing::post};
+        use uuid::Uuid;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(8);
+        let app = Router::new()
+            .route(
+                "/capture/",
+                post(
+                    |State(tx): State<tokio::sync::mpsc::Sender<serde_json::Value>>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        tx.send(body).await.unwrap();
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        let mut config = state.config.clone();
+        config.telemetry_dsn = Some("test-w8-ingest".into());
+        config.telemetry_host = Some(format!("http://{address}"));
+        state.telemetry = TelemetryClient::from_config(&config);
+        assert!(state.telemetry.is_some());
+        let actor = crate::test_utils::test_auth_user(&Uuid::new_v4().to_string());
+        for (error, code) in [
+            (
+                AppError::AuditAdmissionClosed {
+                    reason: AuditAdmissionReason::WitnessUnavailable,
+                },
+                13003,
+            ),
+            (AppError::AuditWitnessDiverged, 13004),
+        ] {
+            assert_eq!(super::proxy_error_telemetry_fields(&error), (503, code));
+            super::emit_proxy_error_telemetry(
+                &state,
+                &actor,
+                &TelemetryContext::default(),
+                "test",
+                &error,
+            );
+        }
+        // The drain is FIFO. A real fault after both controls must be the first
+        // capture; this proves exclusion without a timing-based absence check.
+        super::emit_proxy_error_telemetry(
+            &state,
+            &actor,
+            &TelemetryContext::default(),
+            "test",
+            &AppError::Internal("test fault".into()),
+        );
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured["properties"]["status"], 500);
+        assert_eq!(captured["properties"]["error_code"], 1006);
+        server.abort();
     }
 
     #[test]

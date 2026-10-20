@@ -407,6 +407,7 @@ async fn audit_append_crash_retry_and_conflicting_id() {
                 .keys(doc! { "seq": 1 })
                 .options(
                     mongodb::options::IndexOptions::builder()
+                        .name("audit_log_seq_unique".to_owned())
                         .unique(true)
                         .partial_filter_expression(doc! { "seq": { "$exists": true } })
                         .build(),

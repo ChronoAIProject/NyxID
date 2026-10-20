@@ -523,8 +523,8 @@ async fn oracle_lifecycle_delete_conflicts_then_retains_history_and_stably_ackno
 #[tokio::test]
 async fn oracle_lifecycle_delete_audit_failure_rolls_back_and_retry_succeeds() {
     let f = fixture("oracle_lifecycle_rollback").await;
-    f.db.create_collection(crate::models::audit_log::COLLECTION_NAME)
-        .validator(doc! {"must_not_exist":true})
+    f.db.run_command(doc! {"collMod": crate::models::audit_log::COLLECTION_NAME,
+    "validator": {"must_not_exist": true}})
         .await
         .unwrap();
     workers::report_presence(
