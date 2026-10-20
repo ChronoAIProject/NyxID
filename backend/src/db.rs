@@ -139,7 +139,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;
-    ensure_account_delivery_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
         .create_index(
             mongodb::IndexModel::builder()
@@ -181,35 +180,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     backfill_org_scope_sources(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
-    Ok(())
-}
-
-// Available before the ID producer model lands; that model re-exports this
-// constant so startup DDL never depends on an uncommitted producer module.
-pub(crate) const ACCOUNT_DELIVERY_PAYLOADS_COLLECTION_NAME: &str = "account_delivery_payloads_v1";
-
-async fn ensure_account_delivery_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
-    db.collection::<Document>(ACCOUNT_DELIVERY_PAYLOADS_COLLECTION_NAME)
-        .create_indexes([
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1, "kind": 1, "revision_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("account_delivery_user_kind_revision".to_owned())
-                        .unique(true)
-                        .build(),
-                )
-                .build(),
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1, "_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("account_delivery_expiry".to_owned())
-                        .build(),
-                )
-                .build(),
-        ])
-        .await?;
     Ok(())
 }
 
@@ -5307,77 +5277,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn audit_account_delivery_indexes_enforce_identity_without_ttl() {
-        let db = crate::test_utils::connect_test_database("account_delivery_indexes")
-            .await
-            .expect("test database");
-        ensure_account_delivery_indexes(&db).await.unwrap();
-        ensure_account_delivery_indexes(&db).await.unwrap();
-        let payloads = db.collection::<Document>(ACCOUNT_DELIVERY_PAYLOADS_COLLECTION_NAME);
-        let indexes: Vec<IndexModel> = payloads
-            .list_indexes()
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
-        let identity = indexes
-            .iter()
-            .find(|index| {
-                index
-                    .options
-                    .as_ref()
-                    .and_then(|options| options.name.as_deref())
-                    == Some("account_delivery_user_kind_revision")
-            })
-            .expect("named account delivery identity index");
-        assert_eq!(
-            identity.keys,
-            doc! { "user_id": 1, "kind": 1, "revision_id": 1 }
-        );
-        assert_eq!(identity.options.as_ref().unwrap().unique, Some(true));
-        let expiry = indexes
-            .iter()
-            .find(|index| {
-                index
-                    .options
-                    .as_ref()
-                    .and_then(|options| options.name.as_deref())
-                    == Some("account_delivery_expiry")
-            })
-            .expect("named account delivery expiry scan index");
-        assert_eq!(expiry.keys, doc! { "expires_at": 1, "_id": 1 });
-        assert_ne!(expiry.options.as_ref().unwrap().unique, Some(true));
-        assert!(indexes.iter().all(|index| {
-            index
-                .options
-                .as_ref()
-                .is_none_or(|options| options.expire_after.is_none())
-        }));
-
-        let mut payload = doc! {
-            "_id": uuid::Uuid::new_v4().to_string(),
-            "user_id": uuid::Uuid::new_v4().to_string(),
-            "kind": "password_reset",
-            "revision_id": uuid::Uuid::new_v4().to_string(),
-            "expires_at": bson::DateTime::from_millis(0),
-        };
-        payloads.insert_one(payload.clone()).await.unwrap();
-        payload.insert("_id", uuid::Uuid::new_v4().to_string());
-        let duplicate = payloads.insert_one(payload.clone()).await.unwrap_err();
-        assert!(is_duplicate_key_error(&duplicate));
-        // The uniqueness boundary is exactly user/kind/revision; each of these
-        // independent deliveries remains admissible, including expired payloads.
-        for field in ["user_id", "kind", "revision_id"] {
-            let mut distinct = payload.clone();
-            distinct.insert("_id", uuid::Uuid::new_v4().to_string());
-            distinct.insert(field, uuid::Uuid::new_v4().to_string());
-            payloads.insert_one(distinct).await.unwrap();
-        }
-        assert_eq!(payloads.count_documents(doc! {}).await.unwrap(), 4);
-    }
 
     #[tokio::test]
     async fn feature_flag_indexes_upgrade_legacy_rows_and_allow_distinct_definitions() {

@@ -378,14 +378,12 @@ continues to fail closed at enqueue. Sink owners join the product receipt and
 core terminal completion in one transaction rather than introducing a second
 outcome state machine.
 
-The ID account payload store uses `account_delivery_payloads_v1`. Startup DDL
-creates `account_delivery_user_kind_revision`, unique on
-`(user_id, kind, revision_id)`, and `account_delivery_expiry`, a nonunique scan
-index on `(expires_at, _id)`. Neither is a TTL index: expiry does not authorize
-automatic removal of payloads needed by unsettled delivery or reconciliation.
-Until the producer model lands, the collection name is available as
-`db::ACCOUNT_DELIVERY_PAYLOADS_COLLECTION_NAME` for its model to re-export;
-the startup commit does not depend on that producer module.
+NyxID has no email transport today. `Channel::Email` and `PayloadSource::Account`
+remain reserved contract values; they do not define a payload store, index,
+resolver or worker. Email delivery remains explicitly unconfigured before claim,
+with no send or fabricated receipt. The proposed account payload store and its
+startup indexes are withdrawn; see the
+[delivery contract](SECURITY_W8_DELIVERY_CONTRACT.md).
 
 Dropping a permit, lease expiry, Mongo restore or a new process does not reopen
 dispatch. The protected claim prevents reassignment; recovery records uncertainty
