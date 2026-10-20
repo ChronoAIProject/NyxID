@@ -284,6 +284,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/apk-inputs.yml
+    with:
+      pr-upstream-if-missing: ${{ github.event_name == 'pull_request' }}
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -716,6 +718,33 @@ jobs:
           tags: nyxid-node-machine:ci
           cache-from: type=gha,scope=machine-pr
           cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Build updater E2E image with explicit PR archive rehearsal
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-updater
+          target: e2e
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            APK_INPUT_SOURCE=${{ github.event_name == 'pull_request' && 'pr-upstream-if-missing' || 'durable' }}
+          load: true
+          tags: nyxid-machine-updater-e2e:local
+          cache-from: type=gha,scope=updater-pr
+          cache-to: type=gha,mode=max,scope=updater-pr
+      - name: Build production updater image with explicit PR archive rehearsal
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-updater
+          target: production
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            APK_INPUT_SOURCE=${{ github.event_name == 'pull_request' && 'pr-upstream-if-missing' || 'durable' }}
+          load: true
+          tags: nyxid-machine-updater:production-test
+          cache-from: type=gha,scope=updater-pr
       - name: Verify exported image inputs after build
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
@@ -728,6 +757,7 @@ jobs:
       - name: Verify existing-profile migration, signed updates and rollback
         env:
           MACHINE_IMAGE: nyxid-node-machine:ci
+          UPDATER_E2E_IMAGE: nyxid-machine-updater-e2e:local
           MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
         run: sh cli/tests/machine_updater_e2e.sh
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -738,6 +768,7 @@ jobs:
       - name: Verify read-only production updater and rendered commands
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          UPDATER_PRODUCTION_IMAGE: nyxid-machine-updater:production-test
         run: node cli/tests/machine_updater_production.mjs
       - name: Remove test images and build cache
         if: always()

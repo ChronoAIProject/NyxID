@@ -28,3 +28,15 @@
 - Detect Changes exact discovery command: all four helper modules, 22 passed/0 failed.
 - C-1/C-2 local suites: build inputs 20/0, APT 19/0, APK 35/0, workflow YAML 6/0; policy/YAML/permission checks pass.
 - Production helper/installer behavior unchanged; hosted Detect Changes and downstream APT/APK evidence pending the next PR run.
+
+## C-2 revision — archive layers and durable storage
+- Separate pinned download stages supply read-only BuildKit mounts; installers write receipts elsewhere and retain no archive layer.
+- Policy rejects same-stage download/install, writable mounts, downloader inheritance/copies and non-durable defaults.
+- All-layer Docker-save inspection rejects archive payloads even when a later layer deletes them; native replay mounts inputs read-only.
+- Catalog v2 adds repository-owned release URLs and preserves all 152 existing hashes/identities/provenance URLs/inventory bindings.
+- Normal builds/schedules use durable assets only; explicit PR-only HTTP-404 fallback logs upstream use with unchanged hash/signature/identity checks.
+- Maintainer-dispatched provisioning verifies native payloads in read-only jobs; only its trusted publisher has contents:write, with no clobber/secrets/OIDC.
+- PR closure jobs rehearse exact release payload staging; Machine Container E2E receives explicitly built updater images with event-scoped source selection.
+- Local suites: Detect Changes 22/0, build inputs 20/0, APT 19/0, APK callers/catalogs 43/0, archive/source/publisher/layers 27/0, workflow YAML 6/0 (137/0 total).
+- Input, shell syntax, strict workflow YAML and reusable-permission checks pass; native replay/image-layer execution remains pending PR CI.
+- Initial durable provisioning is an explicit maintainer prerequisite for strict schedules/publication; no remote operation or local image build was run.

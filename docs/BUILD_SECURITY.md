@@ -99,17 +99,23 @@ Alpine additions use six reviewed catalogs under `security/apk/`: frontend
 runtime, updater builder and updater E2E, each for amd64 and arm64. A catalog
 binds the digest-pinned base, native architecture, refresh date, explicit
 requested packages, before/after installed inventories, and exact archive
-name/version/architecture/SHA-256/HTTPS URL. Both the portable installer parser
+name/version/architecture/SHA-256, a repository-owned durable HTTPS URL and
+the original Alpine HTTPS URL as provenance. Both the portable installer parser
 and Dockerfile admission reject malformed or duplicate headers/rows, mutable
 origins, path traversal, architecture mismatches and absent matrix members.
 Signed noarch metadata is retained even when an APK 3 repository install had
 recorded a native architecture for the same meta-package.
 
 Product builds never update APK indexes or solve against a mutable repository.
-A download step checks every catalog archive's checksum, distro signature and
-signed `.PKGINFO` identity. A separate `RUN --network=none` step rechecks those
-inputs, preflights the complete local closure, and installs with APK networking,
-repository files and cache disabled. Unlisted files cannot enter the transaction.
+A separate digest-pinned download **stage** checks every catalog archive's
+checksum, distro signature and signed `.PKGINFO` identity. Each installing
+stage starts from the same pinned base and uses `RUN --network=none` with a
+read-only BuildKit bind mount from its download stage. It rechecks the inputs,
+preflights the complete local closure, and installs with APK networking,
+repository files and cache disabled. Inventories and receipts are written
+outside that mount. Download layers are neither inherited nor copied into
+shipped images; deleting archives in a later layer would still ship their
+bytes and is rejected by policy. Unlisted files cannot enter the transaction.
 The final installed inventory must match the catalog or the image layer fails.
 Successful catalog/base/final records remain under
 `/usr/share/nyxid/build-inputs/apk/<catalog-sha256>/`. The updater's production
@@ -138,10 +144,61 @@ inventory. Pre-install rejections require unchanged installed database bytes;
 a wrong final inventory must reject the completed transaction without issuing
 a success record. Two `APK Dockerfile Layers (arch)` jobs build the three real
 package-stage prefixes with their physical offline install boundary and inspect
-retained inventories. Seven-day artifacts contain exact prefixes, logs and
-package records. These jobs have contents:read only, no repository secrets,
+retained inventories. They also inspect **every layer** from `docker save` and
+reject archive payloads, including archives deleted in a later layer. Native
+closure jobs stage and validate the exact durable-release payload as a
+non-publishing rehearsal. Seven-day artifacts contain exact prefixes, logs,
+layer results, staged catalog metadata and package records. These jobs have
+contents:read only, no repository secrets,
 OIDC, registry login or publication. Final application images, SBOMs and browser
 behavior require the later packaging jobs; package prefixes do not prove those.
+
+Alpine's public repository removes superseded packages. Catalog schema v2
+therefore consumes release assets owned by this repository, under
+`build-inputs-apk-<refreshed-on>`, with SHA-256/architecture/name/version asset
+names. The upstream URL is retained for review and candidate preparation.
+Normal image builds and weekly replay use **only** the durable URL; neither
+fetches package bytes from `dl-cdn.alpinelinux.org`. Changing or corrupting a
+release asset still fails its catalog checksum, distro signature or signed
+identity. Retain these archive releases for every supported catalog; do not
+delete or replace their assets.
+
+A repository maintainer must provision the initial durable release **before
+normal image publication or the strict scheduled APK jobs can succeed**. The
+workflow is intentionally not invoked by this change. Once this workflow has
+landed on main, use GitHub Actions → **Provision APK Archives** → Run workflow
+on **main**, supplying the full reviewed catalog commit SHA in `catalog_commit`.
+The workflow accepts only a full 40-character SHA and runs only from main. Its
+two native read-only preparation jobs execute the trusted workflow revision's
+installer against the candidate catalogs, verifying each upstream archive's
+checksum, Alpine signature and signed identity before staging assets. One
+separate `contents: write` job validates all six catalogs and archive digests
+again using trusted code and the reviewed commit's catalog bytes, then uploads
+to a prerelease marked non-latest. It never clobbers assets: an existing asset
+must match the expected bytes. No new secret, OIDC identity, application tag,
+image push or signing operation is needed. The admin must allow the job's
+`GITHUB_TOKEN` to create repository releases and upload assets. The workflow
+creates only the catalog's `build-inputs-apk-YYYY-MM-DD` archive tag/release.
+
+Before that maintainer step, PR evidence remains possible through the explicit
+`pr-upstream-if-missing` rehearsal input. CI supplies it **only for
+pull_request**; the reusable workflow checks the event again. Every missing
+durable asset must return HTTP 404 before the fetcher logs
+`APK PR FALLBACK (durable asset HTTP 404)` and tries the catalog's provenance
+URL. No fallback occurs on timeout, TLS/auth/rate-limit/server errors, bad
+checksums, signatures or signed identities. All checks remain mandatory and
+archives install with no network from read-only mounts. Logs identify the
+actual source for every archive. This PR evidence proves input integrity and
+packaging while durable-release provisioning remains an explicit outstanding
+prerequisite. Production builds, publication CI and schedules do not pass this
+input, so absence of durable assets blocks them. The existing Machine Container
+E2E job receives explicitly built test/production updater images from its
+verified source export, with the same event-scoped PR fallback; its production
+publication caller uses durable mode. The separate
+`provision-upstream` mode is solely for maintainer payload preparation and
+logs each upstream source. After provisioning, both PR and strict jobs consume
+the durable release. Weekly candidate refresh automation (C-3) must produce
+new reviewed catalogs **and** the corresponding durable release payloads.
 
 The reproducibility contract fixes source revision, language tools, dependency
 locks, Actions, base image indices, downloaded tool checksums, APT snapshots and

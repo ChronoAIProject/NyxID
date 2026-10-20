@@ -17,6 +17,7 @@ import tarfile
 import zlib
 
 from apk_inputs import ARCHES
+from apk_archive_release import stage_payload, validate_payload
 from resolve_apk_requests import REQUESTS
 import importlib.util
 
@@ -70,6 +71,8 @@ fi
     command = ['docker', 'run', '--rm', '--user', '0', '--platform', 'linux/' + arch,
                '--memory=1536m', '--cpus=2', '--entrypoint', 'sh',
                '-v', str(ROOT / 'scripts') + ':/input:ro', '-v', str(folder) + ':/case']
+    if (folder / 'archives').is_dir():
+        command += ['-v', str(folder / 'archives') + ':/case/archives:ro']
     if phase == 'offline':
         command += ['--network=none']
     command += [base, '-ec', shell, 'replay', mode, base, expected]
@@ -96,12 +99,14 @@ def run(args):
                    '--memory=1536m', '--cpus=2', '--entrypoint', 'sh',
                    '-v', str(ROOT / 'scripts') + ':/input:ro', '-v', str(download) + ':/case',
                    base, '-ec',
-                   'sh /input/apk-input-install.sh --download /case/catalog.tsv "$1" /case/archives; chown -R "$2:$3" /case/archives',
-                   'download', base, str(os.getuid()), str(os.getgid())]
+                   'sh /input/apk-input-install.sh --download /case/catalog.tsv "$1" /case/archives "$4"; chown -R "$2:$3" /case/archives',
+                   'download', base, str(os.getuid()), str(os.getgid()),
+                   'pr-upstream-if-missing' if args.pr_upstream_if_missing else 'durable']
         with (stage / 'download.log').open('w') as output:
             result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=600)
         if result.returncode:
             raise ValueError('APK download failed: ' + label + '\n' + (stage / 'download.log').read_text()[-10000:])
+        stage_payload(ROOT / 'security/apk' / (label + '-' + args.arch + '.tsv'), args.arch, download / 'archives', args.output / 'payload')
         rows = [line.split('\t') for line in text.splitlines() if not line.startswith('#')]
         target = next(row for row in rows if row[0] == ('nodejs' if label == 'updater-e2e' else 'python3'))
         cases = ['success', 'wrong-base', 'wrong-arch', 'duplicate-header', 'unsafe-url', 'wrong-before',
@@ -118,7 +123,7 @@ def run(args):
             if case == 'wrong-base': candidate = candidate.replace(base, base.replace('@sha256:', '@sha256:0'), 1)
             if case == 'wrong-arch': candidate = candidate.replace('# arch ' + ARCHES[args.arch], '# arch noarch')
             if case == 'duplicate-header': candidate = candidate.replace('# arch ', '# arch ' + ARCHES[args.arch] + '\n# arch ', 1)
-            if case == 'unsafe-url': candidate = candidate.replace('https://', 'http://', 1)
+            if case == 'unsafe-url': candidate = candidate.replace('https://dl-cdn.', 'http://dl-cdn.', 1)
             if case == 'wrong-before':
                 candidate = '\n'.join('# before-sha256 ' + '0' * 64 if line.startswith('# before-sha256 ') else line for line in candidate.splitlines()) + '\n'
             if case == 'wrong-after':
@@ -126,8 +131,9 @@ def run(args):
             if case == 'signed-identity':
                 wrong = list(target)
                 wrong[2] = 'noarch'
+                wrong[4] = wrong[4].replace('-' + target[2] + '-' + target[0] + '-', '-noarch-' + target[0] + '-')
                 candidate = candidate.replace('\t'.join(target), '\t'.join(wrong), 1)
-            if case == 'wrong-checksum': candidate = candidate.replace(target[3], '0' * 64, 1)
+            if case == 'wrong-checksum': candidate = candidate.replace(target[3], '0' * 64)
             if case == 'corrupt-archive':
                 data = archive.read_bytes() + b'corrupted'
                 archive.unlink()
@@ -136,7 +142,7 @@ def run(args):
                 data = signature_variant(archive.read_bytes(), missing=case == 'missing-signature')
                 archive.unlink()
                 archive.write_bytes(data)
-                candidate = candidate.replace(target[3], digest(data), 1)
+                candidate = candidate.replace(target[3], digest(data))
             if case == 'missing-archive': archive.unlink()
             if case == 'incomplete-closure': candidate = candidate.replace('\t'.join(target) + '\n', '')
             if case == 'success':
@@ -172,11 +178,14 @@ def run(args):
             print('PASS ' + label + ' ' + case + ' (' + args.arch + ')', flush=True)
             count += 1
         shutil.rmtree(download / 'archives')
+    tag, files = validate_payload(ROOT / 'security/apk', args.output / 'payload', [args.arch])
+    print(f'PASS durable release payload rehearsal: {tag}, {len(files)} files ({args.arch})', flush=True)
     print(f'APK closure replay: {count} passed, 0 failed', flush=True)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=tuple(ARCHES), required=True)
+    parser.add_argument('--pr-upstream-if-missing', action='store_true', help='PR rehearsal only: log and allow upstream on durable HTTP 404')
     parser.add_argument('--output', type=Path, required=True)
     run(parser.parse_args())
