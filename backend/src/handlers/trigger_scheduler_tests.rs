@@ -1336,10 +1336,18 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         )
         .await
         .unwrap();
+    // Edits are exact-source CAS writes; the earlier run has advanced the row.
+    let current = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
     trigger_service::update(
         &state.db,
         &state.encryption_keys,
-        &trigger,
+        &current,
         trigger_service::UpdateInput {
             label: None,
             status: None,

@@ -402,15 +402,22 @@ impl Fixture {
                 .any(|domain| domain.domain == "machine"
                     && domain.status != crate::models::personal_erasure::DomainStatus::Complete)
         );
+        // The account row is removed before Machine cleanup completes; the
+        // durable owner barrier still refuses writes and the Machine record
+        // keeps its own deletion basis below.
         assert!(
             self.state
                 .db
                 .collection::<Document>(USERS)
-                .find_one(doc! {"_id":&self.owner,"is_active":false})
+                .find_one(doc! {"_id":&self.owner})
                 .await
                 .unwrap()
-                .is_some()
+                .is_none()
         );
+        assert!(matches!(
+            crate::services::erasure_admission::begin_write(&self.state.db, &self.owner).await,
+            Err(crate::errors::AppError::Conflict(_))
+        ));
         let after = self.machine_document().await;
         assert_eq!(after.get_document("deletion_basis"), Ok(&basis));
         assert_eq!(after.get_str("resource_state"), Ok("deleting"));
