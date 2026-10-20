@@ -321,3 +321,9 @@
 - Freshness/build-input gates, checksum-pinned actionlint, diff check and both real gh archive SHA-256 downloads pass. No local Docker or Cargo compilation used.
 - docs/RELEASE_IMAGE_REMEDIATION.md records 104 remaining exact no-Debian-fix findings across 14 advisories, without enabling any suppression; PM clarification pending on upstream-source-fix versus distro-package-fix eligibility.
 - Hosted: all APT Snapshot and APT Dockerfile Layers matrices, Shipped Image Identity (every component/arch), Backend Credential Packaging, publication final-image gates, Scanner Policy and CI Pipeline. Final green remains unproven until rebuilt scans and the remaining no-fix decision.
+
+## W7 CI82 follow-up — new committed mock-keychain fixtures
+- Fresh actual scan found three history and three tree matches introduced by f3d78472f in cli/src/node/agent.rs:4140,4195,4594; all seed one identical sequential 16-byte mock-keychain fixture in migration/cleanup unit tests.
+- Add one exact monthly synthetic-test-fixture identity with introducing revision, sites, owner, rationale and full-line/value/match hashes; no node source edited and no prose exception added.
+- Real pinned gitleaks policy suite: 19/19 passed, 0 failed; the new fixture case refuses a changed value, moved path and same-line added key. Existing rule/content/expiry and historical negatives remain required.
+- PR jobs: Scanner Policy, Full History Secret Scan, Security Scans Passed and CI Pipeline. Full committed scan reruns after this focused commit.

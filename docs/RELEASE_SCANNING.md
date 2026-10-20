@@ -117,6 +117,14 @@ revision `a71e937c1cb9` and the current tree. A real-detector regression adds a
 key to that same line and requires both changed findings to remain unresolved.
 The W8 document is scanned in full; it has no path-level exemption.
 
+The migration/cleanup mock-keychain unit tests introduced in `f3d78472fe13`
+seed the same sequential 16-byte hex fixture at `cli/src/node/agent.rs` lines
+4140, 4195 and 4594 of that revision. One monthly `synthetic-test-fixture`
+record binds their identical detector rule, normalized path, match, value and
+full source-line hashes. The value exists only in mock unit tests alongside
+explicit test authentication/credential strings. A real-detector test requires
+a changed value, moved path, or new key on the same line to remain unresolved.
+
 ## Exact dependency dispositions
 
 The initial twelve-root audit found twelve Cargo advisory occurrences and six

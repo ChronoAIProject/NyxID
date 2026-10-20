@@ -178,6 +178,26 @@ class SecretPolicy(unittest.TestCase):
         self.assertGreaterEqual(len(changed), 2)
         self.assertTrue(all(disposition(item, entries) is None for item in changed))
 
+    def test_mock_keychain_fixture_is_exact_and_never_covers_a_new_secret(self):
+        name = 'cli/src/node/agent.rs'
+        source = subprocess.check_output(['git', 'show', 'HEAD:' + name], cwd=ROOT)
+        content = next(line for line in source.splitlines(keepends=True)
+                       if b'.set("signing_secret", ' in line)
+        entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
+        findings = self.detect(content, name)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(disposition(findings[0], entries)['kind'], 'synthetic-test-fixture')
+        changed = content.rstrip(b'\n') + b' provider_api_key = "' + secrets.token_hex(24).encode() + b'"\n'
+        changed_findings = self.detect(changed, name)
+        self.assertGreaterEqual(len(changed_findings), 2)
+        self.assertTrue(all(disposition(item, entries) is None for item in changed_findings))
+        changed_value = content.replace(content.split(b'"')[3], secrets.token_hex(16).encode())
+        for data, path in ((content, 'cli/src/node/other.rs'), (changed_value, name)):
+            with self.subTest(path=path):
+                findings = self.detect(data, path)
+                self.assertTrue(findings)
+                self.assertTrue(all(disposition(item, entries) is None for item in findings))
+
     def test_hash_only_policy_metadata_is_not_a_credential_but_new_policy_file_key_is_detected(self):
         content = (ROOT / 'security/secret-exceptions.json').read_bytes()
         self.assertEqual(self.detect(content, 'security/secret-exceptions.json'), [])
