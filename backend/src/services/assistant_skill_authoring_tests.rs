@@ -5221,7 +5221,7 @@ async fn top_level_files_are_reviewed_and_packaged_under_references() {
     let names: Vec<_> = zip::ZipArchive::new(std::io::Cursor::new(archive))
         .unwrap()
         .file_names()
-        .map(str::to_owned)
+        .map(|name| name.expect("valid fixture ZIP name").into_owned())
         .collect();
     assert!(names.contains(&"weekly-review/references/faq.md".to_owned()));
     assert!(names.contains(&"weekly-review/assets/notes.txt".to_owned()));
