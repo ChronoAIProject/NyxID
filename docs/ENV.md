@@ -71,6 +71,13 @@ rollback, disable NyxID issuance first and allow the 60-second proof lifetime to
 expire before removing resource verification support. No runtime restart or
 sandbox change is required by this feature. See [Agent Isolation](AGENT_ISOLATION.md#request-bound-nyxbot-resource-reads).
 
+Deploying the provider still needs a verified drain of existing proxy streams
+and NyxBot turns. The current backend does not track those tasks through a
+graceful shutdown; losing a worker can end its turn as `turn_lost`, without
+automatic replay. Keep existing processes alive until their admitted work is
+complete and new work has been routed elsewhere. The disabled feature flag
+does not protect unrelated in-flight work from a backend process replacement.
+
 ## Remote Machine backend Kubernetes authentication
 
 | Variable | Default | Description |
