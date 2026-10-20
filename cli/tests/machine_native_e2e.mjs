@@ -105,6 +105,9 @@ try{
  await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart},checkpoint});
  const journal=JSON.parse(await fs.readFile(`${directory}/machine-contexts.json`,'utf8'));
  const roles=Object.values(journal.contexts).flatMap(c=>Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid]));
+ const users=new Set(Object.values(journal.contexts).flatMap(c=>[c.command_uid,...Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid])]).map(uid=>`nyxc${uid}`));
+ for(const file of ['/etc/subuid','/etc/subgid'])for(const line of (await fs.readFile(file,'utf8')).split('\n'))assert(!users.has(line.split(':')[0]),'context roles need no subordinate UID/GID grants');
+ checkpoint('context accounts work without allocating subordinate UID/GID ranges');
  let rendered=0;
  for(const entry of await fs.readdir('/proc')){
   if(!/^\d+$/.test(entry))continue;

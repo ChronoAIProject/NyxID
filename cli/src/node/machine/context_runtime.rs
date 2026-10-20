@@ -196,6 +196,13 @@ fn account(uid: u32, home: &Path, node: &str) -> Result<Identity> {
                 "--no-log-init",
                 "--no-create-home",
                 "--user-group",
+                // Context roles map only their own UID in Chromium's sandbox;
+                // they never need subordinate identities. Lima and other hosts
+                // may reserve the default subordinate range for an owner.
+                "--key",
+                "SUB_UID_COUNT=0",
+                "--key",
+                "SUB_GID_COUNT=0",
                 "--shell",
                 "/usr/sbin/nologin",
                 "--uid",
