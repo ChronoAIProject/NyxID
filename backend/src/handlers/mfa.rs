@@ -689,7 +689,9 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let mut actor = test_user(&id, UserType::Person);
         actor.mfa_enabled = true;
-        actor.password_hash = Some(password::hash_password("budget-password").unwrap());
+        // Runtime test credential; never a fixed password.
+        let budget_password = crate::crypto::token::generate_random_token();
+        actor.password_hash = Some(password::hash_password(&budget_password).unwrap());
         let email = actor.email.clone();
         db.collection::<User>(USERS)
             .insert_one(actor)
@@ -742,8 +744,7 @@ mod tests {
         for attempt in 0..10 {
             let base = &bases[attempt % 2];
             // Eight-character nonmatching recovery avoids a probabilistic TOTP match.
-            let mut body =
-                serde_json::json!({"email":email,"password":"budget-password","client":"cli"});
+            let mut body = serde_json::json!({"email":email,"password":budget_password.as_str(),"client":"cli"});
             if attempt % 2 == 0 {
                 body["mfa_code"] = serde_json::json!("wrongKEY");
             }
@@ -766,13 +767,13 @@ mod tests {
         }
         for base in &bases {
             let response = client.post(format!("{base}/api/v1/auth/login"))
-                .json(&serde_json::json!({"email":email,"password":"budget-password","mfa_code":recovery,"client":"cli"}))
+                .json(&serde_json::json!({"email":email,"password":budget_password.as_str(),"mfa_code":recovery,"client":"cli"}))
                 .send().await.unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
             let challenge = client
                 .post(format!("{base}/api/v1/auth/login"))
                 .json(
-                    &serde_json::json!({"email":email,"password":"budget-password","client":"cli"}),
+                    &serde_json::json!({"email":email,"password":budget_password.as_str(),"client":"cli"}),
                 )
                 .send()
                 .await

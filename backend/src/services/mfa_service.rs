@@ -1062,13 +1062,14 @@ mod tests {
         use crate::services::{auth_service, token_service};
         for change in ["password_reset", "factor_generation"] {
             let (db, keys, id) = fixture("mfa_disable_proof").await;
+            // Runtime test credentials; never fixed passwords.
+            let old_password = crate::crypto::token::generate_random_token();
+            let successor_password = crate::crypto::token::generate_random_token();
             db.collection::<bson::Document>("users").update_one(doc! {"_id":&id},
-                doc! {"$set":{"password_hash":password::hash_password("old-disable-password").unwrap(),"mfa_enabled":true}}).await.unwrap();
+                doc! {"$set":{"password_hash":password::hash_password(&old_password).unwrap(),"mfa_enabled":true}}).await.unwrap();
             let active = factor(&db, &keys, &id, &["Recovery"]).await;
             // This is the production seam after verification and before mutation.
-            let held = prepare_totp_disable(&db, &id, "old-disable-password")
-                .await
-                .unwrap();
+            let held = prepare_totp_disable(&db, &id, &old_password).await.unwrap();
             let new_password = if change == "password_reset" {
                 let actor = db
                     .collection::<User>("users")
@@ -1080,17 +1081,17 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                auth_service::reset_password(&db, &reset, "successor-disable-password")
+                auth_service::reset_password(&db, &reset, &successor_password)
                     .await
                     .unwrap();
-                "successor-disable-password"
+                successor_password.as_str()
             } else {
                 // Enrollment/disable use this same shared generation fence.
                 db.collection::<bson::Document>("users")
                     .update_one(doc! {"_id":&id}, doc! {"$inc":{"mfa_state_version":1_i64}})
                     .await
                     .unwrap();
-                "old-disable-password"
+                old_password.as_str()
             };
             let token = crate::crypto::token::hash_token("successor-pending-proof");
             token_service::create_mfa_pending_session(&db, &id, &token)
@@ -1225,7 +1226,7 @@ mod tests {
         ] {
             assert!(!valid_login_code(code));
         }
-        let hash = password::hash_password("Ab_12-xy").unwrap();
+        let hash = password::hash_password(&crate::crypto::token::generate_random_token()).unwrap();
         assert!(valid_recovery_hash(&hash));
         for malicious in [
             hash.replace("m=65536", "m=4294967295"),
@@ -1610,7 +1611,7 @@ mod tests {
             .unwrap();
         assert_eq!(live, 1);
         db.collection::<bson::Document>("users").update_one(doc! {"_id":&id},
-            doc! {"$set":{"password_hash":password::hash_password("fixture-disable-password").unwrap()}}).await.unwrap();
+            doc! {"$set":{"password_hash":password::hash_password(&crate::crypto::token::generate_random_token()).unwrap()}}).await.unwrap();
         let user = db
             .collection::<crate::models::user::User>("users")
             .find_one(doc! {"_id":&id})

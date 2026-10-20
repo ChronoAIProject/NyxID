@@ -3612,7 +3612,7 @@ mod operator_route_tests {
             HeaderMap::new(),
             Json(CreateUserRequest {
                 email: "newbie@example.com".to_string(),
-                password: "password123".to_string(),
+                password: crate::crypto::token::generate_random_token(),
                 display_name: None,
                 role: "user".to_string(),
             }),

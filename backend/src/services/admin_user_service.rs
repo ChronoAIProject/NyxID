@@ -670,6 +670,11 @@ pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runtime test credential; never a fixed password.
+    fn test_password() -> String {
+        crate::crypto::token::generate_random_token()
+    }
     use crate::models::role::{
         COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, Role,
     };
@@ -717,7 +722,7 @@ mod tests {
         let user = User {
             id: user_id.to_string(),
             email: email.to_string(),
-            password_hash: Some(crate::crypto::password::hash_password("password123").unwrap()),
+            password_hash: Some(crate::crypto::password::hash_password(&test_password()).unwrap()),
             display_name: Some("Test".to_string()),
             slug: None,
             avatar_url: None,
@@ -757,7 +762,7 @@ mod tests {
         let user = create_user(
             &db,
             "newuser@example.com",
-            "strongpass123",
+            &test_password(),
             Some("Alice"),
             "user",
         )
@@ -779,7 +784,7 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let user = create_user(&db, "admin@example.com", "strongpass123", None, "admin")
+        let user = create_user(&db, "admin@example.com", &test_password(), None, "admin")
             .await
             .unwrap();
 
@@ -797,7 +802,7 @@ mod tests {
         let user = create_user(
             &db,
             "operator@example.com",
-            "strongpass123",
+            &test_password(),
             None,
             "operator",
         )
@@ -815,7 +820,7 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "notanemail", "strongpass123", None, "user").await;
+        let result = create_user(&db, "notanemail", &test_password(), None, "user").await;
         assert!(result.is_err());
     }
 
@@ -826,7 +831,8 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "user@example.com", "short", None, "user").await;
+        let result =
+            create_user(&db, "user@example.com", &test_password()[..5], None, "user").await;
         assert!(result.is_err());
     }
 
@@ -837,8 +843,14 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result =
-            create_user(&db, "user@example.com", "strongpass123", None, "superadmin").await;
+        let result = create_user(
+            &db,
+            "user@example.com",
+            &test_password(),
+            None,
+            "superadmin",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -849,11 +861,11 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        create_user(&db, "dup@example.com", "strongpass123", None, "user")
+        create_user(&db, "dup@example.com", &test_password(), None, "user")
             .await
             .unwrap();
 
-        let result = create_user(&db, "DUP@EXAMPLE.COM", "strongpass123", None, "user").await;
+        let result = create_user(&db, "DUP@EXAMPLE.COM", &test_password(), None, "user").await;
         assert!(result.is_err());
     }
 
