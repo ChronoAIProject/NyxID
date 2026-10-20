@@ -122,25 +122,37 @@ try{
  checkpoint('missing secure policy refuses separation; restored policy is effective');
  await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart},checkpoint});
  const journal=JSON.parse(await fs.readFile(`${directory}/machine-contexts.json`,'utf8'));
- const roles=Object.values(journal.contexts).flatMap(c=>Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid]));
+ const roles=Object.values(journal.contexts).map(c=>c.browsers[c.generation].secure_uid);
  const users=new Set(Object.values(journal.contexts).flatMap(c=>[c.command_uid,...Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid])]).map(uid=>`nyxc${uid}`));
  for(const file of ['/etc/subuid','/etc/subgid'])for(const line of (await fs.readFile(file,'utf8')).split('\n'))assert(!users.has(line.split(':')[0]),'context roles need no subordinate UID/GID grants');
  checkpoint('context accounts work without allocating subordinate UID/GID ranges');
- let rendered=0;
+ let rendered=0;const observed=new Set();
  for(const entry of await fs.readdir('/proc')){
   if(!/^\d+$/.test(entry))continue;
   try{
    const status=await fs.readFile(`/proc/${entry}/status`,'utf8'),uid=Number(status.match(/^Uid:\s+(\d+)/m)?.[1]);
    if(!roles.includes(uid))continue;
    const args=await fs.readFile(`/proc/${entry}/cmdline`,'utf8');if(!args.includes('--type=renderer'))continue;
+   for(const field of ['Uid','Gid'])assert.deepEqual(status.match(new RegExp(`^${field}:\\s+(.+)$`,'m'))[1].trim().split(/\s+/).map(Number),[uid,uid,uid,uid]);
    assert.match(status,/^NoNewPrivs:\s+1$/m);assert.match(status,/^Seccomp:\s+2$/m);
    assert(status.match(/^NSpid:\s+(.+)$/m)[1].trim().split(/\s+/).length>=2,'renderer has nested PID namespace');
-   assert.notEqual(await fs.readlink(`/proc/${entry}/ns/pid`),await fs.readlink('/proc/self/ns/pid'));
-   assert.notEqual(await fs.readlink(`/proc/${entry}/ns/net`),await fs.readlink('/proc/self/ns/net'));rendered++;
+   const stat=await fs.readFile(`/proc/${entry}/stat`,'utf8'),fields=stat.slice(stat.lastIndexOf(') ')+2).split(/\s+/),parent=fields[2];
+   const parentStatus=await fs.readFile(`/proc/${parent}/status`,'utf8');
+   for(const field of ['Uid','Gid'])assert.deepEqual(parentStatus.match(new RegExp(`^${field}:\\s+(.+)$`,'m'))[1].trim().split(/\s+/).map(Number),[uid,uid,uid,uid]);
+   assert(Number(status.match(/^Seccomp_filters:\s+(\d+)$/m)[1])>Number(parentStatus.match(/^Seccomp_filters:\s+(\d+)$/m)[1]),'renderer adds sandbox filters beyond its browser parent');
+   assert.equal(await fs.readlink(`/proc/${entry}/exe`),resolvedBrowser);
+   assert.equal(await fs.readlink(`/proc/${parent}/exe`),resolvedBrowser);
+   for(const namespace of ['user','pid','net']) {
+    const child=await fs.readlink(`/proc/${entry}/ns/${namespace}`);
+    assert.notEqual(child,await fs.readlink(`/proc/${parent}/ns/${namespace}`));
+    assert.notEqual(child,await fs.readlink(`/proc/self/ns/${namespace}`));
+   }
+   const recheck=await fs.readFile(`/proc/${entry}/stat`,'utf8');assert.equal(recheck.slice(recheck.lastIndexOf(') ')+2).split(/\s+/)[19],fields[19]);
+   observed.add(uid);rendered++;
   }catch(error){if(error.code!=='ENOENT'&&error.code!=='ESRCH')throw error;}
  }
- assert(rendered>=2,'both restarted secure browsers have real sandboxed renderers');
- checkpoint(`live Chromium renderer namespace, NNP and seccomp checks (${rendered} renderers)`);
+ assert.deepEqual([...observed].sort(),roles.sort(),'each restarted secure browser has a live sandboxed renderer');
+ checkpoint(`live Chromium renderer identity, executable, namespace, NNP and additional seccomp checks (${observed.size} secure identities, ${rendered} renderers)`);
  console.log(`ACCEPTANCE ${checkpoints.length} passed / 0 failed / 0 skipped`);
 }finally{
  await stop();clearInterval(heartbeat);
