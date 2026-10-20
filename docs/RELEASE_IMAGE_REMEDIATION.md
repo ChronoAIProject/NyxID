@@ -4,33 +4,44 @@ The final-image Trivy reports from CI 39412744887 remain the evidence source.
 Raw HIGH/CRITICAL/UNKNOWN findings stay visible and blocking. No disposition or
 severity change is introduced by this report.
 
-The October 20 signed APT catalog refresh adds a runtime upgrade to the Glama
-image; trixie-security has `liblzma5 5.8.1-1+deb13u2`, fixing DSA-6549-1 and
-TEMP-1147318-639065. Machine workstation runtimes retain build-essential and its Linux UAPI header
-closure for the documented owner build workloads. The rejected removal and
-package-presence prohibition have been reversed; actual findings remain gated.
-Hosted desktop retains GitHub CLI, updated from Ubuntu 2.45.0 to checksum-pinned
-upstream 2.102.0. Both Linux archive SHA-256 values were verified locally;
-Renovate covers this new pin. Native package replay and final image rescans
-remain required PR evidence for these changes.
+Machine workstation images retain `build-essential` and its header closure for
+C/C++ compile/link/run, make, npm native installs and pip local wheels. The
+rejected toolchain removal has been reversed. Hosted desktop keeps the verified
+upstream gh 2.102.0 release instead of the vulnerable Ubuntu 2.45.0 package.
 
-## Debian findings awaiting the no-fix policy decision
+The MCP demo now builds a static musl executable in the pinned Alpine Rust
+builder and ships `FROM scratch`, with no OS packages or shell. The interim
+liblzma5 upgrade is superseded. The updater and MCP demo are the only explicit
+`scratch_components` in the scanner and SBOM policy. Their embedded Rust
+inventories, architecture/static checks, final scans and subject-bound SBOMs
+remain mandatory. New native image builds/scans are needed to measure the
+resulting finding counts; the prior demo report had 46 blocking findings.
 
-The October 20 InRelease and amd64 Packages index hashes were checked against
-the refreshed catalog. Neither bookworm nor trixie offers a fixed package for
-the following findings. This is distinct from absence of an upstream source
-fix: several advisories already cite a fixed source release or commit. The
-PM's instruction allows dispositions only for findings with no upstream fix;
-clarification is required before treating no **Debian package** fix as eligible.
+## Approved residual-finding policy
 
-There are 104 exact component/package/version/CVE combinations (60 node-agent,
-44 mcp-demo), repeated across the two architectures. Any approved policy must
-bind each combination individually, with owner, expiry, distro, current
-no-fixed-version status, reviewed content and reachability evidence. A new CVE,
-package/version, image, changed content, available fixed version or expired
-record must block. Publication must reevaluate the original full report under
-the same policy and bind its result to the staged subject; a summary cannot
-manufacture a pass.
+A final-image finding is disposition-eligible only when all hold: (a) the
+package is in the component's declared minimal runtime set; (b) the pinned
+suite's security archive at the signed snapshot used by the build offers no
+fixed version for the source package (an upstream source fix does not make the
+finding ineligible; NyxID does not self-build Debian packages); (c) a reachability
+rationale names the affected executable/API and an executable negative test
+proves it absent or unreachable in the final filesystem; (d) owner, 30-day
+expiry, bound to CVE + source package + binary package + version + component +
+architecture. A fixed version in a later snapshot catalog, any new
+CVE/package/version/content, or expiry fails the gate; no renewal while a fix
+exists.
+
+A CRITICAL always blocks when the vulnerable code is in a library the shipped
+binary links (DT_NEEDED), in an executable reachable from the entrypoint, or in
+code that processes network- or user-supplied input.
+
+There are no active image dispositions in this commit. The following inventory
+is the **prior Debian-base baseline**, retained to identify every finding that
+the minimal service images must remove. It contains 104 no-fixed-version
+component/package/version/CVE combinations (60 node-agent, 44 MCP demo), repeated
+across both architectures, plus the demo's two fixed liblzma5 findings.
+
+## Prior Debian-base findings
 
 | Advisory | Component: exact reported packages and versions | Status |
 | --- | --- | --- |
@@ -49,7 +60,7 @@ manufacture a pass.
 | CVE-2026-84782 | node-agent: `3.0.22-1~deb12u1` (libssl3, openssl) | affected |
 | CVE-2026-9538 | mcp-demo: `5.40.1-6+deb13u1` (perl-base)<br>node-agent: `5.36.0-7+deb12u4` (perl-base) | fix_deferred |
 
-## Reachability review required before a disposition
+## Reachability evidence required for any remaining package
 
 - CVE-2023-45853 concerns the separately packaged MiniZip code, not the ordinary
   zlib compression API. Verify the final filesystem has no affected MiniZip or

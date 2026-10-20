@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import subprocess
 
+from elf_runtime import runtime as elf_runtime
 from publication_contract import load_json, require_build_identity, source_identity
 
 spec = importlib.util.spec_from_file_location('identity_archives', Path(__file__).with_name('check-dist-artifacts.py'))
@@ -24,7 +25,7 @@ IMAGES = {
     'machine-node-only': ('cli/Dockerfile.machine-node-only', '', 'nyxid-cli', '/usr/local/bin/nyxid', 'gnu'),
     'machine-hosted-desktop': ('cli/Dockerfile.machine-hosted', 'desktop', 'nyxid-cli', '/usr/local/bin/nyxid', 'gnu'),
     'machine-hosted': ('cli/Dockerfile.machine-hosted', 'hosted', 'nyxid-cli', '/usr/local/bin/nyxid', 'gnu'),
-    'mcp-demo': ('Dockerfile.glama', '', 'nyxid-mcp-demo', '/usr/local/bin/nyxid-mcp-demo', 'gnu'),
+    'mcp-demo': ('Dockerfile.glama', '', 'nyxid-mcp-demo', '/usr/local/bin/nyxid-mcp-demo', 'musl'),
 }
 
 
@@ -48,12 +49,13 @@ def static_musl(binary, target):
     machine = {'aarch64': 183, 'x86_64': 62}[target.split('-')[0]]
     if len(data) < 64 or data[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', data, 18)[0] != machine or \
             struct.unpack_from('<H', data, 16)[0] not in (2, 3):
-        raise ValueError('static updater executable platform mismatch')
+        raise ValueError('static musl executable platform mismatch')
     offset = struct.unpack_from('<Q', data, 32)[0]
     size, count = struct.unpack_from('<HH', data, 54)
     if size != 56 or not 0 < count <= 128 or offset + size * count > len(data) or \
-            any(struct.unpack_from('<I', data, offset + size * index)[0] == 3 for index in range(count)):
-        raise ValueError('scratch updater requires a static executable without an interpreter')
+            any(struct.unpack_from('<I', data, offset + size * index)[0] == 3 for index in range(count)) or \
+            elf_runtime(binary)['needed']:
+        raise ValueError('scratch image requires a static executable without an interpreter')
 
 
 def verify_binary(binary, extractor, package, version, target, commit, epoch):

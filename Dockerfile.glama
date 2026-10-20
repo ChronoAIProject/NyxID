@@ -10,27 +10,30 @@
 # the same MCP surface over Streamable HTTP at /mcp on a real NyxID
 # deployment — see the `mcp-demo` crate's main.rs for the parity notes.
 
-FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+# Resolve the already pinned static cargo-auditable tool with Python, then copy
+# only that executable into the musl builder. No new distro packages are needed.
+FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS tools
+COPY scripts/bootstrap-build-tool.py /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py
+COPY security/build-tools.json /opt/nyxid-build-inputs/security/build-tools.json
+RUN python3 /opt/nyxid-build-inputs/scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /out
+
+FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS builder
 WORKDIR /src
-# Build the reviewed checkout; the external Glama UI must select an immutable
-# source revision and supply this same repository context.
+COPY --from=tools /out/cargo-auditable /usr/local/cargo/bin/cargo-auditable
+# Build only the reviewed checkout at the supplied immutable source identity.
 COPY . .
 ARG NYXID_GIT_HASH
 ARG SOURCE_DATE_EPOCH
 ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
-RUN python3 scripts/bootstrap-build-tool.py cargo-auditable --bin-dir /usr/local/cargo/bin
 RUN cargo auditable build --locked --release -p nyxid-mcp-demo \
  && strip target/release/nyxid-mcp-demo
 
-FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM scratch
 ARG NYXID_GIT_HASH
 ARG SOURCE_DATE_EPOCH
 LABEL org.opencontainers.image.revision=${NYXID_GIT_HASH} \
       io.nyxid.source-date-epoch=${SOURCE_DATE_EPOCH}
-# Upgrade inherited distribution packages using the same signed snapshot gate.
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
-RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:trixie -- liblzma5
 COPY --from=builder /src/target/release/nyxid-mcp-demo /usr/local/bin/nyxid-mcp-demo
 
-CMD ["nyxid-mcp-demo"]
+CMD ["/usr/local/bin/nyxid-mcp-demo"]

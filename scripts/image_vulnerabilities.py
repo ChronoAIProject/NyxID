@@ -12,6 +12,8 @@ from source_artifacts import IMAGES
 
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}')
 BLOCKED = {'HIGH', 'CRITICAL', 'UNKNOWN'}
+# Only reviewed static, shell-free final images may omit a distro inventory.
+SCRATCH_COMPONENTS = frozenset({'nyxid-machine-updater', 'mcp-demo'})
 
 
 def sha(path):
@@ -46,7 +48,7 @@ def evaluate(report, image_id, component):
     if component not in IMAGES:
         raise ValueError('unreviewed application image component')
     _, _, package, binary, _ = IMAGES[component]
-    if component != 'nyxid-machine-updater' and not any(
+    if component not in SCRATCH_COMPONENTS and not any(
             item.get('Class') == 'os-pkgs' and item.get('Packages') for item in report['Results']):
         raise ValueError('missing final distribution package inventory')
     if package and not any(item.get('Class') == 'lang-pkgs' and item.get('Type') == 'rustbinary' and

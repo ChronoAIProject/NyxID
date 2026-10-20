@@ -333,3 +333,11 @@
 - Remove the incorrect package-presence prohibition and its test; all actual HIGH/CRITICAL/UNKNOWN finding gates remain required.
 - Correct the runtime documentation against MACHINE_CONTEXT_SPIKE.md's C/C++, make, npm-native and pip-wheel contract.
 - Local: image vulnerability 14/14, build-input 22/22 and APT policy 23/23; 59 passed, 0 failed; diff check passes. Native image builds/scans remain PR CI evidence.
+
+## W7 CI82 follow-up — shell-free static MCP demo
+- Replace the Glama Debian runtime with scratch and a musl executable from the pinned Alpine Rust builder; remove the superseded liblzma5 package upgrade.
+- Share the explicit updater/MCP scratch-component set between scan and SBOM inventory checks; real rustbinary coverage remains mandatory for both.
+- Check both PT_INTERP and DT_NEEDED before accepting static binaries; retain source identity and exact subject/digest checks.
+- Record the PM's residual-CVE eligibility and unconditional CRITICAL-blocking policy; no active image dispositions added.
+- Local: ELF parser 2/2, source artifacts 16/16, image vulnerabilities 14/14 and APT policy 23/23; 55 passed, 0 failed; packaging workflows 16/16 and SBOM workflows 3/3; build-input gate passed.
+- PR: Shipped Image Identity (mcp-demo, amd64/arm64), Shipped SBOM Policy, Artifact Packaging Policy, APT Policy, Scanner Policy and CI Pipeline; actual final-image scan counts remain hosted evidence.

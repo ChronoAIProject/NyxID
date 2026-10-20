@@ -137,13 +137,23 @@ class ImageVulnerabilities(unittest.TestCase):
             else: report['Results'].pop(0)
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): policy.evaluate(report, self.image_id, 'backend')
 
-    def test_scratch_updater_requires_its_real_binary_inventory_without_distro(self):
-        report = copy.deepcopy(self.report)
-        report['Results'] = [dict(Target='nyxid-machine-updater', Class='lang-pkgs', Type='rustbinary',
-                                  Packages=[{'Name': 'nyxid-machine-updater', 'Version': '1.0'}])]
-        self.assertEqual(policy.evaluate(report, self.image_id, 'nyxid-machine-updater'), [])
-        report['Results'][0]['Type'] = 'cargo'
-        with self.assertRaises(ValueError): policy.evaluate(report, self.image_id, 'nyxid-machine-updater')
+    def test_scratch_components_require_their_actual_binary_inventory(self):
+        self.assertEqual(policy.SCRATCH_COMPONENTS, {'nyxid-machine-updater', 'mcp-demo'})
+        for component in policy.SCRATCH_COMPONENTS:
+            _, _, package, binary, _ = policy.IMAGES[component]
+            report = copy.deepcopy(self.report)
+            report['Results'] = [dict(Target=binary.lstrip('/'), Class='lang-pkgs', Type='rustbinary',
+                                      Packages=[{'Name': package, 'Version': '1.0'}])]
+            with self.subTest(component=component):
+                self.assertEqual(policy.evaluate(report, self.image_id, component), [])
+                for field, value in (('Type', 'cargo'), ('Target', 'wrong/path')):
+                    changed = copy.deepcopy(report)
+                    changed['Results'][0][field] = value
+                    with self.assertRaises(ValueError): policy.evaluate(changed, self.image_id, component)
+                report['Results'][0]['Vulnerabilities'] = [dict(VulnerabilityID='CVE-2099-0001',
+                    PkgName=package, InstalledVersion='1.0', Severity='CRITICAL')]
+                self.assertEqual(len(policy.evaluate(report, self.image_id, component)), 1)
+
 
     def test_changed_image_archive_blocks_any_registry_operation(self):
         with (self.stage / 'image.tar').open('ab') as stream: stream.write(b'changed')

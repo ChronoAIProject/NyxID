@@ -10,7 +10,7 @@ import tempfile
 
 from credential_packaging import MANIFEST, SEAL, verify as verify_credentials
 from image_artifacts import copy, image_container
-from image_vulnerabilities import verify_stage
+from image_vulnerabilities import SCRATCH_COMPONENTS, verify_stage
 from publication_contract import file_digest, require_build_identity, source_identity
 from sbom_evidence import (bind_outputs, composition_source, document, include,
                            validate, verify_outputs, verify_seal, write, load_json)
@@ -64,7 +64,7 @@ def verify_catalog(catalog, receipt):
             catalog.get('descriptor', {}).get('configuration', {}).get('search', {}).get('scope') != 'squashed':
         raise ValueError('Syft filesystem catalog differs from the exact staged manifest/config/platform/tool')
     packages = catalog.get('artifacts', [])
-    if not packages or (receipt['component'] != 'nyxid-machine-updater' and
+    if not packages or (receipt['component'] not in SCRATCH_COMPONENTS and
                         not any(item.get('type') in ('deb', 'apk', 'rpm') for item in packages)):
         raise ValueError('missing actual filesystem distribution package inventory')
 

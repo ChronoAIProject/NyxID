@@ -437,7 +437,7 @@ under the exact policy in `RELEASE_IMAGE_REMEDIATION.md`.
 Hosted desktop keeps GitHub CLI for agent workflows, installed
 from the checksum-pinned upstream gh 2.102.0 archives for each architecture,
 rather than Ubuntu's vulnerable gh 2.45.0. Renovate covers that version pin;
-changed release archive hashes require review. The Glama runtime now upgrades
-inherited packages through the same signed APT snapshot installer, including
-liblzma5. The October 20 catalog is accepted only after native APT replay and
+changed release archive hashes require review. The Glama runtime now contains only its static musl executable in
+`scratch`; no distro packages or shell ship. Its embedded Rust dependency
+inventory, source identity, final-image scan and subject-bound SBOM stay required. The October 20 catalog is accepted only after native APT replay and
 final-image scans in PR CI; local catalog validation is not Linux replay.
