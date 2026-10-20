@@ -219,6 +219,10 @@
       "backend/src/services/async_service_operation.rs": {
         "274c74690fbe607ca65af456fc20f8247c0a4e52919cdd6131505e1d72013c1d": 1
       },
+      "backend/src/services/audit_runtime/relay_tests.rs": {
+        "d154d35c7425d254d01755d307da5e84ed011046639ff1d95f52929158a8c945": 1,
+        "f2168d8f2800e1c94afd493f3a2b8d4f711899fa858f95ab77f946cf4d1b6479": 1
+      },
       "backend/src/services/audit_witness/mod.rs": {
         "49a57e918f1e0ae5299c4a07158db3f63aa44989f063af223a7919f0a9b1e3f6": 1,
         "5c935b7c2aa05f1acd017a27733dc060ba19a2902de101bb23152e7209b09ccd": 1,
@@ -482,6 +486,8 @@
         "81af638d2afe5f9a8bf693f7c29e0d19d2eef52f1c69afef15ecd3fec995b190": 1,
         "d0116a90a3894fa0454c7f1b2a357dfa750e807b5ae5d1403fa23670f38afc12": 1,
         "dcbd76f2290fec4b1ba1f120b1b6947640cfbd96827721a88be1615043859f1c": 1,
+        "e16564e111faaa4e54155fa5051f39d66b5540fd86c91f4a54cc8cc6ae133bd2": 1,
+        "e4e15fd09964bb14ddcc760341ea505577300be166ef3c44d933c96ee8a9390b": 2,
         "f49354a7fb25cdde9623766a1d18fce075070eb5e7221fdc217e95f112a77a48": 1
       },
       "cli/src/node/machine/external_dispatch.rs": {
@@ -508,8 +514,14 @@
         "a30ba7f3df6efda15bddad633928bae25a79cc59cee1a5a50dcb34a5a3e0cdb5": 2
       },
       "cli/src/node/secret_backend.rs": {
-        "1c97c4e2c459ed40c5ac6d42bd8d6ffb58ae82863c03635c0067e2a5e693c9f8": 1,
-        "c0d9e63474b9c0a81b0f022836441eaf7bec13ff570fa4f9866893c9b101c023": 1
+        "c0d9e63474b9c0a81b0f022836441eaf7bec13ff570fa4f9866893c9b101c023": 1,
+        "c6f045553d00c05657978f16cdee1c1c4ecc6d981a9dfcc8cb88a3a25afddd26": 1
+      },
+      "cli/src/node/secret_operation.rs": {
+        "2053ec3d961da51ded8140c9e722217edee069cd19e940c33fc7557ad64c8fd3": 1
+      },
+      "cli/src/node/secret_snapshot.rs": {
+        "8e6e680756aeeff330466486f24f8f10180e9548022cf9480c048fa5f104865f": 1
       },
       "cli/src/node/ssh_node_exec.rs": {
         "35236414687f0e8a9e0b64421ac4985d63975b14dc884485e8b7fd6424b2bb80": 1,

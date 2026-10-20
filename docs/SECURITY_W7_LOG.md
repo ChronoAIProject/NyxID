@@ -202,8 +202,8 @@
 - Recommend Ed25519 for node SSH keys; rewrite remediation/scanner docs around the final PM decisions.
 - Local: patch policy 21/21, use policy 12/12, audit 7/7, workflow 7/7, bundle negatives 5/5, secret policy 17/17.
 - AWS-LC bootstrap 16/16 passed under the exact shared-target Cargo environment.
-- Urgent zip 9 compatibility commit 53a10a33c maps invalid names to existing sanitized errors and adds a non-UTF-8 regression per site; locked workspace check with both KMS features passed (exit 0).
+- ZIP fixes 53a10a33c/eb6251219/8aaf4616c cover all three fallible-name sites; locked workspace/all-targets/both-KMS check passed (exit 0), isolated production-function regressions 2/2; actual Backend Test execution remains PR evidence.
 - Clean committed-source audit: all 12 roots passed (8 npm/3 Cargo/1 pnpm); 7 raw findings retained, 7 exact reviewed, 0 unresolved; bundle 1 map/3691 modules/0 forbidden.
 - Full committed-history/tree scan: 215 history + 111 tree findings, 326 reviewed, 0 unresolved; build-input policy passed.
-- Reviewed B's committed AuditRuntime test setup (8771d5f5e); refreshed only test_utils.rs reference hash, with unchanged private-operation surface and passing Linux/KMS RSA graph checks.
-- Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Mobile, CLI Test, Rust Features/KMS and Artifact Packaging.
+- Reviewed committed A/B changes through 7c05214fb: retain 9723cedf9's test_utils binding; add only AES-GCM custody and Ed25519 witness-test operation entries, with no RSA-reference change; Linux/KMS graph/source checks passed.
+- Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Vulnerability Scan Catalog Freshness, Mobile, Backend Test, CLI Test, Rust Features/KMS and Artifact Packaging identity/image scans.
