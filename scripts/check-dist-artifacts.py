@@ -16,6 +16,7 @@ import tempfile
 import uuid
 
 from publication_contract import file_digest, load_json, require_build_identity, validate_plan
+from sbom_evidence import bind_outputs, composition_source, validate, verify_seal
 
 spec = importlib.util.spec_from_file_location("rust_binary_sbom", Path(__file__).with_name("rust-binary-sbom.py"))
 binary_sbom = importlib.util.module_from_spec(spec)
@@ -133,7 +134,13 @@ def archive_sbom(binary_document, subject, inspection):
     return document
 
 
-def inspect(plan, artifacts, evidence, extractor, syft, targets=None, source_diff=None):
+def inspect(plan, artifacts, evidence, extractor, syft, targets=None, source_diff=None, source_root=None):
+    with composition_source(source_root or binary_sbom.ROOT) as provenance:
+        verify_seal(provenance, provenance / 'cli/src/wizard/assets', 'wizard')
+        return inspect_verified(plan, artifacts, evidence, extractor, syft, targets, source_diff, provenance)
+
+
+def inspect_verified(plan, artifacts, evidence, extractor, syft, targets, source_diff, provenance):
     validate_plan(plan)
     subjects = [item for item in plan["subjects"] if item.get("artifact_kind") == "executable-zip"]
     expected_targets = {item["target"] for item in subjects}
@@ -163,21 +170,25 @@ def inspect(plan, artifacts, evidence, extractor, syft, targets=None, source_dif
                 subprocess.run([str(syft), "scan", "file:" + str(binary), "-o", "syft-json"], check=True, stdout=output)
             binary_sbom.verify_syft(load_json(syft_path), receipt)
             document = binary_sbom.sbom(binary, receipt, subject["package"], plan["source"]["commit"], source_diff)
-            embedded = binary_sbom.ROOT / "cli/src/wizard/assets/shipped-composition.json"
+            embedded = provenance / "cli/src/wizard/assets/shipped-composition.json"
             wizard_spec = importlib.util.spec_from_file_location("embedded_wizard", Path(__file__).with_name("verify-embedded-wizard.py"))
             wizard = importlib.util.module_from_spec(wizard_spec)
             wizard_spec.loader.exec_module(wizard)
             embedded_receipt = wizard.verify(binary, embedded.parent)
             (evidence / (stem + ".embedded-wizard.json")).write_text(json.dumps(embedded_receipt, indent=2) + "\n")
             binary_sbom.attach_wizard(document, embedded.read_bytes(), embedded_receipt)
+            validate(document, 'sha256:' + receipt['subject']['sha256'], plan['source']['commit'])
             (evidence / (stem + ".binary.cdx.json")).write_text(json.dumps(document, indent=2) + "\n")
             archive_document = archive_sbom(document, subject, inspection)
+            validate(archive_document, inspection['digest'], plan['source']['commit'])
             output_path = evidence / (stem + ".cdx.json")
             output_path.write_text(json.dumps(archive_document, indent=2) + "\n")
             records.append({**{key: subject[key] for key in ("id", "kind", "name", "target")},
                             "source": plan["source"], "digest": inspection["digest"], "binary": receipt["subject"],
                             "build_identity": identity,
-                            "sbom": {"path": output_path.name, "digest": file_digest(output_path)}})
+                            "sbom": {"path": output_path.name, "digest": file_digest(output_path)},
+                            "outputs": bind_outputs(evidence, [stem + suffix for suffix in
+                                ('.binary-info.json', '.syft.json', '.embedded-wizard.json', '.binary.cdx.json', '.cdx.json')])})
     return {"schema": "nyxid.archive-inspection.v1", "scope": "complete" if targets is None and source_diff is None else "local-investigation",
             "source": plan["source"], "subjects": records}
 
@@ -189,9 +200,10 @@ if __name__ == "__main__":
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--extractor", type=Path, required=True)
     parser.add_argument("--syft", type=Path, required=True)
+    parser.add_argument("--source-root", type=Path, default=binary_sbom.ROOT)
     parser.add_argument("--target", action="append", help="local subset only; final publication must omit this option")
     parser.add_argument("--source-diff", type=Path, help="local investigation only; final publication requires a clean producer checkout")
     args = parser.parse_args()
-    result = inspect(load_json(args.plan), args.artifacts, args.evidence, args.extractor.resolve(), args.syft.resolve(), args.target, args.source_diff)
+    result = inspect(load_json(args.plan), args.artifacts, args.evidence, args.extractor.resolve(), args.syft.resolve(), args.target, args.source_diff, args.source_root.resolve())
     (args.evidence / "archive-inspection.json").write_text(json.dumps(result, indent=2) + "\n")
     print("Inspected " + str(len(result["subjects"])) + " planned archives (" + result["scope"] + ")")

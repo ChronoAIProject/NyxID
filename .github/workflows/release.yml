@@ -302,12 +302,6 @@ jobs:
     env:
       SOURCE_COMMIT: ${{ needs.plan.outputs.source-commit }}
       SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source-epoch }}
-      RELEASE_INTEGRITY_SIGNING_ENABLED: ${{ vars.RELEASE_INTEGRITY_SIGNING_ENABLED || 'false' }}
-      RELEASE_INTEGRITY_SIGN_CMD: ${{ secrets.RELEASE_INTEGRITY_SIGN_CMD || vars.RELEASE_INTEGRITY_SIGN_CMD }}
-      RELEASE_INTEGRITY_PUBLISH_CMD: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_CMD || vars.RELEASE_INTEGRITY_PUBLISH_CMD }}
-      RELEASE_INTEGRITY_MANIFEST_URL: ${{ vars.RELEASE_INTEGRITY_MANIFEST_URL }}
-      RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
-      RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -336,47 +330,94 @@ jobs:
           python3 scripts/run-exported-build.py --export "$RUNNER_TEMP/credential-source" \
             --commit "$SOURCE_COMMIT" --receipt "$RUNNER_TEMP/credential-build-execution.json" \
             --generated frontend/node_modules --generated frontend/dist --cwd frontend -- npm run build:credential-accept
+      - name: Require standalone final credential composition SBOM
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-asset-sbom.py \
+            --root "$RUNNER_TEMP/credential-source/source/frontend/dist" --source-root "$RUNNER_TEMP/credential-source/source" \
+            --commit "$SOURCE_COMMIT" --epoch "$SOURCE_DATE_EPOCH" --output "$RUNNER_TEMP/credential.cdx.json"
+      - name: Preserve verified standalone credential SBOM for release closure
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: credential-sbom-evidence
+          path: ${{ runner.temp }}/credential.cdx.json
+          if-no-files-found: error
       - name: Upload release integrity manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-release-integrity-manifest
           path: ${{ runner.temp }}/credential-source/source/frontend/dist/release-integrity/releases.json
           if-no-files-found: error
-      - name: Sign and publish release integrity manifest
-        shell: bash
-        run: |
-          if [ "${{ needs.plan.outputs.publishing }}" != "true" ]; then
-            echo "::warning::Release integrity signing skipped because this is not a publishing run."
-            exit 0
-          fi
-          if [ "${RELEASE_INTEGRITY_SIGNING_ENABLED:-false}" != "true" ]; then
-            echo "::warning::Release integrity signing disabled; set RELEASE_INTEGRITY_SIGNING_ENABLED=true and provide command env vars to publish a signed manifest."
-            exit 0
-          fi
-
-          missing=()
-          [ -n "${RELEASE_INTEGRITY_SIGN_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_SIGN_CMD")
-          [ -n "${RELEASE_INTEGRITY_PUBLISH_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_PUBLISH_CMD")
-          [ -n "${RELEASE_INTEGRITY_MANIFEST_URL:-}" ] || missing+=("RELEASE_INTEGRITY_MANIFEST_URL")
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Release integrity signing enabled but missing required env: %s\n' "${missing[*]}"
-            exit 1
-          fi
-
-          export RELEASE_INTEGRITY_MANIFEST_PATH="$RUNNER_TEMP/credential-source/source/frontend/dist/release-integrity/releases.json"
-          bash -c "$RELEASE_INTEGRITY_SIGN_CMD"
-          bash -c "$RELEASE_INTEGRITY_PUBLISH_CMD"
   # Determines if we should publish/announce
+  sbom-gate:
+    name: Complete Release SBOM Closure
+    needs: [plan, build-local-artifacts, build-global-artifacts, release-integrity-manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: artifacts-*
+          path: ${{ runner.temp }}/release-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: credential-sbom-evidence
+          path: ${{ runner.temp }}/credential-sbom
+      - name: Extract compiled metadata and retained wizard membership from every final archive
+        run: |
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/sbom-source" --commit '${{ needs.plan.outputs.source-commit }}'
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-dist-artifacts.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts "$RUNNER_TEMP/release-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --source-root "$RUNNER_TEMP/sbom-source/source" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info" --syft "$RUNNER_TEMP/sbom-tools/bin/syft"
+      - name: Require complete release subject digest and composition closure
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts "$RUNNER_TEMP/release-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --credential-sbom "$RUNNER_TEMP/credential-sbom/credential.cdx.json" \
+            --output "$RUNNER_TEMP/release-sboms"
+      - name: Preserve validated release SBOMs (PR runs do not publish)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: artifacts-sboms
+          path: ${{ runner.temp }}/release-sboms/
+          if-no-files-found: error
+
   host:
     needs:
+      - sbom-gate
       - security-gate
       - plan
       - build-local-artifacts
       - build-global-artifacts
       - release-integrity-manifest
     # Every required build must succeed, independently of artifact presence.
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.sbom-gate.result == 'success' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
+      RELEASE_INTEGRITY_SIGNING_ENABLED: ${{ vars.RELEASE_INTEGRITY_SIGNING_ENABLED || 'false' }}
+      RELEASE_INTEGRITY_SIGN_CMD: ${{ secrets.RELEASE_INTEGRITY_SIGN_CMD || vars.RELEASE_INTEGRITY_SIGN_CMD }}
+      RELEASE_INTEGRITY_PUBLISH_CMD: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_CMD || vars.RELEASE_INTEGRITY_PUBLISH_CMD }}
+      RELEASE_INTEGRITY_MANIFEST_URL: ${{ vars.RELEASE_INTEGRITY_MANIFEST_URL }}
+      RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
+      RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"
     outputs:
@@ -401,6 +442,40 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Fetch complete expected release plan before publication
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: expected-publication-plan
+          path: ${{ runner.temp }}/release-plan
+      - name: Require unchanged complete release SBOM digest closure before any publication
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib
+      - name: Sign and publish release integrity manifest
+        shell: bash
+        run: |
+          if [ "${{ needs.plan.outputs.publishing }}" != "true" ]; then
+            echo "::warning::Release integrity signing skipped because this is not a publishing run."
+            exit 0
+          fi
+          if [ "${RELEASE_INTEGRITY_SIGNING_ENABLED:-false}" != "true" ]; then
+            echo "::warning::Release integrity signing disabled; set RELEASE_INTEGRITY_SIGNING_ENABLED=true and provide command env vars to publish a signed manifest."
+            exit 0
+          fi
+
+          missing=()
+          [ -n "${RELEASE_INTEGRITY_SIGN_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_SIGN_CMD")
+          [ -n "${RELEASE_INTEGRITY_PUBLISH_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_PUBLISH_CMD")
+          [ -n "${RELEASE_INTEGRITY_MANIFEST_URL:-}" ] || missing+=("RELEASE_INTEGRITY_MANIFEST_URL")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Release integrity signing enabled but missing required env: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          export RELEASE_INTEGRITY_MANIFEST_PATH="$GITHUB_WORKSPACE/target/distrib/releases.json"
+          bash -c "$RELEASE_INTEGRITY_SIGN_CMD"
+          bash -c "$RELEASE_INTEGRITY_PUBLISH_CMD"
       - id: host
         shell: bash
         run: |
@@ -425,6 +500,10 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
+      - name: Recheck final release upload bytes and SBOM closure
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts artifacts --evidence artifacts
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
         with:

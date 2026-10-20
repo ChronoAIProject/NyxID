@@ -63,6 +63,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install hash-locked offline SBOM validator and pinned Syft
+        run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
       - name: Export exact committed image inputs
         id: source
         run: |
@@ -141,6 +146,23 @@ jobs:
             fi
           done
           exit "$failed"
+      - name: Require final runtime filesystem, executable and frontend composition SBOMs
+        run: |
+          for component in backend frontend; do
+            "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-sbom.py \
+              --stage "$RUNNER_TEMP/image-scans/$component" --source-root "$RUNNER_TEMP/image-source/source" \
+              --epoch '${{ steps.source.outputs.epoch }}' --syft "$RUNNER_TEMP/sbom-tools/bin/syft" \
+              --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+          done
+      - name: Preserve verified actual runtime SBOM evidence without publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-image-sbom-runtime-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scans/backend/sbom/
+            ${{ runner.temp }}/image-scans/frontend/sbom/
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve actual runtime vulnerability reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -315,6 +337,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install hash-locked offline SBOM validator and pinned Syft
+        run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
       - name: Export exact committed image inputs
         id: source
         run: |
@@ -356,7 +383,9 @@ jobs:
           receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'operator-image-source/image-build-execution.json').read_text())
           assert receipt['exit_code'] == 0 and receipt['post_build_source_verified'] is True
           assert receipt['identity_check']['status'] == 'passed' and receipt['identity_check']['exit_code'] == 0
-          assert receipt['vulnerability_check']['status'] == 'passed' and receipt['vulnerability_check']['exit_code'] == 0
+          assert receipt['vulnerability_check']['status'] == 'passed'
+          assert receipt['sbom_check']['status'] == 'passed' and receipt['sbom_check']['exit_code'] == 0
+          assert receipt['vulnerability_check']['exit_code'] == 0
           assert receipt['image']['component'] == 'machine-hosted-desktop' and receipt['image']['tagged'] is True
           actual = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', 'nyxid-identity:ci'], text=True).strip()
           assert actual == receipt['image']['id'], 'tag differs from the identity-checked image ID'
@@ -377,6 +406,19 @@ jobs:
             --component '${{ matrix.component }}' --platform 'linux/${{ matrix.arch }}' \
             --commit '${{ steps.source.outputs.commit }}' --trivy "$RUNNER_TEMP/scan-tools/trivy" \
             --regctl "$RUNNER_TEMP/scan-tools/regctl" --stage "$RUNNER_TEMP/image-scan"
+      - name: Require actual application filesystem and final executable SBOM
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-sbom.py \
+            --stage "$RUNNER_TEMP/image-scan" --source-root "$RUNNER_TEMP/image-source/source" \
+            --epoch '${{ steps.source.outputs.epoch }}' --syft "$RUNNER_TEMP/sbom-tools/bin/syft" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Preserve verified application SBOM evidence without publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ contains(fromJSON('["node-agent","nyxid-node-machine","nyxid-machine-updater"]'), matrix.component) && 'pr-image-sbom' || 'pr-auxiliary-sbom' }}-${{ matrix.component }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/image-scan/sbom/
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve actual application image vulnerability report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -467,15 +509,129 @@ jobs:
           python3 scripts/check-cli-archive-identity.py --plan "$RUNNER_TEMP/cli-publication-plan.json" \
             --artifacts "$RUNNER_TEMP/cli-build/artifacts" --target "$TARGET" \
             --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Preserve actual final CLI archive for native SBOM inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-cli-archive-${{ matrix.target }}
+          path: ${{ runner.temp }}/cli-build/artifacts/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve complete expected CLI publication plan
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-cli-sbom-plan
+          path: ${{ runner.temp }}/cli-publication-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom-policy:
+    name: Shipped SBOM Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - run: python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/sbom-tools/bin"
+      - name: Test real OCI filesystem replay, schema and negative closure/publication cases
+        env:
+          SYFT_BIN: ${{ runner.temp }}/sbom-tools/bin/syft
+          REGCTL_BIN: ${{ runner.temp }}/sbom-tools/bin/regctl
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test-sbom-evidence.py
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test_rust_binary_sbom.py
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/test_dist_artifacts.py
+      - name: Test required SBOM workflow gates and negative mutations
+        run: |
+          python3 -m venv "$RUNNER_TEMP/sbom-policy"
+          "$RUNNER_TEMP/sbom-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/sbom-policy/bin/python" scripts/test-sbom-workflows.py
+
+  image-sbom-closure:
+    name: Image SBOM Publication Closure
+    needs: [credentials, images, sbom-policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - name: Install hash-locked workflow parser
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-image-sbom-*
+          path: ${{ runner.temp }}/platform-sboms
+      - name: Require complete actual platform and index digest/composition closure without registry writes
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py set \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/platform-sboms" --output "$RUNNER_TEMP/index-sboms"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py closure \
+            --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-verified-index-sboms
+          path: ${{ runner.temp }}/index-sboms/
+          if-no-files-found: error
+          retention-days: 7
+
+  archive-sboms:
+    name: CLI Archive SBOM Composition
+    needs: [archives, sbom-policy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-cli-archive-*
+          path: ${{ runner.temp }}/cli-artifacts
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pr-cli-sbom-plan
+          path: ${{ runner.temp }}/cli-plan
+      - name: Require all four final stripped binaries, archive members and embedded wizard membership
+        run: |
+          commit=$(python3 scripts/export-build-source.py head)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/sbom-source" --commit "$commit"
+          CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-dist-artifacts.py \
+            --plan "$RUNNER_TEMP/cli-plan/cli-publication-plan.json" --artifacts "$RUNNER_TEMP/cli-artifacts" \
+            --evidence "$RUNNER_TEMP/archive-sboms" --source-root "$RUNNER_TEMP/sbom-source/source" \
+            --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info" --syft "$RUNNER_TEMP/sbom-tools/bin/syft"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-verified-cli-sboms
+          path: ${{ runner.temp }}/archive-sboms/
+          if-no-files-found: error
+          retention-days: 7
 
   packaging-pass:
     name: Artifact Packaging Passed
     if: always()
-    needs: [policy, scan-freshness, credentials, worklet, docker-cli, images, archives]
+    needs: [policy, scan-freshness, credentials, worklet, docker-cli, images, archives, sbom-policy, image-sbom-closure, archive-sboms]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every packaging check
         env:
+          SBOM_POLICY: ${{ needs.sbom-policy.result }}
+          IMAGE_SBOMS: ${{ needs.image-sbom-closure.result }}
+          ARCHIVE_SBOMS: ${{ needs.archive-sboms.result }}
           FRESHNESS: ${{ needs.scan-freshness.result }}
           POLICY: ${{ needs.policy.result }}
           CREDENTIALS: ${{ needs.credentials.result }}
@@ -484,6 +640,9 @@ jobs:
           WORKLET: ${{ needs.worklet.result }}
           DOCKER_CLI: ${{ needs.docker-cli.result }}
         run: |
+          test "$SBOM_POLICY" = success
+          test "$IMAGE_SBOMS" = success
+          test "$ARCHIVE_SBOMS" = success
           test "$FRESHNESS" = success
           test "$POLICY" = success
           test "$CREDENTIALS" = success

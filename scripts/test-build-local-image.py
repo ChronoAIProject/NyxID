@@ -46,8 +46,11 @@ raise SystemExit(int(os.environ.get('TEST_CHECK_EXIT','0')))
 ''')
         (scripts / 'bootstrap-build-tool.py').write_text("import json,os,sys\nfrom pathlib import Path\nwith Path(os.environ['TEST_COMMANDS']).open('a') as output:\n    output.write(json.dumps({'tool':'bootstrap','argv':sys.argv[1:]})+'\\n')\nraise SystemExit(int(os.environ.get('TEST_SCAN_BOOTSTRAP_EXIT','0')))\n")
         (scripts / 'check-image-vulnerabilities.py').write_text("import json,os,sys\nfrom pathlib import Path\nwith Path(os.environ['TEST_COMMANDS']).open('a') as output:\n    output.write(json.dumps({'tool':'vulnerability','argv':sys.argv[1:]})+'\\n')\nraise SystemExit(int(os.environ.get('TEST_SCAN_EXIT','0')))\n")
+        (scripts / 'fixture_metadata.py').write_text('VALUE = 1\n')
+        (scripts / 'check-image-sbom.py').write_text("import fixture_metadata\nimport json,os,sys\nfrom pathlib import Path\nwith Path(os.environ['TEST_COMMANDS']).open('a') as output:\n    output.write(json.dumps({'tool':'sbom','argv':sys.argv[1:]})+'\\n')\nraise SystemExit(int(os.environ.get('TEST_SBOM_EXIT','0')))\n")
         manifest = self.fixture.root / 'security/artifact-tools/Cargo.toml'
         manifest.parent.mkdir(parents=True)
+        (self.fixture.root / 'security/python-sbom-requirements.txt').write_text('# fixture lock\n')
         manifest.write_text('[package]\nname="fixture-inspector"\nversion="0.1.0"\n')
         self.fixture.commit()
         self.destination = self.fixture.directory / 'image-export'
@@ -89,6 +92,21 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
                                                   'TEST_COMMANDS': str(self.record)})
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        real_run = subprocess.run
+        def run(command, *args, **kwargs):
+            if command[:3] == [sys.executable, '-m', 'venv']:
+                environment = Path(command[3]); (environment / 'bin').mkdir(parents=True)
+                (environment / 'bin/python').symlink_to(sys.executable)
+                tool = 'sbom-venv'
+            elif len(command) > 3 and command[1:4] == ['-m', 'pip', 'install']:
+                self.assertIn('--require-hashes', command); self.assertIn('--only-binary=:all:', command)
+                tool = 'sbom-pip'
+            else:
+                return real_run(command, *args, **kwargs)
+            with self.record.open('a') as output: output.write(json.dumps(dict(tool=tool, argv=command[1:])) + '\n')
+            return subprocess.CompletedProcess(command, int(os.environ.get('TEST_SBOM_SETUP_EXIT', '0')))
+        self.runner = patch.object(builder.subprocess, 'run', side_effect=run)
+        self.runner.start(); self.addCleanup(self.runner.stop)
 
     def commands(self):
         return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.exists() else []
@@ -109,7 +127,7 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
                                        contexts=['cma=/separately-reviewed/context'])
         self.assertEqual(code, 0)
         commands = self.commands()
-        self.assertEqual([item['tool'] for item in commands], ['docker', 'cargo', 'checker', 'bootstrap', 'bootstrap', 'vulnerability', 'docker'])
+        self.assertEqual([item['tool'] for item in commands], ['docker', 'cargo', 'checker', 'bootstrap', 'bootstrap', 'vulnerability', 'bootstrap', 'sbom-venv', 'sbom-pip', 'sbom', 'docker'])
         commit, epoch = self.fixture.commit_id, str(exported['source']['epoch'])
         self.assertEqual(commands[0]['argv'], ['build', '--load', '--build-arg', 'NYXID_GIT_HASH=' + commit,
             '--build-arg', 'SOURCE_DATE_EPOCH=' + epoch, '--file', str(self.destination / 'source' / self.dockerfile),
@@ -119,7 +137,7 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
         self.assertEqual(commands[2]['argv'], ['--image', IMAGE, '--component', 'machine-hosted', '--arch', 'arm64',
             '--source-root', str(self.destination / 'source'), '--commit', commit, '--epoch', epoch,
             '--extractor', str(self.destination / 'artifact-target/release/nyxid-artifact-info')])
-        self.assertEqual(commands[6]['argv'], ['tag', '--', IMAGE, 'fixture:local'])
+        self.assertEqual(commands[-1]['argv'], ['tag', '--', IMAGE, 'fixture:local'])
         receipt = self.receipt()
         self.assertTrue(receipt['post_build_source_verified'])
         self.assertEqual(receipt['source']['commit'], commit)
@@ -127,6 +145,9 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
         self.assertEqual(receipt['identity_check']['exit_code'], 0)
         self.assertEqual(receipt['vulnerability_check']['status'], 'passed')
         self.assertEqual(receipt['vulnerability_check']['exit_code'], 0)
+        self.assertEqual(receipt['sbom_check']['status'], 'passed')
+        self.assertEqual(receipt['sbom_check']['exit_code'], 0)
+        self.assertEqual(commands[-2]['argv'][:2], ['--stage', str(self.destination / 'scanned-image')])
         self.assertEqual(commands[5]['argv'][:6], ['--image', IMAGE, '--component', 'machine-hosted', '--platform', 'linux/arm64'])
         self.assertEqual(receipt['image'], dict(id=IMAGE, component='machine-hosted', platform='linux/arm64',
                                                requested_tag='fixture:local', tagged=True))
@@ -155,6 +176,23 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
         self.assert_untagged()
         self.assertEqual(self.receipt()['vulnerability_check']['status'], 'failed')
         self.assertEqual(self.receipt()['vulnerability_check']['exit_code'], 31)
+
+    def test_failed_or_missing_sbom_leaves_no_tag(self):
+        for failure in ('missing', 'checker', 'bootstrap'):
+            with self.subTest(failure=failure):
+                # Each build needs a new immutable export directory.
+                self.destination = self.fixture.directory / ('sbom-failure-' + failure)
+                if failure == 'missing':
+                    (self.fixture.root / 'scripts/check-image-sbom.py').rename(self.fixture.root / 'scripts/check-image-sbom.hidden')
+                    self.fixture.commit()
+                with patch.dict(os.environ, TEST_SBOM_EXIT='43' if failure == 'checker' else '0',
+                                TEST_SBOM_SETUP_EXIT='47' if failure == 'bootstrap' else '0'):
+                    code, _ = self.run_build()
+                self.assertNotEqual(code, 0); self.assert_untagged()
+                self.assertEqual(self.receipt()['sbom_check']['status'], 'failed')
+                if failure == 'missing':
+                    (self.fixture.root / 'scripts/check-image-sbom.hidden').rename(self.fixture.root / 'scripts/check-image-sbom.py')
+                    self.fixture.commit()
 
     def test_missing_vulnerability_checker_leaves_no_tag(self):
         (self.fixture.root / 'scripts/check-image-vulnerabilities.py').unlink()
@@ -233,7 +271,7 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
         self.assertFalse(self.record.exists())
 
     def test_cli_exposes_no_verification_optout_or_alternate_checker(self):
-        for option in ('--skip-identity-check', '--skip-vulnerability-check', '--no-scan', '--no-verify', '--checker', '--extractor'):
+        for option in ('--skip-sbom-check', '--sbom-checker', '--skip-identity-check', '--skip-vulnerability-check', '--no-scan', '--no-verify', '--checker', '--extractor'):
             result = subprocess.run([sys.executable, str(ROOT / 'scripts/build-local-image.py'), '--file', self.dockerfile,
                                      '--tag', 'fixture:local', option], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)

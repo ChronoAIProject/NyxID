@@ -98,10 +98,11 @@ def check_vulnerabilities(tree, destination, image_id, component, platform, expo
     bootstrap = tree / 'scripts/bootstrap-build-tool.py'
     if any(path.is_symlink() or not path.is_file() for path in (checker, bootstrap)):
         raise ValueError('mandatory final vulnerability checker/bootstrap is missing or not regular')
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
     tools = destination / 'scan-tools'
     for tool in ('trivy', 'regctl'):
         command = [sys.executable, str(bootstrap), tool, '--bin-dir', str(tools)]
-        code = subprocess.run(command, cwd=tree).returncode
+        code = subprocess.run(command, cwd=tree, env=environment).returncode
         result[tool + '_bootstrap_exit_code'] = code
         if code != 0:
             raise ValueError('mandatory image vulnerability tool bootstrap failed')
@@ -109,9 +110,32 @@ def check_vulnerabilities(tree, destination, image_id, component, platform, expo
                          '--platform', platform, '--commit', exported['source']['commit'],
                          '--trivy', str(tools / 'trivy'), '--regctl', str(tools / 'regctl'),
                          '--stage', str(destination / 'scanned-image')]
-    result['exit_code'] = subprocess.run(result['command'], cwd=tree).returncode
+    result['exit_code'] = subprocess.run(result['command'], cwd=tree, env=environment).returncode
     if result['exit_code'] != 0:
         raise ValueError('mandatory final image vulnerability check failed')
+
+
+def check_sbom(tree, destination, component, exported, result):
+    checker = tree / 'scripts/check-image-sbom.py'
+    requirements = tree / 'security/python-sbom-requirements.txt'
+    if any(p.is_symlink() or not p.is_file() for p in (checker, requirements)):
+        raise ValueError('mandatory final SBOM checker/requirements is missing or not regular')
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    tools = destination / 'scan-tools'
+    python_environment = destination / 'sbom-python'
+    commands = [[sys.executable, str(tree / 'scripts/bootstrap-build-tool.py'), 'syft', '--bin-dir', str(tools)],
+                [sys.executable, '-m', 'venv', str(python_environment)],
+                [str(python_environment / 'bin/python'), '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '-r', str(requirements)]]
+    for command in commands:
+        if subprocess.run(command, cwd=tree, env=environment).returncode != 0:
+            raise ValueError('mandatory SBOM tool bootstrap failed')
+    result['command'] = [str(python_environment / 'bin/python'), str(checker), '--stage', str(destination / 'scanned-image'),
+                         '--source-root', str(tree), '--epoch', str(exported['source']['epoch']),
+                         '--extractor', str(destination / 'artifact-target/release/nyxid-artifact-info'),
+                         '--syft', str(tools / 'syft')]
+    result['exit_code'] = subprocess.run(result['command'], cwd=tree, env=environment).returncode
+    if result['exit_code'] != 0:
+        raise ValueError('mandatory final image SBOM check failed')
 
 
 def build(root, destination, dockerfile, tag, target=None, platform=None, contexts=()):
@@ -142,6 +166,7 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
     receipt['build_exit_code'] = code
     receipt['image'] = dict(id=None, component=component, platform=platform, requested_tag=tag, tagged=False)
     check = receipt['identity_check'] = dict(status='not-run', exit_code=None)
+    sbom = receipt['sbom_check'] = dict(status='not-run', exit_code=None)
     vulnerability = receipt['vulnerability_check'] = dict(status='not-run', exit_code=None)
     try:
         if code == 0:
@@ -158,6 +183,9 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
                 vulnerability['status'] = 'failed'
                 check_vulnerabilities(tree, destination, image_id, component, platform, exported, vulnerability)
                 vulnerability['status'] = 'passed'
+                sbom['status'] = 'failed'
+                check_sbom(tree, destination, component, exported, sbom)
+                sbom['status'] = 'passed'
             try:
                 source.verify(destination, commit)
             except (ValueError, OSError) as error:
@@ -168,6 +196,7 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
             check['status'] = 'passed' if component else 'not-applicable-test-target'
             if not component:
                 vulnerability['status'] = 'not-applicable-test-target'
+                sbom['status'] = 'not-applicable-test-target'
             # No tag is applied until the exact final image passes. Failure
             # preserves any pre-existing tag instead of replacing it with bad bytes.
             code = subprocess.run(['docker', 'tag', '--', image_id, tag], check=False).returncode
@@ -176,6 +205,7 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
         check['error'] = str(error)
         if vulnerability['status'] == 'failed':
             vulnerability['error'] = str(error)
+        if sbom['status'] == 'failed': sbom['error'] = str(error)
         print(str(error), file=sys.stderr)
         code = 1
     finally:

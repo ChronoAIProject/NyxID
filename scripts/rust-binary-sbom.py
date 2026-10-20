@@ -62,6 +62,15 @@ def sbom(binary, receipt, expected_package, commit, source_diff=None):
     if receipt.get("schema") != "nyxid.rust-binary-info.v1" or subject.get("sha256") != digest or \
             subject.get("size") != binary.stat().st_size or subject.get("name") != binary.name:
         raise ValueError("binary metadata receipt does not match actual subject bytes")
+    return inventory_document(receipt, expected_package, commit, source_diff)
+
+
+def inventory_document(receipt, expected_package, commit, source_diff=None):
+    """Replay a previously byte-verified compiled inventory deterministically."""
+    subject = receipt['subject']
+    digest = subject['sha256']
+    if receipt.get('schema') != 'nyxid.rust-binary-info.v1' or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('validated final binary inventory required')
     if not re.fullmatch("[0-9a-f]{40}", commit):
         raise ValueError("full source commit is required")
     audit = receipt["audit"]
@@ -98,7 +107,7 @@ def sbom(binary, receipt, expected_package, commit, source_diff=None):
     ref = "sha256:" + digest
     document = {"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
         "serialNumber": "urn:uuid:" + str(uuid.uuid5(uuid.NAMESPACE_URL, ref)),
-        "metadata": {"component": {"type": "application", "bom-ref": ref, "name": binary.name,
+        "metadata": {"component": {"type": "application", "bom-ref": ref, "name": subject["name"],
             "hashes": [{"alg": "SHA-256", "content": digest}],
             "properties": [{"name": "nyxid:source-commit", "value": commit},
                 {"name": "nyxid:inventory-source", "value": "final binary cargo-auditable section"},

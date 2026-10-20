@@ -96,6 +96,16 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             packaging:
+              - 'scripts/*sbom*'
+              - 'scripts/machine_fixture_tls.py'
+              - 'scripts/check-dist-artifacts.py'
+              - 'scripts/shipped_composition_sbom.py'
+              - 'scripts/oci_subjects.py'
+              - 'scripts/setup-sbom-tools.sh'
+              - 'scripts/validate-cyclonedx.py'
+              - 'scripts/test_cyclonedx.py'
+              - 'security/schemas/**'
+              - 'security/python-sbom-requirements.txt'
               - 'scripts/*scan*'
               - 'scripts/*vulnerabilit*'
               - 'scripts/*dependency*'

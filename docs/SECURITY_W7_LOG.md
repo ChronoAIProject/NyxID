@@ -219,3 +219,17 @@
 - Total: 157 unit/policy/protocol tests passed, 0 final failures; Docker execution remains hosted evidence. No Cargo build or D harness/probe changes.
 - APK durable-present is PR continue-on-error and excluded from apk-pass; CI Pipeline remains gated on APK policy/replay/layers.
 - Required PR evidence: Artifact Packaging Policy; Machine Docker CLI E2E; Built Image Worklet CSP (both); CLI Archive Identity (aarch64 GNU); APT Policy/Dockerfile Layers (both); Detect Changes.
+
+## C-6 — SBOMs from shipped artifacts
+- Catalog the exact staged OCI layout with pinned Syft; validate raw manifest/config/platform/squashed scope and complete converted package/file/distro inventory.
+- Extract each final binary and frontend/credential assets from the immutable image; bind compiled metadata, ABI, source identity, embedded wizard and fresh locked JS/CSS membership.
+- Bind archive SBOMs to actual archive/member digests; publication replay reopens every final archive and checks all planned release-file digests.
+- Validate exact amd64/arm64 platform composition and all ten platforms/five indices; reject extra/duplicate/missing subjects; keep auxiliary evidence outside the publication set.
+- Require verified SBOMs before platform copies, index writes, tag promotion and release hosting; attach OCI referrers/release assets only in publishers; operator wrapper gates tags and records results.
+- PR/weekly jobs validate and retain evidence with contents:read; no secrets/OIDC/registry writes. Native inspection avoids Python schema tools in the Focal builder.
+- Local commands: test-sbom-evidence.py20/20 (real pinned Syft/regctl OCI/referrer replay); test-sbom-workflows.py3/3 (mutation matrix); test-build-local-image.py19/19; test-image-vulnerabilities.py14/14.
+- Local commands: test_rust_binary_sbom.py7/7; test_dist_artifacts.py5/5; test_oci_subjects.py8/8; test_publication_contract.py11/11; test_cyclonedx.py3/3.
+- Regressions: packaging14/14, scanners7/7, Detect Changes28/28, credentials21/21, source16/16, build inputs20/20, Node policy4/4, YAML9/9; total209 passed, 0 final failures.
+- Standalone workflow YAML (14 workflows/22 Rust actions), reusable permissions (8 calls), build-input/Node policy and diff checks passed; real fresh locked credential composition10 components and wizard membership passed.
+- Required PR jobs: Shipped SBOM Policy; Image SBOM Publication Closure; CLI Archive SBOM Composition; Backend Credential Packaging and Shipped Image Identity (both arches); CLI Archive Identity (all four targets).
+- Actual image/archive acceptance remains hosted PR evidence; no local Cargo/Docker build or remote publication. C-7 mandatory signing is still pending; D native acceptance workflow awaits its PM-forwarded harness contract.

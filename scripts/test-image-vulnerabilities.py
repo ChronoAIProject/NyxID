@@ -186,12 +186,14 @@ class ImageVulnerabilities(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'nonregular'): policy.verify_stage(self.stage)
 
     def test_publisher_copies_only_passing_digest_without_rebuilding_or_tags(self):
-        with patch.object(publisher.subprocess, 'run') as run, \
+        with patch.object(publisher, 'verify_sbom', return_value={}), patch.object(publisher.subprocess, 'run') as run, \
                 patch.object(publisher.subprocess, 'check_output', return_value=self.digest + '\n'):
             self.assertEqual(publisher.publish(self.stage, 'ghcr.io/fixture/nyxid/backend', self.regctl), self.digest)
-        command = run.call_args.args[0]
+        command = run.call_args_list[0].args[0]
         self.assertEqual(command, [str(self.regctl), 'image', 'copy',
             'ocidir://' + str(self.stage / 'oci') + '@' + self.digest, 'ghcr.io/fixture/nyxid/backend@' + self.digest])
+        self.assertEqual(run.call_args.args[0][1:3], ['artifact', 'put'])
+        self.assertIn('ghcr.io/fixture/nyxid/backend@' + self.digest, run.call_args.args[0])
 
 
 if __name__ == '__main__':

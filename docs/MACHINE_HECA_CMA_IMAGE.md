@@ -46,6 +46,8 @@ Its `image-build-execution.json` must show all of:
 - `image.component: "machine-hosted"`, the checked immutable `image.id`, and
   `image.tagged: true` for the requested tag and platform.
 
+The same wrapper now requires a final filesystem/executable SBOM and records `sbom_check.status = passed` before tagging. Retain `scanned-image/sbom` with the receipt; see [RELEASE_SBOMS.md](RELEASE_SBOMS.md). The operator needs Python 3.9+ with venv support and Node at the repository version, in addition to Docker and the existing build prerequisites.
+
 A raw `docker build` of this target is unsupported for deployment. The wrapper
 also gates the other reviewed application image targets. Its explicit updater
 `e2e` test target has a distinct test-only receipt and cannot qualify as a
