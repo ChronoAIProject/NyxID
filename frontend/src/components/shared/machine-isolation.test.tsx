@@ -55,9 +55,10 @@ const supported: MachineProfile = {
   separation_choice: "shared_legacy",
   separated: { available: true, landlock_abi: 8, reason: null },
   separation_evidence: {
-    version: 3, os: "linux", landlock_abi: 8, separate_users: true,
+    version: 4, os: "linux", landlock_abi: 8, separate_users: true,
     managed_browser_configured: true, command_seccomp: true,
     landlock_enforced: true, managed_browser_sandbox: true, managed_browser_policy: true,
+    credential_custody: true,
   },
 };
 
@@ -67,13 +68,25 @@ it("shows confirmed support without changing the owner's existing legacy choice"
   expect(screen.getByText(/existing shared legacy assignments stay shared/)).toBeVisible();
 });
 
-it.each([undefined, null, { ...supported.separation_evidence!, version: 1 }, { ...supported.separation_evidence!, version: 2 }, { ...supported.separation_evidence!, version: 4 }])(
+it.each([undefined, null, { ...supported.separation_evidence!, version: 1 }, { ...supported.separation_evidence!, version: 2 }, { ...supported.separation_evidence!, version: 3 }, { ...supported.separation_evidence!, version: 5 }])(
   "does not treat old booleans or unsupported evidence versions as confirmation (%j)",
   separation_evidence => {
     render(<MachineSeparationSupport machine={{ ...supported, separation_evidence }} />);
     expect(screen.getByText("Separation support unknown")).toBeVisible();
     expect(screen.queryByText("Separation support confirmed")).not.toBeInTheDocument();
     expect(screen.getByText(/Upgrade or reconnect the node/)).toBeVisible();
+  },
+);
+
+it.each([undefined, null, false])(
+  "requires positively observed credential custody (%j)",
+  credential_custody => {
+    render(<MachineSeparationSupport machine={{ ...supported, separation_evidence: { ...supported.separation_evidence!, credential_custody } }} />);
+    expect(screen.getByText("Separation prerequisites not met")).toBeVisible();
+    expect(screen.getByText(/Credential custody could not be verified/)).toBeVisible();
+    expect(screen.getByText(/protected credential storage and rerun setup/)).toBeVisible();
+    expect(screen.getByText("node_custody_unverified")).toBeInTheDocument();
+    expect(screen.queryByText("Separation support confirmed")).not.toBeInTheDocument();
   },
 );
 

@@ -740,6 +740,7 @@ export interface MachineProfile {
     landlock_enforced?: boolean | null;
     managed_browser_sandbox?: boolean | null;
     managed_browser_policy?: boolean | null;
+    credential_custody?: boolean | null;
     probe_timed_out?: boolean;
   } | null;
   version: number;
@@ -772,12 +773,12 @@ export interface MachineProfile {
 }
 
 /** Display only. The server remains authoritative for assignment selection.
- * Raw node profiles may carry the old support boolean without v3 evidence. */
+ * Raw node profiles may carry the old support boolean without v4 evidence. */
 export function machineSeparationSupport(machine: MachineProfile) {
   const evidence = machine.separation_evidence;
   const unavailable = (reason: string) => ({ available: false, reason });
   if (!evidence) return unavailable("separated_capabilities_not_reported");
-  if (evidence.version !== 3) return unavailable("separated_probe_version_unsupported");
+  if (evidence.version !== 4) return unavailable("separated_probe_version_unsupported");
   if (evidence.os !== "linux") return unavailable("separated_requires_linux");
   if (evidence.managed_browser_policy === false) return unavailable("separated_browser_policy_not_effective");
   if (evidence.probe_timed_out) return unavailable("separated_probe_timeout");
@@ -794,6 +795,8 @@ export function machineSeparationSupport(machine: MachineProfile) {
     if (observed === false) return unavailable(reason);
     if (observed !== true) return unavailable("separated_probe_evidence_incomplete");
   }
+  if (evidence.credential_custody !== true)
+    return unavailable("node_custody_unverified");
   if (!machine.authority_versions?.includes(2))
     return unavailable("machine_authority_upgrade_required");
   return { available: true, reason: null };

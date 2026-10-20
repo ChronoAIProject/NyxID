@@ -44,6 +44,7 @@ export function MachineSharingBadge() {
 }
 
 const supportReasons: Record<string, string> = {
+  node_custody_unverified: "Credential custody could not be verified for all command and browser users. Upgrade or repair the node’s protected credential storage and rerun setup. Separation remains unavailable until real identity checks confirm that node tokens, signing secrets and stored credentials are protected.",
   separated_browser_policy_not_effective: "The actual managed secure browser did not confirm that its policy blocks DevTools. Reinstall managed policies for this executable and rerun setup. Separation remains unavailable until the live policy check succeeds.",
   separated_requires_linux: "This runtime supports per-agent separation only on Linux. macOS has no supported per-agent sandbox. Use a supported Linux host.",
   separated_requires_landlock_abi_6: "Working Landlock ABI 6 or newer is required. Upgrade the Linux kernel or use a supported host.",
