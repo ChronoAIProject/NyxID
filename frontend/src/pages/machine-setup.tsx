@@ -1,5 +1,6 @@
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
+import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
 import { useVerifiedUpdaterImage } from "@/hooks/use-machines";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -272,7 +273,13 @@ export function MachineSetupPage() {
             />
             <FormField control={form.control} name="separation" render={({ field }) => <FormItem>
               <FormLabel>Agent separation</FormLabel>
-              <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => { field.onChange(value); form.setValue("legacy_warning_acknowledged", false); }}>
+              <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => {
+                // The hidden select can emit an empty value during reset.
+                // Preserve the reviewed choice until a valid option is selected.
+                if (!["automatic", "require_separated", "shared_legacy"].includes(value)) return;
+                field.onChange(value);
+                form.setValue("legacy_warning_acknowledged", false);
+              }}>
                 <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
                 <SelectContent>
                   <SelectItem value="automatic">Automatic — require confirmed supported separation</SelectItem>
@@ -281,6 +288,7 @@ export function MachineSetupPage() {
                 </SelectContent>
               </Select>
               <p className="text-12 text-muted-foreground">Automatic and required refuse when the real host probes cannot confirm support. macOS and browserless nodes need an informed legacy choice or a supported Linux host.</p>
+              {where !== "docker" ? <p className="text-12 text-muted-foreground">On Linux, provision distinct OS users by running the generated setup command with sudo and --separate-users. Separation also needs a managed browser; enable Browser only if you want to grant that capability. The command preserves your selected capabilities.</p> : null}
               <FormMessage />
             </FormItem>} />
             {form.watch("separation") === "shared_legacy" && <div className="space-y-2 rounded-lg border p-3 text-12">
@@ -569,12 +577,12 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
       <p>{states[setup.status] ?? "Waiting for setup…"}</p>
       {setup.status === "selection_required" && <><p>{setup.selection_reason}</p><Link to="/assistant/machines">Review machine separation</Link></>}
       {setup.machine ? (
-        <p>
+        <><p>
           Enabled:{" "}
           {(["shell", "files", "browser", "computer"] as const)
             .filter((c) => setup.machine?.[c])
             .join(", ")}
-        </p>
+        </p><MachineSeparationSupport machine={setup.machine} /></>
       ) : null}
       {setup.conversation_id ? (
         <Link to="/assistant" search={{ c: setup.conversation_id }}>

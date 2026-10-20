@@ -638,6 +638,18 @@ browser users. A configured username or kernel version alone is insufficient.
 The browser probe uses a fresh profile and the actual executable, including its
 AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
 
+The setup page carries the reviewed choice into native `--separation` arguments
+or Docker's `NYXID_MACHINE_SEPARATION` environment variable. It preserves the
+capabilities you selected; it does not silently enable a browser to make probes
+pass. On a fresh Linux VM, install the managed browser and desktop prerequisites,
+select Browser if you intend to grant it, and run the generated native setup
+command with `sudo` and `--separate-users` to provision the required OS identities.
+For example, an explicitly required browser/files setup is:
+
+```sh
+sudo nyxid node setup --files --browser --separate-users --separation require-separated
+```
+
 | Setup option | New-assignment intent |
 |---|---|
 | Omitted on a new setup, or `--separation automatic` | Choose separated only after every supported mechanism is confirmed; otherwise explain the reason and offer an informed legacy choice when stdin and stderr are terminals. |
@@ -680,6 +692,26 @@ and the existing feature gates still apply. `machine status` shows the recorded
 intent and cached probe reason without launching a browser. Upgrade the server
 to the W9.4 selection contract before relying on a node's advertised intent;
 older servers do not enforce the new selection field.
+
+After successful setup, `[machine].separation_choice` in the profile's
+`config.toml` stores `automatic`, `require_separated` or `shared_legacy` (the CLI
+uses hyphens). An older profile with no value stays unselected on an omitted-flag
+rerun. Before relying on these defaults, upgrade and drain every server replica,
+then deploy the matching UI and CLI/container versions. The server's durable
+W9.4 marker preserves only pre-cutover implicit NyxBot reachability under live
+ACLs; a newly added machine with no choice requires owner selection. Existing
+legacy assignments continue normally, and node intent never rewrites them.
+
+Assistant → Machines distinguishes confirmed support, unmet prerequisites and
+unknown evidence. A new or old support boolean alone is insufficient for a new
+separated assignment. Node settings say **Sharing set per agent** because one
+node can have legacy and separated assignments at the same time. Review the
+agent's **Shared legacy**, **Separate workspace and browser**, or **Owner
+selection required** label for its effective mode. Saved-login fills still bind
+to their approved context and profile generation; revocation quarantines the old
+profile before reuse. These controls do not establish VM-level isolation or move
+the credential service outside agent OS identities; see the [residuals and
+mechanisms](MACHINE_AGENT_ISOLATION.md#what-separated-does-and-does-not-guarantee).
 
 ```sh
 nyxid node machine enable                    # commands and files

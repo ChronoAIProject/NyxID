@@ -26,11 +26,15 @@ Nothing here may break existing nodes, proxying, SSH, NyxBot or specialists.
 
 ## Shared machines, action cards and activity
 
-Existing machines share one workspace and browser session among their granted
-agents. The Machines page, settings and action cards say **Shared workspace and
-browser**. Command/browser credential isolation does not separate specialists'
-files or authenticated tabs. Use separate machine containers for stronger
-separation. See [the phased isolation design](MACHINE_AGENT_ISOLATION.md).
+Existing `shared_legacy` assignments share the node's legacy workspace and browser
+session. A `separated` assignment uses its agent/person/group context's private
+workspace and secure/developer browser profiles. The Machines page and node
+settings say **Sharing set per agent**; each assignment shows **Shared legacy**,
+**Separate workspace and browser**, or **Owner selection required**. Command/node
+credential separation alone does not separate specialists' files or authenticated
+tabs. Use a separate machine container or VM per agent for stronger separation;
+containers still share their host kernel. See [the separation contract and
+residuals](MACHINE_AGENT_ISOLATION.md#w94-new-assignment-selection).
 
 Machine actions in chat have metadata cards: browser action and an existing
 encrypted screenshot thumbnail when one was returned, file read/write byte
@@ -868,8 +872,28 @@ Measurements and reproduction commands are under
 - **Additive.** Every model field is additive and serde-defaulted. No new
   environment variables unless unavoidable; if one is added, document it in
   `docs/ENV.md` and CLAUDE.md.
-- **Mixed versions.** Old nodes are unchanged and never receive machine
-  requests. Old servers never send them. Old frontends ignore the new fields.
+- **Mixed versions.** Nodes that predate machine capability never receive machine
+  requests. Machine-capable nodes that predate W9.4 retain existing legacy
+  assignments; absent evidence never establishes a new separated assignment.
+  Upgrade and drain every API replica before relying on the W9.4 selection
+  contract, then publish the matching frontend and CLI/images. Older servers
+  ignore the new intent and do not enforce this contract. Keep old writers
+  drained while relying on the new selection rules.
+- **W9.4 cutover.** The first capable server atomically persists the immutable
+  `machine-separation-defaults-v1` marker and snapshot through machine access
+  index initialization. Its fixed snapshot version freezes enabled-node ceilings
+  and pre-marker organization-admin reachability. Flag-off NyxBot compatibility
+  materializes only that frozen reachability with live ACL checks. Later node
+  enablement, promotions or broader capabilities do not enlarge it; tombstones
+  and explicit restrictions win. Keep the marker and snapshot across restarts.
+- **Support and choice.** New setup intent is automatic by default, with positive
+  v2 OS evidence required for separated access. Explicit shared legacy requires
+  the complete warning and owner consent. Missing intent or evidence surfaces
+  `selection_required` in the API, settings and NyxBot result/watch; it grants
+  nothing and directs the owner to Assistant → Machines. Changing a feature flag
+  or node intent never rewrites existing assignments. New external OAuth/API-key
+  grants support explicit legacy consent only; automatic and required contexts
+  are refused until that authority supports them.
 - **Existing features.** Proxy, credential, SSH and oracle behaviour are
   unchanged.
 

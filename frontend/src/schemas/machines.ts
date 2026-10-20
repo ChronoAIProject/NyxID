@@ -730,6 +730,17 @@ export const machineChoicesSchema = z.object({
 export type MachineChoices = z.infer<typeof machineChoicesSchema>;
 export interface MachineProfile {
   separation_choice?: "automatic" | "require_separated" | "shared_legacy" | null;
+  separation_evidence?: {
+    version: number;
+    os: string;
+    landlock_abi?: number | null;
+    separate_users?: boolean | null;
+    managed_browser_configured?: boolean | null;
+    command_seccomp?: boolean | null;
+    landlock_enforced?: boolean | null;
+    managed_browser_sandbox?: boolean | null;
+    probe_timed_out?: boolean;
+  } | null;
   version: number;
   shell: boolean;
   files: boolean;
@@ -757,6 +768,32 @@ export interface MachineProfile {
   saved_login_ready: boolean;
   installation?: "container" | "native";
   updater_ready?: boolean;
+}
+
+/** Display only. The server remains authoritative for assignment selection.
+ * Raw node profiles may carry the old support boolean without v2 evidence. */
+export function machineSeparationSupport(machine: MachineProfile) {
+  const evidence = machine.separation_evidence;
+  const unavailable = (reason: string) => ({ available: false, reason });
+  if (!evidence) return unavailable("separated_capabilities_not_reported");
+  if (evidence.version !== 2) return unavailable("separated_probe_version_unsupported");
+  if (evidence.os !== "linux") return unavailable("separated_requires_linux");
+  if (evidence.probe_timed_out) return unavailable("separated_probe_timeout");
+  if (!Number.isInteger(evidence.landlock_abi) || (evidence.landlock_abi ?? 0) < 6)
+    return unavailable("separated_requires_landlock_abi_6");
+  for (const [observed, reason] of [
+    [evidence.separate_users, "separated_requires_separate_users"],
+    [evidence.managed_browser_configured, "separated_requires_managed_browser"],
+    [evidence.command_seccomp, "separated_seccomp_probe_failed"],
+    [evidence.landlock_enforced, "separated_landlock_probe_failed"],
+    [evidence.managed_browser_sandbox, "separated_browser_sandbox_probe_failed"],
+  ] as const) {
+    if (observed === false) return unavailable(reason);
+    if (observed !== true) return unavailable("separated_probe_evidence_incomplete");
+  }
+  if (!machine.authority_versions?.includes(2))
+    return unavailable("machine_authority_upgrade_required");
+  return { available: true, reason: null };
 }
 export interface MachineSetup {
   selection_reason?: string | null;

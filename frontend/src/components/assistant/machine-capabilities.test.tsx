@@ -32,10 +32,25 @@ describe("machine capability editor", () => {
     expect(screen.getByText("Granted commands and file tools run in shared mode, as configured.")).toBeInTheDocument();
     expect(screen.getByText("Restore the managed installation before requesting separated mode.")).toBeInTheDocument();
   });
+  it.each([
+    [undefined, "Separation support unknown"],
+    [null, "Separation support unknown"],
+    [{ available: false, landlock_abi: null, reason: "separated_capabilities_not_reported" }, "Separation support unknown"],
+    [{ available: false, landlock_abi: 8, reason: "separated_requires_managed_browser" }, "Separation prerequisites not met"],
+    [{ available: false, landlock_abi: 8, reason: "separated_probe_timeout" }, "Separation probe timed out"],
+    [{ available: true, landlock_abi: 8, reason: "future_reason" }, "Separation support unknown"],
+    [{ available: true, landlock_abi: 8, reason: null }, "Separation support confirmed"],
+  ] as const)("shows support separately from an existing legacy assignment (%j)", (separated, label) => {
+    render(<MachineCapabilityForm machine={{ ...machine, mode: "shared_legacy", separated }} agentId="agent" contextEnabled />);
+    expect(screen.getByText(label)).toBeVisible();
+    expect(screen.getByText("Shared legacy")).toBeVisible();
+    expect(screen.getByText(/Granted commands and file tools run in shared mode/)).toBeVisible();
+    if (!separated?.available || separated.reason) expect(screen.queryByRole("button", { name: "Separate workspace and browser for this agent" })).not.toBeInTheDocument();
+  });
   it("labels separated contexts without promising full isolation", () => {
     render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", saved_login_ids: [] }} agentId="agent" />);
     expect(screen.getByText("Separate workspace and browser")).toBeInTheDocument();
-    expect(screen.getByText(/Full isolation requires a separate machine container or VM/)).toBeInTheDocument();
+    expect(screen.getByText(/separate machine container or VM.*containers still share their host kernel/)).toBeInTheDocument();
     expect(screen.queryByText("Shared legacy")).not.toBeInTheDocument();
   });
   it("starts denied, uses names and requires an explicit dirty change", async () => {

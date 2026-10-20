@@ -14,7 +14,7 @@ import {
   remoteMachineFixture,
   remoteMachinePlatformFixture,
 } from "@/test/remote-machine-fixture";
-import { machineSetupCommand } from "@/schemas/machines";
+import { machineSetupCommand, SHARED_LEGACY_WARNING } from "@/schemas/machines";
 const mock = vi.hoisted(() => ({
   issue: vi.fn(),
   create: vi.fn(),
@@ -338,4 +338,81 @@ it("shows actionable separation selection when the node reports no owner choice"
   expect(screen.getByText(/machine access requires an owner separation choice/)).toBeInTheDocument();
   expect(screen.getByText("Upgrade the old node or explicitly choose legacy.")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Review machine separation" })).toBeInTheDocument();
+});
+
+it.each((["vm", "docker"] as const).flatMap(where => [
+  { where, selection: "automatic", label: "Automatic — require confirmed supported separation", flag: "automatic" },
+  { where, selection: "require_separated", label: "Require separated workspaces and browsers", flag: "require-separated" },
+  { where, selection: "shared_legacy", label: "Explicit shared legacy access", flag: "shared-legacy" },
+]))("carries $selection through review into the issued $where command", async ({ where, selection, label, flag }) => {
+  mock.search = { setup: "intent" };
+  mock.setup = { id: "intent", choices: { ...choices, where }, status: "review" };
+  mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
+  render(<MachineSetupPage />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "Agent separation" }));
+  await user.click(screen.getByRole("option", { name: label }));
+  if (selection === "shared_legacy") {
+    expect(screen.getByText(SHARED_LEGACY_WARNING)).toBeVisible();
+    await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
+  }
+  await user.click(screen.getByRole("button", { name: "Create my setup command" }));
+  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: selection, where })));
+  const command = await screen.findByText(where === "docker" ? /docker run -d/ : /node setup --separation/);
+  expect(command).toHaveTextContent(where === "docker" ? `NYXID_MACHINE_SEPARATION=${flag}` : `--separation '${flag}'`);
+  if (selection !== "shared_legacy") expect(command).not.toHaveTextContent("shared-legacy");
+});
+
+it("requires fresh legacy acknowledgement when reviewing a previously selected setup", async () => {
+  mock.search = { setup: "intent" };
+  mock.setup = { id: "intent", choices: { ...choices, separation: "shared_legacy", legacy_warning_acknowledged: true }, status: "review" };
+  mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
+  render(<MachineSetupPage />);
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Agent separation" })).toHaveTextContent("Explicit shared legacy access"));
+  expect(await screen.findByText(SHARED_LEGACY_WARNING)).toBeVisible();
+  const consent = screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ });
+  expect(consent).not.toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Create my setup command" }));
+  expect(await screen.findByText("Acknowledge the shared legacy warning before continuing")).toBeVisible();
+  expect(mock.issue).not.toHaveBeenCalled();
+  fireEvent.click(consent);
+  fireEvent.click(screen.getByRole("button", { name: "Create my setup command" }));
+  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: "shared_legacy", legacy_warning_acknowledged: true })));
+  expect(await screen.findByText(/docker run -d/)).toHaveTextContent("NYXID_MACHINE_SEPARATION=shared-legacy");
+});
+
+it("reviews an old omitted choice as automatic and clears legacy consent when the mode changes", async () => {
+  mock.search = { setup: "intent" };
+  mock.setup = { id: "intent", choices: { ...choices, separation: null }, status: "review" };
+  mock.issue.mockResolvedValue({ token: `nyx_nreg_${"b".repeat(64)}` });
+  render(<MachineSetupPage />);
+  const user = userEvent.setup();
+  const mode = screen.getByRole("combobox", { name: "Agent separation" });
+  expect(mode).toHaveTextContent("Automatic");
+  await user.click(mode);
+  await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
+  await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
+  await user.click(mode);
+  await user.click(screen.getByRole("option", { name: /Automatic —/ }));
+  await user.click(mode);
+  await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
+  expect(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ })).not.toBeChecked();
+  await user.click(mode);
+  await user.click(screen.getByRole("option", { name: /Automatic —/ }));
+  await user.click(screen.getByRole("button", { name: "Create my setup command" }));
+  await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: "automatic", legacy_warning_acknowledged: false })));
+  expect(await screen.findByText(/docker run -d/)).toHaveTextContent("NYXID_MACHINE_SEPARATION=automatic");
+});
+
+it.each([
+  [undefined, "Separation support unknown"],
+  [{ version: 2, os: "macos" }, "Separation prerequisites not met"],
+  [{ version: 2, os: "linux", landlock_abi: 8, separate_users: true, managed_browser_configured: true, command_seccomp: true, landlock_enforced: true, managed_browser_sandbox: true }, "Separation support confirmed"],
+] as const)("shows the observed support after connection (%j)", (separation_evidence, label) => {
+  mock.setup = { id: "intent", choices, status: "connected", machine: {
+    shell: true, files: true, authority_versions: [2], separation_evidence,
+    separated: { available: true, landlock_abi: 8, reason: null },
+  } };
+  render(<MachineSetupPage />);
+  expect(screen.getByText(label)).toBeVisible();
 });

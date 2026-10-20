@@ -68,8 +68,9 @@ OpenDots is ahead in per-agent lifecycle/UX and continuously rechecked capabilit
 The owner-approved mode is `separated`; the UI label is **Separate workspace and
 browser for this agent**. It combines the former workspace and browser phases.
 Existing assignments retain `shared_legacy`. New assignments follow the W9.4
-selection contract below. **Full isolation requires a separate machine container
-or VM per agent.** Never label this mode “isolated”.
+selection contract below. **Use a separate machine container or VM per agent
+for stronger separation; containers still share their host kernel.** Never label
+`separated` mode “isolated” or a VM boundary.
 
 #### W9.4 new-assignment selection
 
@@ -110,6 +111,35 @@ neither intent nor evidence remains usable through an existing legacy assignment
 new access requires the owner action. Missing UI fields from an older server are
 accepted for existing assignments, while new grant submissions without explicit
 external legacy consent are rejected by the upgraded server with an explanation.
+
+#### Capability evidence and owner-visible support
+
+The v2 report confirms Linux, Landlock ABI 6+, a root supervisor with three
+distinct non-root users, the command seccomp filter, actual Landlock enforcement,
+and the configured managed Chromium's sandbox under both browser identities.
+Every mechanism needs a positive observation; absent fields, unknown versions
+and the pre-v2 support boolean are insufficient. The browser probe executes the
+real managed binary and reads `chrome://sandbox`; it does not infer browser
+permission from `/bin/true` or a successful `unshare` before exec. On Ubuntu,
+AppArmor's unprivileged-user-namespace sysctl is diagnostic only: the executable's
+profile attachment decides its user-namespace permission. Keep that restriction
+enabled. macOS has no supported per-agent separation backend in this runtime.
+
+Settings distinguish confirmed support, failed prerequisites and unknown evidence.
+`separated_probe_timeout` has its own retry guidance: a cold Chromium start can
+exceed the five-second probe bound. Timeout does not establish support or prove
+that a host can never support separation. All probe process groups are swept on
+success, error and timeout. Reports are observations, not an attestation or a
+promise that support will remain available; execution still checks current fences.
+
+The machine-level badge says **Sharing set per agent**. The assignment label is
+**Shared legacy**, **Separate workspace and browser**, or **Owner selection
+required**. Capability support and command-versus-node-secret separation are
+different facts: neither `commands_isolated` nor successful v2 probes change an
+existing assignment. An unknown host remains usable under an existing legacy
+assignment, subject to its live ACLs and restrictions. Browserless node-only
+containers need explicit legacy consent; a separate container per agent is the
+recommended deployment until browserless contexts are supported.
 
 #### What separated does and does not guarantee
 
