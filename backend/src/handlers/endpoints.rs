@@ -728,6 +728,7 @@ mod tests {
             .unwrap();
             services.push(service);
         }
+        crate::test_utils::init_test_audit_chain_hmac_key();
         crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
