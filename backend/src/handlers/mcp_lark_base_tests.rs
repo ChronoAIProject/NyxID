@@ -1272,6 +1272,11 @@ async fn lark_base_write_same_photo_distinct_conversations_refuses_stalled_dispa
     });
     assert_eq!(payload(&first)["record_id"], "rec_receipt");
     assert_error(&second);
+    assert!(
+        text(&second).contains("A Base write for this photo is in progress; try again shortly"),
+        "{second}"
+    );
+    assert!(!text(&second).contains("outcome unknown"), "{second}");
     assert_eq!(requests(&u).await.len(), 3);
     let replay = rpc(&f, &auth2, "tools/call", Some(params)).await;
     assert_eq!(payload(&replay)["already_created"], true);

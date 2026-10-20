@@ -28,14 +28,18 @@ fn conflict(row: &LarkBaseWrite) -> AppError {
             "Photo already belongs to record {}; use bitable_record_update to change its fields",
             row.record_id.as_deref().unwrap_or("unknown")
         )),
-        WriteState::Uncertain | WriteState::Dispatching => AppError::Conflict(format!(
-            "Photo reserved by a Base write in state {}; check the Base; NyxID will not create it again",
-            state_name(row.state)
-        )),
-        _ => AppError::Conflict(format!(
-            "Photo reserved by a Base write in state {}; it is in progress or its authority changed",
-            state_name(row.state)
-        )),
+        WriteState::Uploading | WriteState::Dispatching if row.deadline_at > Utc::now() => {
+            AppError::Conflict("A Base write for this photo is in progress; try again shortly".into())
+        }
+        WriteState::Uncertain | WriteState::Dispatching => AppError::Conflict(
+            "Base write outcome unknown; check the Base; NyxID will not create it again".into()
+        ),
+        WriteState::Uploading => AppError::Conflict(
+            "A previous Base upload for this photo expired or its authority changed; try again shortly".into()
+        ),
+        WriteState::FailedPreDispatch | WriteState::FailedDefinite => AppError::Internal(
+            "Inactive Base write reached the reservation conflict path".into()
+        ),
     }
 }
 
@@ -53,27 +57,52 @@ pub(super) async fn claim(
             let calls = db.collection::<LarkBaseWrite>(COLLECTION);
             let existing = calls.find_one(doc! {"key":&proposed.key}).session(&mut *session).await?;
             let mut next = proposed.clone();
-            if let Some(row) = existing {
+            if let Some(row) = &existing {
                 let same_authority = row.principal == proposed.principal && row.contract_digests == proposed.contract_digests;
                 if row.state == WriteState::Succeeded {
-                    if !same_authority || row.logical_request_sha256 != proposed.logical_request_sha256 { return Err(conflict(&row)); }
-                    return Ok(Claim::Replay(row.record_id.clone().ok_or_else(|| conflict(&row))?));
+                    if !same_authority || row.logical_request_sha256 != proposed.logical_request_sha256 { return Err(conflict(row)); }
+                    return Ok(Claim::Replay(row.record_id.clone().ok_or_else(|| conflict(row))?));
                 }
                 if row.state == WriteState::Dispatching && row.deadline_at <= Utc::now() {
-                    terminal_in_session(&db, session, &row, WriteState::Uncertain, "deadline", None).await?;
+                    terminal_in_session(&db, session, row, WriteState::Uncertain, "deadline", None).await?;
                     // Commit the uncertainty before returning its refusal.
-                    return Ok(Claim::Active(Box::new(LarkBaseWrite { state: WriteState::Uncertain, ..row })));
+                    return Ok(Claim::Active(Box::new(LarkBaseWrite { state: WriteState::Uncertain, ..row.clone() })));
                 }
                 if !matches!(row.state, WriteState::FailedPreDispatch | WriteState::FailedDefinite)
                     && !(row.state == WriteState::Uploading && row.deadline_at <= Utc::now() && same_authority) {
-                    return Err(conflict(&row));
+                    return Err(conflict(row));
                 }
                 next.id = row.id.clone();
                 next.created_at = row.created_at;
                 if same_authority { next.files = row.files.clone(); }
+            }
+            // Check holders before inserting/replacing the incoming write. A
+            // stale dispatching holder must commit its uncertainty while the
+            // incoming call is refused, without activating a partial attempt.
+            for key in &photos {
+                let reservations = db.collection::<LarkBaseWritePhoto>(PHOTOS);
+                if let Some(photo) = reservations.find_one(doc! {"photo_key":key}).session(&mut *session).await?
+                    && photo.write_id != next.id {
+                    let holder = calls.find_one(doc! {"_id":&photo.write_id}).session(&mut *session).await?
+                        .ok_or_else(|| AppError::Conflict("Photo is reserved by another Base write".into()))?;
+                    if holder.state == WriteState::Dispatching && holder.deadline_at <= Utc::now() {
+                        if !terminal_in_session(&db, session, &holder, WriteState::Uncertain, "deadline", None).await? {
+                            return Err(AppError::Conflict("Base write attempt changed; try again shortly".into()));
+                        }
+                        return Ok(Claim::Active(Box::new(LarkBaseWrite { state: WriteState::Uncertain, ..holder })));
+                    }
+                    if matches!(holder.state, WriteState::FailedPreDispatch | WriteState::FailedDefinite) {
+                        reservations.delete_one(doc! {"_id":&photo.id,"write_id":&photo.write_id,"attempt":&photo.attempt})
+                            .session(&mut *session).await?;
+                    } else {
+                        return Err(conflict(&holder));
+                    }
+                }
+            }
+            if let Some(row) = existing {
                 let changed = calls.replace_one(doc! {"_id":&row.id,"attempt":&row.attempt,"state":state_name(row.state)}, &next)
                     .session(&mut *session).await?;
-                if changed.matched_count != 1 { return Err(conflict(&row)); }
+                if changed.matched_count != 1 { return Err(AppError::Conflict("Base write attempt changed; try again shortly".into())); }
             } else {
                 calls.insert_one(&next).session(&mut *session).await?;
             }
@@ -81,8 +110,7 @@ pub(super) async fn claim(
                 let reservations = db.collection::<LarkBaseWritePhoto>(PHOTOS);
                 if let Some(photo) = reservations.find_one(doc! {"photo_key":key}).session(&mut *session).await? {
                     if photo.write_id != next.id {
-                        let holder = calls.find_one(doc! {"_id":&photo.write_id}).session(&mut *session).await?;
-                        return Err(holder.as_ref().map(conflict).unwrap_or_else(|| AppError::Conflict("Photo is reserved by another Base write".into())));
+                        return Err(AppError::Conflict("Base write photo reservation changed; try again shortly".into()));
                     }
                     reservations.update_one(doc! {"_id":&photo.id,"write_id":&next.id,"attempt":&photo.attempt},
                         doc! {"$set":{"attempt":&next.attempt,"expires_at":bson::Bson::Null}}).session(&mut *session).await?;

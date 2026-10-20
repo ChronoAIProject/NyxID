@@ -339,6 +339,97 @@ async fn lark_base_write_overlapping_batches_and_uncertain_holders_keep_one_atom
 }
 
 #[tokio::test]
+async fn lark_base_write_photo_holder_deadlines_commit_uncertainty_before_refusal() {
+    let db = db("base_holder_deadline").await;
+    let (proposal, photos) = make_proposal(&["a"]);
+    let mut holder = active(&db, &proposal, &photos).await;
+    let (overlap, overlap_photos) = make_proposal(&["a", "b"]);
+    for phase in [WriteState::Uploading, WriteState::Dispatching] {
+        if phase == WriteState::Dispatching {
+            ledger::barrier(&db, &holder, &photos, "body")
+                .await
+                .unwrap();
+            holder.state = phase;
+        }
+        for (incoming, keys) in [(&proposal, &photos), (&overlap, &overlap_photos)] {
+            let Err(AppError::Conflict(message)) = ledger::claim(&db, incoming, keys).await else {
+                panic!("live {phase:?} must refuse as in progress");
+            };
+            assert_eq!(
+                message,
+                "A Base write for this photo is in progress; try again shortly"
+            );
+            assert!(!message.contains("outcome unknown"));
+        }
+    }
+    expire(&db, &mut holder).await;
+    let ledger::Claim::Active(refused) =
+        ledger::claim(&db, &overlap, &overlap_photos).await.unwrap()
+    else {
+        panic!("expired dispatch must commit its uncertainty before refusal");
+    };
+    assert_eq!(refused.id, holder.id);
+    assert_eq!(refused.attempt, holder.attempt);
+    assert_eq!(refused.state, WriteState::Uncertain);
+    let stored = db
+        .collection::<LarkBaseWrite>(COLLECTION)
+        .find_one(doc! {"_id":&holder.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, WriteState::Uncertain);
+    assert_eq!(stored.last_code.as_deref(), Some("deadline"));
+    assert_eq!(stored.attempt, holder.attempt);
+    assert!(stored.expires_at.is_some());
+    assert_eq!(
+        db.collection::<LarkBaseWrite>(COLLECTION)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        db.collection::<LarkBaseWrite>(COLLECTION)
+            .find_one(doc! {"key":&overlap.key})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let photo = db
+        .collection::<LarkBaseWritePhoto>(PHOTOS)
+        .find_one(doc! {"photo_key":&photos[0]})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(photo.write_id, holder.id);
+    assert_eq!(photo.attempt, holder.attempt);
+    assert!(photo.expires_at.is_some());
+    assert_eq!(
+        db.collection::<LarkBaseWritePhoto>(PHOTOS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    for (incoming, keys) in [(&proposal, &photos), (&overlap, &overlap_photos)] {
+        let Err(AppError::Conflict(message)) = ledger::claim(&db, incoming, keys).await else {
+            panic!("uncertainty must refuse subsequent calls");
+        };
+        assert_eq!(
+            message,
+            "Base write outcome unknown; check the Base; NyxID will not create it again"
+        );
+        assert!(!message.contains("in progress"));
+    }
+    assert!(
+        effect_gate(&db, &holder, WriteState::Dispatching)
+            .await
+            .is_err()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn lark_base_write_failure_release_corrected_retry_and_stale_cleanup_are_attempt_fenced() {
     let db = db("base_retry_race").await;
     let (proposal, photos) = make_proposal(&["a"]);
