@@ -1,0 +1,107 @@
+name: Artifact Packaging
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '13 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Artifact Packaging Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test-credential-packaging.py
+      - name: Check required PR and publication gate wiring
+        run: |
+          python3 -m venv "$RUNNER_TEMP/packaging-policy"
+          "$RUNNER_TEMP/packaging-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/packaging-policy/bin/python" scripts/test-packaging-workflows.py
+
+  credentials:
+    name: Backend Credential Packaging (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Prepare backend image memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual backend runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/backend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-credential-backend:ci
+          provenance: false
+          cache-from: |
+            type=gha,scope=backend-pr-linux-${{ matrix.arch }}
+            type=gha,scope=backend-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=backend-pr-linux-${{ matrix.arch }}
+      - name: Build actual frontend runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-credential-frontend:ci
+          provenance: false
+          cache-from: type=gha,scope=frontend-pr-linux-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=frontend-pr-linux-${{ matrix.arch }}
+      - name: Require image-extracted manifest, fingerprint, SOURCE_COMMIT and complete byte parity
+        run: |
+          python3 scripts/check-credential-image.py --image nyxid-credential-backend:ci --component backend \
+            --compare-image nyxid-credential-frontend:ci --source-root "$RUNNER_TEMP/image-source/source" \
+            --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}'
+      - name: Verify exported image inputs after build and extraction
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+
+  packaging-pass:
+    name: Artifact Packaging Passed
+    if: always()
+    needs: [policy, credentials]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every packaging check
+        env:
+          POLICY: ${{ needs.policy.result }}
+          CREDENTIALS: ${{ needs.credentials.result }}
+        run: |
+          test "$POLICY" = success
+          test "$CREDENTIALS" = success

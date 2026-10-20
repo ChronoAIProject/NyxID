@@ -87,3 +87,13 @@
 - Exact committed root clean-installs with scripts disabled and no lock drift; policies, syntax and workflow/permission checks pass.
 - No local Docker/application build, push or remote workflow; hosted tool/maintenance/image acceptance remains pending PR CI.
 - C-4 will propose D's local registration fixture, separation flags, credential non-creation assertions, restart persistence and probe cleanup contract.
+
+## C-4a — backend-image credential packaging
+- Replaced the cache-only backend image smoke with required native amd64/arm64 backend+frontend runtime builds and extraction/parity checks; weekly uses the same workflow.
+- Extract from a resolved image ID without startup; reject archive traversal, duplicate members, links and special files; remove stopped containers and anonymous volumes.
+- Require exact credential file closure, manifest hashes/sizes/SRI, recomputed fingerprint, HTML script metadata, source commit/version/epoch and composition/lock binding.
+- Publication repeats extraction/parity on actual backend/frontend image digests before multi-architecture tag promotion; workflow negatives prevent dropping required gates.
+- Local: 148 tests pass (credential21, wiring5, CI helpers26, inputs20, image caller3, workflow9, APT21, APK43); policies/YAML/permissions/syntax pass.
+- A fresh locked scratch npm install and actual credential build pass; all five output files validate. Shared dependency symlinks were unsuitable for source attribution and were replaced only in scratch.
+- Docker extraction and native image builds require Artifact Packaging Policy and Backend Credential Packaging (amd64/arm64) on the PR.
+- Signature verification remains C-7; this check binds the actual credential manifest bytes that signing must consume.

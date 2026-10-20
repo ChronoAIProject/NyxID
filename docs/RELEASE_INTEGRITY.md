@@ -63,6 +63,30 @@ than trusting a separate build of the same source. The backend emits
 `Referrer-Policy: no-referrer`, and frontend nginx preserves its strict CSP
 without adding the SPA policy. See [Production browser policy](BROWSER_SECURITY_POLICY.md).
 
+The required `Artifact Packaging` PR workflow builds both runtime images on
+native amd64 and arm64 runners. `scripts/check-credential-image.py` extracts
+files from stopped containers resolved to immutable image IDs; it never starts
+the images. It rejects links, unsafe paths, missing or extra files, manifest
+hash/size/SRI drift, a different source commit/version/epoch, a different
+credential fingerprint, and a stale composition inventory or lock binding.
+The complete extracted credential file sets must match between the backend
+and frontend images. The weekly run uses the same checks. The publication
+workflow repeats parity against its actual per-architecture image digests and
+requires success before multi-architecture tag promotion.
+
+For a local Docker check after building both images from a verified export:
+
+```sh
+python3 scripts/check-credential-image.py --image nyxid-backend:local \
+  --component backend --compare-image nyxid-frontend:local \
+  --source-root /path/to/export/source --commit "$SOURCE_COMMIT" \
+  --epoch "$SOURCE_DATE_EPOCH"
+```
+
+This packaging check establishes the exact manifest bytes to sign. It does not
+create or verify a release signature; the mandatory official release signing
+and publication gate is a separate control.
+
 In split deployments where a reverse proxy sends the SPA/static frontend and
 backend to different upstreams, route these accept paths and
 `/credential-accept/assets/*` to the backend upstream, not the SPA/static

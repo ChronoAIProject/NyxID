@@ -656,48 +656,14 @@ jobs:
         working-directory: ${{ runner.temp }}/backend-source/source
         run: python3 scripts/check-backend-docker-embeds.py --build-messages "$RUNNER_TEMP/backend-build.jsonl"
 
-  # Exercise the image's compiler and release build when its infrastructure changes.
-  backend-image-smoke:
-    name: Backend Release Image
+  # Final image extraction supersedes the former cache-only backend image smoke.
+  artifact-packaging:
+    name: Artifact Packaging
     needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.backend_image == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Export exact committed image inputs
-        id: source
-        run: |
-          commit=$(git rev-parse HEAD)
-          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Prepare backend image memory reserve
-        timeout-minutes: 5
-        run: bash .github/scripts/prepare-backend-runner.sh
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - name: Build backend release image without publishing
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: ${{ runner.temp }}/image-source/source
-          file: ${{ runner.temp }}/image-source/source/backend/Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
-            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
-          outputs: type=cacheonly
-          push: false
-          cache-from: |
-            type=gha,scope=backend-pr-linux-amd64
-            type=gha,scope=backend-linux-amd64
-          cache-to: type=gha,mode=max,scope=backend-pr-linux-amd64
-          provenance: false
-      - name: Verify exported image inputs after build
-        if: ${{ always() && steps.source.outcome == 'success' }}
-        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.backend_image == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/artifact-packaging.yml
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -1522,7 +1488,7 @@ jobs:
       - permissions-test
       - backend-billing-smoke
       - backend-image-inputs
-      - backend-image-smoke
+      - artifact-packaging
       - cli-test
       - machine-container
       - rust-features
@@ -1557,7 +1523,7 @@ jobs:
             permissions-test=${{ needs.permissions-test.result }}
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
-            backend-image-smoke=${{ needs.backend-image-smoke.result }}
+            artifact-packaging=${{ needs.artifact-packaging.result }}
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
