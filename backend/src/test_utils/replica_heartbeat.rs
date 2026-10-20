@@ -8,7 +8,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::{errors::AppResult, services::security_readiness_service};
+use crate::errors::AppResult;
+use mongodb::bson::doc;
 
 struct Task {
     stop: CancellationToken,
@@ -33,6 +34,7 @@ async fn start_with_period(db: &mongodb::Database, period: Duration) -> AppResul
     .await?;
     super::local_test_connection(&mut options);
     let background = mongodb::Client::with_options(options)?.database(db.name());
+    let fixture_name = db.name().to_owned();
     let mut tasks = TASKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -46,27 +48,55 @@ async fn start_with_period(db: &mongodb::Database, period: Duration) -> AppResul
                     () = cancelled.cancelled() => return Ok(()),
                     () = tokio::time::sleep(period) => {},
                 }
-                // Database shutdown or an observation failure terminates the
-                // worker with a result; it never panics in a detached task.
-                security_readiness_service::observe(
-                    &background,
-                    &crate::services::node_owner_service::ReplicaIdentity {
-                        instance_name: "test-backend".into(),
-                        generation_id: "test-process".into(),
-                        internal_base_url: "http://127.0.0.1:3002".into(),
-                    },
-                    &security_readiness_service::RolloutConfig {
-                        expected_replicas: vec!["test-backend".into()],
-                        drained: true,
-                    },
-                    false,
-                )
-                .await?;
+                // Initial readiness created this row. Never upsert during a
+                // fixture heartbeat: a completed raw drop between ticks must
+                // not recreate its database. Missing/deleting fixture data is
+                // a clean terminal observation only for this test worker.
+                if !refresh(&background, &fixture_name).await? {
+                    return Ok(());
+                }
             }
         }));
         std::sync::Arc::new(tokio::sync::Mutex::new(Some(Task { stop, handle })))
     });
     Ok(())
+}
+
+async fn refresh(db: &mongodb::Database, fixture_name: &str) -> AppResult<bool> {
+    let result = db
+        .collection::<crate::models::security_replica::SecurityReplica>(
+            crate::models::security_replica::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": "test-process"},
+            doc! {"$set": {"observed_at": mongodb::bson::DateTime::now()}},
+        )
+        .await;
+    match result {
+        Ok(result) => Ok(result.matched_count == 1),
+        Err(error) if own_fixture_drop(fixture_name, db.name(), &error) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+// Only the result of the exact fixture-scoped observation above may use this
+// classification. No production heartbeat or other database error is ignored.
+fn own_fixture_drop(
+    fixture_name: &str,
+    request_database: &str,
+    error: &mongodb::error::Error,
+) -> bool {
+    if fixture_name != request_database || super::parse_managed_test_db_name(fixture_name).is_none()
+    {
+        return false;
+    }
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(error) => matches!(error.code, 215 | 26),
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(error)) => {
+            matches!(error.code, 215 | 26)
+        }
+        _ => false,
+    }
 }
 
 /// Called before session cleanup/drop on the independent cleanup runtime.
@@ -104,6 +134,69 @@ pub(super) async fn stop(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::security_readiness_service;
+
+    #[test]
+    fn audit_fixture_heartbeat_clean_drop_is_scoped_to_own_database_and_two_codes() {
+        let name = super::super::new_test_db_name("heartbeat_scope");
+        for code in [215, 26, 112, 13] {
+            let command: mongodb::error::CommandError = mongodb::bson::from_document(
+                doc! {"code": code, "codeName": "test", "errmsg": "fixture error"},
+            )
+            .unwrap();
+            let error = mongodb::error::Error::from(mongodb::error::ErrorKind::Command(command));
+            assert_eq!(
+                own_fixture_drop(&name, &name, &error),
+                matches!(code, 215 | 26)
+            );
+            assert!(!own_fixture_drop(&name, "admin", &error));
+            assert!(!own_fixture_drop("admin", "admin", &error));
+            let write: mongodb::error::WriteError =
+                mongodb::bson::from_document(doc! {"code": code, "errmsg": "fixture error"})
+                    .unwrap();
+            let error = mongodb::error::Error::from(mongodb::error::ErrorKind::Write(
+                mongodb::error::WriteFailure::WriteError(write),
+            ));
+            assert_eq!(
+                own_fixture_drop(&name, &name, &error),
+                matches!(code, 215 | 26)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_fixture_heartbeat_raw_drop_exits_cleanly_without_recreating_database() {
+        let db = crate::test_utils::connect_transaction_test_database("heartbeat_raw_drop").await;
+        security_readiness_service::ready_test_replica(&db).await;
+        assert!(stop(db.name()).await);
+        start_with_period(&db, Duration::from_millis(1))
+            .await
+            .unwrap();
+        let slot = TASKS.lock().unwrap().get(db.name()).unwrap().clone();
+        // Legacy callers may drop while the fixture client/heartbeat is live.
+        db.drop().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if slot.lock().await.as_ref().unwrap().handle.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("raw fixture deletion must finish its heartbeat");
+        // Joining an Ok worker cannot emit the heartbeat-failure diagnostic.
+        assert!(stop(db.name()).await);
+        assert!(!TASKS.lock().unwrap().contains_key(db.name()));
+        crate::test_utils::teardown_test_database(&db).await;
+        assert!(
+            !db.client()
+                .list_database_names()
+                .await
+                .unwrap()
+                .contains(&db.name().to_owned())
+        );
+    }
 
     #[tokio::test]
     async fn audit_fixture_teardown_joins_replica_heartbeat_without_panic_or_database_recreation() {
