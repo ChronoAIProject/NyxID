@@ -1637,3 +1637,4 @@ Executed initial cargo check --locked -p nyxid-cli --all-targets --features node
 Seven new command/writer/custody controls pass; every existing test is preserved. cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics. Owned rustfmt/diff checks pass.
 Startup/reload, WebSocket writers, managed registration, OAuth retention/redaction, resumable migration and old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not complete.
 Artifact/keychain namespace contract unchanged. Native file/mock object-service tests only; Linux and actual OS custody unverified. Logs:/tmp/nyxid-w96-writers-{check,tests,clippy}.log. No push.
+PM hosted resolution: run39362062126/head8589cfd8 passes Coverage (Backend) and Backend Test, including writes-only invocation. capacity_wait fails only Coverage (Backend Base) on mainaaa3d772; PM closes the capacity investigation as an upstream baseline flake.
