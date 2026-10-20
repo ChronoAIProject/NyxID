@@ -1655,7 +1655,7 @@ All six new runtime controls pass both runs, including actual forwarding followe
 Executed cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics; owned rustfmt/diff checks pass. No controls/bounds weakened.
 Managed registration, OAuth durability/redaction, resumable migration, enforced old-daemon stop/status/wait/manual cutover and W9.5 OS custody remain open; artifact/keychain namespace unchanged. Logs:/tmp/nyxid-w96-runtime-{check,tests,tests-retry,clippy}.log. No push.
 
-## W9.6 checkpoint 4 — durable OAuth responses and redacted errors, 2026-10-20 (awaiting PM review)
+## W9.6 checkpoint 4 — durable OAuth responses and redacted errors, 2026-10-20 (PM accepted)
 
 PM accepted runtime checkpoint d552800e2; EXECUTION/REVIEW remain local/untracked. Managed registration, migration/cutover and W9.5 remain open.
 OAuth login/refresh now retain the original pinned directory/generation and per-service lease; dispatch is durable before provider contact, returned tokens before guarded publication/live use.
@@ -1668,3 +1668,17 @@ Final cargo test --locked -p nyxid-cli --features node-proxy-test --bin nyxid no
 cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics in23.01s. Owned rustfmt/diff checks pass; no tests/bounds/denial assertions weakened.
 Artifacts: .nyxid-storage-oauth-<binding>.json/.lock and file envelope .nyxid-storage-oauth-<UUID>.key; keychain object/v1/oauth-recovery/<UUID>, within existing broad contracts. Native file/mock key-service controls only; actual OS/Linux custody remains unverified.
 Forced termination before the first durable response write leaves the dispatch barrier and requires fresh authorization; no replay or secret output. Logs:/tmp/nyxid-w96-oauth-{check,tests,tests-retry,node-tests,clippy}.log. No push.
+
+## W9.6 checkpoint 5 — guarded managed registration, 2026-10-20 (awaiting PM review)
+
+PM accepted OAuth a0b4c768f; EXECUTION/REVIEW remain local/untracked. This checkpoint does not close PRE-08.
+Managed ticket/Kubernetes bootstrap retains one validated Directory and registration lease through recipient work, provider awaits, complete source reads, guarded publication and owned cleanup.
+Existing ordinary/corrupt/missing-key custody refuses before recipient/network/key initialization; verified sealing, admission, endpoint, capabilities and advancing rekey fence precede target initialization.
+Controlled Kubernetes rekey preserves every existing HTTP/query/OAuth/SSH/pending-RCI secret, including optional empty/absent values; same/backward and foreign pending bindings remain refused.
+Cleanup validates all artifacts before retirement; stale/uncertain publication retains recovery. Installed identities resume exact bytes without another delivery, including real child-process exit before cleanup.
+Initial all-target cargo check exits0. Initial managed tests28/1/0 caught a0755-vs0700 regression: pinned chmod+sync restores the original owner-only guarantee without repairing mutable custody. All original permission/symlink/refusal assertions remain.
+Invalid-seal rekey fixture now has real encrypted custody and asserts the actual decryption denial, retaining original config-byte and recipient-reuse assertions. Thirteen new managed/storage controls execute.
+Exact shared Cargo environment used throughout; target locks honored and other streams untouched. Managed retry29 passed/0 failed/0 ignored in5.49s; full node565/0/3 existing ignored in49.97s, zero warnings.
+cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings exits0/zero diagnostics. Owned rustfmt/diff checks pass; no tests/bounds/security controls removed or weakened.
+Artifact/keychain namespace unchanged. Native file/mock HTTP checks only; resumable migration including OAuth recovery, actual daemon stop/status/wait/manual cutover, Linux/OS custody and W9.5 remain open.
+Logs:/tmp/nyxid-w96-managed-{check,tests,tests-retry,node-tests,clippy}.log. No push or OS service/keyring action.

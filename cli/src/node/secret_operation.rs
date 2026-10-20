@@ -117,6 +117,17 @@ impl SecretOperation {
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new(".")),
         )?;
+        Self::open_in(config, path, directory, keychain)
+    }
+
+    /// Managed bootstrap already holds directory custody across its network
+    /// await. Observe that same handle instead of resolving the path again.
+    pub(crate) fn open_in(
+        config: &NodeConfig,
+        path: &Path,
+        directory: Directory,
+        keychain: KeychainBackend,
+    ) -> Result<Self> {
         let baseline = NodeConfig::load_in(&directory, path)?;
         let supplied = Zeroizing::new(toml::to_string(config).map_err(|_| invalid())?);
         let actual = Zeroizing::new(toml::to_string(&baseline).map_err(|_| invalid())?);

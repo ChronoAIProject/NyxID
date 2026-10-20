@@ -32,6 +32,24 @@ impl Directory {
         Ok(Self(self.0.try_clone()?))
     }
 
+    /// Managed bootstrap keeps its stricter owner-only directory contract.
+    /// Change the pinned inode, never a pathname that may have been retargeted.
+    /// Untrusted writable directories are refused before any permission change.
+    pub(crate) fn make_private(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            validate_directory(&self.0, true)?;
+            self.0
+                .set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            self.sync()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(invalid())
+        }
+    }
+
     /// Create a unique attempt lease. Callers never recreate an existing
     /// attempt's lock inode; recovery opens that inode without O_CREAT.
     pub(crate) fn create_lease(&self, name: &std::ffi::OsStr) -> Result<File> {
@@ -994,6 +1012,36 @@ mod tests {
         assert!(read(&path, MAX_CONFIG_BYTES).unwrap() == maximum);
         assert!(publication.save(&path, &too_large).is_err());
         assert!(read(&path, MAX_CONFIG_BYTES).unwrap() == maximum);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_directory_privacy_uses_pinned_inode_and_refuses_mutable_custody() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("node");
+        let retained = root.path().join("retained");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pinned = Directory::open(&path).unwrap();
+        std::fs::rename(&path, &retained).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        pinned.make_private().unwrap();
+        assert_eq!(
+            std::fs::metadata(&retained).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::set_permissions(&retained, std::fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(pinned.make_private().is_err());
+        assert_eq!(
+            std::fs::metadata(&retained).unwrap().permissions().mode() & 0o777,
+            0o770
+        );
     }
 
     #[test]

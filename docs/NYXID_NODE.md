@@ -608,6 +608,37 @@ key and never authorize reads or publication after custody loss. Do not delete
 recovery artifacts to bypass a refusal. Legacy keychain nodes still require the
 explicit stopped-daemon migration before their writers can run.
 
+## Managed bootstrap custody and retry
+
+Managed bootstrap holds one private directory handle and registration lease
+through recipient preparation, the provider response and encrypted identity
+publication. It checks an existing identity and every selected secret before
+creating a recipient or contacting the provider. A missing or replaced node key
+causes a refusal; bootstrap never regenerates it to repair an existing identity.
+The local node key is initialized only after the sealed delivery, writer
+admission, endpoint, workload fence and capabilities have been validated.
+
+Keep `managed-bootstrap.json`, `managed-bootstrap-request.json` and
+`managed-kubernetes-recipient.json` private beside the config. These files retain
+the recipient needed to retrieve the same delivery after an interrupted request.
+Do not delete them to bypass an incompatible binding or recipient error. A stale
+configuration or uncertain publication retains recovery data. Cleanup validates
+every present artifact before retiring any of them, and reports failures.
+
+If identity publication succeeded but cleanup was interrupted, retry managed
+startup with the same binding and directory. It recognizes the installed identity
+and finishes cleanup without requesting another credential delivery. The legacy
+ticket path makes no provider request in this case; Kubernetes still checks its
+projected workload identity through `/prepare` before reusing the installed
+binding. Controlled Kubernetes rekey must advance the installed runtime generation
+or credential epoch and pass the existing admission checks. It replaces node
+authentication material while preserving HTTP, query, OAuth, SSH and pending
+credential keys. A same or backward fence is refused.
+
+The registration lease coordinates current bootstrap commands. It does not prove
+that an old daemon has stopped and does not authorize a storage migration. Keep
+the documented stopped-daemon migration boundary for existing keychain nodes.
+
 ## Troubleshooting
 
 ### "Config error: Failed to read config"
