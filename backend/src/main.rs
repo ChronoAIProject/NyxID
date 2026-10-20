@@ -89,6 +89,7 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
+    pub audit_runtime: Arc<services::audit_runtime::AuditRuntime>,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
     pub http_client: reqwest::Client,
@@ -444,6 +445,11 @@ async fn server_main() {
     )
     .await
     .expect("Durable audit initialization failed; inspect audit cutover diagnostics");
+    let audit_runtime = Arc::new(services::audit_runtime::AuditRuntime::new(
+        audit_config.admission.clone(),
+        false,
+    ));
+    tracing::info!(limits = ?audit_config.admission, "Effective audit admission limits");
     tracing::warn!("Audit witness is not configured; durable local audit is unwitnessed");
     // Index setup also contains compatibility data migrations. None may run
     // before the common audit allocator and process key are available.
@@ -451,6 +457,7 @@ async fn server_main() {
         .await
         .expect("Failed to verify MongoDB indexes and compatibility migrations");
     services::audit_outbox_service::spawn_materializer(db.clone(), audit_chain_hmac_key.clone());
+    services::audit_runtime::spawn_monitor(db.clone(), audit_runtime.clone());
     db::run_startup_migrations(&db)
         .await
         .expect("Startup data migrations failed");
@@ -921,6 +928,7 @@ async fn server_main() {
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
+        audit_runtime,
         config: config.clone(),
         jwt_keys,
         http_client: http_client.clone(),

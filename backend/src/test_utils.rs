@@ -2124,6 +2124,10 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     AppState {
         local_machine_platform: None,
         db: db.clone(),
+        audit_runtime: Arc::new(crate::services::audit_runtime::AuditRuntime::new(
+            Default::default(),
+            false,
+        )),
         config: config.clone(),
         jwt_keys,
         http_client: http_client.clone(),

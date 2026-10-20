@@ -1,5 +1,14 @@
 //! Audit configuration is deliberately local-first. Absence of a witness is
 //! an explicit unwitnessed deployment, never an implicit production-ready sink.
+mod diagnostics;
+mod evidence;
+mod monitor;
+pub use diagnostics::{AuditDiagnostics, AuditRuntime};
+pub use monitor::spawn_monitor;
+pub mod policy;
+pub(super) use evidence::load_in_session;
+pub use evidence::{ExternalAuditEvidence, external_evidence};
+
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Default)]
@@ -7,6 +16,7 @@ pub struct AuditConfig {
     pub chain_id: Option<Uuid>,
     /// Required only when adopting a preexisting v1 chain for the first time.
     pub cutover_drained: bool,
+    pub admission: policy::AdmissionLimits,
 }
 
 impl AuditConfig {
@@ -16,10 +26,12 @@ impl AuditConfig {
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(_) => Err("Audit configuration must be UTF-8"),
         };
-        Self::parse(
+        let mut config = Self::parse(
             optional("AUDIT_CHAIN_ID")?.as_deref(),
             optional("AUDIT_CUTOVER_DRAINED")?.as_deref(),
-        )
+        )?;
+        config.admission = policy::AdmissionLimits::from_env()?;
+        Ok(config)
     }
 
     fn parse(chain: Option<&str>, drained: Option<&str>) -> Result<Self, &'static str> {
@@ -38,6 +50,7 @@ impl AuditConfig {
         Ok(Self {
             chain_id,
             cutover_drained,
+            admission: policy::AdmissionLimits::default(),
         })
     }
 }

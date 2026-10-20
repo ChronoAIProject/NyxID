@@ -49,6 +49,7 @@ pub enum AuditChainStatus {
 pub enum AuditEvidenceStatus {
     Unwitnessed,
     Unverified,
+    Unavailable,
     Broken,
 }
 
@@ -226,10 +227,10 @@ pub async fn verify_chain(
             ));
         }
     }
-    let evidence_status = if durable.as_ref().is_some_and(|s| s.witness_enrolled) {
-        AuditEvidenceStatus::Unverified
-    } else {
-        AuditEvidenceStatus::Unwitnessed
+    let evidence_status = match durable.as_ref() {
+        Some(state) if state.witness_enrolled => AuditEvidenceStatus::Unverified,
+        Some(_) => AuditEvidenceStatus::Unwitnessed,
+        None => AuditEvidenceStatus::Unavailable,
     };
     let head_seq = tail.as_ref().map(|tail| tail.seq);
     let head_hash = tail.map(|tail| tail.entry_hash);

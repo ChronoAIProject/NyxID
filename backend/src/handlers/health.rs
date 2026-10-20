@@ -36,6 +36,8 @@ pub async fn security_readiness(
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub degraded: bool,
+    pub audit: crate::services::audit_runtime::AuditDiagnostics,
     pub version: String,
     pub commit: String,
     pub encryption: EncryptionHealthResponse,
@@ -51,13 +53,24 @@ pub struct EncryptionHealthResponse {
 ///
 /// Returns service health status. Used by load balancers and monitoring.
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let status = match crate::services::audit_state_service::load(&state.db).await {
-        Ok(head) if head.witness_enrolled => "unverified",
-        Ok(_) => "unwitnessed",
-        Err(_) => "unavailable",
+    use crate::services::audit_runtime::policy::WitnessState;
+    let audit =
+        match crate::services::audit_runtime::external_evidence(&state.db, &state.audit_runtime)
+            .await
+        {
+            Ok(evidence) => evidence.diagnostics,
+            Err(_) => state.audit_runtime.diagnostics(None, chrono::Utc::now()),
+        };
+    let degraded = audit.witness != WitnessState::Ready;
+    let status = match audit.witness {
+        WitnessState::Unavailable => "unavailable",
+        WitnessState::Ready => "ok",
+        _ => "degraded",
     };
     Json(HealthResponse {
         status: status.to_string(),
+        degraded,
+        audit,
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit: env!("NYXID_GIT_HASH").to_string(),
         encryption: EncryptionHealthResponse {
@@ -172,12 +185,70 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database("audit_health_local").await;
         let state = crate::test_utils::test_app_state(db.clone());
         let response = health_check(State(state.clone())).await;
-        assert_eq!(response.0.status, "unwitnessed");
+        assert_eq!(response.0.status, "degraded");
+        assert!(response.0.degraded);
+        assert_eq!(
+            response.0.audit.witness,
+            crate::services::audit_runtime::policy::WitnessState::Unwitnessed
+        );
         db.collection::<mongodb::bson::Document>(crate::models::audit_state::COLLECTION_NAME)
             .delete_many(mongodb::bson::doc! {})
             .await
             .unwrap();
         assert_eq!(health_check(State(state)).await.0.status, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn audit_health_keeps_http_200_during_configured_outage_and_backlog() {
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, StatusCode},
+            routing::get,
+        };
+        use tower::ServiceExt;
+        let db = crate::test_utils::connect_transaction_test_database("audit_health_outage").await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.audit_runtime = std::sync::Arc::new(
+            crate::services::audit_runtime::AuditRuntime::new(Default::default(), true),
+        );
+        let router = Router::new()
+            .route("/health", get(health_check))
+            .with_state(state);
+        for (count, age, expected) in [(0_i64, 0, "stale"), (1, 3_600, "backlogged")] {
+            db.collection::<mongodb::bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+                .update_one(mongodb::bson::doc! {"singleton": true}, mongodb::bson::doc! {"$set": {
+                    "witness_enrolled": true, "pending_count": count, "next_order": count,
+                    "oldest_pending_at": if count == 0 { bson::Bson::Null } else {
+                        bson::Bson::DateTime(bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(age)))
+                    }
+                }}).await.unwrap();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["status"], "degraded");
+            assert_eq!(json["degraded"], true);
+            assert_eq!(json["audit"]["witness"], expected);
+            assert!(json["audit"]["last_contact_secs"].is_null());
+            assert_eq!(json["audit"]["admission"]["narrowing"], "alarm");
+            assert_eq!(json["audit"]["admission"]["availability"], "alarm");
+            assert_eq!(
+                json["audit"]["admission"]["standard"],
+                if count == 0 { "alarm" } else { "closed" }
+            );
+        }
     }
 
     // ---- HealthResponse serialization ----
@@ -199,7 +270,10 @@ mod tests {
     #[test]
     fn health_response_serializes_all_fields() {
         let resp = HealthResponse {
-            status: "ok".to_string(),
+            status: "degraded".to_string(),
+            degraded: true,
+            audit: crate::services::audit_runtime::AuditRuntime::new(Default::default(), false)
+                .diagnostics(None, chrono::Utc::now()),
             version: "1.0.0".to_string(),
             commit: "abc1234".to_string(),
             encryption: EncryptionHealthResponse {
@@ -208,7 +282,9 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["status"], "ok");
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["degraded"], true);
+        assert_eq!(json["audit"]["witness"], "unavailable");
         assert_eq!(json["version"], "1.0.0");
         assert_eq!(json["commit"], "abc1234");
         assert_eq!(json["encryption"]["previous_key_configured"], false);
@@ -221,7 +297,10 @@ mod tests {
         stats.v2_current = 100;
         stats.v2_previous = 5;
         let resp = HealthResponse {
-            status: "ok".to_string(),
+            status: "degraded".to_string(),
+            degraded: true,
+            audit: crate::services::audit_runtime::AuditRuntime::new(Default::default(), false)
+                .diagnostics(None, chrono::Utc::now()),
             version: "2.0.0".to_string(),
             commit: "def5678".to_string(),
             encryption: EncryptionHealthResponse {

@@ -13,6 +13,13 @@ fn client_closed_request() -> StatusCode {
     StatusCode::from_u16(499).expect("499 is within the valid status-code range")
 }
 
+/// Fixed operator-only audit closure category. Client responses remain generic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditAdmissionReason {
+    Backlogged,
+    WitnessUnavailable,
+}
+
 pub const PENDING_CREDENTIAL_DECRYPT_FAILED_CODE: u32 = 8006;
 pub const PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE: u32 = 8007;
 pub const PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE: u32 = 8008;
@@ -165,6 +172,12 @@ pub enum AppError {
 
     #[error("Audit chain identity or history conflicts with durable state")]
     AuditIntegrityConflict,
+
+    #[error("Temporarily unavailable. Please retry later.")]
+    AuditAdmissionClosed { reason: AuditAdmissionReason },
+
+    #[error("Temporarily unavailable. Please retry later.")]
+    AuditWitnessDiverged,
 
     #[error("Internal server error: {0}")]
     Internal(String),
@@ -820,7 +833,9 @@ impl AppError {
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::AuditNotInitialized
             | Self::AuditCutoverRequired
-            | Self::AuditIntegrityConflict => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::AuditIntegrityConflict
+            | Self::AuditAdmissionClosed { .. }
+            | Self::AuditWitnessDiverged => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
@@ -1050,6 +1065,8 @@ impl AppError {
             Self::AuditNotInitialized => 13000,
             Self::AuditCutoverRequired => 13001,
             Self::AuditIntegrityConflict => 13002,
+            Self::AuditAdmissionClosed { .. } => 13003,
+            Self::AuditWitnessDiverged => 13004,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
@@ -1319,6 +1336,8 @@ impl AppError {
             Self::AuditNotInitialized => "audit_not_initialized",
             Self::AuditCutoverRequired => "audit_cutover_required",
             Self::AuditIntegrityConflict => "audit_integrity_conflict",
+            Self::AuditAdmissionClosed { .. } => "audit_admission_closed",
+            Self::AuditWitnessDiverged => "audit_witness_diverged",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
@@ -1637,6 +1656,9 @@ impl IntoResponse for AppError {
         match &self {
             // Already logged once with bounded structured fields by the startup boundary.
             AppError::VoiceStartFailed(_) => {}
+            // The runtime logs each categorical transition with a bounded
+            // repeat cadence. Never flood logs with each refused request.
+            AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged => {}
             AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
             AppError::PoolAttemptTransport(kind) => {
                 tracing::error!(?kind, "Pool attempt transport failure")
@@ -1649,6 +1671,15 @@ impl IntoResponse for AppError {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        if matches!(
+            self,
+            Self::AuditAdmissionClosed { .. } | Self::AuditWitnessDiverged
+        ) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("30"),
             );
         }
         response
@@ -2087,9 +2118,40 @@ mod tests {
         assert!(error.response_body().message.len() < 2_000);
     }
 
+    #[tokio::test]
+    async fn audit_admission_errors_are_generic_retryable_and_do_not_expose_reason() {
+        for error in [
+            AppError::AuditAdmissionClosed {
+                reason: AuditAdmissionReason::Backlogged,
+            },
+            AppError::AuditAdmissionClosed {
+                reason: AuditAdmissionReason::WitnessUnavailable,
+            },
+            AppError::AuditWitnessDiverged,
+        ] {
+            assert!(matches!(error.error_code(), 13003 | 13004));
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "30");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let text = std::str::from_utf8(&body).unwrap();
+            assert!(text.contains("Temporarily unavailable"));
+            assert!(!text.contains("backlogged"));
+            assert!(!text.contains("witness_unavailable"));
+        }
+    }
+
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::AuditNotInitialized.error_code(),
+            AppError::AuditCutoverRequired.error_code(),
+            AppError::AuditIntegrityConflict.error_code(),
+            AppError::AuditAdmissionClosed {
+                reason: AuditAdmissionReason::Backlogged,
+            }
+            .error_code(),
+            AppError::AuditWitnessDiverged.error_code(),
             AppError::ManagedExecutionPending("".into()).error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),

@@ -1,6 +1,5 @@
 //! Transactional safe-event queue. Event identity is allocated outside a caller's
 //! retry loop; operation/stage is the logical replay identity across processes.
-use chrono::Utc;
 use mongodb::{ClientSession, Database, bson::doc};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -10,8 +9,8 @@ use crate::{
     models::{
         audit_log::AuditLog,
         audit_outbox::{
-            AuditOwner, AuditPrincipal, AuditStage, PENDING_COLLECTION_NAME as PENDING,
-            PendingAuditEvent, SafeAuditEvent,
+            AuditOutbox, AuditOwner, AuditPrincipal, AuditStage, COLLECTION_NAME as OUTBOX,
+            PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent, SafeAuditEvent,
         },
         audit_state::{AuditState, COLLECTION_NAME as STATE},
     },
@@ -88,21 +87,42 @@ pub async fn enqueue_in_session(
     let event = event.safe_projection();
     uuid(event_id)?;
     validate(&event)?;
+    // A replay is not permission to bypass a missing or rolled-back allocator.
+    let key = super::audit_service::audit_chain_hmac_key().ok_or(AppError::AuditNotInitialized)?;
+    let (state, now) = super::audit_state_service::writer_snapshot(db, session, key).await?;
     let filter = doc! {"event.operation_id": &event.operation_id,
     "event.stage": bson::to_bson(&event.stage).map_err(|_| AppError::AuditIntegrityConflict)?};
     let pending = db.collection::<PendingAuditEvent>(PENDING);
     if let Some(existing) = pending.find_one(filter).session(&mut *session).await? {
-        if existing.event != event {
+        if existing.event != event
+            || existing.order <= 0
+            || existing.order > state.next_order
+            || existing
+                .materialized_seq
+                .is_some_and(|seq| seq > state.head_seq)
+            || (existing.materialized_seq.is_none() && state.pending_count <= 0)
+        {
             return Err(AppError::AuditIntegrityConflict);
+        }
+        if let Some(seq) = existing.materialized_seq {
+            let delivery = db
+                .collection::<AuditOutbox>(OUTBOX)
+                .find_one(doc! {"_id": &existing.id})
+                .session(&mut *session)
+                .await?
+                .ok_or(AppError::AuditIntegrityConflict)?;
+            if delivery.chain_id != state.id
+                || delivery.order != existing.order
+                || delivery.seq != seq
+                || delivery.key_version != state.key_version
+                || (seq == state.head_seq && delivery.entry_hash != state.head_hash)
+                || (delivery.witnessed_at.is_none() && state.pending_count <= 0)
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
         }
         return Ok(existing.id);
     }
-    let state = db
-        .collection::<AuditState>(STATE)
-        .find_one(doc! {"singleton": true})
-        .session(&mut *session)
-        .await?
-        .ok_or(AppError::AuditNotInitialized)?;
     let order = state
         .next_order
         .checked_add(1)
@@ -111,7 +131,6 @@ pub async fn enqueue_in_session(
         .pending_count
         .checked_add(1)
         .ok_or(AppError::AuditIntegrityConflict)?;
-    let now = Utc::now();
     let updated = db.collection::<AuditState>(STATE).update_one(
         doc! {"_id": &state.id, "next_order": state.next_order, "pending_count": state.pending_count},
         doc! {"$set": {"next_order": order, "pending_count": count,

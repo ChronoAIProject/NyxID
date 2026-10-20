@@ -1,7 +1,7 @@
 //! Local chain allocation is always transactional, including without a witness.
 //! Only explicit startup adoption may initialize the head; append never infers
 //! a replacement head from surviving rows.
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mongodb::{ClientSession, Database, bson::doc, options::IndexOptions};
 use uuid::Uuid;
 
@@ -89,6 +89,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn load(db: &Database) -> AppResult<AuditState> {
     db.collection::<AuditState>(STATE)
         .find_one(doc! {"singleton": true})
@@ -207,7 +208,13 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
 }
 
 fn validate_identity(state: &AuditState, config: &AuditConfig) -> AppResult<()> {
-    if state.protocol != PROTOCOL
+    if state.pending_count < 0
+        || state.next_order < state.pending_count
+        || (state.pending_count == 0) != state.oldest_pending_at.is_none()
+        || state.head_seq < 0
+        || state.witnessed_seq < 0
+        || state.witnessed_seq > state.head_seq
+        || state.protocol != PROTOCOL
         || state.key_version != 1
         || config.chain_id.is_some_and(|id| id.to_string() != state.id)
     {
@@ -252,6 +259,20 @@ pub async fn append_in_session(
     append(db, session, entry, key, None).await
 }
 
+/// Reservation and replay use the same local boundary checks as direct append.
+/// This does not establish external continuity or configured-witness admission.
+pub(super) async fn writer_snapshot(
+    db: &Database,
+    session: &mut ClientSession,
+    key: &[u8],
+) -> AppResult<(AuditState, DateTime<Utc>)> {
+    let (state, now) = super::audit_runtime::load_in_session(db, session).await?;
+    let state = state.ok_or(AppError::AuditNotInitialized)?;
+    validate_identity(&state, &AuditConfig::default())?;
+    validate_tail(db, session, key, &state).await?;
+    Ok((state, now))
+}
+
 pub(super) async fn append_reserved_in_session(
     db: &Database,
     session: &mut ClientSession,
@@ -270,16 +291,9 @@ async fn append(
     reservation: Option<&PendingAuditEvent>,
 ) -> AppResult<AuditLog> {
     let entries = db.collection::<AuditLog>(AUDIT_LOG);
-    let state = db
-        .collection::<AuditState>(STATE)
-        .find_one(doc! {"singleton": true})
-        .session(&mut *session)
-        .await?
-        .ok_or(AppError::AuditNotInitialized)?;
-    validate_identity(&state, &AuditConfig::default())?;
     // Replay must validate the durable boundary too: an identical old UUID is
     // not permission to accept a rolled-back head or an old-writer tail.
-    validate_tail(db, &mut *session, key, &state).await?;
+    let (state, database_now) = writer_snapshot(db, session, key).await?;
     if let Some(existing) = entries
         .find_one(doc! {"_id": &entry.id})
         .session(&mut *session)
@@ -340,7 +354,7 @@ async fn append(
                     .pending_count
                     .checked_add(1)
                     .ok_or(AppError::AuditIntegrityConflict)?,
-                Utc::now(),
+                database_now,
             )
         }
     };

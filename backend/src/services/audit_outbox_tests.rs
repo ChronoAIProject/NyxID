@@ -7,6 +7,7 @@ use crate::{
     services::{audit_chain_service as chain, audit_state_service as state},
     test_utils::connect_transaction_test_database,
 };
+use chrono::Utc;
 
 const KEY: [u8; 32] = [2; 32];
 
@@ -32,6 +33,79 @@ async fn enqueue(db: &Database, id: &str, event: &AuditEvent) -> AppResult<Strin
     let result = enqueue_in_session(db, &mut session, id, event).await?;
     state::commit(&mut session).await?;
     Ok(result)
+}
+
+#[tokio::test]
+async fn audit_pending_replay_refuses_missing_or_rolled_back_allocator() {
+    let db = connect_transaction_test_database("audit_pending_replay_boundary").await;
+    let event = event();
+    let id = Uuid::new_v4().to_string();
+    enqueue(&db, &id, &event).await.unwrap();
+    db.collection::<bson::Document>(STATE)
+        .update_one(
+            doc! {"singleton": true},
+            doc! {"$set": {"next_order": 0_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        enqueue(&db, &id, &event).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+    db.collection::<bson::Document>(STATE)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert!(matches!(
+        enqueue(&db, &id, &event).await,
+        Err(AppError::AuditNotInitialized)
+    ));
+}
+
+#[tokio::test]
+async fn audit_materialized_replay_refuses_head_rollback() {
+    let db = connect_transaction_test_database("audit_pending_materialized_rollback").await;
+    let event = event();
+    let id = Uuid::new_v4().to_string();
+    enqueue(&db, &id, &event).await.unwrap();
+    assert!(materialize_one(&db, &KEY).await.unwrap());
+    db.collection::<bson::Document>(STATE)
+        .update_one(doc! {"singleton": true}, doc! {"$set": {"head_seq": 0_i64}})
+        .await
+        .unwrap();
+    assert!(matches!(
+        enqueue(&db, &id, &event).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+}
+
+#[tokio::test]
+async fn audit_pending_reservation_refuses_corrupt_tail_and_missing_delivery() {
+    let db = connect_transaction_test_database("audit_pending_delivery_boundary").await;
+    let event = event();
+    let id = Uuid::new_v4().to_string();
+    enqueue(&db, &id, &event).await.unwrap();
+    assert!(materialize_one(&db, &KEY).await.unwrap());
+    db.collection::<bson::Document>(OUTBOX)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert!(matches!(
+        enqueue(&db, &id, &event).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+    db.collection::<bson::Document>(AUDIT)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let fresh = AuditEvent {
+        operation_id: Uuid::new_v4().to_string(),
+        ..event
+    };
+    assert!(matches!(
+        enqueue(&db, &Uuid::new_v4().to_string(), &fresh).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
 }
 
 #[tokio::test]
