@@ -3014,8 +3014,10 @@ async fn start_chat_turn(
         &row.channel_bot_id,
     )
     .await?;
-    let (declared, media_event_ids, media_sent_at) =
-        crate::services::channel_media_events::for_turn(&state.db, row, event_key).await?;
+    let (declared, media_event_ids, media_sent_at) = Box::pin(
+        crate::services::channel_media_events::for_turn(&state.db, row, event_key),
+    )
+    .await?;
     let had_media = declared > 0;
     if text.trim().is_empty() && !had_media {
         return Ok(Inbound::Silent);
@@ -3312,7 +3314,12 @@ async fn start_chat_turn(
             {
                 tracing::warn!("Accepted channel source retained without async reply preference");
             }
-            super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
+            Box::pin(super::assistant_team::wake(
+                state,
+                &row.user_id,
+                &conversation_id,
+            ))
+            .await;
             Ok(Inbound::Queued)
         }
         // A concurrent first message created the chat: it now exists.
@@ -3924,8 +3931,12 @@ async fn media_admission(
         conversation_id: None,
         agent_id: row.agent_id.clone(),
     };
-    let presence =
-        crate::services::channel_media_events::presence(&state.db, &request, missing_media).await?;
+    let presence = Box::pin(crate::services::channel_media_events::presence(
+        &state.db,
+        &request,
+        missing_media,
+    ))
+    .await?;
     let media = Box::pin(crate::services::channel_media_events::admission(
         &state.db, &request,
     ))
@@ -4096,7 +4107,7 @@ async fn responses_with_producers_impl(
         && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
         && activity["actor"]["kind"] == "human"
     {
-        match media_admission(
+        match Box::pin(media_admission(
             &state,
             &row,
             &event_id,
@@ -4104,7 +4115,7 @@ async fn responses_with_producers_impl(
             activity["actor"]["id"].as_str().unwrap_or_default(),
             activity["conversation"]["thread_id"].as_str(),
             true,
-        )
+        ))
         .await
         {
             Ok(media) => media,
@@ -4869,7 +4880,7 @@ pub async fn relay_callback(
         == crate::models::channel_thread::ThreadSenderKind::Human
         && chats::native_owner_eligible(&row.platform, &payload["raw_platform_data"])
     {
-        match media_admission(
+        match Box::pin(media_admission(
             &state,
             &row,
             &claims.message_id,
@@ -4879,7 +4890,7 @@ pub async fn relay_callback(
                 .unwrap_or_default(),
             thread_id.as_deref(),
             false,
-        )
+        ))
         .await
         {
             Ok(media) => media,

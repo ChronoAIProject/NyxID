@@ -52,11 +52,11 @@ pub(super) async fn inbound(
     if row.transport != "direct" {
         return Ok(false);
     }
-    Ok(
-        inbound_impl(state, row, payload, message, text, event_key, false)
-            .await?
-            .is_some(),
-    )
+    Ok(Box::pin(inbound_impl(
+        state, row, payload, message, text, event_key, false,
+    ))
+    .await?
+    .is_some())
 }
 
 pub(super) async fn gateway_inbound(
@@ -73,7 +73,7 @@ pub(super) async fn gateway_inbound(
     }
     let payload = json!({"conversation":{"type":activity["conversation"]["kind"]},
         "sender":{"display_name":activity["actor"]["display_name"]}});
-    inbound_impl(
+    Box::pin(inbound_impl(
         state,
         row,
         &payload,
@@ -81,7 +81,7 @@ pub(super) async fn gateway_inbound(
         text,
         event_key,
         true,
-    )
+    ))
     .await
 }
 
@@ -152,10 +152,11 @@ async fn inbound_impl(
     }
 
     if text.trim().is_empty()
-        && crate::services::channel_media_events::for_turn(&state.db, row, event_key)
-            .await?
-            .0
-            == 0
+        && Box::pin(crate::services::channel_media_events::for_turn(
+            &state.db, row, event_key,
+        ))
+        .await?
+        .0 == 0
     {
         return Ok(Some(Inbound::Silent));
     }

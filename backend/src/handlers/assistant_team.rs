@@ -209,7 +209,10 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
-        if crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id).await?
+        if Box::pin(crate::services::channel_thread_follow_service::prune_queue(
+            &state.db, owner, id,
+        ))
+        .await?
             == 0
         {
             return Ok(());
@@ -682,12 +685,14 @@ pub(crate) async fn permission_decided(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
         );
-        notify(state, owner, &request.conversation_id, vec![event]).await;
+        Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed
         && request.kind == "skills"
         && request.decided_by.as_deref() != Some("orchestrator")
-        && deliver_skill_notification(state, request).await.is_err()
+        && Box::pin(deliver_skill_notification(state, request))
+            .await
+            .is_err()
     {
         tracing::debug!("Skill attachment notification deferred");
     }

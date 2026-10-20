@@ -2058,7 +2058,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             return Err(AppError::Forbidden("Thread sender changed".into()));
         }
-        super::channel_thread_follow_service::admit_turn(db, user_id, origin, &id, session).await?;
+        Box::pin(super::channel_thread_follow_service::admit_turn(
+            db, user_id, origin, &id, session,
+        ))
+        .await?;
         row.channel = Some(origin.clone());
     }
     if let Some(request) = start.group_request_id.as_deref() {
@@ -2113,11 +2116,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         .any(|event| event.invocation_id.is_some())
     {
         let before = row.pending_events.len();
-        row.pending_events = super::assistant_invocation_service::filter_events_in_session(
-            db,
-            session,
-            user_id,
-            std::mem::take(&mut row.pending_events),
+        row.pending_events = Box::pin(
+            super::assistant_invocation_service::filter_events_in_session(
+                db,
+                session,
+                user_id,
+                std::mem::take(&mut row.pending_events),
+            ),
         )
         .await?;
         if row.pending_events.len() != before {
@@ -2147,13 +2152,13 @@ pub(crate) async fn begin_owner_turn_in_session(
     {
         Vec::new()
     } else {
-        super::channel_thread_follow_service::filter_events(
+        Box::pin(super::channel_thread_follow_service::filter_events(
             db,
             user_id,
             &id,
             super::async_service_operation::select_events(&mut row, start.origin),
             session,
-        )
+        ))
         .await?
     };
     if had_queued_media
@@ -2302,11 +2307,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.credential_invocation_id != next_invocation
         && !row.credential_api_key_id.is_empty()
     {
-        super::assistant_agent_credential_service::require_invocation_boundary_clear(
-            db,
-            user_id,
-            &row.id,
-            &mut *session,
+        Box::pin(
+            super::assistant_agent_credential_service::require_invocation_boundary_clear(
+                db,
+                user_id,
+                &row.id,
+                &mut *session,
+            ),
         )
         .await?;
         super::api_key_mutation_service::update_one(
@@ -2459,9 +2466,9 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
-        super::assistant_invocation_service::settle_in_session(
+        Box::pin(super::assistant_invocation_service::settle_in_session(
             db, session, user_id, &lost_turn, &message,
-        )
+        ))
         .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
@@ -3386,7 +3393,9 @@ async fn finish_turn_inner(
     let (error, settled) = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation: AppResult<_> = async {
+            // Settlement includes media finalization and invocation bookkeeping.
+            // Bound the transaction future independently of its retry-driver frames.
+            let operation: AppResult<_> = Box::pin(async {
                 // A retry after an ambiguous commit observes the durable reply.
                 if let Some(saved) = db
                     .collection::<AssistantMessage>(MESSAGES)
@@ -3644,7 +3653,7 @@ async fn finish_turn_inner(
                     .await?;
                 }
                 if let Some(turn) = settled_turn.as_ref() {
-                    super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message).await?;
+                    Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
@@ -3657,7 +3666,7 @@ async fn finish_turn_inner(
                     .session(&mut *session)
                     .await?;
                 Ok((error, settled_turn))
-            }
+            })
             .await;
             transactions::transaction_result(operation)
         })

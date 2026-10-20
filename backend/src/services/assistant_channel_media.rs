@@ -478,8 +478,8 @@ pub async fn ingest_and_bind(state: &AppState, row: &AssistantConversation) -> A
     if message.media_pending.is_none() {
         return Ok(String::new());
     }
-    let receipt = collect(state, row, &message).await?;
-    let receipt = binding::bind(&state.db, &message, &receipt).await?;
+    let receipt = Box::pin(collect(state, row, &message)).await?;
+    let receipt = Box::pin(binding::bind(&state.db, &message, &receipt)).await?;
     binding::reconcile(&state.db, &receipt).await?;
     Ok(receipt.context)
 }
