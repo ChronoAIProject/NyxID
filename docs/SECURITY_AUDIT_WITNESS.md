@@ -2,9 +2,11 @@
 
 The reference executable is `nyxid-audit-witness`, built from the backend package.
 It runs independently of MongoDB and of the NyxID application host. This batch
-provides the protocol, client and sink. Application readiness, outbox delivery,
-verification, retention, HMAC transitions and caller admission are subsequent W8
-integrations; installing this executable alone does not activate those controls.
+provides the protocol, client and sink. W8-4 adds the opt-in application relay and
+local durable allocation and intent/claim foundation. Replica cutover readiness,
+retained verification, retention, HMAC transitions and complete caller admission
+remain tracked W8 integrations; installing this executable alone does not activate
+them.
 
 ## W8-4 rollout decisions
 
@@ -28,7 +30,8 @@ Without a witness, `AUDIT_CHAIN_ID` may be omitted and the first initialization
 persists a UUID v4. For later independent enrollment, retain and independently
 provision that exact identity. A configured witness never automatically enrolls
 or resets itself from MongoDB, and removing its configuration after enrollment
-must report unavailable instead of reverting to optional unwitnessed mode.
+retains stale configured admission instead of reverting to optional unwitnessed
+mode. Existing pending age/count can additionally make it backlogged.
 
 PM approved C2's four-tier policy. Pending **age and count** gate DB-only
 admission; contact freshness raises alarms and gates live-claim effects. The
@@ -74,9 +77,9 @@ these are admission controls, not proxy server faults. The runtime must record
 categorical closure/divergence transitions as system audit events and emit
 error-level transition/repeat logs at most once per minute, with recovery at info.
 Logs contain fixed status/count/age/sequence metadata and never event bodies.
-The policy/diagnostic foundation does not itself convert a workflow: transactional
-admission/reservations, authenticated relay and intent/claim consumption remain
-tracked integration work. Production activation requires the recovery gate below.
+The policy/diagnostic foundation does not itself convert a workflow: each owner
+must adopt transactional admission/reservations and consume the intent/claim
+permit around its effect. Production activation requires the recovery gate below.
 S3 compliance-mode Object Lock remains scheduled as W8-3b after W8-5, including
 retained-version anti-shadowing and storage-level writer-denial tests.
 
@@ -90,8 +93,8 @@ Neither materialization nor compaction releases unacknowledged capacity. Index
 setup and compatibility migrations run after the allocator is initialized.
 The original v1 canonical bytes and existing business transactions are retained.
 
-This group does not yet connect the external relay or implement configured
-witness admission. Categorical evidence is available in health and in the admin
+The optional external relay authenticates independent history and supplies live
+contact to configured admission. Categorical evidence is available in health and in the admin
 verification/Integrity responses and UI. The audit and billing verify endpoints
 use `status` for categorical evidence (`unwitnessed`, `unverified`, `unavailable`
 or `broken`) and `local_status` for their existing local HMAC/anchor result.
@@ -102,8 +105,8 @@ pending time independently of local continuity. A stored enrolled cursor is
 is `unavailable`, including an empty local history. Older responses without an
 evidence field display as unavailable; neither local success nor a missing field
 produces a fully verified success message.
-The immutable external cursor, replica/protocol observations, protected intent
-dispatch and caller conversions remain explicit integration work. The local
+Replica/protocol cutover observations, protected retained verification and caller
+conversions remain explicit integration work. The local
 head detects disagreement with a deleted tail, but a coordinated Mongo rollback
 still requires independently authenticated witness evidence. Until W8-5 adds a
 protected retention boundary, deleting the head row is corruption, including
@@ -233,6 +236,101 @@ harness independently implements receipt framing in Python for its live app-UID
 requests. Body/property order and JSON whitespace do not affect signatures.
 
 ## Storage, durability and enrollment
+
+### Intent and outcome reservation
+
+The service-level foundation accepts only reviewed static action names and typed
+actor/owner/target identities. A business owner creates one stable operation UUID
+outside retries, then commits its DB mutation, the intent event and **two** pending
+slots in the same transaction: one for intent, one for the eventual outcome.
+The outcome slot has no event body before completion. Witnessing the intent
+releases only its own slot. Outstanding outcome reservations remain in pending
+count/age admission, including while no materialized event occupies that slot.
+Terminal success/failure/cancellation/uncertainty consumes the original slot,
+so closed admission cannot prevent recording an already admitted result.
+
+With a configured/enrolled witness, dispatch waits for the materialized intent
+to appear in authenticated observed history. The application records the attempt
+and serving generation **before** requesting the independent claim. It obtains
+an exact operation/attempt/process/intent-bound receipt and records the claim
+before issuing a non-cloneable, non-serializable permit. Consuming that permit
+rechecks its durable phase/identity, fresh Effect admission and any shared
+divergence marker before entering the provider closure. The same generation
+UUID is used by the deployment's existing replica identity. Claim retrieval and
+stored receipts do not renew contact freshness. Failure after a potentially
+accepted claim leaves its reservation and attempted identity intact.
+
+A recovered unresolved attempt is durably `uncertain` and yields no send permit.
+No lease timeout, missing local response, new process or retrieved receipt grants
+reassignment. A provider call already entered by a paused original process may
+still finish; the new process must not dispatch again. Positive provider
+reconciliation or actual provider idempotency belongs to each owning workflow
+and remains W8-6 work. Marking uncertainty does not claim that no effect happened.
+There is no generic retry/reset endpoint. The process remembers issued logical
+operations for its lifetime; capacity planning must include that memory.
+
+Witness-free local mode retains the same intent/outcome transaction and local
+one-shot claim, while permitting normal operation under C1. It remains explicitly
+`unwitnessed` and provides no independent protection against a rollback of local
+claim history. A deployment that was enrolled cannot enter this mode by removing
+its witness settings. These are infrastructure APIs; every pending workflow must
+still adopt stable business dedupe identities, terminal recording and reviewed
+provider reconciliation before it counts as converted.
+
+### Application pin and relay
+
+Set `AUDIT_WITNESS_URL`, `AUDIT_WITNESS_PIN_FILE` and
+`AUDIT_WITNESS_TOKEN_FILE` together. Partial configuration fails startup. The
+public pin is JSON with `protocol: 1`, the lowercase hex `verification_key`, and
+`enrollment`, the original complete signed receipt zero obtained and verified by
+the independent administrator. Its enrollment event must equal its head. Keep
+the original pin and receipt outside rollbackable Mongo and outside app-host
+custody. The app copy is an administrator-owned read-only file whose directory
+ancestors are neither application-owned nor writable by group/world; all path
+components are opened without following symlinks. Run the app under a distinct
+unprivileged UID. On macOS use canonical absolute paths. The append credential
+is a separate app-owned mode `0600` file with no additional hard links, symlinks
+or group/world-writable ancestors. Neither raw credential nor verification pin
+appears in diagnostics or Debug. The library's loopback validation constructor
+is not exposed as a production configuration downgrade.
+
+No network call blocks startup. A configured process starts `stale`, with unknown
+contact freshness and Mongo's existing oldest-pending age. Validating the protected
+enrollment pin durably activates configured admission before serving, even if the
+first observation is unreachable; removing settings cannot undo that activation.
+The activation does not advance the witnessed cursor or renew contact. Every five seconds,
+including on an otherwise quiet chain, the relay challenges the witness and
+reconstructs authenticated history from the protected enrollment. Pages must
+bind the previous signed receipt, preserve monotonic receipt order/time, and
+agree with the final challenge-bound observation. Every newly traversed audit
+link is compared with its local canonical HMAC row. Each process keeps only live
+contact in memory; no persisted receipt can create it. Full history replay is
+bounded per tick, continues from the authenticated process cursor, and publishes
+no freshness before catching up. Receipt digest memory/history replay cost must
+be capacity-planned until protected W8-5 checkpoints provide a retained boundary.
+
+The relay commits a UUID-identified advance request, its exact predecessor and
+bounded links before sending. Transaction conflicts fence competing workers;
+the witness serializes requests at the exact predecessor. An identical retry
+keeps its original identity. An accepted request whose response or Mongo commit
+was lost is recovered from signed history, without manufacturing a second batch.
+Only authenticated observed history releases capacity: marking outbox rows,
+advancing the witnessed cursor, clearing a completed request, decrementing the
+pending count and recalculating the remaining oldest reservation share one
+majority+journal Mongo transaction. Local materialization never releases it.
+Pending requests are rechecked against real canonical rows before any retry.
+
+Conflicting enrollment/history/local rows latch a durable incident and remove
+live contact. Startup reloads that incident even while the witness is unreachable.
+There is no application method to clear it. Removing configuration after
+enrollment preserves stale configured admission, rather than reverting to
+unwitnessed policy. Protection against a rollback of both the incident marker and
+all local state depends on independently retained witness history and the W8-5
+recovery/checkpoint protocol; do not treat Mongo's incident flag as external
+evidence. A current challenge and agreement support live diagnostics; the verify
+API continues reporting `unverified` until complete retained external verification
+lands. Configuring this relay does not satisfy the production recovery gate or
+convert pending workflows.
 
 The executable requires Unix permissions and an unprivileged sink UID distinct
 from the admin owner. Its enrollment directory is admin-owned mode `0750`;

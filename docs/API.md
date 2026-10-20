@@ -183,7 +183,9 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 
 #### GET /health
 
-Returns service health status. No authentication required.
+Returns service health status with HTTP 200, including during an audit witness
+outage or admission closure. No authentication required. Consumers must inspect
+`degraded` and `audit`; an HTTP success alone does not establish audit integrity.
 
 **Auth:** None
 
@@ -191,8 +193,30 @@ Returns service health status. No authentication required.
 
 ```json
 {
-  "status": "ok",
-  "version": "0.5.0"
+  "status": "degraded",
+  "degraded": true,
+  "version": "0.72.0",
+  "commit": "<build commit>",
+  "audit": {
+    "witness": "unwitnessed",
+    "admission": { "narrowing": "open", "availability": "open", "standard": "open", "effect": "open" },
+    "chain_id": "<chain UUID>",
+    "pending_count": 0,
+    "oldest_pending_secs": 0,
+    "last_contact_secs": null,
+    "local_head_seq": 0,
+    "witnessed_seq": null,
+    "standard_closes_in_secs": null,
+    "availability_closes_in_secs": null,
+    "divergence": null,
+    "last_transition": null,
+    "limits": {
+      "contact_secs": 60, "pending_age_secs": 30, "pending_count": 10000,
+      "standard": { "pending_age_secs": 3600, "pending_count": 100000 },
+      "availability": { "pending_age_secs": 86400, "pending_count": 1000000 }
+    }
+  },
+  "encryption": { "previous_key_configured": false, "decrypt_stats": {} }
 }
 ```
 
@@ -6227,7 +6251,14 @@ Query the audit log with server-side pagination, sorting, scoped search, and fil
 
 #### GET /api/v1/admin/audit-log/verify
 
-Verify the tamper-evident audit-log hash chain over a bounded range. A broken chain returns HTTP 200 with `status: "broken"` because the integrity break is the report finding, not a transport error.
+Verify the local audit HMAC chain over a bounded range, and report independent
+external evidence separately. Findings return HTTP 200. `local_status` describes
+the requested local range; `status` describes external evidence and must never be
+inferred from local continuity. A witness-free deployment is `unwitnessed`, even
+when every local HMAC is valid. A configured witness that is stale or has pending
+verification is `unverified`; unavailable local/evidence state is `unavailable`;
+conflicting evidence or a local break is `broken`. A local pass cannot detect an
+unwitnessed suffix deletion or restore by itself.
 
 **Auth:** Admin or operator
 
@@ -6243,7 +6274,16 @@ Verify the tamper-evident audit-log hash chain over a bounded range. A broken ch
 
 ```json
 {
-  "status": "ok",
+  "status": "unwitnessed",
+  "local_status": "ok",
+  "external_evidence": {
+    "status": "unwitnessed",
+    "local_head_seq": 58321,
+    "witnessed_seq": null,
+    "pending_count": 10000,
+    "oldest_pending_at": "2026-10-20T00:00:00Z",
+    "diagnostics": { "witness": "unwitnessed", "last_contact_secs": null }
+  },
   "checked_count": 10000,
   "pre_chain_count": 42,
   "head_seq": 58321,
@@ -6253,6 +6293,34 @@ Verify the tamper-evident audit-log hash chain over a bounded range. A broken ch
 ```
 
 If a break is detected, `break_info` contains the first broken sequence, its kind (`gap`, `link_mismatch`, or `hash_mismatch`), and the expected/actual values.
+
+The diagnostics above are abbreviated; the complete object uses the same fields
+as `/health.audit`. `GET /api/v1/admin/chain-verification` (admin/operator) returns
+rolling local verification and `external_evidence` as distinct fields. The
+Integrity page shows witness state, pending count/age, contact age, local and
+witnessed sequences, per-tier closure time, divergence prefixes and the latest
+system transition. No receipt body, event payload, credential or public-key pin
+is included in these diagnostics. Missing evidence in an older response is
+unavailable, never implicit verification.
+
+Witness observations use a fresh process challenge. Restarts begin with unknown
+freshness; reading a stored receipt cannot renew it. Signed history is checked
+from the independently retained enrollment and compared with local canonical
+links before delivery reservations are released. The local suffix after
+`witnessed_seq`, plus reservations not yet materialized, is the newest explicitly
+unwitnessed window. Without an enrolled witness the whole chain is unwitnessed.
+Protected retention/checkpoint verification and complete caller admission remain
+tracked W8 rollout gates; configuring the relay alone does not complete them.
+
+Configured-witness admission uses four operation tiers. Narrowing remains
+allowed for witness reasons. Availability and Standard use distinct pending
+age/count hard ceilings; contact age alone raises an alarm. Standard refuses on
+divergence, while Availability retains its own hard ceiling. External Effect
+dispatch requires a witnessed durable intent plus a live one-shot claim; outages
+defer dispatch. Closed admission returns generic HTTP 503 with `Retry-After: 30`
+and code `13003` or `13004`, without internal witness details. Rollout, limits and
+administrator recovery prerequisites are in
+[SECURITY_AUDIT_WITNESS.md](SECURITY_AUDIT_WITNESS.md) and [ENV.md](ENV.md).
 
 **Audit Event Types:**
 
