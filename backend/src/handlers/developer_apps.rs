@@ -180,8 +180,9 @@ pub struct ConnectionWebhookSecretResponse {
     pub client_id: String,
     pub connection_webhook_url: String,
     pub connection_webhook_enabled: bool,
-    /// Returned only by configuration and rotation endpoints.
-    pub signing_secret: String,
+    /// Returned only by configuration and rotation endpoints; kept in wiping
+    /// custody until Axum serializes this response into its HTTP body.
+    pub signing_secret: zeroize::Zeroizing<String>,
     pub key_id: String,
 }
 

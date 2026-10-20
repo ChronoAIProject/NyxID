@@ -290,3 +290,8 @@
 - Reused C's successor all-target both-KMS backend Clippy --no-deps -- -D warnings, drivers22:23:54–56, exit0 at22:30:15; execution sources frozen20:13:56/20:15:42. Required shared env/nofile60000; no B Cargo.
 - Successor test compiler28510 started22:31:04, preserved executable mtime22:47:50.109460. Full audit_ run212 passed/0 failed (2 existing manual benchmarks ignored), including all five execution tests: send-once/receipt, resolver mismatch, terminal-detail replay, receipt rollback/reconciliation, unavailable witness. Evidence: ~/Library/Caches/nyxid-w8-core/evidence/successor-audit-full.log.
 - Scoped rustfmt/check, whitespace and per-file/index inspection pass. C confirmed exact first two notification_service.rs hunks plus execution sources/docs; settings, finish wrapper, sink/configuration, FIFO and all foreign lane edits excluded. This slice uses the already committed terminal-detail and bounded-runner APIs.
+
+### CORE-B C1: retain webhook secret in wiping response custody
+
+- Return the configured or rotated signing secret as Zeroizing<String> and retain that wrapper in the response DTO through serialization. The secret is still returned only after the configuration and audit transaction commits.
+- Validation: corrected TEST no-run exit0; direct webhooks:8, all passed with no failures/ignored. Actual both-KMS all-target Clippy exit101 is retained: sole foreign B admin.rs2979 Json lint, PM-qualified unaffected C paths. Broader workflow42 remains pending.

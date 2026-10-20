@@ -346,7 +346,7 @@ pub async fn configure(
     actor_id: &str,
     client_id: &str,
     url: &str,
-) -> AppResult<(OauthClient, String, String)> {
+) -> AppResult<(OauthClient, Zeroizing<String>, String)> {
     let url = webhook_delivery_service::validate_webhook_url(url, "connection_webhook_url").await?;
     store_configuration(
         db,
@@ -440,7 +440,7 @@ async fn store_configuration(
     actor_id: &str,
     client_id: &str,
     url: &str,
-) -> AppResult<(OauthClient, String, String)> {
+) -> AppResult<(OauthClient, Zeroizing<String>, String)> {
     let secret = WebhookSecret::prepare(encryption_keys).await?;
     let updated = WebhookConfiguration::new(
         db,
@@ -454,7 +454,7 @@ async fn store_configuration(
     .commit()
     .await?;
     // No secret is returned until the business mutation and safe audit commit.
-    Ok((updated, secret.raw.to_string(), secret.key_id))
+    Ok((updated, secret.raw, secret.key_id))
 }
 
 pub async fn rotate_secret(
@@ -464,7 +464,7 @@ pub async fn rotate_secret(
     principal: &AuditPrincipal,
     actor_id: &str,
     client_id: &str,
-) -> AppResult<(OauthClient, String, String)> {
+) -> AppResult<(OauthClient, Zeroizing<String>, String)> {
     let secret = WebhookSecret::prepare(encryption_keys).await?;
     let updated = WebhookConfiguration::new(
         db,
@@ -477,7 +477,7 @@ pub async fn rotate_secret(
     )
     .commit()
     .await?;
-    Ok((updated, secret.raw.to_string(), secret.key_id))
+    Ok((updated, secret.raw, secret.key_id))
 }
 
 pub async fn disable(
@@ -794,7 +794,7 @@ mod tests {
             configured.connection_webhook_key_id.as_deref(),
             Some(first_key_id.as_str())
         );
-        assert!(!format!("{configured:?}").contains(&first_secret));
+        assert!(!format!("{configured:?}").contains(first_secret.as_str()));
         let stored_first = Zeroizing::new(
             keys.decrypt(
                 configured
@@ -811,7 +811,7 @@ mod tests {
             rotate_secret(&db, &runtime, &keys, &principal, &owner, &client_id)
                 .await
                 .expect("rotate webhook secret");
-        assert_ne!(first_secret, second_secret);
+        assert_ne!(first_secret.as_str(), second_secret.as_str());
         assert_ne!(first_key_id, second_key_id);
         let stored_second = Zeroizing::new(
             keys.decrypt(
