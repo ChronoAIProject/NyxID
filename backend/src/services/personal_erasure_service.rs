@@ -23,9 +23,12 @@ const DOMAINS: &[&str] = &[
     "oracle",
     "channel_bots",
     "provider_credentials",
-    "machine",
     "local_inventory",
     "source",
+    // Machine lifecycle, deletion consent and paid liability are durable
+    // records retained after source removal. Their native cleanup checkpoint
+    // must not hold the account row, but still gates overall completion.
+    "machine",
     "vendor",
 ];
 

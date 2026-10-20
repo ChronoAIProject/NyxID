@@ -126,8 +126,13 @@ pub(crate) async fn ready_or_enqueue(db: &Database, user: &str) -> AppResult<boo
         .write_concern(WriteConcern::majority())
         .await?;
     let result: AppResult<bool> = async {
+        // Preparation is not write admission: disabled owners, including those
+        // already retired by the platform-personal lifecycle, still need
+        // erasure. Touch the same owner row so credential changes and lifecycle
+        // transitions still contend; acceptance rechecks the dependency revision
+        // and installs the permanent write barrier in its own transaction.
         let owner = db.collection::<Document>(USERS).find_one_and_update(
-            doc! {"_id":user,"is_active":true,"platform_personal_deleting":{"$ne":true}},
+            doc! {"_id":user,"user_type":{"$ne":"org"}},
             doc! {"$inc":{"credential_preparation_fence":1_i64}}).session(&mut tx).await?
             .ok_or_else(||AppError::Conflict("Credential owner changed".into()))?;
         let revision=owner.get("credential_dependency_revision").cloned().unwrap_or(bson::Bson::Int64(0));
@@ -358,6 +363,92 @@ pub(super) async fn process_one(db: &Database, keys: &EncryptionKeys) -> AppResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inactive_owners_prepare_without_reopening_authority_and_rewrap_invalidates_snapshot() {
+        for deleting in [false, true] {
+            let (db, user) = super::super::tests::fixture().await;
+            let keys = crate::test_utils::test_encryption_keys();
+            let mut legacy = crate::test_utils::test_encryption_keys();
+            legacy.set_contextual_record_writes(false);
+            let credential = import_material(&db, &legacy, &user, Some("provider"), "oauth2").await;
+            db.collection::<Document>(USERS)
+                .update_one(
+                    doc! {"_id":&user},
+                    doc! {"$set":{"is_active":false,"platform_personal_deleting":deleting},
+                    "$inc":{"platform_personal_effect_revision":1_i64}},
+                )
+                .await
+                .unwrap();
+            let original = db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id":&user})
+                .await
+                .unwrap()
+                .unwrap();
+            finish_preparation(&db, &keys, &user).await;
+            super::super::tests::assert_account_preserved(
+                db.collection::<Document>(USERS)
+                    .find_one(doc! {"_id":&user})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                original,
+            );
+
+            // A real storage writer still invalidates an inactive owner's
+            // prepared revision, even though the credential value is unchanged.
+            let source = db
+                .collection::<Document>(COLLECTIONS[0])
+                .find_one(doc! {"_id":&credential.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                crate::services::credential_record_service::migrate_snapshot(
+                    &db,
+                    &keys,
+                    COLLECTIONS[0],
+                    &source,
+                )
+                .await
+                .unwrap()
+            );
+            assert!(matches!(
+                Box::pin(super::super::accept(&db, &user, &user, None)).await,
+                Err(AppError::ErasurePreparing)
+            ));
+            assert!(super::super::status(&db, &user).await.unwrap().is_none());
+            finish_preparation(&db, &keys, &user).await;
+            let accepted = Box::pin(super::super::accept(&db, &user, &user, None))
+                .await
+                .unwrap();
+            assert_eq!(accepted.status, ErasureStatus::Accepted);
+            assert!(matches!(
+                crate::services::erasure_admission::begin_write(&db, &user).await,
+                Err(AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                crate::services::admin_user_service::set_user_active(&db, "admin", &user, true)
+                    .await,
+                Err(AppError::Conflict(_))
+            ));
+            assert!(
+                crate::services::user_credentials_service::upsert_user_credentials(
+                    &db,
+                    &keys,
+                    &user,
+                    "provider",
+                    "late-client",
+                    Some("late-secret"),
+                    None,
+                )
+                .await
+                .is_err()
+            );
+            db.drop().await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn stale_cleanup_cannot_delete_successor_plans_or_recreate_old_plans() {
