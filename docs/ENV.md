@@ -453,6 +453,8 @@ Otherwise the automatic derivation chain is safe: local deployments derive from 
 
 ## Audit Log Hash Chain (Optional)
 
+The independently deployed `nyxid-audit-witness` uses protected files and CLI flags, with no new production environment variables in W8-3. Enrollment, public-pin custody, TLS/storage prerequisites and the separation threat model are in [SECURITY_AUDIT_WITNESS.md](SECURITY_AUDIT_WITNESS.md). Its server readiness/outbox integration remains a later W8 batch.
+
 NyxID audit-log rows created after this feature is enabled are tamper-evident. Each chained row carries `seq`, `prev_hash`, and `entry_hash`; `entry_hash` is an HMAC-SHA256 over a canonical encoding of the row content and the previous row's hash. The HMAC key stays in process memory and is never written to MongoDB, so a database-only attacker cannot recompute a valid chain after editing, deleting, inserting, or reordering chained rows.
 
 | Variable | Default | Description |
