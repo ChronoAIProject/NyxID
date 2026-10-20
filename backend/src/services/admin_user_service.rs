@@ -2,6 +2,9 @@ use chrono::Utc;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
+use super::auth_service::{
+    AccountAudit, default_role_ids_in_session, platform_role_ids_in_session,
+};
 use super::{
     audit_outbox_service,
     audit_runtime::{AuditRuntime, policy::AuditTier, transaction},
@@ -9,10 +12,10 @@ use super::{
 };
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
-use crate::models::audit_outbox::{AuditOwner, AuditPrincipal};
+use crate::models::audit_outbox::{AuditDetail, AuditOwner, AuditPrincipal, SecurityFlag};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
-use crate::services::{api_key_mutation_service as key_mutations, role_service};
+use crate::services::role_service;
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -56,6 +59,8 @@ pub async fn get_user_email(db: &mongodb::Database, user_id: &str) -> AppResult<
 /// Admin-created accounts are pre-verified and active.
 pub async fn create_user(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    principal: AuditPrincipal,
     email: &str,
     password_raw: &str,
     display_name: Option<&str>,
@@ -103,25 +108,7 @@ pub async fn create_user(
         ));
     }
 
-    // Check email uniqueness (case-insensitive). Scoped to person accounts
-    // because the new partial-unique index on `users.email` only constrains
-    // `user_type = "person"`, and orgs are allowed to share contact emails
-    // with persons.
     let normalized = email.to_lowercase();
-    let existing = db
-        .collection::<User>(USERS)
-        .find_one(doc! {
-            "email": &normalized,
-            "user_type": "person",
-        })
-        .await?;
-
-    if existing.is_some() {
-        return Err(AppError::Conflict(
-            "A user with this email already exists".to_string(),
-        ));
-    }
-
     // Validate display name length
     if let Some(name) = display_name
         && name.len() > 200
@@ -146,11 +133,6 @@ pub async fn create_user(
     };
     let (is_admin, is_operator) = platform_role.legacy_flags();
 
-    // Auto-assign default roles to new admin-created users
-    let mut role_ids = role_service::get_default_role_ids(db).await?;
-    let platform_role_ids = role_service::get_platform_role_ids(db).await?;
-    role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
-
     let new_user = User {
         id: user_id.clone(),
         email: normalized,
@@ -165,7 +147,7 @@ pub async fn create_user(
         is_active: true,
         is_admin,
         is_operator,
-        role_ids,
+        role_ids: vec![],
         group_ids: vec![],
         invite_code_id: None,
         mfa_enabled: false,
@@ -179,11 +161,51 @@ pub async fn create_user(
         profile_config: Default::default(),
     };
 
-    db.collection::<User>(USERS).insert_one(&new_user).await?;
-
-    tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
-
-    Ok(new_user)
+    let audit = AccountAudit::new("admin.user.created");
+    let context = (db, runtime, &principal, &new_user, &audit, &platform_role);
+    transaction::run(
+        db,
+        &context,
+        |session, (db, runtime, principal, prepared, audit, role)| {
+            Box::pin(async move {
+                let existing = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"email": &prepared.email, "user_type": "person"})
+                    .session(&mut *session)
+                    .await?;
+                if existing.is_some() {
+                    return Err(AppError::Conflict(
+                        "A user with this email already exists".into(),
+                    ));
+                }
+                let mut user = (*prepared).clone();
+                user.role_ids = default_role_ids_in_session(db, session).await?;
+                let ids = platform_role_ids_in_session(db, session).await?;
+                role_service::add_platform_role_id(&mut user.role_ids, **role, &ids);
+                db.collection::<User>(USERS)
+                    .insert_one(&user)
+                    .session(&mut *session)
+                    .await?;
+                let event = audit
+                    .event((*principal).clone(), &user, &user.id)
+                    .with_detail(AuditDetail::PlatformRoleChange {
+                        old: None,
+                        new: role_service::resolve_platform_role_from_ids(&user, &ids),
+                    });
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    runtime,
+                    AuditTier::Standard,
+                    &audit.event_id,
+                    &event,
+                )
+                .await?;
+                Ok(user)
+            })
+        },
+    )
+    .await
 }
 
 /// Update a user's profile fields (admin action).
@@ -192,122 +214,160 @@ pub async fn create_user(
 /// field constraints.
 pub async fn update_user(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    principal: AuditPrincipal,
     user_id: &str,
     display_name: Option<&str>,
     email: Option<&str>,
     avatar_url: Option<&str>,
 ) -> AppResult<User> {
-    let existing = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let audit = AccountAudit::new("admin.user.updated");
+    let context = (
+        db,
+        runtime,
+        &principal,
+        user_id,
+        display_name,
+        email,
+        avatar_url,
+        &audit,
+    );
+    transaction::run(
+        db,
+        &context,
+        |session, (db, runtime, principal, user_id, display_name, email, avatar_url, audit)| {
+            Box::pin(async move {
+                let existing = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! { "_id": user_id })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let mut set_doc = doc! {};
+                let mut set_doc = doc! {};
 
-    if let Some(name) = display_name {
-        let name = name.trim();
-        if name.len() > 200 {
-            return Err(AppError::ValidationError(
-                "Display name must be 200 characters or less".to_string(),
-            ));
-        }
-        set_doc.insert(
-            "display_name",
-            if name.is_empty() {
-                bson::Bson::Null
-            } else {
-                bson::Bson::String(name.to_string())
-            },
-        );
-    }
+                if let Some(name) = display_name {
+                    let name = name.trim();
+                    if name.len() > 200 {
+                        return Err(AppError::ValidationError(
+                            "Display name must be 200 characters or less".to_string(),
+                        ));
+                    }
+                    set_doc.insert(
+                        "display_name",
+                        if name.is_empty() {
+                            bson::Bson::Null
+                        } else {
+                            bson::Bson::String(name.to_string())
+                        },
+                    );
+                }
 
-    if let Some(new_email) = email {
-        // Email format validation
-        let trimmed = new_email.trim();
-        let at_pos = trimmed.find('@');
-        let is_valid = match at_pos {
-            Some(pos) => {
-                let local = &trimmed[..pos];
-                let domain = &trimmed[pos + 1..];
-                trimmed.len() >= 5
-                    && !local.is_empty()
-                    && !domain.is_empty()
-                    && domain.contains('.')
-                    && !domain.starts_with('.')
-                    && !domain.ends_with('.')
-            }
-            None => false,
-        };
-        if !is_valid {
-            return Err(AppError::ValidationError(
-                "Invalid email format".to_string(),
-            ));
-        }
+                if let Some(new_email) = email {
+                    // Email format validation
+                    let trimmed = new_email.trim();
+                    let at_pos = trimmed.find('@');
+                    let is_valid = match at_pos {
+                        Some(pos) => {
+                            let local = &trimmed[..pos];
+                            let domain = &trimmed[pos + 1..];
+                            trimmed.len() >= 5
+                                && !local.is_empty()
+                                && !domain.is_empty()
+                                && domain.contains('.')
+                                && !domain.starts_with('.')
+                                && !domain.ends_with('.')
+                        }
+                        None => false,
+                    };
+                    if !is_valid {
+                        return Err(AppError::ValidationError(
+                            "Invalid email format".to_string(),
+                        ));
+                    }
 
-        // Check uniqueness (case-insensitive). Scoped to person accounts so
-        // that an org's contact email does not spuriously block a person
-        // rename, matching the partial-unique `users.email` index.
-        let normalized = new_email.to_lowercase();
-        let existing_with_email = db
-            .collection::<User>(USERS)
-            .find_one(doc! {
-                "email": &normalized,
-                "user_type": "person",
-                "_id": { "$ne": user_id },
+                    // Check uniqueness (case-insensitive). Scoped to person accounts so
+                    // that an org's contact email does not spuriously block a person
+                    // rename, matching the partial-unique `users.email` index.
+                    let normalized = new_email.to_lowercase();
+                    let existing_with_email = db
+                        .collection::<User>(USERS)
+                        .find_one(doc! {
+                            "email": &normalized,
+                            "user_type": "person",
+                            "_id": { "$ne": user_id },
+                        })
+                        .session(&mut *session)
+                        .await?;
+
+                    if existing_with_email.is_some() {
+                        return Err(AppError::ValidationError(
+                            "Email already in use".to_string(),
+                        ));
+                    }
+
+                    set_doc.insert("email", normalized);
+                }
+
+                if let Some(url) = avatar_url {
+                    let url = url.trim();
+                    if url.len() > 2048 {
+                        return Err(AppError::ValidationError(
+                            "Avatar URL must be 2048 characters or less".to_string(),
+                        ));
+                    }
+                    if !url.is_empty() && !url.starts_with("https://") {
+                        return Err(AppError::ValidationError(
+                            "Avatar URL must use https:// scheme".to_string(),
+                        ));
+                    }
+                    set_doc.insert(
+                        "avatar_url",
+                        if url.is_empty() {
+                            bson::Bson::Null
+                        } else {
+                            bson::Bson::String(url.to_string())
+                        },
+                    );
+                }
+
+                // Early return if no actual fields changed
+                if set_doc.is_empty() {
+                    return Ok(existing);
+                }
+
+                let now = Utc::now();
+                set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
+
+                db.collection::<User>(USERS)
+                    .update_one(doc! { "_id": user_id }, doc! { "$set": set_doc })
+                    .session(&mut *session)
+                    .await?;
+
+                let updated = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! { "_id": user_id })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Internal("User disappeared after update".to_string())
+                    })?;
+
+                let event = audit.event((*principal).clone(), &updated, &updated.id);
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    runtime,
+                    AuditTier::Standard,
+                    &audit.event_id,
+                    &event,
+                )
+                .await?;
+                Ok(updated)
             })
-            .await?;
-
-        if existing_with_email.is_some() {
-            return Err(AppError::ValidationError(
-                "Email already in use".to_string(),
-            ));
-        }
-
-        set_doc.insert("email", normalized);
-    }
-
-    if let Some(url) = avatar_url {
-        let url = url.trim();
-        if url.len() > 2048 {
-            return Err(AppError::ValidationError(
-                "Avatar URL must be 2048 characters or less".to_string(),
-            ));
-        }
-        if !url.is_empty() && !url.starts_with("https://") {
-            return Err(AppError::ValidationError(
-                "Avatar URL must use https:// scheme".to_string(),
-            ));
-        }
-        set_doc.insert(
-            "avatar_url",
-            if url.is_empty() {
-                bson::Bson::Null
-            } else {
-                bson::Bson::String(url.to_string())
-            },
-        );
-    }
-
-    // Early return if no actual fields changed
-    if set_doc.is_empty() {
-        return Ok(existing);
-    }
-
-    let now = Utc::now();
-    set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
-
-    db.collection::<User>(USERS)
-        .update_one(doc! { "_id": user_id }, doc! { "$set": set_doc })
-        .await?;
-
-    let updated = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::Internal("User disappeared after update".to_string()))?;
-
-    Ok(updated)
+        },
+    )
+    .await
 }
 
 /// Set the platform role for a target user. Accepts `"admin"`, `"operator"`,
@@ -388,7 +448,15 @@ pub async fn set_user_active(
         super::platform_personal_owner_lifecycle::retire(db, runtime, target_user_id, false)
             .await?;
     }
-    apply_user_security_state(db, target_user_id, is_active, false, target.is_active).await?;
+    apply_user_security_state(
+        db,
+        runtime,
+        admin_user_id,
+        target_user_id,
+        is_active,
+        target.is_active,
+    )
+    .await?;
 
     if !is_active {
         super::platform_personal_owner_lifecycle::retire(db, runtime, target_user_id, false)
@@ -403,18 +471,82 @@ pub async fn set_user_active(
 /// grant cannot revive.
 async fn apply_user_security_state(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    admin_user_id: &str,
     user_id: &str,
     active: bool,
-    deleting: bool,
     expected_active: bool,
 ) -> AppResult<()> {
-    apply_user_security_state_with_deletion_policy(
+    let audit = AccountAudit::new("admin.user.status_changed");
+    let principal = AuditPrincipal::Person {
+        id: admin_user_id.to_owned(),
+    };
+    let revocation = SessionAudit::new(principal.clone(), user_id, "sessions_revoked", user_id);
+    let context = (
         db,
+        runtime,
+        &principal,
         user_id,
         active,
-        deleting,
-        None,
-        Some(expected_active),
+        expected_active,
+        &audit,
+        &revocation,
+    );
+    transaction::run(
+        db,
+        &context,
+        |session,
+         (db, runtime, principal, owner_id, active, expected_active, audit, revocation)| {
+            Box::pin(async move {
+                let before = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"_id": owner_id})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+                apply_user_security_state_in_session(
+                    db,
+                    session,
+                    owner_id,
+                    *active,
+                    false,
+                    None,
+                    Some(*expected_active),
+                )
+                .await?;
+                if !*active {
+                    revoke_all_user_sessions_in_session(db, runtime, session, owner_id, revocation)
+                        .await?;
+                }
+                let after = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"_id": owner_id})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+                let event = audit
+                    .event((*principal).clone(), &after, &after.id)
+                    .with_detail(AuditDetail::SecurityFlagChange {
+                        flag: SecurityFlag::AccountActive,
+                        old: before.is_active,
+                        new: after.is_active,
+                    });
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    runtime,
+                    if *active {
+                        AuditTier::Standard
+                    } else {
+                        AuditTier::Narrowing
+                    },
+                    &audit.event_id,
+                    &event,
+                )
+                .await?;
+                Ok(())
+            })
+        },
     )
     .await
 }
@@ -435,111 +567,123 @@ async fn apply_user_security_state_with_deletion_policy(
             ));
         }
     }
-    let db = db.clone();
-    let user_id = user_id.to_owned();
-    let owner_deletion_policy = owner_deletion_policy.map(str::to_owned);
-    db.client()
-        .start_session()
+    let context = (
+        db,
+        user_id,
+        active,
+        deleting,
+        owner_deletion_policy,
+        expected_active,
+    );
+    transaction::run(
+        db,
+        &context,
+        |session, (db, user_id, active, deleting, policy, expected)| {
+            Box::pin(apply_user_security_state_in_session(
+                db, session, user_id, *active, *deleting, *policy, *expected,
+            ))
+        },
+    )
+    .await
+}
+
+async fn apply_user_security_state_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    user_id: &str,
+    active: bool,
+    deleting: bool,
+    owner_deletion_policy: Option<&str>,
+    expected_active: Option<bool>,
+) -> AppResult<()> {
+    let current = db
+        .collection::<bson::Document>(USERS)
+        .find_one(doc! {"_id":user_id})
+        .session(&mut *session)
         .await?
-        .start_transaction()
-        .write_concern(mongodb::options::WriteConcern::majority())
-        .and_run2(async move |session| {
-            let result: AppResult<()> = async {
-                let current = db
-                    .collection::<bson::Document>(USERS)
-                    .find_one(doc! {"_id":&user_id})
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-                if active
-                    && current
-                        .get("deletion_requested_at")
-                        .is_some_and(|value| !matches!(value, bson::Bson::Null))
-                {
-                    return Err(AppError::Conflict(
-                        "Account deletion has already been accepted".into(),
-                    ));
-                }
-                let mut filter = doc! {"_id":&user_id};
-                if let Some(expected_active) = expected_active {
-                    filter.insert("is_active", expected_active);
-                }
-                if active {
-                    filter.insert("platform_personal_retirement_pending", doc! {"$ne":true});
-                    filter.insert("platform_personal_deleting", doc! {"$ne":true});
-                }
-                let now = bson::DateTime::now();
-                let mut set = doc! {"is_active":active,"updated_at":now};
-                if !active {
-                    set.insert("platform_personal_retirement_pending", true);
-                }
-                if deleting {
-                    set.insert("platform_personal_deleting", true);
-                    let requested = current
-                        .get("deletion_requested_at")
-                        .filter(|value| !matches!(value, bson::Bson::Null))
-                        .cloned()
-                        .unwrap_or(bson::Bson::DateTime(now));
-                    set.insert("deletion_requested_at", requested);
-                }
-                let changed = db
-                    .collection::<bson::Document>(USERS)
-                    .update_one(
-                        filter,
-                        doc! {"$set":set,"$inc":{"platform_personal_effect_revision":1_i64}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if changed.matched_count != 1 {
-                    return Err(AppError::Conflict(
-                        "Account state changed; refresh before retrying".into(),
-                    ));
-                }
-                if let Some(policy) = &owner_deletion_policy {
-                    // Same transaction as the account/source fence. These
-                    // retained lifecycle records outlive the user cascade;
-                    // replay preserves the original consent and timestamp.
-                    let accepted_at = current
-                        .get_datetime("deletion_requested_at")
-                        .copied()
-                        .unwrap_or(now);
-                    let basis = crate::models::remote_machine::MachineDeletionBasis {
-                        owner_id: user_id.clone(),
-                        source: crate::models::remote_machine::MachineDeletionSource::AccountOwner,
-                        policy_version: policy.clone(),
-                        accepted_at: accepted_at.to_chrono(),
-                    };
-                    let basis = bson::to_bson(&basis).map_err(|_| {
-                        AppError::Internal("Machine deletion basis encoding failed".into())
-                    })?;
-                    db.collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
-                        .update_many(
-                            doc! {"owner_id":&user_id,"deletion_basis":bson::Bson::Null},
-                            doc! {"$set":{"deletion_basis":basis}},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                }
-                if !active {
-                    super::machine_external_grant_service::user_security_changed_in_session(
-                        &db,
-                        &user_id,
-                        if deleting {
-                            "user_deletion_requested"
-                        } else {
-                            "user_disabled"
-                        },
-                        session,
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
-            .await;
-            key_mutations::transaction_result(result)
-        })
-        .await
-        .map_err(key_mutations::map_transaction_error)
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    if active
+        && current
+            .get("deletion_requested_at")
+            .is_some_and(|value| !matches!(value, bson::Bson::Null))
+    {
+        return Err(AppError::Conflict(
+            "Account deletion has already been accepted".into(),
+        ));
+    }
+    let mut filter = doc! {"_id":user_id};
+    if let Some(expected_active) = expected_active {
+        filter.insert("is_active", expected_active);
+    }
+    if active {
+        filter.insert("platform_personal_retirement_pending", doc! {"$ne":true});
+        filter.insert("platform_personal_deleting", doc! {"$ne":true});
+    }
+    let now = bson::DateTime::now();
+    let mut set = doc! {"is_active":active,"updated_at":now};
+    if !active {
+        set.insert("platform_personal_retirement_pending", true);
+    }
+    if deleting {
+        set.insert("platform_personal_deleting", true);
+        let requested = current
+            .get("deletion_requested_at")
+            .filter(|value| !matches!(value, bson::Bson::Null))
+            .cloned()
+            .unwrap_or(bson::Bson::DateTime(now));
+        set.insert("deletion_requested_at", requested);
+    }
+    let changed = db
+        .collection::<bson::Document>(USERS)
+        .update_one(
+            filter,
+            doc! {"$set":set,"$inc":{"platform_personal_effect_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if changed.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Account state changed; refresh before retrying".into(),
+        ));
+    }
+    if let Some(policy) = owner_deletion_policy {
+        // Same transaction as the account/source fence. These
+        // retained lifecycle records outlive the user cascade;
+        // replay preserves the original consent and timestamp.
+        let accepted_at = current
+            .get_datetime("deletion_requested_at")
+            .copied()
+            .unwrap_or(now);
+        let basis = crate::models::remote_machine::MachineDeletionBasis {
+            owner_id: user_id.to_owned(),
+            source: crate::models::remote_machine::MachineDeletionSource::AccountOwner,
+            policy_version: policy.to_owned(),
+            accepted_at: accepted_at.to_chrono(),
+        };
+        let basis = bson::to_bson(&basis)
+            .map_err(|_| AppError::Internal("Machine deletion basis encoding failed".into()))?;
+        db.collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .update_many(
+                doc! {"owner_id":user_id,"deletion_basis":bson::Bson::Null},
+                doc! {"$set":{"deletion_basis":basis}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if !active {
+        super::machine_external_grant_service::user_security_changed_in_session(
+            db,
+            user_id,
+            if deleting {
+                "user_deletion_requested"
+            } else {
+                "user_disabled"
+            },
+            session,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Initiate a forced password reset for a user.
@@ -552,24 +696,66 @@ pub async fn force_password_reset(
     principal: AuditPrincipal,
     user_id: &str,
 ) -> AppResult<Option<String>> {
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if user.password_hash.is_none() {
-        return Err(AppError::BadRequest(
-            "User has no password (social login only)".to_string(),
-        ));
-    }
-
-    let token = crate::services::auth_service::initiate_password_reset(db, &user.email).await?;
-
-    // Revoke all sessions to force re-authentication
-    revoke_all_user_sessions(db, runtime, principal, user_id).await?;
-
-    Ok(token)
+    let token = zeroize::Zeroizing::new(crate::crypto::token::generate_random_token());
+    let token_hash = crate::crypto::token::hash_token(&token);
+    let expires_at = bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1));
+    let audit = AccountAudit::new("admin.user.password_reset");
+    let revocation = SessionAudit::new(principal.clone(), user_id, "sessions_revoked", user_id);
+    let context = (
+        db,
+        runtime,
+        &principal,
+        user_id,
+        &token_hash,
+        &expires_at,
+        &audit,
+        &revocation,
+    );
+    let issued = transaction::run(
+        db,
+        &context,
+        |session, (db, runtime, principal, user_id, token_hash, expires_at, audit, revocation)| {
+            Box::pin(async move {
+                let user = db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"_id": user_id})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+                if user.password_hash.is_none() {
+                    return Err(AppError::BadRequest(
+                        "User has no password (social login only)".into(),
+                    ));
+                }
+                let issued = !user.user_type.is_org();
+                if issued {
+                    super::auth_service::write_password_reset_in_session(
+                        db,
+                        session,
+                        &user,
+                        token_hash,
+                        **expires_at,
+                    )
+                    .await?;
+                }
+                revoke_all_user_sessions_in_session(db, runtime, session, &user.id, revocation)
+                    .await?;
+                let event = audit.event((*principal).clone(), &user, &user.id);
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    runtime,
+                    AuditTier::Availability,
+                    &audit.event_id,
+                    &event,
+                )
+                .await?;
+                Ok(issued)
+            })
+        },
+    )
+    .await?;
+    Ok(issued.then(|| token.to_string()))
 }
 
 /// Delete a user and cascade-delete all related documents.
@@ -862,30 +1048,29 @@ async fn delete_user_cascade_internal(
 /// Manually verify a user's email address.
 ///
 /// Sets email_verified = true and clears the verification token.
-pub async fn verify_email(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    if user.email_verified {
-        return Err(AppError::BadRequest("Email already verified".to_string()));
-    }
-
-    let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$set": {
-                "email_verified": true,
-                "email_verification_token": null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    Ok(())
+pub async fn verify_email(
+    db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    principal: AuditPrincipal,
+    user_id: &str,
+) -> AppResult<()> {
+    let audit = AccountAudit::new("admin.user.email_verified");
+    let context = (db, runtime, &principal, user_id, &audit);
+    transaction::run(db, &context, |session, (db, runtime, principal, user_id, audit)| {
+        Box::pin(async move {
+            let user = db.collection::<User>(USERS).find_one(doc! {"_id": user_id})
+                .session(&mut *session).await?.ok_or_else(|| AppError::NotFound("User not found".into()))?;
+            if user.email_verified { return Err(AppError::BadRequest("Email already verified".into())); }
+            db.collection::<User>(USERS).update_one(
+                doc! {"_id": &user.id}, doc! {"$set": {"email_verified": true, "email_verification_token": null, "updated_at": bson::DateTime::now()}}
+            ).session(&mut *session).await?;
+            let event = audit.event((*principal).clone(), &user, &user.id).with_detail(
+                crate::models::audit_outbox::AuditDetail::SecurityFlagChange { flag: crate::models::audit_outbox::SecurityFlag::EmailVerified, old: user.email_verified, new: true }
+            );
+            audit_outbox_service::enqueue_admitted_in_session(db, session, runtime, AuditTier::Availability, &audit.event_id, &event).await?;
+            Ok(())
+        })
+    }).await
 }
 
 /// List all sessions for a user, sorted by created_at descending.
@@ -1188,10 +1373,16 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
         let user = create_user(
             &db,
+            &state.audit_runtime,
+            principal.clone(),
             "newuser@example.com",
             "strongpass123",
             Some("Alice"),
@@ -1213,11 +1404,23 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
-        let user = create_user(&db, "admin@example.com", "strongpass123", None, "admin")
-            .await
-            .unwrap();
+        let user = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "admin@example.com",
+            "strongpass123",
+            None,
+            "admin",
+        )
+        .await
+        .unwrap();
 
         assert!(user.is_admin);
         assert!(!user.is_operator);
@@ -1228,10 +1431,16 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
         let user = create_user(
             &db,
+            &state.audit_runtime,
+            principal.clone(),
             "operator@example.com",
             "strongpass123",
             None,
@@ -1249,9 +1458,22 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "notanemail", "strongpass123", None, "user").await;
+        let result = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "notanemail",
+            "strongpass123",
+            None,
+            "user",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1260,9 +1482,22 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "user@example.com", "short", None, "user").await;
+        let result = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "user@example.com",
+            "short",
+            None,
+            "user",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1271,10 +1506,22 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
-        let result =
-            create_user(&db, "user@example.com", "strongpass123", None, "superadmin").await;
+        let result = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "user@example.com",
+            "strongpass123",
+            None,
+            "superadmin",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1283,13 +1530,34 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         seed_platform_roles(&db).await;
 
-        create_user(&db, "dup@example.com", "strongpass123", None, "user")
-            .await
-            .unwrap();
+        create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "dup@example.com",
+            "strongpass123",
+            None,
+            "user",
+        )
+        .await
+        .unwrap();
 
-        let result = create_user(&db, "DUP@EXAMPLE.COM", "strongpass123", None, "user").await;
+        let result = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "DUP@EXAMPLE.COM",
+            "strongpass123",
+            None,
+            "user",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1298,12 +1566,24 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "existing@example.com").await;
 
-        let updated = update_user(&db, &user_id, Some("New Name"), None, None)
-            .await
-            .unwrap();
+        let updated = update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &user_id,
+            Some("New Name"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(updated.display_name.as_deref(), Some("New Name"));
     }
 
@@ -1312,12 +1592,24 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "oldemail@example.com").await;
 
-        let updated = update_user(&db, &user_id, None, Some("newemail@example.com"), None)
-            .await
-            .unwrap();
+        let updated = update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &user_id,
+            None,
+            Some("newemail@example.com"),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(updated.email, "newemail@example.com");
     }
 
@@ -1326,10 +1618,23 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "valid@example.com").await;
 
-        let result = update_user(&db, &user_id, None, Some("bad"), None).await;
+        let result = update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &user_id,
+            None,
+            Some("bad"),
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1338,7 +1643,20 @@ mod tests {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
-        let result = update_user(&db, &Uuid::new_v4().to_string(), Some("Name"), None, None).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
+        let result = update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &Uuid::new_v4().to_string(),
+            Some("Name"),
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1960,11 +2278,23 @@ mod tests {
         let db = connect_test_database("admin_form_user_clear")
             .await
             .expect("Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let principal = AuditPrincipal::Person {
+            id: Uuid::new_v4().to_string(),
+        };
         let id = Uuid::new_v4().to_string();
         seed_person(&db, &id, "clear@example.com").await;
-        let updated = update_user(&db, &id, Some("   "), None, Some("  "))
-            .await
-            .unwrap();
+        let updated = update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &id,
+            Some("   "),
+            None,
+            Some("  "),
+        )
+        .await
+        .unwrap();
         assert!(updated.display_name.is_none());
         assert!(updated.avatar_url.is_none());
         let raw = db
@@ -1975,5 +2305,435 @@ mod tests {
             .unwrap();
         assert_eq!(raw.get("display_name"), Some(&bson::Bson::Null));
         assert_eq!(raw.get("avatar_url"), Some(&bson::Bson::Null));
+    }
+    #[tokio::test]
+    async fn w8_id_admin_lifecycle_uses_admin_principal_and_person_or_org_owner() {
+        use crate::models::{
+            audit_outbox::{AuditDetail, PENDING_COLLECTION_NAME, PendingAuditEvent},
+            user::UserType,
+        };
+        let db = connect_transaction_test_database("w8_id_admin_lifecycle_owners").await;
+        let state = test_app_state(db.clone());
+        role_service::seed_system_roles(&db).await.unwrap();
+        let admin = Uuid::new_v4().to_string();
+        let mut administrator = test_user(&admin, UserType::Person);
+        let roles = role_service::get_platform_role_ids(&db).await.unwrap();
+        administrator.role_ids.push(roles.admin);
+        administrator.is_admin = true;
+        db.collection::<User>(USERS)
+            .insert_one(administrator)
+            .await
+            .unwrap();
+        let principal = AuditPrincipal::Person { id: admin.clone() };
+        let person = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "w8-id-admin-sentinel@example.invalid",
+            "w8-id-admin-password",
+            None,
+            "user",
+        )
+        .await
+        .unwrap();
+        let second = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "w8-id-admin-two@example.invalid",
+            "w8-id-second-password",
+            None,
+            "operator",
+        )
+        .await
+        .unwrap();
+        update_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            &person.id,
+            Some("private-display-sentinel"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<User>(USERS).update_one(doc! {"_id": &person.id},doc! {"$set":{"email_verified":false,"email_verification_token":"private-hash-sentinel"}}).await.unwrap();
+        verify_email(&db, &state.audit_runtime, principal.clone(), &person.id)
+            .await
+            .unwrap();
+        let issued = super::super::token_service::create_session_and_issue_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &person.id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let reset_token =
+            force_password_reset(&db, &state.audit_runtime, principal.clone(), &person.id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            db.collection::<Session>(SESSIONS)
+                .find_one(doc! {"_id": &issued.session_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        let retained = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.password_reset_token.as_deref(),
+            Some(crate::crypto::token::hash_token(&reset_token).as_str())
+        );
+        let count = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action":"sessions_revoked","event.owner.id":&person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            count.event.detail,
+            Some(AuditDetail::SessionRevocationCount {
+                count: 1,
+                saturated: false
+            })
+        );
+        for action in [
+            "admin.user.created",
+            "admin.user.updated",
+            "admin.user.email_verified",
+            "admin.user.password_reset",
+        ] {
+            let row = db
+                .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .find_one(doc! {"event.action":action,"event.owner.id":&person.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.event.principal, principal);
+            assert_eq!(
+                row.event.owner,
+                AuditOwner::Person {
+                    id: person.id.clone()
+                }
+            );
+            let bytes = bson::to_vec(&row).unwrap();
+            for secret in [
+                person.email.as_str(),
+                "w8-id-admin-password",
+                "private-display-sentinel",
+                "private-hash-sentinel",
+                reset_token.as_str(),
+                retained.password_reset_token.as_deref().unwrap(),
+                retained.password_hash.as_deref().unwrap(),
+            ] {
+                assert!(
+                    !bytes
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes())
+                );
+            }
+        }
+        for _ in 0..2 {
+            let org = test_user(&Uuid::new_v4().to_string(), UserType::Org);
+            db.collection::<User>(USERS).insert_one(&org).await.unwrap();
+            set_user_active(&db, &state.audit_runtime, &admin, &org.id, false)
+                .await
+                .unwrap();
+            let row = db
+                .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .find_one(
+                    doc! {"event.action":"admin.user.status_changed","event.owner.id":&org.id},
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.event.principal, principal);
+            assert_eq!(row.event.owner, AuditOwner::Org { id: org.id });
+            assert_eq!(
+                row.event.detail,
+                Some(AuditDetail::SecurityFlagChange {
+                    flag: SecurityFlag::AccountActive,
+                    old: true,
+                    new: false,
+                })
+            );
+        }
+        for (id, role) in [
+            (&person.id, PlatformRole::User),
+            (&second.id, PlatformRole::Operator),
+        ] {
+            let created = db
+                .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .find_one(doc! {"event.action": "admin.user.created", "event.owner.id": id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                created.event.detail,
+                Some(AuditDetail::PlatformRoleChange {
+                    old: None,
+                    new: role
+                })
+            );
+        }
+        let other = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &second.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other.is_active);
+        assert!(other.password_reset_token.is_none());
+        assert_eq!(
+            db.collection::<bson::Document>("notification_deliveries_v1")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn w8_id_forced_reset_and_admin_verification_roll_back_with_their_audits() {
+        use crate::models::{
+            audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent},
+            refresh_token::{COLLECTION_NAME as REFRESH, RefreshToken},
+        };
+        use crate::test_utils::fail_command::{FailCommandController, Guard};
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Arc, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        };
+        let base = connect_transaction_test_database("w8_id_admin_reset_atomic").await;
+        let controller = Arc::new(OnceLock::<FailCommandController>::new());
+        let observed_controller = controller.clone();
+        let armed = Arc::new(AtomicBool::new(false));
+        let observed_armed = armed.clone();
+        let mut guard =
+            Guard::acquire(
+                &base,
+                Some(EventHandler::callback(move |event| {
+                    if let CommandEvent::Started(event) = event
+                        && event.command_name == "insert"
+                        && event.command.get_str("insert").ok() == Some(PENDING_COLLECTION_NAME)
+                        && event.command.get_array("documents").is_ok_and(|rows| {
+                            rows.iter().any(|row| {
+                                matches!(
+                                    row.as_document()
+                                        .and_then(|row| row.get_document("event").ok())
+                                        .and_then(|event| event.get_str("action").ok()),
+                                    Some("admin.user.password_reset" | "admin.user.email_verified")
+                                )
+                            })
+                        })
+                        && !observed_armed.swap(true, Ordering::SeqCst)
+                    {
+                        observed_controller.get().unwrap().arm(
+                    doc! {"times": 1},
+                    doc! {"failCommands": ["insert"], "errorCode": 121, "errorLabels": []},
+                ).unwrap();
+                    }
+                })),
+            )
+            .await;
+        controller
+            .set(guard.controller())
+            .unwrap_or_else(|_| panic!("controller set twice"));
+        let db = guard.database().clone();
+        let state = test_app_state(db.clone());
+        role_service::seed_system_roles(&db).await.unwrap();
+        let admin = Uuid::new_v4().to_string();
+        let principal = AuditPrincipal::Person { id: admin.clone() };
+        let person = create_user(
+            &db,
+            &state.audit_runtime,
+            principal.clone(),
+            "w8-id-forced-reset@example.invalid",
+            "w8-id-original-password",
+            None,
+            "user",
+        )
+        .await
+        .unwrap();
+        let mut issued = Vec::new();
+        for _ in 0..2 {
+            issued.push(
+                super::super::token_service::create_session_and_issue_tokens(
+                    &db,
+                    &state.audit_runtime,
+                    &state.config,
+                    &state.jwt_keys,
+                    &person.id,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let before = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let failed =
+            force_password_reset(&db, &state.audit_runtime, principal.clone(), &person.id).await;
+        assert!(
+            armed.load(Ordering::SeqCst),
+            "fault must follow token issuance and revocation"
+        );
+        assert!(matches!(failed, Err(AppError::DatabaseError(_))));
+        guard.disarm().await.unwrap();
+        let after = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.password_reset_token, before.password_reset_token);
+        assert_eq!(
+            after.password_reset_expires_at,
+            before.password_reset_expires_at
+        );
+        for collection in [SESSIONS, REFRESH] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {"user_id": &person.id, "revoked": false},)
+                    .await
+                    .unwrap(),
+                2
+            );
+        }
+        assert_eq!(db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME).count_documents(
+            doc! {"event.action": {"$in": ["admin.user.password_reset", "sessions_revoked"]}},
+        ).await.unwrap(), 0);
+        let token = force_password_reset(&db, &state.audit_runtime, principal.clone(), &person.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.password_reset_token,
+            Some(crate::crypto::token::hash_token(&token))
+        );
+        assert_eq!(updated.password_hash, before.password_hash);
+        for item in issued {
+            assert!(
+                db.collection::<Session>(SESSIONS)
+                    .find_one(doc! {"_id": &item.session_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked
+            );
+        }
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH)
+                .count_documents(doc! {"user_id": &person.id, "revoked": false},)
+                .await
+                .unwrap(),
+            0
+        );
+        let revocation = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action": "sessions_revoked"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            revocation.event.detail,
+            Some(AuditDetail::SessionRevocationCount {
+                count: 2,
+                saturated: false
+            })
+        );
+        assert_eq!(revocation.event.principal, principal);
+        assert_eq!(
+            revocation.event.owner,
+            AuditOwner::Person {
+                id: person.id.clone()
+            }
+        );
+
+        db.collection::<User>(USERS).update_one(
+            doc! {"_id": &person.id},
+            doc! {"$set": {"email_verified": false, "email_verification_token": "w8-id-verification-hash-sentinel"}},
+        ).await.unwrap();
+        armed.store(false, Ordering::SeqCst);
+        let failed = verify_email(&db, &state.audit_runtime, principal.clone(), &person.id).await;
+        assert!(armed.load(Ordering::SeqCst));
+        assert!(matches!(failed, Err(AppError::DatabaseError(_))));
+        guard.disarm().await.unwrap();
+        let unverified = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unverified.email_verified);
+        assert_eq!(
+            unverified.email_verification_token.as_deref(),
+            Some("w8-id-verification-hash-sentinel")
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {"event.action": "admin.user.email_verified"},)
+                .await
+                .unwrap(),
+            0
+        );
+        verify_email(&db, &state.audit_runtime, principal.clone(), &person.id)
+            .await
+            .unwrap();
+        let verified = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &person.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verified.email_verified);
+        assert!(verified.email_verification_token.is_none());
+        let event = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action": "admin.user.email_verified"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event.principal, principal);
+        assert_eq!(
+            event.event.detail,
+            Some(AuditDetail::SecurityFlagChange {
+                flag: SecurityFlag::EmailVerified,
+                old: false,
+                new: true,
+            })
+        );
+        assert_eq!(
+            db.collection::<bson::Document>("notification_deliveries_v1")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 }

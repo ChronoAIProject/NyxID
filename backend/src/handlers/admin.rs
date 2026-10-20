@@ -380,6 +380,8 @@ pub async fn create_user(
 
     let user = admin_user_service::create_user(
         &state.db,
+        &state.audit_runtime,
+        crate::services::token_service::audit_principal(&auth_user)?,
         &email,
         &body.password,
         body.display_name.as_deref(),
@@ -388,16 +390,6 @@ pub async fn create_user(
     .await?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.created",
-        Some(serde_json::json!({
-            "target_user_id": &user.id,
-            "target_email": &user.email,
-            "role": platform_role.as_str(),
-        })),
-    );
 
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
@@ -528,27 +520,14 @@ pub async fn update_user(
 
     let updated = admin_user_service::update_user(
         &state.db,
+        &state.audit_runtime,
+        crate::services::token_service::audit_principal(&auth_user)?,
         &user_id,
         body.display_name.as_deref(),
         body.email.as_deref(),
         body.avatar_url.as_deref(),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.updated",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "target_email": &updated.email,
-            "changes": {
-                "display_name": body.display_name,
-                "email": body.email,
-                "avatar_url": body.avatar_url,
-            }
-        })),
-    );
 
     let platform_role = role_service::resolve_platform_role(&state.db, &updated).await?;
     Ok(Json(user_to_admin_item(updated, platform_role)))
@@ -634,16 +613,6 @@ pub async fn set_user_status(
     )
     .await?;
 
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.status_changed",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "is_active": body.is_active,
-        })),
-    );
-
     // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
     // There is no dedicated suspend/unsuspend route — this single endpoint
     // serves both, so the emitted variant mirrors the applied bool.
@@ -685,18 +654,6 @@ pub async fn force_password_reset(
         &user_id,
     )
     .await?;
-
-    #[cfg(debug_assertions)]
-    if let Some(ref t) = _token {
-        tracing::debug!(token = %t, user_id = %user_id, "Admin-initiated password reset token (dev only)");
-    }
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.password_reset",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
 
     Ok(Json(AdminActionResponse {
         message: "Password reset initiated".to_string(),
@@ -754,14 +711,13 @@ pub async fn verify_user_email(
 ) -> AppResult<Json<VerifyEmailResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    admin_user_service::verify_email(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.email_verified",
-        Some(serde_json::json!({ "target_user_id": &user_id })),
-    );
+    admin_user_service::verify_email(
+        &state.db,
+        &state.audit_runtime,
+        crate::services::token_service::audit_principal(&auth_user)?,
+        &user_id,
+    )
+    .await?;
 
     Ok(Json(VerifyEmailResponse {
         id: user_id,

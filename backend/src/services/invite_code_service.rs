@@ -229,6 +229,64 @@ pub async fn reserve_invite_code(
     }
 }
 
+/// Validate a registration invitation in the caller's transaction snapshot.
+/// Reservation and usage append occur together after the new person is inserted;
+/// a fake registration consumes no slot and needs no compensating write.
+pub(super) async fn registration_invite_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    code: &str,
+    email: &str,
+) -> AppResult<InviteCode> {
+    let normalized = normalize_code(code);
+    let email = normalize_email(email);
+    match db
+        .collection::<InviteCode>(COLLECTION_NAME)
+        .find_one(doc! {"code": normalized})
+        .session(session)
+        .await?
+    {
+        None => Err(AppError::InviteCodeInvalid),
+        Some(invite) if !invite.is_active => Err(AppError::InviteCodeDeactivated),
+        Some(invite)
+            if invite
+                .usages
+                .iter()
+                .any(|usage| usage.email.as_deref() == Some(email.as_str())) =>
+        {
+            Err(AppError::InviteCodeAlreadyRedeemed)
+        }
+        Some(invite) if invite.used_count >= invite.max_uses => Err(AppError::InviteCodeExhausted),
+        Some(invite) => Ok(invite),
+    }
+}
+
+/// Join account creation, the slot reservation and immutable usage attribution.
+/// A failed conditional mutation aborts the complete registration transaction.
+pub(super) async fn consume_registration_invite_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    invite: &InviteCode,
+    user: &crate::models::user::User,
+) -> AppResult<()> {
+    let email = normalize_email(&user.email);
+    let usage = InviteCodeUsage {
+        user_id: user.id.clone(),
+        used_at: user.created_at,
+        email: Some(email.clone()),
+    };
+    let usage = bson::to_bson(&usage)
+        .map_err(|_| AppError::Internal("Invite usage encoding failed".into()))?;
+    let updated = db.collection::<InviteCode>(COLLECTION_NAME).update_one(
+        doc! {"_id": &invite.id, "is_active": true, "$expr": {"$lt": ["$used_count", "$max_uses"]}, "usages.email": {"$ne": email}},
+        doc! {"$inc": {"used_count": 1}, "$push": {"usages": usage}, "$set": {"updated_at": bson::DateTime::from_chrono(user.created_at)}},
+    ).session(session).await?;
+    if updated.matched_count != 1 {
+        return Err(AppError::InviteCodeInvalid);
+    }
+    Ok(())
+}
+
 /// Record which user redeemed a previously-reserved invite code.
 ///
 /// Best-effort append to the `usages` array. Failures are logged but do not
@@ -682,5 +740,142 @@ mod tests {
             matches!(err, crate::errors::AppError::InviteCodeDeactivated),
             "deactivated must take precedence over already-redeemed; got: {err:?}"
         );
+    }
+    #[tokio::test]
+    async fn w8_id_registration_invite_keeps_one_slot_and_diagnostic_order() {
+        use crate::models::{
+            audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent},
+            user::User,
+        };
+        use crate::services::{auth_service, role_service};
+        use crate::test_utils::{connect_transaction_test_database, test_app_state};
+        let db = connect_transaction_test_database("w8_id_registration_invite_fences").await;
+        let state = test_app_state(db.clone());
+        role_service::seed_system_roles(&db).await.unwrap();
+        let creator = Uuid::new_v4().to_string();
+        let invite = create_invite_code(&db, &creator, 1, None).await.unwrap();
+        let normalized_input = format!("  {}  ", invite.code.to_lowercase());
+        let (first, second) = tokio::join!(
+            auth_service::register_user(
+                &db,
+                &state.audit_runtime,
+                "w8-id-invite-one@example.invalid",
+                "w8-id-password-one",
+                None,
+                Some(&normalized_input),
+                true
+            ),
+            auth_service::register_user(
+                &db,
+                &state.audit_runtime,
+                "w8-id-invite-two@example.invalid",
+                "w8-id-password-two",
+                None,
+                Some(&normalized_input),
+                true
+            ),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let (winner, loser) = match (first, second) {
+            (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+            _ => panic!("one invitation slot must create exactly one account"),
+        };
+        assert!(matches!(loser, AppError::InviteCodeExhausted));
+        assert!(winner.actually_created);
+        assert_eq!(winner.invite_code_id.as_deref(), Some(invite.id.as_str()));
+        let used = db
+            .collection::<InviteCode>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &invite.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(used.used_count, 1);
+        assert_eq!(used.usages.len(), 1);
+        assert_eq!(used.usages[0].user_id, winner.user_id);
+        let user = db
+            .collection::<User>(USERS_COLLECTION)
+            .find_one(doc! {"_id": &winner.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let before_events = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+
+        // Deactivation precedes both same-identity reuse and exhausted-capacity diagnostics.
+        db.collection::<InviteCode>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &invite.id},
+                doc! {"$set": {"is_active": false}},
+            )
+            .await
+            .unwrap();
+        let disabled = auth_service::register_user(
+            &db,
+            &state.audit_runtime,
+            &user.email,
+            "w8-id-password-one",
+            None,
+            Some(&invite.code),
+            true,
+        )
+        .await;
+        assert!(matches!(disabled, Err(AppError::InviteCodeDeactivated)));
+        db.collection::<InviteCode>(COLLECTION_NAME)
+            .update_one(doc! {"_id": &invite.id}, doc! {"$set": {"is_active": true}})
+            .await
+            .unwrap();
+        let reused = auth_service::register_user(
+            &db,
+            &state.audit_runtime,
+            &user.email,
+            "w8-id-password-one",
+            None,
+            Some(&invite.code),
+            true,
+        )
+        .await;
+        assert!(matches!(reused, Err(AppError::InviteCodeAlreadyRedeemed)));
+
+        // A fake duplicate-email success using another valid code consumes no slot or audit.
+        let spare = create_invite_code(&db, &creator, 1, None).await.unwrap();
+        let duplicate = auth_service::register_user(
+            &db,
+            &state.audit_runtime,
+            &user.email,
+            "w8-id-password-one",
+            None,
+            Some(&spare.code),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(!duplicate.actually_created);
+        assert_ne!(duplicate.user_id, user.id);
+        let spare = db
+            .collection::<InviteCode>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &spare.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(spare.used_count, 0);
+        assert!(spare.usages.is_empty());
+        assert_eq!(
+            db.collection::<User>(USERS_COLLECTION)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            before_events
+        );
+        db.drop().await.unwrap();
     }
 }

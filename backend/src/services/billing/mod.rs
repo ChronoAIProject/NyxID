@@ -874,8 +874,10 @@ mod tests {
             .await
             .expect("seed roles");
         insert_platform_rate(&db, 1).await;
+        let registration_state = crate::test_utils::test_app_state(db.clone());
         let owner = crate::services::auth_service::register_user(
             &db,
+            &registration_state.audit_runtime,
             "wallet-auto@example.com",
             "password123",
             Some("Wallet Auto"),
@@ -1102,8 +1104,10 @@ mod tests {
             .await
             .expect("seed roles");
         insert_platform_rate(&db, 1).await;
+        let registration_state = crate::test_utils::test_app_state(db.clone());
         let owner = crate::services::auth_service::register_user(
             &db,
+            &registration_state.audit_runtime,
             "wallet-optout@example.com",
             &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Opt Out"),
@@ -1162,8 +1166,10 @@ mod tests {
             .await
             .expect("seed roles");
         insert_platform_rate(&db, 1).await;
+        let registration_state = crate::test_utils::test_app_state(db.clone());
         let owner = crate::services::auth_service::register_user(
             &db,
+            &registration_state.audit_runtime,
             "wallet-rollout@example.com",
             &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Rollout"),
@@ -2259,18 +2265,20 @@ mod tests {
         let actor = crate::services::audit_service::AuditActor::from_auth_user(
             &crate::test_utils::test_auth_user(&Uuid::new_v4().to_string()),
         );
+        let registration_state = crate::test_utils::test_app_state(db.clone());
         super::config::update_global_defaults(
             &db,
             &super::config::GlobalBillingPatch {
                 default_overdraft_cap_credits: Some(Some(37)),
             },
             &actor,
-            b"test-key",
+            registration_state.audit_chain_hmac_key.as_slice(),
         )
         .await
         .expect("set global cap");
         let first = crate::services::auth_service::register_user(
             &db,
+            &registration_state.audit_runtime,
             "cap-global@example.com",
             &uuid::Uuid::new_v4().to_string(),
             Some("Cap Global"),
@@ -2297,12 +2305,14 @@ mod tests {
                 default_overdraft_cap_credits: Some(None),
             },
             &actor,
-            b"test-key",
+            registration_state.audit_chain_hmac_key.as_slice(),
         )
         .await
         .expect("clear global cap");
+        let registration_state = crate::test_utils::test_app_state(db.clone());
         let second = crate::services::auth_service::register_user(
             &db,
+            &registration_state.audit_runtime,
             "cap-env@example.com",
             &uuid::Uuid::new_v4().to_string(),
             Some("Cap Env"),

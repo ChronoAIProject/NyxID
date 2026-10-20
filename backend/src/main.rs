@@ -609,7 +609,7 @@ async fn server_main() {
         services::role_service::backfill_platform_role_memberships(&db)
             .await
             .expect("Failed to backfill platform role memberships");
-        run_promote_admin(&db, &email).await;
+        run_promote_admin(&db, &audit_runtime, &email).await;
         return;
     }
     if let Some(Commands::CleanupOrphans(args)) = post_db_command {
@@ -1896,28 +1896,24 @@ fn decode_hmac_seed(encryption_key: Option<&str>) -> Option<zeroize::Zeroizing<V
 }
 
 /// Run the --promote-admin CLI command, then return.
-async fn run_promote_admin(db: &mongodb::Database, email: &str) {
-    use services::{audit_service, auth_service};
+async fn run_promote_admin(
+    db: &mongodb::Database,
+    runtime: &services::audit_runtime::AuditRuntime,
+    email: &str,
+) {
+    use services::auth_service;
 
-    match auth_service::promote_user_to_admin(db, email).await {
+    match auth_service::promote_user_to_admin(
+        db,
+        runtime,
+        models::audit_outbox::AuditPrincipal::System {
+            actor: models::audit_outbox::SystemAuditActor::Startup,
+        },
+        email,
+    )
+    .await
+    {
         Ok(user_id) => {
-            audit_service::log_async(
-                db.clone(),
-                Some(user_id.clone()),
-                "admin_promoted".to_string(),
-                Some(serde_json::json!({
-                    "email": email,
-                    "method": "cli"
-                })),
-                None,
-                None,
-                None,
-                None,
-            );
-
-            // Brief sleep to allow the async audit log write to complete
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
             println!("Successfully promoted user to admin:");
             println!("  Email:   {email}");
             println!("  User ID: {user_id}");

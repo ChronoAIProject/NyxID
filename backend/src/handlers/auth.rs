@@ -13,12 +13,10 @@ use mongodb::bson::doc;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
-use crate::services::{
-    audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
-    token_service,
-};
+#[cfg(test)]
+use crate::services::role_service;
+use crate::services::{auth_service, feature_flag_service, invite_code_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
@@ -317,7 +315,7 @@ pub(crate) fn resolve_auth_client_mode(
 /// follows AUTO_VERIFY_EMAIL; password login currently accepts active accounts.
 pub async fn register(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<Json<RegisterResponse>> {
@@ -328,105 +326,42 @@ pub async fn register(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    // When the invite-code gate is enabled, an invite code is mandatory and
-    // we reserve one slot up front. When it is disabled (public launch),
-    // any invite code the client sent is ignored and registration proceeds
-    // without reserving anything.
-    let invite_code_id = if feature_flag_service::invitation_code_required(&state.db).await? {
-        let raw_code = body
-            .invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| AppError::ValidationError("Invite code is required".to_string()))?;
-        match invite_code_service::reserve_invite_code(&state.db, raw_code, &body.email).await {
-            Ok(id) => Some(id),
-            // Enumeration-safe: treat an already-redeemed code as if the
-            // email address simply doesn't exist yet. Return the same
-            // fake-success response used for duplicate-email registrations so
-            // callers cannot distinguish "code used" from "email unknown".
-            // Nothing was reserved, so there is nothing to release. We mirror
-            // the duplicate-email path's audit side-effect (and add a warn) so
-            // the two paths are indistinguishable AND the reuse attempt is
-            // still recorded for audit/monitoring.
-            Err(AppError::InviteCodeAlreadyRedeemed) => {
-                tracing::warn!("Registration attempt with an already-redeemed invite code");
-                let message = "Registration processed. You can now sign in.".to_string();
-                let fake_user_id = uuid::Uuid::new_v4().to_string();
-                audit_service::log_async(
-                    state.db.clone(),
-                    Some(fake_user_id.clone()),
-                    "register".to_string(),
-                    Some(serde_json::json!({ "email": body.email })),
-                    extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips),
-                    extract_user_agent(&headers),
-                    None,
-                    None,
-                );
-                return Ok(Json(RegisterResponse {
-                    user_id: fake_user_id,
-                    message,
-                }));
-            }
-            Err(e) => return Err(e),
-        }
+    // Gate policy remains unchanged; consumption joins account creation so a
+    // failed or fake registration cannot strand a separately reserved slot.
+    let invite_code = if feature_flag_service::invitation_code_required(&state.db).await? {
+        Some(
+            body.invite_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+                .ok_or_else(|| AppError::ValidationError("Invite code is required".into()))?,
+        )
     } else {
         None
     };
-
-    let register_result = auth_service::register_user(
+    let result = match auth_service::register_user(
         &state.db,
+        &state.audit_runtime,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
-        invite_code_id.as_deref(),
+        invite_code,
         state.config.auto_verify_email,
     )
-    .await;
-
-    let result = match register_result {
-        Ok(r) if r.actually_created => {
-            if let Some(ref code_id) = invite_code_id {
-                invite_code_service::record_usage(&state.db, code_id, &r.user_id, &body.email)
-                    .await;
-            }
-            r
+    .await
+    {
+        // Retain enumeration-safe success, without inventing a verified actor
+        // or emitting an account mutation that did not occur.
+        Err(AppError::InviteCodeAlreadyRedeemed) => {
+            tracing::warn!("Registration attempt with an already-redeemed invite code");
+            return Ok(Json(RegisterResponse {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                message: "Registration processed. You can now sign in.".into(),
+            }));
         }
-        // The two arms below silently no-op the invite-code accounting:
-        // `Ok(_)` is the email-enumeration-protection fake-success branch
-        // (no real user was created); `Err(_)` is a downstream failure.
-        // In both cases we release the reservation and do NOT emit
-        // `invite.code_redeemed` — only an actually-redeemed code counts.
-        Ok(r) => {
-            // Email already existed: the service returned a fake-success to
-            // prevent enumeration. The invite code slot (if any) was never
-            // actually used, so release it before returning the fake
-            // result to the caller.
-            if let Some(ref code_id) = invite_code_id {
-                invite_code_service::release_reservation(&state.db, code_id).await;
-            }
-            r
-        }
-        Err(e) => {
-            // Registration failed for another reason (hash, DB write, etc).
-            // Release any reservation before surfacing the error.
-            if let Some(ref code_id) = invite_code_id {
-                invite_code_service::release_reservation(&state.db, code_id).await;
-            }
-            return Err(e);
-        }
+        other => other?,
     };
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(result.user_id.clone()),
-        "register".to_string(),
-        Some(serde_json::json!({ "email": body.email })),
-        extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips),
-        extract_user_agent(&headers),
-        None,
-        None,
-    );
+    let invite_code_id = result.invite_code_id.clone();
     if result.actually_created {
         ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
     }
@@ -893,7 +828,7 @@ pub async fn verify_email(
     headers: HeaderMap,
     Json(body): Json<VerifyEmailRequest>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
-    let user_id = auth_service::verify_email(&state.db, &body.token).await?;
+    let user_id = auth_service::verify_email(&state.db, &state.audit_runtime, &body.token).await?;
 
     // Telemetry: user.email_verified. Pre-auth path (token-gated), so
     // surface comes from the `X-NyxID-Client` header.
@@ -941,15 +876,11 @@ pub async fn forgot_password(
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     // Always return success to prevent email enumeration
-    let _token = auth_service::initiate_password_reset(&state.db, &body.email).await?;
+    let _token =
+        auth_service::initiate_password_reset(&state.db, &state.audit_runtime, &body.email).await?;
 
-    // In production, send the reset token via email.
-    // In development, the token is logged for testing.
-    #[cfg(debug_assertions)]
-    if let Some(ref token) = _token {
-        tracing::debug!(token = %token, "Password reset token generated (dev only)");
-    }
-
+    // Email delivery is not implemented. Preserve the existing response and
+    // discard the token; never write it to logs or a speculative delivery store.
     // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_requested).
     // `initiate_password_reset` returns `Option<String>` (the bare reset token)
     // and intentionally does not reveal whether the email matched a user,
@@ -991,7 +922,13 @@ pub async fn reset_password(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    auth_service::reset_password(&state.db, &body.token, &body.new_password).await?;
+    auth_service::reset_password(
+        &state.db,
+        &state.audit_runtime,
+        &body.token,
+        &body.new_password,
+    )
+    .await?;
 
     // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_completed).
     // `auth_service::reset_password` returns `AppResult<()>` and the handler
@@ -1032,65 +969,22 @@ pub struct SetupResponse {
 /// is created, this endpoint returns 403 Forbidden.
 pub async fn setup(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
+    _headers: HeaderMap,
     Json(body): Json<SetupRequest>,
 ) -> AppResult<Json<SetupResponse>> {
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    // Guard: only allow setup when no users exist
-    let user_count = state
-        .db
-        .collection::<User>(USERS)
-        .count_documents(doc! {})
-        .await?;
-
-    if user_count > 0 {
-        return Err(AppError::Forbidden(
-            "Setup has already been completed. Use the CLI --promote-admin flag to promote existing users.".to_string(),
-        ));
-    }
-
-    // Create the user via the normal registration flow
-    let result = auth_service::register_user(
+    let result = auth_service::bootstrap_admin(
         &state.db,
+        &state.audit_runtime,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
-        None,
-        true, // Admin setup always auto-verifies
     )
     .await?;
 
-    // Promote to admin and mark email as verified. The RBAC membership is
-    // authoritative; the legacy flag is mirrored during the migration window.
-    let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
-    let mut pipeline = role_service::set_platform_role_update(
-        crate::models::user::PlatformRole::Admin,
-        &platform_role_ids,
-        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
-    );
-    pipeline.push(doc! { "$set": { "email_verified": true } });
-    state
-        .db
-        .collection::<User>(USERS)
-        .update_one(doc! { "_id": &result.user_id }, pipeline)
-        .await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(result.user_id.clone()),
-        "admin_setup".to_string(),
-        Some(serde_json::json!({
-            "email": body.email,
-            "method": "bootstrap"
-        })),
-        extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips),
-        extract_user_agent(&headers),
-        None,
-        None,
-    );
     ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
 
     tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");
@@ -2101,5 +1995,192 @@ mod w8_id_first_party_tests {
         assert_eq!(event.api_key_id.as_deref(), Some(key.as_str()));
         assert_eq!(event.user_id.as_deref(), Some(owner.as_str()));
         assert!(!serde_json::to_string(&event).unwrap().contains(&secret));
+    }
+}
+
+#[cfg(test)]
+mod w8_id_account_lifecycle_tests {
+    use super::*;
+    use crate::models::audit_outbox::{
+        AuditOwner, AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent, SystemAuditActor,
+    };
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+        routing::post,
+    };
+    use mongodb::bson::doc;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn post_json(app: &Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn w8_id_http_registration_verification_and_reset_keep_safe_verified_attribution() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_id_http_account").await;
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.config.email_auth_enabled = true;
+        let invite = invite_code_service::create_invite_code(
+            &db,
+            &uuid::Uuid::new_v4().to_string(),
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+        let app = Router::new()
+            .route("/register", post(register))
+            .route("/verify", post(verify_email))
+            .route("/forgot", post(forgot_password))
+            .route("/reset", post(reset_password))
+            .layer(axum::Extension(ConnectInfo(
+                "127.0.0.1:23151".parse::<SocketAddr>().unwrap(),
+            )))
+            .with_state(state.clone());
+        let (status,registered)=post_json(&app,"/register",json!({"email":"w8-id-http-one@example.invalid","password":"w8-id-http-password","invite_code":invite.code})).await;
+        assert_eq!(status, StatusCode::OK, "{registered}");
+        let id = registered["user_id"].as_str().unwrap();
+        let registration = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action":"register","event.owner.id":id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            registration.event.principal,
+            AuditPrincipal::System {
+                actor: SystemAuditActor::Authentication
+            }
+        );
+        assert_eq!(
+            registration.event.owner,
+            AuditOwner::Person { id: id.to_owned() }
+        );
+        let second = auth_service::register_user(
+            &db,
+            &state.audit_runtime,
+            "w8-id-http-two@example.invalid",
+            "w8-id-http-old-password",
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let (status, verified) = post_json(
+            &app,
+            "/verify",
+            json!({"token":second.email_verification_token.as_str()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{verified}");
+        let verified = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action":"email_verified","event.owner.id":&second.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            verified.event.principal,
+            AuditPrincipal::Person {
+                id: second.user_id.clone()
+            }
+        );
+        let (known_status, known) = post_json(
+            &app,
+            "/forgot",
+            json!({"email":"w8-id-http-two@example.invalid"}),
+        )
+        .await;
+        assert_eq!(known_status, StatusCode::OK, "{known}");
+        let issued = db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action": "password_reset_requested", "event.owner.id": &second.user_id})
+            .await.unwrap().unwrap();
+        assert_eq!(
+            issued.event.principal,
+            AuditPrincipal::System {
+                actor: SystemAuditActor::Authentication
+            }
+        );
+        let issued_count = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .count_documents(doc! {"event.action": "password_reset_requested"})
+            .await
+            .unwrap();
+        let (status, unknown) = post_json(
+            &app,
+            "/forgot",
+            json!({"email":"w8-id-http-unknown@example.invalid"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(known, unknown, "forgot-password remains enumeration-safe");
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {"event.action": "password_reset_requested"})
+                .await
+                .unwrap(),
+            issued_count
+        );
+        let token = auth_service::initiate_password_reset(
+            &db,
+            &state.audit_runtime,
+            "w8-id-http-two@example.invalid",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (status, reset) = post_json(
+            &app,
+            "/reset",
+            json!({"token":token,"new_password":"w8-id-http-new-password"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reset}");
+        let reset = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action":"password_reset","event.owner.id":&second.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reset.event.principal,
+            AuditPrincipal::Person { id: second.user_id }
+        );
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>("notification_deliveries_v1")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>("audit_effect_intents")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 }
