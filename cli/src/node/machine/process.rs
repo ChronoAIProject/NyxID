@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, ffi::CString, path::PathBuf};
 
+#[cfg(any(target_os = "linux", test))]
+use anyhow::Context;
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
@@ -334,21 +336,61 @@ fn deny_agent_namespaces() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Probe in disposable children: never install filters or enter namespaces in
-/// the supervisor. No browser, listener, account or persistent file is created.
-#[cfg(target_os = "linux")]
-async fn probe_status(mut command: Command) -> Result<()> {
+/// Own the child until it is reaped, including on timeout and output overflow.
+/// Kill-on-drop also covers cancellation of the caller's future.
+#[cfg(any(target_os = "linux", test))]
+pub(super) async fn probe_output(mut command: Command) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const OUTPUT_LIMIT: u64 = 64 * 1024;
     command
+        .kill_on_drop(true)
+        .process_group(0)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    anyhow::ensure!(
-        tokio::time::timeout(std::time::Duration::from_secs(5), command.status())
-            .await??
-            .success(),
-        "separated_mechanism_probe_failed"
-    );
-    Ok(())
+    let mut child = command.spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("separated_probe_stdout_missing")?
+        .take(OUTPUT_LIMIT + 1);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).await?;
+        anyhow::ensure!(
+            output.len() as u64 <= OUTPUT_LIMIT,
+            "separated_probe_output_limit"
+        );
+        anyhow::ensure!(
+            child.wait().await?.success(),
+            "separated_mechanism_probe_failed"
+        );
+        Ok(output)
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        result => {
+            if let Some(pid) = child.id() {
+                // Browser probes may have renderer children in the same group.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+                let killed = child.start_kill();
+                child.wait().await?;
+                killed?;
+            }
+            match result {
+                Ok(error) => error,
+                Err(_) => bail!("separated_probe_timeout"),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn probe_status(command: Command) -> Result<()> {
+    probe_output(command).await.map(|_| ())
 }
 
 #[cfg(target_os = "linux")]
@@ -364,49 +406,6 @@ pub(super) async fn probe_command_seccomp(identity: &Identity) -> Result<()> {
                 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
             {
                 return Err(std::io::Error::from_raw_os_error(libc::EPERM));
-            }
-            Ok(())
-        });
-    }
-    probe_status(command).await
-}
-
-#[cfg(target_os = "linux")]
-pub(super) async fn probe_browser_namespaces(identity: &Identity) -> Result<()> {
-    let mut command = Command::new("/bin/true");
-    // Browser children deliberately retain namespace access. Applying the
-    // command filter here would manufacture an unsupported-host result.
-    identity.prepare(&mut command)?;
-    let uid_map = format!("0 {} 1\n", identity.uid);
-    let gid_map = format!("0 {} 1\n", identity.gid);
-    unsafe {
-        command.pre_exec(move || {
-            // Only syscalls and preallocated bytes after fork. Mapping happens
-            // after the real UID/GID/group drop, with NNP already installed.
-            let write_map = |path: &std::ffi::CStr, bytes: &[u8]| -> std::io::Result<()> {
-                let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
-                if fd < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let count = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
-                let error = std::io::Error::last_os_error();
-                libc::close(fd);
-                if count < 0 {
-                    return Err(error);
-                }
-                if count as usize != bytes.len() {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO));
-                }
-                Ok(())
-            };
-            if libc::unshare(libc::CLONE_NEWUSER) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            write_map(c"/proc/self/setgroups", b"deny")?;
-            write_map(c"/proc/self/uid_map", uid_map.as_bytes())?;
-            write_map(c"/proc/self/gid_map", gid_map.as_bytes())?;
-            if libc::unshare(libc::CLONE_NEWPID | libc::CLONE_NEWNET) != 0 {
-                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -462,6 +461,41 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn timed_out_probe_is_killed_and_reaped() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec /bin/sleep 30", "probe"])
+            .arg(&pid_file);
+        let error = probe_output(command).await.unwrap_err();
+        assert_eq!(error.to_string(), "separated_probe_timeout");
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "probe child survived timeout"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 
     #[test]
     fn desktop_bus_handoff_requires_private_regular_supervisor_file() {

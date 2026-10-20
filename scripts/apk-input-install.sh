@@ -3,10 +3,13 @@
 set -eu
 export LC_ALL=C
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-[ "$#" = 4 ] && [ "$(id -u)" = 0 ] || fail 'usage: apk-input-install.sh --download|--install CATALOG BASE-IMAGE ARCHIVE-DIRECTORY (root)'
-mode=$1 catalog=$2 base=$3 work=$4
-case "$work" in /*/archives) ;; *) fail 'APK archive path must be an absolute archives directory' ;; esac
-[ ! -L "$work" ] || fail 'APK archive directory must not be symlinked'
+[ "$#" -ge 4 ] && [ "$#" -le 5 ] && [ "$(id -u)" = 0 ] || fail 'usage: apk-input-install.sh --download|--install CATALOG BASE-IMAGE ARCHIVE-DIRECTORY [SOURCE-MODE] (root)'
+mode=$1 catalog=$2 base=$3 archives=$4
+source_mode=${5:-durable}
+case "$source_mode" in durable|pr-upstream-if-missing|provision-upstream) ;; *) fail 'invalid APK source mode' ;; esac
+[ "$mode" = --download ] || [ "$#" = 4 ] || fail 'source mode is download-only'
+case "${archives}" in /*/archives) ;; *) fail 'APK archive path must be an absolute archives directory' ;; esac
+[ ! -L "${archives}" ] || fail 'APK archive directory must not be symlinked'
 case "$mode" in --download|--install) ;; *) fail 'invalid APK installer mode' ;; esac
 [ -f "$catalog" ] || fail 'APK catalog missing'
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -18,17 +21,17 @@ inventory() { awk -f "$script_dir/apk-inventory.awk" /lib/apk/db/installed | LC_
 before=$(inventory | sha256sum | cut -d ' ' -f 1)
 [ "$before" = "$(field before-sha256)" ] || fail 'APK base inventory mismatch'
 if [ "$mode" = --download ]; then
-    [ ! -e "$work" ] || fail 'APK archive directory must be fresh'
-    mkdir -p "$work"
+    [ ! -e "${archives}" ] || fail 'APK archive directory must be fresh'
+    mkdir -p "${archives}"
 else
-    [ -d "$work" ] || fail 'APK archives missing'
+    [ -d "${archives}" ] || fail 'APK archives missing'
 fi
 set --
 tab=$(printf '\t')
-while IFS="$tab" read -r name version arch sha url; do
-    archive=$work/$name-$version.apk
+while IFS="$tab" read -r name version arch sha durable upstream; do
+    archive=${archives}/$name-$version.apk
     if [ "$mode" = --download ]; then
-        wget -T 120 -O "$archive" "$url"
+        sh "$script_dir/apk-input-fetch.sh" "$durable" "$upstream" "$archive" "$source_mode" "$sha"
     fi
     [ -f "$archive" ] && [ ! -L "$archive" ] || fail 'APK archive missing or symlinked'
     printf '%s  %s\n' "$sha" "$archive" | sha256sum -c - >/dev/null || fail 'APK archive checksum mismatch'
@@ -44,6 +47,9 @@ done <<EOF_ROWS
 $rows
 EOF_ROWS
 [ "$mode" = --install ] || exit 0
+[ "$#" -gt 0 ] || fail 'empty APK archive selection'
+work=$(mktemp -d /tmp/nyxid-apk-install.XXXXXXXX)
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 # Ignore inherited indexes/cache/repositories: the complete closure consists
 # only of the pinned base plus these explicit, signature-checked archives.
 apk --no-network --no-cache --repositories-file /dev/null add --simulate "$@" || fail 'APK closure preflight failed'
@@ -57,4 +63,3 @@ receipt=/usr/share/nyxid/build-inputs/apk/$(sha256sum "$catalog" | cut -d ' ' -f
 mkdir -p "$receipt"
 cp "$catalog" "$receipt/archives.tsv"
 cp "$work/base-installed.tsv" "$work/installed.tsv" "$receipt/"
-rm -rf -- "$work"

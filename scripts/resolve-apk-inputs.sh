@@ -57,6 +57,7 @@ awk -F '\t' 'NR==FNR {present[$1]=1;next} !present[$1] {exit 1}' \
 catalog=/out/archives.tsv
 rows=/out/archive-inputs.tsv
 : > "$rows"
+refreshed=$(date -u +%Y-%m-%d)
 tab=$(printf '\t')
 while IFS="$tab" read -r name version architecture; do
     # Pinned APK 2/3 expose query-mode fetch. Exclude the installed DB so
@@ -86,13 +87,14 @@ while IFS="$tab" read -r name version architecture; do
         $1=="arch" {print $2; architectures++}
         END {if(names!=1 || versions!=1 || architectures!=1) exit 1}')
     case "$archive_arch" in "$native_arch"|noarch) ;; *) exit 1 ;; esac
-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$version" "$archive_arch" \
-        "$(sha256sum "$archive" | cut -d ' ' -f 1)" "$url" >> "$rows"
+    sha=$(sha256sum "$archive" | cut -d ' ' -f 1)
+    durable=https://github.com/ChronoAIProject/NyxID/releases/download/build-inputs-apk-$refreshed/$sha-$archive_arch-$name-$version.apk
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$version" "$archive_arch" "$sha" "$durable" "$url" >> "$rows"
 done < /out/changed.tsv
 awk -F '\t' 'BEGIN {OFS="\t"} NR==FNR {arch[$1]=$3;next} {if($1 in arch) $3=arch[$1];print}' \
     "$rows" /out/resolved-installed.tsv > /out/installed.tsv
-printf '# nyxid.apk-inputs.v1\n# base-image %s\n# arch %s\n# refreshed-on %s\n# packages %s\n# before-sha256 %s\n# after-sha256 %s\n' \
-    "$base" "$native_arch" "$(date -u +%Y-%m-%d)" "$(printf '%s\n' "$@" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')" \
+printf '# nyxid.apk-inputs.v2\n# base-image %s\n# arch %s\n# refreshed-on %s\n# packages %s\n# before-sha256 %s\n# after-sha256 %s\n' \
+    "$base" "$native_arch" "$refreshed" "$(printf '%s\n' "$@" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//')" \
     "$(sha256sum /out/base-installed.tsv | cut -d ' ' -f 1)" \
     "$(sha256sum /out/installed.tsv | cut -d ' ' -f 1)" > "$catalog"
 cat "$rows" >> "$catalog"

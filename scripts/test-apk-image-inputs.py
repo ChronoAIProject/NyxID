@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from apk_archive_layers import check_layers
 from apk_inputs import prefixes as apk_prefixes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,12 +37,19 @@ def run(args):
             command = ["docker", "buildx", "build", "--load", "--no-cache", "--provenance=false",
                        "--platform", args.platform, "--file", str(dockerfile), "--tag", tag,
                        str(ROOT)]
+            if args.pr_upstream_if_missing:
+                command[-1:-1] = ['--build-arg', 'APK_INPUT_SOURCE=pr-upstream-if-missing']
             log = args.output / (label + ".log")
             with log.open("w") as output:
                 result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=2400)
             if result.returncode:
                 print(log.read_text()[-12000:], flush=True)
                 raise ValueError("APK Dockerfile build failed: " + name + ":" + stage)
+            saved = Path(temporary) / 'image.tar'
+            subprocess.run(['docker', 'save', '--output', str(saved), tag], check=True, timeout=180)
+            layer_count = check_layers(saved)
+            (args.output / (label + '-layers.txt')).write_text(f'{layer_count} layers checked; no APK archive payloads\n')
+            saved.unlink()
             # No network exists in this verification container. Inspect actual
             # retained distro metadata and installed inventories from the build.
             verify = r'''
@@ -74,5 +82,6 @@ done
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
+    parser.add_argument("--pr-upstream-if-missing", action="store_true", help="PR rehearsal only: log and allow upstream on durable HTTP 404")
     parser.add_argument("--output", type=Path, required=True)
     run(parser.parse_args())

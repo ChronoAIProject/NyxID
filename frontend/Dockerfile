@@ -37,14 +37,21 @@ ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
+FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS frontend-runtime-apk-download
+USER root
+COPY scripts/apk-input-install.sh scripts/apk-input-fetch.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
+COPY security/apk/ /opt/nyxid-apk/catalogs/
+ARG TARGETARCH
+ARG APK_INPUT_SOURCE=durable
+RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives "${APK_INPUT_SOURCE}"
+
 FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS runtime
 
 USER root
 COPY scripts/apk-input-install.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
 COPY security/apk/ /opt/nyxid-apk/catalogs/
 ARG TARGETARCH
-RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
-RUN --network=none sh /opt/nyxid-apk/apk-input-install.sh --install /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
+RUN --network=none --mount=type=bind,from=frontend-runtime-apk-download,source=/opt/nyxid-apk/archives,target=/opt/nyxid-apk/archives sh /opt/nyxid-apk/apk-input-install.sh --install /opt/nyxid-apk/catalogs/frontend-runtime-${TARGETARCH}.tsv nginxinc/nginx-unprivileged:1.30-alpine@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 /opt/nyxid-apk/archives
 RUN mkdir -p /etc/nginx/nyxid/generated && chown 101:101 /etc/nginx/nyxid/generated
 # Remove stock pages before copying the shipped SPA.
 RUN rm -rf /usr/share/nginx/html/*

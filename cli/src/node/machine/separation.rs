@@ -25,8 +25,8 @@ fn separate_users(supervisor: u32, command: (u32, u32), browsers: &[(u32, u32)])
 enum Probe {
     CommandSeccomp,
     Landlock,
-    SecureNamespaces,
-    DeveloperNamespaces,
+    SecureBrowser,
+    DeveloperBrowser,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -51,10 +51,89 @@ where
     if evidence.landlock_enforced != Some(true) {
         return evidence;
     }
-    let secure = run(Probe::SecureNamespaces).await;
-    let developer = secure && run(Probe::DeveloperNamespaces).await;
-    evidence.browser_user_namespaces = Some(secure && developer);
+    let secure = run(Probe::SecureBrowser).await;
+    let developer = secure && run(Probe::DeveloperBrowser).await;
+    evidence.managed_browser_sandbox = Some(secure && developer);
     evidence
+}
+
+/// Read Chromium's built-in renderer sandbox diagnostics after launching the
+/// configured executable. Unknown/partial pages and duplicate rows fail closed.
+#[cfg(any(target_os = "linux", test))]
+fn chromium_sandbox_active(output: &[u8]) -> bool {
+    static ROW: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?s)<tr>\s*<td(?:\s[^>]*)?>([^<]*)</td>\s*<td(?:\s[^>]*)?>([^<]*)</td>\s*</tr>",
+        )
+        .expect("constant sandbox row pattern")
+    });
+    let Ok(html) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let rows: Vec<_> = ROW
+        .captures_iter(html)
+        .map(|row| (row[1].trim().to_owned(), row[2].trim().to_owned()))
+        .collect();
+    [
+        ("Layer 1 Sandbox", "Namespace"),
+        ("PID namespaces", "Yes"),
+        ("Network namespaces", "Yes"),
+        ("Seccomp-BPF sandbox", "Yes"),
+    ]
+    .into_iter()
+    .all(|(name, value)| {
+        let mut matches = rows.iter().filter(|row| row.0 == name);
+        matches.next().is_some_and(|row| row.1 == value) && matches.next().is_none()
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn probe_browser(
+    browser: &nyxid_machine::config::ManagedBrowserConfig,
+    identity: &Identity,
+) -> anyhow::Result<()> {
+    use anyhow::ensure;
+    use std::os::fd::AsRawFd;
+    ensure!(identity.uid != 0, "separated_browser_requires_non_root");
+    // A fresh private profile never opens the owner's tabs, cookies or native
+    // messaging sockets. Chromium's own exec/zygote path performs namespace
+    // creation, so AppArmor attaches the real binary's policy before the probe.
+    let profile = tempfile::Builder::new()
+        .prefix(".nyxid-sandbox-probe-")
+        .tempdir()?;
+    let directory = std::fs::File::open(profile.path())?;
+    if unsafe { libc::geteuid() } == 0 {
+        ensure!(
+            unsafe { libc::fchown(directory.as_raw_fd(), identity.uid, identity.gid) } == 0,
+            "separated_browser_probe_profile_owner"
+        );
+    }
+    let mut command = tokio::process::Command::new(&browser.binary);
+    // Same UID/GID, supplementary groups, NNP and executable as the separated
+    // runtime. Never apply the namespace-denying command filter to Chromium.
+    identity.prepare(&mut command)?;
+    command
+        .arg(format!("--user-data-dir={}", profile.path().display()))
+        .args([
+            "--headless=new",
+            // Chromium 123+ requires this for headless chrome:// diagnostics.
+            "--allow-chrome-scheme-url",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-breakpad",
+            "--disable-crash-reporter",
+            "--password-store=basic",
+            "--dump-dom",
+            "chrome://sandbox",
+        ]);
+    let output = super::process::probe_output(command).await?;
+    ensure!(
+        chromium_sandbox_active(&output),
+        "separated_browser_sandbox_probe_failed"
+    );
+    Ok(())
 }
 
 pub(super) async fn observe(
@@ -79,6 +158,14 @@ pub(super) async fn observe(
     {
         use super::process;
         let mut evidence = evidence;
+        evidence.apparmor_userns_restricted =
+            std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+                .ok()
+                .and_then(|value| match value.trim() {
+                    "0" => Some(false),
+                    "1" => Some(true),
+                    _ => None,
+                });
         evidence.landlock_abi = process::context_sandbox::abi()
             .ok()
             .and_then(|abi| u32::try_from(abi).ok());
@@ -92,17 +179,20 @@ pub(super) async fn observe(
         run_probes(evidence, |probe| async move {
             match probe {
                 Probe::CommandSeccomp => process::probe_command_seccomp(command).await.is_ok(),
-                Probe::Landlock => tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    process::context_sandbox::probe(command),
-                )
-                .await
-                .is_ok_and(|result| result.is_ok()),
-                Probe::SecureNamespaces => process::probe_browser_namespaces(secure).await.is_ok(),
-                Probe::DeveloperNamespaces => match developer {
-                    Some(developer) => process::probe_browser_namespaces(developer).await.is_ok(),
-                    None => false,
-                },
+                Probe::Landlock => process::context_sandbox::probe(command).await.is_ok(),
+                Probe::SecureBrowser | Probe::DeveloperBrowser => {
+                    let identity = if probe == Probe::SecureBrowser {
+                        Some(secure)
+                    } else {
+                        developer
+                    };
+                    match (config.managed_browser.as_ref(), identity) {
+                        (Some(browser), Some(identity)) => {
+                            probe_browser(browser, identity).await.is_ok()
+                        }
+                        _ => false,
+                    }
+                }
             }
         })
         .await
@@ -112,6 +202,55 @@ pub(super) async fn observe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sandbox_page() -> String {
+        [
+            ("Layer 1 Sandbox", "Namespace"),
+            ("PID namespaces", "Yes"),
+            ("Network namespaces", "Yes"),
+            ("Seccomp-BPF sandbox", "Yes"),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            format!("<tr><td class=\"good\">{name}</td><td class=\"good\">{value}</td></tr>")
+        })
+        .collect()
+    }
+
+    #[test]
+    fn chromium_diagnostics_require_every_active_sandbox_layer() {
+        let good = sandbox_page();
+        assert!(chromium_sandbox_active(good.as_bytes()));
+        for (name, value) in [
+            ("Layer 1 Sandbox", "Namespace"),
+            ("PID namespaces", "Yes"),
+            ("Network namespaces", "Yes"),
+            ("Seccomp-BPF sandbox", "Yes"),
+        ] {
+            let row =
+                format!("<tr><td class=\"good\">{name}</td><td class=\"good\">{value}</td></tr>");
+            assert!(
+                !chromium_sandbox_active(good.replace(&row, "").as_bytes()),
+                "{name}"
+            );
+            assert!(
+                !chromium_sandbox_active(good.replace(&row, &row.replace(value, "No")).as_bytes()),
+                "{name}"
+            );
+            assert!(
+                !chromium_sandbox_active(format!("{good}{row}").as_bytes()),
+                "{name}"
+            );
+        }
+        assert!(!chromium_sandbox_active(
+            good.replace("Namespace", "SUID").as_bytes()
+        ));
+        assert!(!chromium_sandbox_active(
+            b"<title>chrome://sandbox failed</title>"
+        ));
+        assert!(!chromium_sandbox_active(b"Layer 1 Sandbox Namespace PID namespaces Yes Network namespaces Yes Seccomp-BPF sandbox Yes"));
+        assert!(!chromium_sandbox_active(b"\xff"));
+    }
 
     fn prerequisites() -> Evidence {
         Evidence {
@@ -129,8 +268,8 @@ mod tests {
         let probes = [
             Probe::CommandSeccomp,
             Probe::Landlock,
-            Probe::SecureNamespaces,
-            Probe::DeveloperNamespaces,
+            Probe::SecureBrowser,
+            Probe::DeveloperBrowser,
         ];
         for (index, failed) in probes.iter().enumerate() {
             let mut calls = Vec::new();
@@ -146,7 +285,7 @@ mod tests {
                 Some(match failed {
                     Probe::CommandSeccomp => "separated_seccomp_probe_failed",
                     Probe::Landlock => "separated_landlock_probe_failed",
-                    _ => "separated_browser_namespace_probe_failed",
+                    _ => "separated_browser_sandbox_probe_failed",
                 })
             );
         }
@@ -167,8 +306,8 @@ mod tests {
             [
                 Probe::CommandSeccomp,
                 Probe::Landlock,
-                Probe::SecureNamespaces,
-                Probe::DeveloperNamespaces
+                Probe::SecureBrowser,
+                Probe::DeveloperBrowser
             ]
         );
     }
@@ -200,7 +339,7 @@ mod tests {
             assert!(!evidence.support().available);
             assert_eq!(evidence.command_seccomp, None);
             assert_eq!(evidence.landlock_enforced, None);
-            assert_eq!(evidence.browser_user_namespaces, None);
+            assert_eq!(evidence.managed_browser_sandbox, None);
         }
     }
 
@@ -240,6 +379,6 @@ mod tests {
         assert!(!evidence.support().available);
         assert_eq!(evidence.landlock_abi, None);
         assert_eq!(evidence.command_seccomp, None);
-        assert_eq!(evidence.browser_user_namespaces, None);
+        assert_eq!(evidence.managed_browser_sandbox, None);
     }
 }

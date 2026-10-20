@@ -10,8 +10,10 @@ from apk_inputs import ARCHES, catalog, check_apk_inputs, prefixes
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 'alpine:3.22@sha256:' + 'a' * 64
-ROW = 'python3\t3.14.8-r0\tx86_64\t' + 'b' * 64 + '\thttps://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.8-r0.apk\n'
-VALID = f'''# nyxid.apk-inputs.v1
+UPSTREAM = 'https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/python3-3.14.8-r0.apk'
+DURABLE = 'https://github.com/ChronoAIProject/NyxID/releases/download/build-inputs-apk-2026-10-20/' + 'b' * 64 + '-x86_64-python3-3.14.8-r0.apk'
+ROW = 'python3\t3.14.8-r0\tx86_64\t' + 'b' * 64 + '\t' + DURABLE + '\t' + UPSTREAM + '\n'
+VALID = f'''# nyxid.apk-inputs.v2
 # base-image {BASE}
 # arch x86_64
 # refreshed-on 2026-10-20
@@ -36,7 +38,7 @@ class CatalogTests(unittest.TestCase):
             self.parse(value)
 
     def test_valid(self): self.assertEqual(self.parse(VALID), ROW)
-    def test_wrong_schema(self): self.reject(VALID.replace('.v1', '.v2'))
+    def test_wrong_schema(self): self.reject(VALID.replace('.v2', '.v1'))
     def test_missing_header(self): self.reject(VALID.replace('# arch x86_64\n', ''))
     def test_duplicate_header(self): self.reject(VALID.replace(ROW, '# arch x86_64\n' + ROW))
     def test_unknown_header(self): self.reject(VALID.replace(ROW, '# bypass yes\n' + ROW))
@@ -45,12 +47,15 @@ class CatalogTests(unittest.TestCase):
     def test_mutable_base(self): self.reject(VALID.replace(BASE, 'alpine:3.22'))
     def test_wrong_arch(self): self.reject(VALID.replace('# arch x86_64', '# arch aarch64'))
     def test_wrong_archive_arch(self): self.reject(VALID.replace('\tx86_64\t', '\taarch64\t'))
-    def test_noarch(self): self.assertIn('\tnoarch\t', self.parse(VALID.replace('\tx86_64\t', '\tnoarch\t')))
+    def test_noarch(self): self.assertIn('\tnoarch\t', self.parse(VALID.replace('\tx86_64\t', '\tnoarch\t').replace('-x86_64-python3-', '-noarch-python3-')))
     def test_bad_inventory_hash(self): self.reject(VALID.replace('c' * 64, 'c' * 63))
     def test_bad_archive_hash(self): self.reject(VALID.replace('b' * 64, 'B' * 64))
     def test_duplicate_archive(self): self.reject(VALID + ROW)
     def test_empty_closure(self): self.reject(VALID.replace(ROW, ''))
+    def test_durable_date(self): self.reject(VALID.replace('build-inputs-apk-2026-10-20', 'build-inputs-apk-2026-10-21'))
+    def test_durable_hash(self): self.reject(VALID.replace(DURABLE, DURABLE.replace('b' * 64, 'e' * 64)))
     def test_http_origin(self): self.reject(VALID.replace('https://', 'http://'))
+    def test_origin_lookalike(self): self.reject(VALID.replace('dl-cdn.alpinelinux.org', 'dl-cdnXalpinelinuxYorg'))
     def test_origin_suffix(self): self.reject(VALID.replace('alpinelinux.org/', 'alpinelinux.org.evil/'))
     def test_moving_branch(self): self.reject(VALID.replace('/v3.24/', '/edge/'))
     def test_url_arch(self): self.reject(VALID.replace('/x86_64/', '/aarch64/'))
@@ -86,7 +91,7 @@ class Callers(unittest.TestCase):
     def test_raw_apk(self): self.mutate('RUN --network=none ', 'RUN apk add python3 && ', 'raw APK')
     def test_networked_install(self): self.mutate('RUN --network=none ', 'RUN ', 'network=none')
     def test_catalog_copy(self): self.mutate('COPY security/apk/', 'COPY wrong/', 'omits installer')
-    def test_wrong_stage_catalog(self): self.mutate('frontend-runtime-', 'updater-e2e-', 'stage/request binding')
+    def test_wrong_stage_catalog(self): self.mutate('AS runtime', 'AS wrong', 'stage/request binding')
     def test_no_download(self): self.mutate('--download ', '--install ', 'stage/request binding')
     def test_missing_arch(self):
         (self.root / 'security/apk/frontend-runtime-arm64.tsv').unlink()
@@ -95,6 +100,22 @@ class Callers(unittest.TestCase):
         path = self.root / 'security/apk/frontend-runtime-amd64.tsv'
         path.write_text(path.read_text().replace('# packages python3', '# packages perl'))
         self.assertTrue(any('requested packages differ' in e for e in check_apk_inputs(self.root, self.names)))
+    def test_mutable_durable_default(self): self.mutate('ARG APK_INPUT_SOURCE=durable', 'ARG APK_INPUT_SOURCE=pr-upstream-if-missing', 'default to durable')
+    def test_writable_mount(self): self.mutate('target=/opt/nyxid-apk/archives sh', 'target=/opt/nyxid-apk/archives,rw sh', 'read-only')
+    def test_copy_download_archives(self):
+        path = self.root / 'frontend/Dockerfile'
+        path.write_text(path.read_text() + '\nCOPY --from=frontend-runtime-apk-download /opt/nyxid-apk/archives /archives\n')
+        self.assertTrue(any('must not be inherited or copied' in e for e in check_apk_inputs(self.root, self.names)))
+    def test_same_stage_download_install(self):
+        path = self.root / 'frontend/Dockerfile'
+        text = path.read_text()
+        download = next(line for line in text.splitlines() if ' --download ' in line)
+        path.write_text(text.replace('RUN --network=none ', download + '\nRUN --network=none ', 1))
+        self.assertTrue(any('separate stages' in e for e in check_apk_inputs(self.root, self.names)))
+    def test_foreign_durable_repository(self):
+        path = self.root / 'security/apk/frontend-runtime-amd64.tsv'
+        path.write_text(path.read_text().replace('/ChronoAIProject/NyxID/', '/evil/NyxID/'))
+        self.assertTrue(check_apk_inputs(self.root, self.names))
     def test_projection(self):
         cases = prefixes(self.root, self.names)
         self.assertEqual(len(cases), 3)
