@@ -17,6 +17,50 @@ inventories, architecture/static checks, final scans and subject-bound SBOMs
 remain mandatory. New native image builds/scans are needed to measure the
 resulting finding counts; the prior demo report had 46 blocking findings.
 
+## Node runtime package and linkage evidence
+
+Readelf inspection of both actual Linux CLI archives from CI 39412744887
+(`pr-cli-archive-x86_64-unknown-linux-gnu` and
+`pr-cli-archive-aarch64-unknown-linux-gnu`) found `libdbus-1.so.3` in DT_NEEDED.
+The amd64 archive additionally needs libgcc_s.so.1, libm.so.6, libc.so.6 and
+ld-linux-x86-64.so.2. The arm64 archive additionally needs libgcc_s.so.1,
+libpthread.so.0, libm.so.6, libdl.so.2 and libc.so.6. These are the actual release
+archives, not binaries extracted from the image: CI did not retain that image.
+Running the arm64 archive in the exact pinned bookworm-slim base fails before
+main with a missing libdbus-1.so.3 loader error. The Dockerfile comment claiming
+that the encrypted file backend removes the loader dependency is incorrect;
+unconditional keyring Secret Service features introduce it even when unused.
+
+The new exporter retains exactly the following runtime packages, their dpkg
+status/control records and actual file lists. A native arm64 disposable replay
+used the October 20 signed snapshots and produced these versions. Only the
+aggregate CA bundle is copied from that snapshot's ca-certificates package;
+its openssl, debconf and shell dependencies remain in the package builder.
+The exported filesystem's Trivy scan detected exactly five OS packages and
+zero HIGH/CRITICAL/UNKNOWN findings with the existing local vulnerability DB.
+This is rootfs evidence; the completed node image still requires native PR
+execution, Rust inventory, current vulnerability scan and subject-bound SBOM.
+
+| Retained package | Native arm64 replay version | Runtime role |
+| --- | --- | --- |
+| base-files | 12.4+deb12u15 | Distribution identity, base directory and configuration files |
+| libc6 | 2.36-9+deb12u14 | GNU loader, libc, libm, pthread/dl compatibility and resolver support |
+| libgcc-s1 | 12.2.0-14+deb12u1 | Compiler runtime and unwinding support |
+| netbase | 6.4 | Network service/protocol databases |
+| tzdata | 2026c-0+deb12u1 | Timezone data |
+| CA bundle only, ca-certificates | 20250419~deb12u1 | Trust bundle SHA-256: 714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5 |
+
+The shell entrypoint currently invokes only nyxid, plus shell builtins (`set`,
+`[`, `echo`, `exit`, `exec`). Node SSH execution uses russh rather than an
+external ssh client. The reduced node image needs no shell once registration
+and foreground-start orchestration move to the coordinated CLI subcommand;
+no ssh client, util-linux tools/libraries, perl, ncurses, gzip, libacl,
+libsystemd/libudev, OpenSSL or zlib is in the five-package export. All packages
+behind the prior 60 Debian findings are excluded. The CLI container feature
+must also remove the DBus link; adding the old CLI to this rootfs would fail.
+This service image is distinct from the machine workstation images, whose
+owner shell/build/browser workloads retain their documented tools.
+
 ## Approved residual-finding policy
 
 A final-image finding is disposition-eligible only when all hold: (a) the

@@ -341,3 +341,11 @@
 - Record the PM's residual-CVE eligibility and unconditional CRITICAL-blocking policy; no active image dispositions added.
 - Local: ELF parser 2/2, source artifacts 16/16, image vulnerabilities 14/14 and APT policy 23/23; 55 passed, 0 failed; packaging workflows 16/16 and SBOM workflows 3/3; build-input gate passed.
 - PR: Shipped Image Identity (mcp-demo, amd64/arm64), Shipped SBOM Policy, Artifact Packaging Policy, APT Policy, Scanner Policy and CI Pipeline; actual final-image scan counts remain hosted evidence.
+
+## W7 CI82 follow-up — minimal node rootfs exporter and measured linkage
+- Export exactly libc6/libgcc-s1/base-files/netbase/tzdata from snapshot-installed packages, retaining honest dpkg status/file lists; copy only the same snapshot's CA bundle.
+- Reject absent runtime files, uninstalled/wrong packages, traversal, escaping write paths and builder-tool leakage; record only slim-excluded documentation/metadata omissions.
+- Both actual CI Linux CLI archives link libdbus-1.so.3. Native arm64 execution in the exact pinned base fails at the loader; this reproducer is distinguished from an actual CI image execution.
+- Disposable arm64 signed-snapshot export passed; actual Trivy rootfs scan detected exactly five OS packages and 0 HIGH/CRITICAL/UNKNOWN findings with the local DB. Full native image evidence still required in PR CI.
+- Local exporter tests 5/5 passed; no Cargo source/manifest or node entrypoint edited. Coordinated CLI entrypoint and container feature are required before wiring the reduced Dockerfile.
+- PR: Artifact Packaging Policy; eventual node image wiring must pass Shipped Image Identity (node-agent, both arches), native execution, final scan and SBOM closure.
