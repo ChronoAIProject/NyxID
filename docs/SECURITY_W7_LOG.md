@@ -155,3 +155,17 @@
 - Real Linux sandbox and Docker/image/archive execution require PR CI; local Lima access awaits PM coordination with D. No local application/backend build.
 - Missing APK durable release confirmed loud but non-blocking on PRs; scheduled durability remains required. Provisioning is still a maintainer step.
 - Commit excludes all C-5 scanner drafts and other streams' files; no push, merge, secrets, tags or remote workflow execution.
+
+## C-5 — required discovery, exact dispositions and final-image scans
+- Add read-only PR/weekly history/dependency scanners required by CI Pipeline and release publication; no inline, baseline, inherited-config or blanket ignores.
+- Seven PM-proposed semantic placeholders replace only the owned lines. Exact rule/path/match/value/source-line dispositions include owner, expiry, rationale and provenance; all 123 entries have identity negatives.
+- Real-detector negatives cover Firebase same-file new key, changed bytes/path/rule, expiry, policy metadata and deleted branch history; no Firebase key use/probe.
+- Audit all 12 locks and every manifest/workspace, including machine/updater and independent tools/test roots; local result: 10 clean, Cargo 12 advisory occurrences, mobile 6.
+- Scan actual runtime images on both native PR/weekly architectures, require OS/Rust binary inventories, block HIGH/CRITICAL/UNKNOWN, and require fresh APT/APK/CA catalogs.
+- Publication waits for source scans, scans before the first registry write and copies only the passing staged OCI digest; operator wrapper fails before tagging on missing/failed scans.
+- D's final contract now asserts exact volumes, retained container ID/state, explicit choice-change refusal, unchanged custody and hidden/dangling profile absence; no D-owned edit.
+- Local: secret14, dependency7, image14, wiring6, wrapper18, catalogs29, pins20, helpers28, packaging14, YAML9, machine14, mobile8, WSS7 = 188 passed / 0 failed.
+- Real Lima root/_apt regression on committed 8589cfd88: 1 passed / 0 failed in a disposable pinned Ubuntu container; guest dpkg hash unchanged and no container left.
+- Full committed candidate with all 566 source refs: history215 + tree111, reviewed316, unresolved10 (six historical documentation values); gate correctly fails without provenance exceptions.
+- Remaining dependency/history findings stay blocking. No manifest/lock edit, confirmed operational credential, rotation, local application build, push or remote workflow execution.
+- PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Vulnerability Scan Catalog Freshness, Artifact Packaging Policy/image matrix, Machine Docker CLI E2E.

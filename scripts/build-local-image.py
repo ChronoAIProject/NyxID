@@ -93,6 +93,27 @@ def check_identity(tree, destination, image_id, component, platform, exported, r
         raise ValueError('mandatory final image identity check failed')
 
 
+def check_vulnerabilities(tree, destination, image_id, component, platform, exported, result):
+    checker = tree / 'scripts/check-image-vulnerabilities.py'
+    bootstrap = tree / 'scripts/bootstrap-build-tool.py'
+    if any(path.is_symlink() or not path.is_file() for path in (checker, bootstrap)):
+        raise ValueError('mandatory final vulnerability checker/bootstrap is missing or not regular')
+    tools = destination / 'scan-tools'
+    for tool in ('trivy', 'regctl'):
+        command = [sys.executable, str(bootstrap), tool, '--bin-dir', str(tools)]
+        code = subprocess.run(command, cwd=tree).returncode
+        result[tool + '_bootstrap_exit_code'] = code
+        if code != 0:
+            raise ValueError('mandatory image vulnerability tool bootstrap failed')
+    result['command'] = [sys.executable, str(checker), '--image', image_id, '--component', component,
+                         '--platform', platform, '--commit', exported['source']['commit'],
+                         '--trivy', str(tools / 'trivy'), '--regctl', str(tools / 'regctl'),
+                         '--stage', str(destination / 'scanned-image')]
+    result['exit_code'] = subprocess.run(result['command'], cwd=tree).returncode
+    if result['exit_code'] != 0:
+        raise ValueError('mandatory final image vulnerability check failed')
+
+
 def build(root, destination, dockerfile, tag, target=None, platform=None, contexts=()):
     commit = source.git(root, "rev-parse", "HEAD").decode().strip()
     relative = str(source.relative(dockerfile))
@@ -121,6 +142,7 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
     receipt['build_exit_code'] = code
     receipt['image'] = dict(id=None, component=component, platform=platform, requested_tag=tag, tagged=False)
     check = receipt['identity_check'] = dict(status='not-run', exit_code=None)
+    vulnerability = receipt['vulnerability_check'] = dict(status='not-run', exit_code=None)
     try:
         if code == 0:
             if iidfile.is_symlink() or not iidfile.is_file() or iidfile.stat().st_size > 128:
@@ -132,19 +154,28 @@ def build(root, destination, dockerfile, tag, target=None, platform=None, contex
             if component:
                 check['status'] = 'failed'
                 check_identity(tree, destination, image_id, component, platform, exported, check)
+                check['status'] = 'passed'
+                vulnerability['status'] = 'failed'
+                check_vulnerabilities(tree, destination, image_id, component, platform, exported, vulnerability)
+                vulnerability['status'] = 'passed'
             try:
                 source.verify(destination, commit)
             except (ValueError, OSError) as error:
                 receipt['post_build_source_verified'] = False
+                check['status'] = 'failed'
                 receipt['post_build_source_error'] = str(error)
                 raise
             check['status'] = 'passed' if component else 'not-applicable-test-target'
+            if not component:
+                vulnerability['status'] = 'not-applicable-test-target'
             # No tag is applied until the exact final image passes. Failure
             # preserves any pre-existing tag instead of replacing it with bad bytes.
             code = subprocess.run(['docker', 'tag', '--', image_id, tag], check=False).returncode
             receipt['image']['tagged'] = code == 0
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         check['error'] = str(error)
+        if vulnerability['status'] == 'failed':
+            vulnerability['error'] = str(error)
         print(str(error), file=sys.stderr)
         code = 1
     finally:

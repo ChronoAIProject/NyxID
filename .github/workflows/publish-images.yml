@@ -53,12 +53,12 @@ jobs:
       force-all: true
 
   # ---------------------------------------------------------------------------
-  # Build each component for each platform on its native runner while CI runs.
-  # Each job pushes by digest only (no tags). A failed CI gate leaves no tagged
-  # release because `merge` waits for both the builds and the gate.
+  # CI, including source dependency/history scans, precedes every registry write.
+  # Build and scan each final native image locally, then copy its exact digest.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
+    needs: ci-gate
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -138,7 +138,7 @@ jobs:
       - name: Verify exported image inputs before build
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit "${{ steps.source.outputs.commit }}"
 
-      - name: Build and push by digest
+      - name: Build staged image without registry writes
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -153,7 +153,9 @@ jobs:
           build-args: |
             NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
-          outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          load: true
+          push: false
+          tags: nyxid-publish:staged
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           provenance: false
@@ -167,12 +169,11 @@ jobs:
           components: clippy, rustfmt
       - name: Require final publication image source identity before attestation and promotion
         env:
-          IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          IMAGE: nyxid-publish:staged
           PLATFORM: ${{ matrix.platform }}
           COMPONENT: ${{ matrix.component }}
         run: |
           CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
-          docker pull --platform "$PLATFORM" "$IMAGE"
           python3 scripts/check-image-identity.py --image "$IMAGE" --component "$COMPONENT" \
             --arch "${PLATFORM#linux/}" --source-root "$RUNNER_TEMP/image-source/source" \
             --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
@@ -181,7 +182,7 @@ jobs:
         if: matrix.component == 'nyxid-node-machine'
         timeout-minutes: 10
         env:
-          MACHINE_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          MACHINE_IMAGE: nyxid-publish:staged
         run: |
           docker build --build-arg MACHINE_IMAGE="$MACHINE_IMAGE" \
             -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
@@ -197,23 +198,49 @@ jobs:
         if: matrix.component == 'nyxid-machine-updater'
         timeout-minutes: 10
         env:
-          UPDATER_PRODUCTION_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          UPDATER_PRODUCTION_IMAGE: nyxid-publish:staged
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           npm ci --ignore-scripts --prefix frontend
           node cli/tests/machine_updater_production.mjs
 
+      - name: Install checksummed final image scanners and digest copier
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Require vulnerability scan of the exact staged publication subject
+        run: |
+          python3 scripts/check-image-vulnerabilities.py --image nyxid-publish:staged \
+            --component '${{ matrix.component }}' --platform '${{ matrix.platform }}' \
+            --commit '${{ steps.source.outputs.commit }}' --trivy "$RUNNER_TEMP/scan-tools/trivy" \
+            --regctl "$RUNNER_TEMP/scan-tools/regctl" --stage "$RUNNER_TEMP/scanned-image"
+      - name: Copy only the passing immutable OCI subject to GHCR
+        id: publish
+        run: |
+          python3 scripts/publish-scanned-image.py --stage "$RUNNER_TEMP/scanned-image" \
+            --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/scan-tools/regctl"
+      - name: Preserve final image vulnerability report and digest binding
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: published-image-scan-${{ matrix.component }}-${{ matrix.platform_pair }}
+          path: |
+            ${{ runner.temp }}/scanned-image/trivy.json
+            ${{ runner.temp }}/scanned-image/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Attest published image digest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ${{ steps.repo.outputs.image }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
 
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
+          digest="${{ steps.publish.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest

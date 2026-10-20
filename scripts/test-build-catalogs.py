@@ -312,7 +312,7 @@ class UpdateCoverage(unittest.TestCase):
                         matches.extend(re.finditer(pattern, (ROOT / name).read_text()))
             self.assertEqual(len(matches), 1, manager['depNameTemplate'])
         self.assertEqual(dependencies, {'axodotdev/cargo-dist', 'rust-lang/rustup', 'rust-secure-code/cargo-auditable',
-                                       'anchore/syft', 'npm', 'node', 'rust', '@openai/codex', '@agentclientprotocol/codex-acp',
+                                       'anchore/syft', 'gitleaks/gitleaks', 'aquasecurity/trivy', 'rustsec/rustsec', 'regclient/regclient', 'npm', 'node', 'rust', '@openai/codex', '@agentclientprotocol/codex-acp',
                                        'getheca/heca-artifacts', 'trycua/cua', 'https://github.com/ChronoAIProject/cma.git'})
 
 

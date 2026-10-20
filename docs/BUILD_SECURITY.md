@@ -342,9 +342,11 @@ older than ninety days even if it was recently checked. The weekly freshness
 job and scheduled APT/APK image checks fail on stale inputs. Candidate generation
 runs independently of the current-input freshness result, so an overdue catalog
 can still receive a verified refresh PR. The PR freshness job evaluates the
-proposed committed inputs. Scheduled vulnerability-image jobs must use this
-same freshness gate when those scanner jobs are added; package-prefix builds
-are not vulnerability scans.
+proposed committed inputs. The Security Scans and Artifact Packaging workflows
+require this same gate on PRs and schedules alongside vulnerability scanning of
+the actual application runtime images. Package-prefix builds provide separate
+input-replay evidence. See [RELEASE_SCANNING.md](RELEASE_SCANNING.md) for scanner
+coverage, exception review and currently blocking findings.
 
 Dependabot covers the Cargo/npm roots, Actions, Dockerfile base digests and
 hash-locked Python requirements. `renovate.json` adds Monday version proposals

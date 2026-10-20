@@ -36,6 +36,16 @@ jobs:
           "$RUNNER_TEMP/packaging-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
           "$RUNNER_TEMP/packaging-policy/bin/python" scripts/test-packaging-workflows.py
 
+  scan-freshness:
+    name: Image Scan Catalog Freshness
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require current APT, APK and transport CA catalogs for scheduled image scans
+        run: python3 scripts/check-build-input-freshness.py
+
   credentials:
     name: Backend Credential Packaging (${{ matrix.arch }})
     needs: policy
@@ -113,6 +123,34 @@ jobs:
               --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
               --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
           done
+      - name: Install checksummed actual image vulnerability tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Scan actual backend and frontend runtime bytes without publication
+        run: |
+          failed=0
+          for component in backend frontend; do
+            if python3 scripts/check-image-vulnerabilities.py --image "nyxid-credential-$component:ci" \
+              --component "$component" --platform 'linux/${{ matrix.arch }}' --commit '${{ steps.source.outputs.commit }}' \
+              --trivy "$RUNNER_TEMP/scan-tools/trivy" --regctl "$RUNNER_TEMP/scan-tools/regctl" \
+              --stage "$RUNNER_TEMP/image-scans/$component"; then
+              :
+            else
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Preserve actual runtime vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-image-scans-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scans/*/trivy.json
+            ${{ runner.temp }}/image-scans/*/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify exported image inputs after build and extraction
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
@@ -318,6 +356,7 @@ jobs:
           receipt = json.loads((Path(os.environ['RUNNER_TEMP']) / 'operator-image-source/image-build-execution.json').read_text())
           assert receipt['exit_code'] == 0 and receipt['post_build_source_verified'] is True
           assert receipt['identity_check']['status'] == 'passed' and receipt['identity_check']['exit_code'] == 0
+          assert receipt['vulnerability_check']['status'] == 'passed' and receipt['vulnerability_check']['exit_code'] == 0
           assert receipt['image']['component'] == 'machine-hosted-desktop' and receipt['image']['tagged'] is True
           actual = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', 'nyxid-identity:ci'], text=True).strip()
           assert actual == receipt['image']['id'], 'tag differs from the identity-checked image ID'
@@ -328,6 +367,26 @@ jobs:
             --arch '${{ matrix.arch }}' --source-root "$RUNNER_TEMP/image-source/source" \
             --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}' \
             --extractor "$RUNNER_TEMP/artifact-target/release/nyxid-artifact-info"
+      - name: Install checksummed final image vulnerability tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py trivy --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Scan actual final application image bytes without publication
+        run: |
+          python3 scripts/check-image-vulnerabilities.py --image nyxid-identity:ci \
+            --component '${{ matrix.component }}' --platform 'linux/${{ matrix.arch }}' \
+            --commit '${{ steps.source.outputs.commit }}' --trivy "$RUNNER_TEMP/scan-tools/trivy" \
+            --regctl "$RUNNER_TEMP/scan-tools/regctl" --stage "$RUNNER_TEMP/image-scan"
+      - name: Preserve actual application image vulnerability report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: application-image-scan-${{ matrix.component }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/image-scan/trivy.json
+            ${{ runner.temp }}/image-scan/image-scan.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify exported source after build and extraction
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
@@ -412,11 +471,12 @@ jobs:
   packaging-pass:
     name: Artifact Packaging Passed
     if: always()
-    needs: [policy, credentials, worklet, docker-cli, images, archives]
+    needs: [policy, scan-freshness, credentials, worklet, docker-cli, images, archives]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every packaging check
         env:
+          FRESHNESS: ${{ needs.scan-freshness.result }}
           POLICY: ${{ needs.policy.result }}
           CREDENTIALS: ${{ needs.credentials.result }}
           IMAGES: ${{ needs.images.result }}
@@ -424,6 +484,7 @@ jobs:
           WORKLET: ${{ needs.worklet.result }}
           DOCKER_CLI: ${{ needs.docker-cli.result }}
         run: |
+          test "$FRESHNESS" = success
           test "$POLICY" = success
           test "$CREDENTIALS" = success
           test "$IMAGES" = success

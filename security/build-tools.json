@@ -127,5 +127,93 @@
         "sha256": "c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47"
       }
     }
+  },
+  "gitleaks": {
+    "version": "8.30.1",
+    "source": "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz",
+        "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_x64.tar.gz",
+        "sha256": "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_arm64.tar.gz",
+        "sha256": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+        "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      }
+    }
+  },
+  "trivy": {
+    "version": "0.76.0",
+    "source": "https://github.com/aquasecurity/trivy/releases/tag/v0.76.0",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_macOS-ARM64.tar.gz",
+        "sha256": "e7ec0d21fe842553f59af99aba2efbcc822369fbaed27019c575408b6d135fce"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_macOS-64bit.tar.gz",
+        "sha256": "89563d4d495cf4ef06a0d1950f8710b124e9f7bd2615ec6c47b03673f4ad45a2"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-ARM64.tar.gz",
+        "sha256": "aab21e677a7b7071fc79f1711480840754c18a1b9d9cefa7ccd06af63a0e8f4c"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz",
+        "sha256": "e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7"
+      }
+    }
+  },
+  "cargo-audit": {
+    "version": "0.22.2",
+    "source": "https://github.com/rustsec/rustsec/releases/tag/cargo-audit/v0.22.2",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-apple-darwin-v0.22.2.tgz",
+        "sha256": "ec7ca4263769593df4d909be85b94a6b79efa2897be5d2bb8ebd516e823175af"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-apple-darwin-v0.22.2.tgz",
+        "sha256": "847831323de932155b226ab60ee4a180e13e5d007a019f0d4b7b4d89a6de2ab2"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-unknown-linux-gnu-v0.22.2.tgz",
+        "sha256": "c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz",
+        "sha256": "ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39"
+      }
+    }
+  },
+  "regctl": {
+    "version": "0.11.6",
+    "source": "https://github.com/regclient/regclient/releases/tag/v0.11.6",
+    "targets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-darwin-arm64",
+        "sha256": "5b52b71861abc300ab513e87a4c3794cff6508035ac7f6b6bdfa1fa5688c0040"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-arm64",
+        "sha256": "a9b71a3ee79b2d1dbbd7d51fd5e8fa214722c192864235d3d8764463c751a1ff"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-darwin-amd64",
+        "sha256": "d651381c58357e9b9446cec172761c7418b7621da57960d438175d8f4c5b479d"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-amd64",
+        "sha256": "8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd"
+      }
+    }
   }
 }

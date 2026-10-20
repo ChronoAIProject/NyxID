@@ -96,6 +96,10 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             packaging:
+              - 'scripts/*scan*'
+              - 'scripts/*vulnerabilit*'
+              - 'scripts/*dependency*'
+              - 'scripts/*audit*'
               - 'scripts/*csp*'
               - 'scripts/*machine*docker*'
               - 'cli/tests/updater-npm/**'
@@ -291,6 +295,12 @@ jobs:
               - '.github/scripts/**'
               - '.github/tools/**'
               - 'security/**'
+
+  security-scans:
+    name: Security Scans
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scans.yml
 
   # Run the same package-boundary matrix on PRs, weekly and in publication CI.
   apt-inputs:
@@ -1491,6 +1501,7 @@ jobs:
       - apt-inputs
       - apk-inputs
       - catalog-maintenance
+      - security-scans
       - cursor-plugin-validate
       - codex-plugin-validate
       - claude-plugin-validate
@@ -1526,6 +1537,7 @@ jobs:
             apt-inputs=${{ needs.apt-inputs.result }}
             apk-inputs=${{ needs.apk-inputs.result }}
             catalog-maintenance=${{ needs.catalog-maintenance.result }}
+            security-scans=${{ needs.security-scans.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
             claude-plugin-validate=${{ needs.claude-plugin-validate.result }}

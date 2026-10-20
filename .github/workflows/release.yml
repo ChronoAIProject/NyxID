@@ -47,6 +47,12 @@ on:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
+  security-gate:
+    name: Release Security Scans
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-scans.yml
+
   # Plan without creating a remote release.
   plan:
     runs-on: "ubuntu-24.04"
@@ -363,12 +369,13 @@ jobs:
   # Determines if we should publish/announce
   host:
     needs:
+      - security-gate
       - plan
       - build-local-artifacts
       - build-global-artifacts
       - release-integrity-manifest
     # Every required build must succeed, independently of artifact presence.
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"

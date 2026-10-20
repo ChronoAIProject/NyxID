@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail closed on probe inputs, daemon leftovers and registration/reconnect failures."""
 import importlib.util
+import copy
 from pathlib import Path
 import tempfile
 import unittest
@@ -90,6 +91,54 @@ class FixtureAcceptance(unittest.TestCase):
             self.assertEqual(result.returncode, 17)
             self.assertEqual(json.loads(record.read_text()), args)
             self.assertEqual(json.loads(trace.read_text()), args)
+
+
+class RetainedContainer(unittest.TestCase):
+    def setUp(self):
+        self.name = 'nyxid-node-machine-fixture'
+        self.image = 'sha256:' + 'b' * 64
+        self.info = dict(Id='a' * 64, Image=self.image, State=dict(Running=True),
+                         Config=dict(Env=['NYXID_MACHINE_MANAGED=0', 'NYXID_MACHINE_SEPARATION=shared-legacy']),
+                         Mounts=[dict(Type='volume', Name=self.name + '-state', Destination='/var/lib/nyxid-machine', RW=True),
+                                 dict(Type='volume', Name=self.name + '-workspace', Destination='/workspace', RW=True)])
+
+    def test_stop_retains_identity_volumes_and_choice(self):
+        self.assertEqual(checks.require_machine_container(self.info, self.name, self.image), 'a' * 64)
+        self.info['State']['Running'] = False
+        checks.require_machine_container(self.info, self.name, self.image, 'a' * 64, running=False)
+        self.info['State']['Running'] = True
+        checks.require_machine_container(self.info, self.name, self.image, 'a' * 64)
+
+    def test_replaced_container_changed_choice_wrong_volumes_or_running_state_fail(self):
+        for mutation in ('id', 'choice', 'managed', 'state-volume', 'workspace-volume', 'bind', 'readonly', 'duplicate', 'running'):
+            info = copy.deepcopy(self.info)
+            if mutation == 'id': info['Id'] = 'c' * 64
+            elif mutation == 'choice': info['Config']['Env'][1] = 'NYXID_MACHINE_SEPARATION=automatic'
+            elif mutation == 'managed': info['Config']['Env'][0] = 'NYXID_MACHINE_MANAGED=1'
+            elif mutation == 'state-volume': info['Mounts'][0]['Name'] = 'other-state'
+            elif mutation == 'workspace-volume': info['Mounts'][1]['Name'] = 'other-workspace'
+            elif mutation == 'bind': info['Mounts'][0]['Type'] = 'bind'
+            elif mutation == 'readonly': info['Mounts'][0]['RW'] = False
+            elif mutation == 'duplicate': info['Mounts'].append(dict(info['Mounts'][0]))
+            else: info['State']['Running'] = False
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                checks.require_machine_container(info, self.name, self.image, 'a' * 64)
+
+    def test_refused_profile_cannot_leave_only_hidden_metadata_or_dangling_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary) / 'refused-profile'
+            checks.require_profile_absent(profile)
+            profile.mkdir()
+            for name in ('.keyfile', '.config.toml.tmp', '.nyxid-storage-file',
+                         '.secret-intent-fixture.json', '.secret-attempt-fixture.lock'):
+                marker = profile / name
+                marker.touch()
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    checks.require_profile_absent(profile)
+                marker.unlink()
+            profile.rmdir()
+            profile.symlink_to(Path(temporary) / 'absent-target')
+            with self.assertRaises(ValueError): checks.require_profile_absent(profile)
 
 
 if __name__ == '__main__':

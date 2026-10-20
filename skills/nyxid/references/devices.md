@@ -132,7 +132,7 @@ Approved response, returned once:
   "status": "approved",
   "api_key": "nyxid_ag_...",
   "node_id": "1d16ddfe-89f1-4ec1-a316-4a5c8960d55f",
-  "refresh_token": "1fb20ca9a1fd9b10ddfc7d2a5b7d5f54f326e2e6a2ef8e70b8a4fd9e0bd41c47",
+  "refresh_token": "<refresh_token_returned_on_delivery>",
   "expires_in": 86400
 }
 ```

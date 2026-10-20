@@ -21,6 +21,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_DOWNLOAD = 128 * 1024 * 1024
+MAX_EXECUTABLE = 256 * 1024 * 1024
 
 
 def target_for_host(machine, system, libc=None):
@@ -110,7 +111,7 @@ def unpack_npm(archive, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tool", choices=["cargo-dist", "cargo-auditable", "syft", "rustup", "npm"])
+    parser.add_argument("tool", choices=["cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit", "regctl", "rustup", "npm"])
     parser.add_argument("--bin-dir", type=Path, required=True)
     args = parser.parse_args()
     catalog = json.loads((ROOT / "security/build-tools.json").read_text())
@@ -124,20 +125,24 @@ def main():
         # the installer basename instead of entering an unsupported proxy mode.
         archive = stage / ("rustup-init" if args.tool == "rustup" else "download")
         download_verified(item, archive)
-        if args.tool in ("cargo-dist", "cargo-auditable", "syft"):
+        if args.tool in ("cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit"):
             executable = "dist" if args.tool == "cargo-dist" else args.tool
             names = ("dist", "cargo-dist") if args.tool == "cargo-dist" else (executable,)
             with tarfile.open(archive) as package:
                 members = [m for m in package if m.isfile() and PurePosixPath(m.name).name in names]
-                if len(members) != 1 or members[0].size > MAX_DOWNLOAD:
+                if len(members) != 1 or members[0].size > MAX_EXECUTABLE:
                     raise ValueError("expected one reviewed tool executable")
                 binary = stage / executable
                 with package.extractfile(members[0]) as source, binary.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 binary.chmod(0o755)
                 os.replace(binary, destination / executable)
-            version_args = ["auditable", "--version"] if args.tool == "cargo-auditable" else ["version"] if args.tool == "syft" else ["--version"]
+            version_args = ["auditable", "--version"] if args.tool == "cargo-auditable" else ["version"] if args.tool in ("syft", "gitleaks") else ["--version"]
             subprocess.run([str(destination / executable), *version_args], check=True)
+        elif args.tool == "regctl":
+            archive.chmod(0o755)
+            os.replace(archive, destination / "regctl")
+            subprocess.run([str(destination / "regctl"), "version"], check=True)
         elif args.tool == "rustup":
             archive.chmod(0o755)
             subprocess.run([str(archive), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", catalog["rust_toolchain"]], check=True)

@@ -1,0 +1,120 @@
+name: Security Scans
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '41 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Scanner Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install checksummed policy-test tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py gitleaks --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py regctl --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Require exact content, path, rule and expiry negatives with the real detector
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/scan-tools/gitleaks
+          REGCTL_BIN: ${{ runner.temp }}/scan-tools/regctl
+        run: |
+          python3 scripts/test-secret-policy.py
+          python3 scripts/test-dependency-audits.py
+          python3 scripts/test-image-vulnerabilities.py
+          python3 scripts/test-build-local-image.py
+      - name: Require PR, schedule and publication scanner wiring
+        run: |
+          python3 -m venv "$RUNNER_TEMP/scanner-policy"
+          "$RUNNER_TEMP/scanner-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-scanner-workflows.py
+
+  history:
+    name: Full History Secret Scan
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 scripts/bootstrap-build-tool.py gitleaks --bin-dir "$RUNNER_TEMP/scan-tools"
+      - name: Require full history plus complete committed source, without inline/baseline exclusions
+        run: |
+          python3 scripts/scan-secrets.py --scanner "$RUNNER_TEMP/scan-tools/gitleaks" --output "$RUNNER_TEMP/secret-scan"
+      - name: Retain locations and exact dispositions without credential bytes
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: secret-scan-dispositions
+          path: ${{ runner.temp }}/secret-scan/secret-scan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  dependencies:
+    name: Every Dependency Root Audit
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install checksummed audit/bootstrap executables and existing locked npm/pnpm tools
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-audit --bin-dir "$RUNNER_TEMP/scan-tools"
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/scan-tools"
+          "$RUNNER_TEMP/scan-tools/npm" ci --ignore-scripts --prefix security/npm-tools
+      - name: Audit all Cargo/npm/pnpm roots including independent locks and workspace members
+        run: |
+          python3 scripts/audit-dependencies.py --output "$RUNNER_TEMP/dependency-audits" \
+            --cargo-audit "$RUNNER_TEMP/scan-tools/cargo-audit" \
+            --npm "$GITHUB_WORKSPACE/security/npm-tools/node_modules/.bin/npm" \
+            --pnpm "$GITHUB_WORKSPACE/security/npm-tools/node_modules/.bin/pnpm"
+      - name: Retain complete audit reports and root coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-root-audits
+          path: ${{ runner.temp }}/dependency-audits/
+          if-no-files-found: error
+          retention-days: 7
+
+  freshness:
+    name: Vulnerability Scan Catalog Freshness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check-build-input-freshness.py
+
+  passed:
+    name: Security Scans Passed
+    if: always()
+    needs: [policy, history, dependencies, freshness]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every scanner and freshness check
+        env:
+          POLICY: ${{ needs.policy.result }}
+          HISTORY: ${{ needs.history.result }}
+          DEPENDENCIES: ${{ needs.dependencies.result }}
+          FRESHNESS: ${{ needs.freshness.result }}
+        run: |
+          test "$POLICY" = success
+          test "$HISTORY" = success
+          test "$DEPENDENCIES" = success
+          test "$FRESHNESS" = success

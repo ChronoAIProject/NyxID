@@ -143,6 +143,27 @@ def require_unchanged(before, after):
         raise ValueError('Docker CLI left a probe container, persistent state, or anonymous volume behind')
 
 
+def require_profile_absent(profile):
+    # A hidden-only directory or dangling symlink still constitutes local state.
+    if profile.exists() or profile.is_symlink():
+        raise ValueError('unsupported start created a local credential/config directory')
+
+
+def require_machine_container(info, name, image_id, expected_id=None, running=True):
+    if info['Image'] != image_id or not {'NYXID_MACHINE_MANAGED=0', 'NYXID_MACHINE_SEPARATION=shared-legacy'} <= set(info['Config']['Env']):
+        raise ValueError('real CLI did not preserve the selected actual image and explicit self-hosted choice')
+    if not re.fullmatch('[0-9a-f]{64}', info['Id']) or (expected_id is not None and info['Id'] != expected_id):
+        raise ValueError('Docker CLI replaced the retained machine container')
+    if info['State']['Running'] is not running:
+        raise ValueError('retained machine container has the wrong running state')
+    required = {'/var/lib/nyxid-machine': name + '-state', '/workspace': name + '-workspace'}
+    for destination, volume in required.items():
+        mounts = [item for item in info['Mounts'] if item['Destination'] == destination]
+        if len(mounts) != 1 or mounts[0]['Type'] != 'volume' or mounts[0].get('Name') != volume or mounts[0].get('RW') is not True:
+            raise ValueError('machine container state/workspace volume differs from the Docker CLI contract')
+    return info['Id']
+
+
 def run_image(image, kind, directory, gateway):
     baseline = resources()
     names = []
@@ -169,8 +190,7 @@ def run_image(image, kind, directory, gateway):
                     names.append('nyxid-node-machine-' + profile)
                     before = resources()
                     local_profile = Path.home() / '.nyxid-node/profiles' / profile
-                    if local_profile.exists():
-                        raise ValueError('disposable refusal profile already exists')
+                    require_profile_absent(local_profile)
                     start = len(trace.read_text().splitlines()) if trace.exists() else 0
                     result = cli(binary, 'start', profile, environment, selection, expect_success=False)
                     if 'shared-legacy' not in result.stderr:
@@ -181,8 +201,7 @@ def run_image(image, kind, directory, gateway):
                         raise ValueError('unsupported start must perform one real capability preflight')
                     require_probe(probes[0])
                     require_unchanged(before, resources())
-                    if local_profile.exists():
-                        raise ValueError('unsupported start created a local credential/config directory')
+                    require_profile_absent(local_profile)
                     if any(state()[key] != 0 for key in ('connections', 'registration_attempts', 'requests')):
                         raise ValueError('unsupported start contacted registration before refusing')
                 print('Machine Docker CLI: omitted/automatic/require-separated refused before registration or state; real probes cleaned', flush=True)
@@ -208,16 +227,29 @@ def run_image(image, kind, directory, gateway):
             if kind == 'node-only' and any(original['machine'][key] is not False or current['machine'].get(key) is not False for key in ('browser', 'computer')):
                 raise ValueError('node-only preset enabled browser/computer capabilities')
             inspected = json.loads(docker('inspect', name))[0]
-            if inspected['Image'] != image_id or not {'NYXID_MACHINE_MANAGED=0', 'NYXID_MACHINE_SEPARATION=shared-legacy'} <= set(inspected['Config']['Env']):
-                raise ValueError('real CLI did not start the selected actual image with the explicit self-hosted choice')
+            container_id = require_machine_container(inspected, name, image_id)
+            # Existing containers retain their intent. An explicit different
+            # choice must refuse without replacing the container or custody.
+            for action in ('start', 'restart'):
+                for selection in ('automatic', 'require-separated'):
+                    before = resources()
+                    refused = cli(binary, action, profile, environment, selection, expect_success=False)
+                    if 'recorded choice' not in refused.stderr:
+                        raise ValueError('existing-container refusal did not explain retained separation intent')
+                    require_unchanged(before, resources())
+                    require_machine_container(json.loads(docker('inspect', name))[0], name, image_id, container_id)
+                    if custody(name) != original or state()['registration_attempts'] != 1:
+                        raise ValueError('explicit choice change modified custody or retried registration')
             for action in ('restart', 'stop-start'):
                 auth_before, status_before, heartbeat_before = current['authentications'], current['statuses'], current['heartbeats']
                 if action == 'stop-start':
                     cli(binary, 'stop', profile, environment)
+                    require_machine_container(json.loads(docker('inspect', name))[0], name, image_id, container_id, running=False)
                     cli(binary, 'start', profile, environment)
                 else:
                     cli(binary, 'restart', profile, environment)
                 current = wait_for(state, lambda item: item['authentications'] > auth_before and item['statuses'] > status_before and item['heartbeats'] > heartbeat_before)
+                require_machine_container(json.loads(docker('inspect', name))[0], name, image_id, container_id)
                 after = custody(name)
                 if after != original or current['registrations'] != 1 or current['registration_attempts'] != 1:
                     raise ValueError('restart changed custody/recorded choice or re-registered the node')
