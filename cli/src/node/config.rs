@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
 use super::secret_backend::SecretBackend;
@@ -520,7 +521,7 @@ impl NodeConfig {
         Self::from_bytes(&bytes)
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let content = std::str::from_utf8(bytes)
             .map_err(|_| Error::Config("Node configuration is not valid UTF-8".into()))?;
         let mut config: Self = toml::from_str(content)
@@ -585,6 +586,7 @@ impl NodeConfig {
             name,
             content.as_bytes(),
             |directory, current| {
+                directory.require_idle()?;
                 super::secret_transaction::validate_publication(directory, name, current, &next)?;
                 validate(directory, &next)?;
                 intent(directory, content.as_bytes())
@@ -593,23 +595,27 @@ impl NodeConfig {
     }
 
     /// Encrypt and store the auth token.
+    #[cfg(test)]
     pub fn set_auth_token(&mut self, raw_token: &str, enc: &LocalEncryption) -> Result<()> {
         self.node.auth_token_encrypted = enc.encrypt(raw_token)?;
         Ok(())
     }
 
     /// Decrypt the stored auth token.
+    #[cfg(test)]
     pub fn decrypt_auth_token(&self, enc: &LocalEncryption) -> Result<String> {
         enc.decrypt(&self.node.auth_token_encrypted)
     }
 
     /// Encrypt and store the HMAC signing secret.
+    #[cfg(test)]
     pub fn set_signing_secret(&mut self, raw_secret: &str, enc: &LocalEncryption) -> Result<()> {
         self.signing.shared_secret_encrypted = Some(enc.encrypt(raw_secret)?);
         Ok(())
     }
 
     /// Decrypt the stored signing secret, if present.
+    #[cfg(test)]
     pub fn decrypt_signing_secret(&self, enc: &LocalEncryption) -> Result<Option<String>> {
         match &self.signing.shared_secret_encrypted {
             Some(encrypted) => Ok(Some(enc.decrypt(encrypted)?)),

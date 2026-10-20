@@ -1,9 +1,13 @@
 use std::path::Path;
 
-use super::config::{KeychainFormat, NodeConfig};
+#[cfg(test)]
+use super::config::KeychainFormat;
+use super::config::NodeConfig;
 use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
-use super::keychain::{KeychainBackend, KeychainVault};
+use super::keychain::KeychainBackend;
+#[cfg(test)]
+use super::keychain::KeychainVault;
 use super::secret_fields::SecretField;
 use super::secret_operation::SecretOperation;
 use zeroize::Zeroizing;
@@ -17,7 +21,9 @@ pub struct ObservedSecrets {
 
 /// Unified secret storage -- either file-based AES-GCM or OS keychain vault.
 pub enum SecretBackend {
+    #[cfg(test)]
     File(LocalEncryption),
+    #[cfg(test)]
     Keychain(KeychainVault),
     Observed(Box<ObservedSecrets>),
     Writer(Box<ObservedSecrets>),
@@ -40,6 +46,7 @@ impl SecretBackend {
 
     /// Build the appropriate backend from an existing config.
     /// For keychain: loads the vault (single keychain read = single prompt).
+    #[cfg(test)]
     pub fn from_config(config: &NodeConfig, config_dir: &Path) -> Result<Self> {
         if config.keychain_format == Some(KeychainFormat::ImmutableV1) {
             // Legacy writer entry points must never open an immutable store.
@@ -129,7 +136,9 @@ impl SecretBackend {
     pub(crate) fn publish(&self, config: &NodeConfig, path: &Path) -> Result<()> {
         match self {
             Self::Writer(writer) => writer.operation.publish(config, path),
-            Self::File(_) | Self::Keychain(_) | Self::Observed(_) => Err(guarded_write_required()),
+            Self::Observed(_) => Err(guarded_write_required()),
+            #[cfg(test)]
+            Self::File(_) | Self::Keychain(_) => Err(guarded_write_required()),
         }
     }
 
@@ -165,7 +174,9 @@ impl SecretBackend {
     pub(crate) fn store_field(&self, field: SecretField, value: &str) -> Result<Option<String>> {
         match self {
             Self::Writer(writer) => writer.operation.store(field, value).map(Some),
+            #[cfg(test)]
             Self::File(file) => file.encrypt(value).map(Some),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 vault.set_credential(&field.legacy_key(), value)?;
                 Ok(None)
@@ -182,10 +193,12 @@ impl SecretBackend {
         match self {
             Self::Observed(reader) => reader.operation.load(config, field),
             Self::Writer(writer) => writer.operation.load_projection(config, field),
+            #[cfg(test)]
             Self::File(file) => field
                 .encoded(config)?
                 .map(|encoded| file.decrypt(encoded).map(Zeroizing::new))
                 .transpose(),
+            #[cfg(test)]
             Self::Keychain(vault) => match field {
                 SecretField::AuthToken => vault.get_auth_token().map(Zeroizing::new).map(Some),
                 SecretField::SigningSecret => vault
@@ -212,6 +225,7 @@ impl SecretBackend {
     }
 
     /// Build during registration (before config is loaded from disk).
+    #[cfg(test)]
     pub fn new(backend: &str, node_id: &str, config_dir: &Path) -> Result<Self> {
         match backend {
             "keychain" => Ok(Self::Keychain(KeychainVault::new(node_id))),
@@ -249,7 +263,9 @@ impl SecretBackend {
                     writer.operation.store(SecretField::AuthToken, token)?;
                 Ok(())
             }
+            #[cfg(test)]
             Self::File(enc) => config.set_auth_token(token, enc),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 vault.set_auth_token(token)?;
                 config.node.auth_token_encrypted = String::new();
@@ -261,7 +277,9 @@ impl SecretBackend {
 
     pub fn load_auth_token(&self, config: &NodeConfig) -> Result<String> {
         match self {
+            #[cfg(test)]
             Self::File(enc) => config.decrypt_auth_token(enc),
+            #[cfg(test)]
             Self::Keychain(vault) => vault.get_auth_token(),
             Self::Observed(_) | Self::Writer(_) => self
                 .require_field(config, &SecretField::AuthToken)
@@ -278,7 +296,9 @@ impl SecretBackend {
                     Some(writer.operation.store(SecretField::SigningSecret, secret)?);
                 Ok(())
             }
+            #[cfg(test)]
             Self::File(enc) => config.set_signing_secret(secret, enc),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 vault.set_signing_secret(secret)?;
                 config.signing.shared_secret_encrypted = Some(String::new());
@@ -290,7 +310,9 @@ impl SecretBackend {
 
     pub fn load_signing_secret(&self, config: &NodeConfig) -> Result<Option<String>> {
         match self {
+            #[cfg(test)]
             Self::File(enc) => config.decrypt_signing_secret(enc),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 if config.signing.shared_secret_encrypted.is_some() {
                     vault
@@ -313,13 +335,16 @@ impl SecretBackend {
 
     /// Store a credential value. Returns `Some(encrypted)` for file backend,
     /// `None` for keychain (value stored in vault).
+    #[cfg(test)]
     pub fn store_credential_value(
         &self,
         service_slug: &str,
         value: &str,
     ) -> Result<Option<String>> {
         match self {
+            #[cfg(test)]
             Self::File(enc) => Ok(Some(enc.encrypt(value)?)),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 vault.set_credential(service_slug, value)?;
                 Ok(None)
@@ -329,12 +354,14 @@ impl SecretBackend {
     }
 
     /// Load a credential value from the appropriate backend.
+    #[cfg(test)]
     pub fn load_credential_value(
         &self,
         service_slug: &str,
         encrypted: Option<&str>,
     ) -> Result<String> {
         match self {
+            #[cfg(test)]
             Self::File(enc) => {
                 let encrypted = encrypted.ok_or_else(|| {
                     Error::Config(format!(
@@ -343,6 +370,7 @@ impl SecretBackend {
                 })?;
                 enc.decrypt(encrypted)
             }
+            #[cfg(test)]
             Self::Keychain(vault) => vault.get_credential(service_slug),
             Self::Observed(_) | Self::Writer(_) => Err(Error::Config(
                 "Typed node secret location is required".into(),
@@ -351,10 +379,13 @@ impl SecretBackend {
     }
 
     /// Delete a credential (no-op for file backend since config.save() handles it).
-    pub fn delete_credential(&self, service_slug: &str) -> Result<()> {
+    pub fn delete_credential(&self, _service_slug: &str) -> Result<()> {
         match self {
-            Self::File(_) | Self::Writer(_) => Ok(()),
-            Self::Keychain(vault) => vault.delete_credential(service_slug),
+            Self::Writer(_) => Ok(()),
+            #[cfg(test)]
+            Self::File(_) => Ok(()),
+            #[cfg(test)]
+            Self::Keychain(vault) => vault.delete_credential(_service_slug),
             Self::Observed(_) => Err(guarded_write_required()),
         }
     }
@@ -378,7 +409,9 @@ impl SecretBackend {
                     private_key_b64u,
                 )
                 .map(Some),
+            #[cfg(test)]
             Self::File(enc) => Ok(Some(enc.encrypt(private_key_b64u)?)),
+            #[cfg(test)]
             Self::Keychain(vault) => {
                 vault.set_pending_crypto_key(pending_id, private_key_b64u)?;
                 Ok(None)
@@ -388,28 +421,13 @@ impl SecretBackend {
     }
 
     /// Delete a pending private key (no-op for file backend after config save).
-    pub fn delete_pending_crypto_key(&self, pending_id: &str) -> Result<()> {
+    pub fn delete_pending_crypto_key(&self, _pending_id: &str) -> Result<()> {
         match self {
-            Self::File(_) | Self::Writer(_) => Ok(()),
-            Self::Keychain(vault) => vault.delete_pending_crypto_key(pending_id),
-            Self::Observed(_) => Err(guarded_write_required()),
-        }
-    }
-
-    /// Delete the stored auth token from the backend.
-    pub fn delete_auth_token(&self) -> Result<()> {
-        match self {
-            Self::File(_) | Self::Writer(_) => Ok(()),
-            Self::Keychain(vault) => vault.delete_auth_token(),
-            Self::Observed(_) => Err(guarded_write_required()),
-        }
-    }
-
-    /// Delete the stored signing secret from the backend.
-    pub fn delete_signing_secret(&self) -> Result<()> {
-        match self {
-            Self::File(_) | Self::Writer(_) => Ok(()),
-            Self::Keychain(vault) => vault.delete_signing_secret(),
+            Self::Writer(_) => Ok(()),
+            #[cfg(test)]
+            Self::File(_) => Ok(()),
+            #[cfg(test)]
+            Self::Keychain(vault) => vault.delete_pending_crypto_key(_pending_id),
             Self::Observed(_) => Err(guarded_write_required()),
         }
     }
@@ -419,7 +437,9 @@ impl SecretBackend {
     /// For keychain: refreshes the in-memory vault cache from the OS keychain.
     pub fn refresh(&self) -> Result<()> {
         match self {
+            #[cfg(test)]
             Self::File(_) => Ok(()),
+            #[cfg(test)]
             Self::Keychain(vault) => vault.refresh(),
             Self::Observed(reader) | Self::Writer(reader) => {
                 reader.operation.health(&reader.baseline)

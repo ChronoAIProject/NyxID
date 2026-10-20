@@ -199,39 +199,7 @@ pub fn cmd_version() {
 }
 
 pub fn cmd_migrate(target_backend: &str, config_path: Option<&str>) -> Result<()> {
-    if target_backend != "keychain" && target_backend != "file" {
-        return Err(super::error::Error::Validation(
-            "Target must be 'keychain' or 'file'".to_string(),
-        ));
-    }
-
-    let config_dir = config::resolve_config_dir(config_path);
-    let config_file = config_dir.join("config.toml");
-
-    let mut node_config = NodeConfig::load(&config_file)?;
-    let source_backend = node_config.storage_backend.clone();
-
-    if node_config.storage_backend == target_backend {
-        println!("Already using '{target_backend}' storage. Nothing to migrate.");
-        return Ok(());
-    }
-
-    let source = SecretBackend::from_config(&node_config, &config_dir)?;
-    let target = SecretBackend::new(target_backend, &node_config.node.id, &config_dir)?;
-    let report = migrate_config(
-        &mut node_config,
-        &source,
-        &target,
-        target_backend,
-        &config_file,
-    )?;
-
-    println!("Migrated from '{source_backend}' to '{target_backend}'.");
-    println!("Restart the agent to use the new storage backend.");
-    for warning in report.cleanup_warnings {
-        eprintln!("Warning: {warning}");
-    }
-    Ok(())
+    super::migration::command(target_backend, config_path, false, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,105 +1583,6 @@ fn prompt_choice(label: &str, options: &[&str], default: &str) -> Result<String>
             "Invalid choice '{trimmed}', expected one of: {options_str}"
         )))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Migration helpers
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Default)]
-struct MigrationReport {
-    cleanup_warnings: Vec<String>,
-}
-
-fn migrate_config(
-    node_config: &mut NodeConfig,
-    source: &SecretBackend,
-    target: &SecretBackend,
-    target_backend: &str,
-    config_file: &Path,
-) -> Result<MigrationReport> {
-    let auth_token = source.load_auth_token(node_config)?;
-    let signing_secret = source.load_signing_secret(node_config)?;
-
-    let mut credential_values = Vec::new();
-    for (slug, cred_config) in &node_config.credentials {
-        let value = source.load_credential_value(
-            slug,
-            cred_config
-                .header_value_encrypted
-                .as_deref()
-                .or(cred_config.param_value_encrypted.as_deref()),
-        )?;
-        credential_values.push((slug.clone(), cred_config.injection_method.clone(), value));
-    }
-
-    let mut updated = node_config.clone();
-    target.store_auth_token(&mut updated, &auth_token)?;
-    if let Some(ref secret) = signing_secret {
-        target.store_signing_secret(&mut updated, secret)?;
-    }
-
-    for (slug, injection_method, value) in &credential_values {
-        let encrypted = target.store_credential_value(slug, value)?;
-        if let Some(cred_config) = updated.credentials.get_mut(slug) {
-            match injection_method.as_str() {
-                // path_prefix and AWS SigV4 both store the encrypted
-                // credential on `header_value_encrypted` (Codex review
-                // REC 10). The pre-NyxID#716 migration code only knew
-                // about `"header"` and `"query_param"`, so a backend
-                // switch from file → keychain (or vice versa) on a node
-                // with a path-prefix or cloud-billing credential would
-                // silently drop the encrypted-payload pointer.
-                "header" | "path_prefix" | "aws_sigv4" | "ifttt_webhook" => {
-                    cred_config.header_value_encrypted = encrypted;
-                }
-                "query_param" => cred_config.param_value_encrypted = encrypted,
-                _ => {}
-            }
-        }
-    }
-
-    updated.storage_backend = target_backend.to_string();
-    if let Err(err) = updated.save(config_file) {
-        rollback_target_secrets(target, &credential_values);
-        return Err(err);
-    }
-
-    let cleanup_warnings = cleanup_source_secrets(source, &credential_values);
-    *node_config = updated;
-    Ok(MigrationReport { cleanup_warnings })
-}
-
-fn rollback_target_secrets(target: &SecretBackend, credential_values: &[(String, String, String)]) {
-    let _ = target.delete_auth_token();
-    let _ = target.delete_signing_secret();
-    for (slug, _, _) in credential_values {
-        let _ = target.delete_credential(slug);
-    }
-}
-
-fn cleanup_source_secrets(
-    source: &SecretBackend,
-    credential_values: &[(String, String, String)],
-) -> Vec<String> {
-    let mut warnings = Vec::new();
-
-    if let Err(err) = source.delete_auth_token() {
-        warnings.push(format!("Failed to remove old auth token: {err}"));
-    }
-    if let Err(err) = source.delete_signing_secret() {
-        warnings.push(format!("Failed to remove old signing secret: {err}"));
-    }
-    for (slug, _, _) in credential_values {
-        if let Err(err) = source.delete_credential(slug) {
-            warnings.push(format!(
-                "Failed to remove old credential '{slug}' from the previous backend: {err}"
-            ));
-        }
-    }
-
-    warnings
 }
 
 // ---------------------------------------------------------------------------
@@ -4260,115 +4129,92 @@ mod tests {
     #[test]
     fn migrate_keychain_to_file_cleans_up_source_secrets() {
         let dir = tempfile::tempdir().unwrap();
-        let source = SecretBackend::new_mock_keychain("node-1");
-        let target = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
-
+        let store = super::super::keychain::KeychainBackend::new_mock("node-1");
         let mut config = NodeConfig::new(
-            "wss://example.com/api/v1/nodes/ws".to_string(),
-            "node-1".to_string(),
-            "keychain".to_string(),
+            "wss://example.com/api/v1/nodes/ws".into(),
+            "node-1".into(),
+            "keychain".into(),
         );
-        source
-            .store_auth_token(&mut config, "nyx_nauth_test")
+        store.set("auth_token", "nyx_nauth_test").unwrap();
+        store
+            .set("signing_secret", "00112233445566778899aabbccddeeff")
             .unwrap();
-        source
-            .store_signing_secret(&mut config, "00112233445566778899aabbccddeeff")
-            .unwrap();
-        config
-            .add_header_credential_via("openai", "Authorization", "Bearer sk-test", None, &source)
-            .unwrap();
-
+        store.set("cred/openai", "Bearer sk-test").unwrap();
+        config.signing.shared_secret_encrypted = Some(String::new());
+        config.credentials.insert(
+            "openai".into(),
+            super::super::config::CredentialConfig::new_header("Authorization".into(), None, None),
+        );
         let config_file = dir.path().join("config.toml");
-        let report = migrate_config(&mut config, &source, &target, "file", &config_file).unwrap();
-        assert!(report.cleanup_warnings.is_empty());
-        assert_eq!(config.storage_backend, "file");
-
+        config.save(&config_file).unwrap();
+        super::super::migration::test_migrate(&config_file, "file", &store).unwrap();
         let loaded = NodeConfig::load(&config_file).unwrap();
-        let file_backend = SecretBackend::from_config(&loaded, dir.path()).unwrap();
+        assert_eq!(loaded.storage_backend, "file");
+        let file_backend =
+            SecretBackend::reader_with_keychain(&loaded, dir.path(), store.clone()).unwrap();
         assert_eq!(
             file_backend.load_auth_token(&loaded).unwrap(),
             "nyx_nauth_test"
         );
         assert_eq!(
             file_backend.load_signing_secret(&loaded).unwrap(),
-            Some("00112233445566778899aabbccddeeff".to_string())
+            Some("00112233445566778899aabbccddeeff".into())
         );
-        assert_eq!(
-            file_backend
-                .load_credential_value(
-                    "openai",
-                    loaded.credentials["openai"]
-                        .header_value_encrypted
-                        .as_deref(),
-                )
-                .unwrap(),
-            "Bearer sk-test"
-        );
-
-        assert!(source.load_auth_token(&config).is_err());
-        assert!(source.load_signing_secret(&config).is_err());
         assert!(
-            source
-                .load_credential_value(
-                    "openai",
-                    config.credentials["openai"]
-                        .header_value_encrypted
-                        .as_deref(),
+            file_backend
+                .require_field(
+                    &loaded,
+                    &super::super::secret_fields::SecretField::Credential {
+                        slug: "openai".into(),
+                        part: super::super::secret_fields::CredentialPart::Header,
+                    }
                 )
-                .is_err()
+                .unwrap()
+                .as_str()
+                == "Bearer sk-test"
         );
+        // Check actual source custody, rather than a stale in-memory vault.
+        for name in ["auth_token", "signing_secret", "cred/openai"] {
+            assert!(store.get_optional(name).unwrap().is_none());
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn migrate_preserves_source_secrets_when_save_fails() {
-        use std::fs;
         use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
-        let source = SecretBackend::new_mock_keychain("node-1");
-        let target = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
-
+        let store = super::super::keychain::KeychainBackend::new_mock("node-1");
         let mut config = NodeConfig::new(
-            "wss://example.com/api/v1/nodes/ws".to_string(),
-            "node-1".to_string(),
-            "keychain".to_string(),
+            "wss://example.com/api/v1/nodes/ws".into(),
+            "node-1".into(),
+            "keychain".into(),
         );
-        source
-            .store_auth_token(&mut config, "nyx_nauth_test")
+        store.set("auth_token", "nyx_nauth_test").unwrap();
+        store
+            .set("signing_secret", "00112233445566778899aabbccddeeff")
             .unwrap();
-        source
-            .store_signing_secret(&mut config, "00112233445566778899aabbccddeeff")
-            .unwrap();
-        config
-            .add_header_credential_via("openai", "Authorization", "Bearer sk-test", None, &source)
-            .unwrap();
-
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
-
-        let config_file = dir.path().join("config.toml");
-        let result = migrate_config(&mut config, &source, &target, "file", &config_file);
-
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
-
+        store.set("cred/openai", "Bearer sk-test").unwrap();
+        config.signing.shared_secret_encrypted = Some(String::new());
+        config.credentials.insert(
+            "openai".into(),
+            super::super::config::CredentialConfig::new_header("Authorization".into(), None, None),
+        );
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = super::super::migration::test_migrate(&path, "file", &store);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
-        assert_eq!(config.storage_backend, "keychain");
-        assert_eq!(source.load_auth_token(&config).unwrap(), "nyx_nauth_test");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(NodeConfig::load(&path).unwrap().storage_backend, "keychain");
+        assert_eq!(store.get("auth_token").unwrap(), "nyx_nauth_test");
         assert_eq!(
-            source.load_signing_secret(&config).unwrap(),
-            Some("00112233445566778899aabbccddeeff".to_string())
+            store.get("signing_secret").unwrap(),
+            "00112233445566778899aabbccddeeff"
         );
-        assert_eq!(
-            source
-                .load_credential_value(
-                    "openai",
-                    config.credentials["openai"]
-                        .header_value_encrypted
-                        .as_deref(),
-                )
-                .unwrap(),
-            "Bearer sk-test"
-        );
+        assert_eq!(store.get("cred/openai").unwrap(), "Bearer sk-test");
     }
 
     #[test]
@@ -4736,34 +4582,52 @@ mod tests {
 
     #[test]
     fn cleanup_source_secrets_removes_auth_signing_and_credentials() {
-        let backend = SecretBackend::new_mock_keychain("node-1");
+        let dir = tempfile::tempdir().unwrap();
+        let store = super::super::keychain::KeychainBackend::new_mock("node-1");
         let mut config = NodeConfig::new(
             "wss://example.com/api/v1/nodes/ws".to_string(),
             "node-1".to_string(),
             "keychain".to_string(),
         );
-        backend
-            .store_auth_token(&mut config, "nyx_nauth_test")
+        store.set("auth_token", "nyx_nauth_test").unwrap();
+        store
+            .set("signing_secret", "00112233445566778899aabbccddeeff")
             .unwrap();
-        backend
-            .store_signing_secret(&mut config, "00112233445566778899aabbccddeeff")
-            .unwrap();
-        config
-            .add_header_credential_via("openai", "Authorization", "Bearer sk-test", None, &backend)
-            .unwrap();
-
-        let warnings = cleanup_source_secrets(
-            &backend,
-            &[(
-                "openai".to_string(),
-                "header".to_string(),
-                "Bearer sk-test".to_string(),
-            )],
+        store.set("cred/openai", "Bearer sk-test").unwrap();
+        config.signing.shared_secret_encrypted = Some(String::new());
+        config.credentials.insert(
+            "openai".into(),
+            super::super::config::CredentialConfig::new_header("Authorization".into(), None, None),
         );
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+        super::super::migration::test_migrate(&path, "file", &store).unwrap();
 
-        assert!(warnings.is_empty());
-        assert!(backend.load_auth_token(&config).is_err());
-        assert!(backend.load_signing_secret(&config).is_err());
-        assert!(backend.load_credential_value("openai", None).is_err());
+        for name in ["auth_token", "signing_secret", "cred/openai"] {
+            assert!(store.get_optional(name).unwrap().is_none());
+        }
+        let installed = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(&installed, dir.path(), store).unwrap();
+        assert_eq!(
+            reader.load_auth_token(&installed).unwrap(),
+            "nyx_nauth_test"
+        );
+        assert_eq!(
+            reader.load_signing_secret(&installed).unwrap().as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
+        assert!(
+            reader
+                .require_field(
+                    &installed,
+                    &super::super::secret_fields::SecretField::Credential {
+                        slug: "openai".into(),
+                        part: super::super::secret_fields::CredentialPart::Header,
+                    }
+                )
+                .unwrap()
+                .as_str()
+                == "Bearer sk-test"
+        );
     }
 }

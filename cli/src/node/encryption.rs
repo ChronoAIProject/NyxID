@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -26,6 +27,7 @@ impl LocalEncryption {
     }
 
     /// Open an existing key without creation, repair, or backend fallback.
+    #[cfg(test)]
     pub fn open_existing(config_dir: &Path) -> Result<Self> {
         let directory = super::storage::Directory::open(config_dir)?;
         Self::open_in(&directory)
@@ -60,6 +62,7 @@ impl LocalEncryption {
 
     /// Deliberate registration/migration initialization only. Never replaces
     /// an existing key, even if corrupt, unprotected, or concurrently created.
+    #[cfg(test)]
     pub fn initialize(config_dir: &Path) -> Result<Self> {
         let directory = super::storage::Directory::open(config_dir)?;
         let _writer = directory.writer_lock()?;

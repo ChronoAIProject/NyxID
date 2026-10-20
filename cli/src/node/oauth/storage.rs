@@ -85,7 +85,7 @@ enum Phase {
     Returned,
     Complete,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
@@ -508,6 +508,408 @@ pub(crate) fn recover_pending(backend: &SecretBackend) -> Result<()> {
         rotation.recover()?;
     }
     Ok(())
+}
+
+/// An encrypted recovery record moves with the backend. Neither capture nor
+/// relocation contacts a provider. The original service lease is held by the
+/// migration from validation through publication and cleanup.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryMove {
+    name: String,
+    source_bytes: String,
+    target_bytes: Option<String>,
+    key_digest: Option<[u8; 32]>,
+    target_file: bool,
+}
+
+fn binding_for(path: &std::path::Path, node: &str, service: &str) -> Result<String> {
+    let bytes = serde_json::to_vec(&(
+        "nyxid-node-oauth-recovery-v1",
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(invalid)?,
+        node,
+        service,
+    ))
+    .map_err(|_| invalid())?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+fn read_envelope(
+    directory: &Directory,
+    keychain: &KeychainBackend,
+    record: &Record,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    let name = Rotation::key_name(record);
+    let bytes = if record.file_key {
+        optional_read(directory, &name)?.map(Zeroizing::new)
+    } else {
+        keychain
+            .get_optional(&name)
+            .map_err(|_| invalid())?
+            .map(|v| {
+                let v = Zeroizing::new(v);
+                if v.len() != 44 {
+                    return Err(invalid());
+                }
+                base64::engine::general_purpose::STANDARD
+                    .decode(v.as_bytes())
+                    .map(Zeroizing::new)
+                    .map_err(|_| invalid())
+            })
+            .transpose()?
+    };
+    if bytes.as_ref().is_some_and(|v| v.len() != 32) {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+fn aad_for(record: &Record) -> Result<Vec<u8>> {
+    serde_json::to_vec(&(
+        1,
+        &record.binding,
+        record.id,
+        record.file_key,
+        record.observed,
+    ))
+    .map_err(|_| invalid())
+}
+fn decrypt_record(record: &Record, key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(record.ciphertext.as_ref().ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
+    if bytes.len() < 28 {
+        return Err(invalid());
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| invalid())?;
+    let plain = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&bytes[..12]),
+                Payload {
+                    msg: &bytes[12..],
+                    aad: &aad_for(record)?,
+                },
+            )
+            .map_err(|_| invalid())?,
+    );
+    // Validate the typed payload as well as authenticating its bytes.
+    let _: Returned = serde_json::from_slice(&plain).map_err(|_| invalid())?;
+    Ok(plain)
+}
+fn encrypt_record(record: &Record, key: &[u8], plain: &[u8]) -> Result<String> {
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| invalid())?;
+    let mut nonce = [0; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let mut encrypted = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: plain,
+                aad: &aad_for(record)?,
+            },
+        )
+        .map_err(|_| invalid())?;
+    let mut bytes = nonce.to_vec();
+    bytes.append(&mut encrypted);
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+impl RecoveryMove {
+    /// A size-only upper bound, never persisted or used as authority. AES-GCM
+    /// relocation preserves ciphertext length; decimal hash bytes may grow.
+    pub(crate) fn reserve_target_capacity(&mut self) -> Result<()> {
+        let mut record = self.source()?;
+        record.file_key = self.target_file;
+        record.observed = [255; 32];
+        record.installed = record.installed.map(|_| [255; 32]);
+        self.target_bytes = Some(serde_json::to_string(&record).map_err(|_| invalid())?);
+        Ok(())
+    }
+    fn source(&self) -> Result<Record> {
+        serde_json::from_str(&self.source_bytes).map_err(|_| invalid())
+    }
+    fn target(&self) -> Result<Record> {
+        serde_json::from_str(self.target_bytes.as_ref().ok_or_else(invalid)?).map_err(|_| invalid())
+    }
+    pub(crate) fn capture_all(
+        directory: &Directory,
+        path: &std::path::Path,
+        config: &NodeConfig,
+        keychain: &KeychainBackend,
+        target_file: bool,
+    ) -> Result<(Vec<Self>, Vec<File>)> {
+        let mut records = Vec::new();
+        let mut leases = Vec::new();
+        for name in directory.names()? {
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(".nyxid-storage-oauth-") || !name.ends_with(".json") {
+                continue;
+            }
+            let bytes = directory.read(OsStr::new(name), MAX_CONFIG_BYTES)?;
+            let record: Record = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let binding = binding_for(path, &config.node.id, &record.service)?;
+            if record.version != 1
+                || record.binding != binding
+                || record.id.get_version_num() != 4
+                || record.file_key != (config.storage_backend == "file")
+                || name != format!(".nyxid-storage-oauth-{binding}.json")
+                || (record.phase == Phase::Returned && record.ciphertext.is_none())
+                || (matches!(record.phase, Phase::Reserved | Phase::Dispatched)
+                    && record.ciphertext.is_some())
+            {
+                return Err(invalid());
+            }
+            leases.push(
+                directory
+                    .try_existing_lease(OsStr::new(&format!(
+                        ".nyxid-storage-oauth-{binding}.lock"
+                    )))?
+                    .ok_or_else(pending)?,
+            );
+            let key = read_envelope(directory, keychain, &record)?;
+            if matches!(record.phase, Phase::Dispatched | Phase::Returned) && key.is_none() {
+                return Err(invalid());
+            }
+            if record.phase == Phase::Returned {
+                let _ = decrypt_record(&record, key.as_ref().ok_or_else(invalid)?)?;
+                if config.publication.snapshot() != Some(record.observed)
+                    && config.publication.snapshot() != record.installed
+                {
+                    // Retiring original custody would remove the existing
+                    // restore-and-recover path. Resolve this return first;
+                    // migration must never authorize it for a stale baseline.
+                    return Err(Error::Config("node_migration_oauth_recovery_required: restore the original node configuration and custody, recover the retained OAuth response, then rerun migration; no target secrets were staged".into()));
+                }
+            }
+            if record.file_key != target_file {
+                let mut target = record.clone();
+                target.file_key = target_file;
+                // Ownership is reserved in the migration journal before any
+                // target write; an existing target is never adopted.
+                if read_envelope(directory, keychain, &target)?.is_some() {
+                    return Err(invalid());
+                }
+            }
+            records.push(Self {
+                name: name.into(),
+                source_bytes: String::from_utf8(bytes).map_err(|_| invalid())?,
+                target_bytes: None,
+                key_digest: key.as_ref().map(|k| Sha256::digest(k.as_slice()).into()),
+                target_file,
+            });
+        }
+        Ok((records, leases))
+    }
+    pub(crate) fn hold(
+        &self,
+        directory: &Directory,
+        path: &std::path::Path,
+        node: &str,
+    ) -> Result<File> {
+        let source = self.source()?;
+        let binding = binding_for(path, node, &source.service)?;
+        if source.version != 1
+            || source.id.get_version_num() != 4
+            || source.binding != binding
+            || self.name != format!(".nyxid-storage-oauth-{binding}.json")
+        {
+            return Err(invalid());
+        }
+        self.validate_record(directory)?;
+        directory
+            .try_existing_lease(OsStr::new(&format!(".nyxid-storage-oauth-{binding}.lock")))?
+            .ok_or_else(pending)
+    }
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn validate_record(&self, directory: &Directory) -> Result<()> {
+        let actual = directory.read(OsStr::new(&self.name), MAX_CONFIG_BYTES)?;
+        if actual != self.source_bytes.as_bytes()
+            && self
+                .target_bytes
+                .as_ref()
+                .is_none_or(|v| actual != v.as_bytes())
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(crate) fn prepare(
+        &mut self,
+        directory: &Directory,
+        keychain: &KeychainBackend,
+        observed: [u8; 32],
+        installed: [u8; 32],
+    ) -> Result<()> {
+        let source = self.source()?;
+        let key = read_envelope(directory, keychain, &source)?;
+        if key
+            .as_ref()
+            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            != self.key_digest
+        {
+            return Err(invalid());
+        }
+        let mut target = source.clone();
+        target.file_key = self.target_file;
+        // Only a return authorized for the exact pre-migration generation may
+        // follow its unchanged complete projection to the installed generation.
+        // A stale return stays stale. Unknown dispatches always stay barriers.
+        if target.observed == observed {
+            target.observed = installed;
+        }
+        if target.installed == Some(observed) {
+            target.installed = Some(installed);
+        }
+        if matches!(source.phase, Phase::Reserved | Phase::Complete) {
+            target.ciphertext = None;
+        }
+        if source.phase == Phase::Returned {
+            let key = key.as_ref().ok_or_else(invalid)?;
+            let plain = decrypt_record(&source, key)?;
+            target.ciphertext = Some(encrypt_record(&target, key, &plain)?);
+        }
+        self.target_bytes = Some(serde_json::to_string(&target).map_err(|_| invalid())?);
+        Ok(())
+    }
+    pub(crate) fn validate_plan(&self, source_hash: [u8; 32], target_hash: [u8; 32]) -> Result<()> {
+        let source = self.source()?;
+        if self.target_bytes.is_none() {
+            return Ok(());
+        }
+        let target = self.target()?;
+        let mut expected = source.clone();
+        expected.file_key = self.target_file;
+        if expected.observed == source_hash {
+            expected.observed = target_hash;
+        }
+        if expected.installed == Some(source_hash) {
+            expected.installed = Some(target_hash);
+        }
+        expected.ciphertext = if matches!(source.phase, Phase::Reserved | Phase::Complete) {
+            None
+        } else {
+            target.ciphertext.clone()
+        };
+        if serde_json::to_vec(&expected).map_err(|_| invalid())?
+            != serde_json::to_vec(&target).map_err(|_| invalid())?
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage(&self, directory: &Directory, keychain: &KeychainBackend) -> Result<()> {
+        let source = self.source()?;
+        let target = self.target()?;
+        if source.file_key == target.file_key || self.key_digest.is_none() {
+            return Ok(());
+        }
+        let key = read_envelope(directory, keychain, &source)?.ok_or_else(invalid)?;
+        if Some(Sha256::digest(key.as_slice()).into()) != self.key_digest {
+            return Err(invalid());
+        }
+        match read_envelope(directory, keychain, &target)? {
+            Some(actual) if actual == key => {}
+            Some(_) => return Err(invalid()),
+            None if target.file_key => {
+                directory.publish(OsStr::new(&Rotation::key_name(&target)), &key, false)?
+            }
+            None => {
+                let encoded = Zeroizing::new(
+                    base64::engine::general_purpose::STANDARD.encode(key.as_slice()),
+                );
+                keychain
+                    .set(&Rotation::key_name(&target), &encoded)
+                    .map_err(|_| invalid())?;
+            }
+        }
+        #[cfg(test)]
+        if std::env::var_os("NYXID_TEST_MIGRATION_EXIT_AFTER_ENVELOPE_PUT").is_some() {
+            std::process::exit(0);
+        }
+        self.validate_target(directory, keychain)
+    }
+    pub(crate) fn validate_target(
+        &self,
+        directory: &Directory,
+        keychain: &KeychainBackend,
+    ) -> Result<()> {
+        let target = self.target()?;
+        let source = self.source()?;
+        if source.id != target.id
+            || source.binding != target.binding
+            || source.service != target.service
+            || source.phase != target.phase
+            || target.file_key != self.target_file
+        {
+            return Err(invalid());
+        }
+        let key = read_envelope(directory, keychain, &target)?;
+        if key
+            .as_ref()
+            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            != self.key_digest
+        {
+            return Err(invalid());
+        }
+        if target.phase == Phase::Returned {
+            let _ = decrypt_record(&target, key.as_ref().ok_or_else(invalid)?)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn install(&self, directory: &Directory) -> Result<()> {
+        self.validate_record(directory)?;
+        let target = self.target_bytes.as_ref().ok_or_else(invalid)?;
+        directory.publish(OsStr::new(&self.name), target.as_bytes(), true)
+    }
+    pub(crate) fn validate_cleanup(
+        &self,
+        directory: &Directory,
+        keychain: &KeychainBackend,
+        cleaning: bool,
+    ) -> Result<()> {
+        self.validate_target(directory, keychain)?;
+        let source = self.source()?;
+        if source.file_key == self.target_file || self.key_digest.is_none() {
+            return Ok(());
+        }
+        let actual = read_envelope(directory, keychain, &source)?;
+        if actual.is_none() && cleaning {
+            return Ok(());
+        }
+        if actual
+            .as_ref()
+            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            != self.key_digest
+        {
+            return Err(invalid());
+        }
+        if source.phase == Phase::Returned {
+            let key = actual.as_ref().ok_or_else(invalid)?;
+            let target = self.target()?;
+            if decrypt_record(&source, key)? != decrypt_record(&target, key)? {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn retire(&self, directory: &Directory, keychain: &KeychainBackend) -> Result<()> {
+        let source = self.source()?;
+        if source.file_key == self.target_file || self.key_digest.is_none() {
+            return Ok(());
+        }
+        if source.file_key {
+            remove_if_present(directory, &Rotation::key_name(&source))
+        } else {
+            keychain
+                .delete(&Rotation::key_name(&source))
+                .map_err(|_| invalid())
+        }
+    }
 }
 
 fn apply(

@@ -261,15 +261,61 @@ nyxid node migrate --to keychain
 nyxid node migrate --to file
 ```
 
-The `migrate` command:
+This unreleased branch currently refuses a mutating migration with
+`node_migration_quiescence_required`. The resumable engine is being reviewed
+before activation of the enforced launchd/systemd stop, status and wait boundary.
+A free registration lock or a missing PID file cannot prove that an older daemon
+has stopped. Keep existing node processes stopped and retain their original
+configuration and custody; do not remove lock or recovery files to bypass this
+refusal. Legacy keychain writers continue to direct you to the explicit migration
+command, rather than converting the backend implicitly.
 
-1. Reads all secrets (auth token, signing secret, all credential values) from the current backend
-2. Writes them to the target backend
-3. Updates `storage_backend` in the config file
-4. Saves the updated config
-5. Removes the old secrets from the previous backend
+The migration engine reads the complete typed source before staging any target:
+node authentication and signing, header/query/path-prefix/SigV4/IFTTT values,
+OAuth access/refresh/client credentials, SSH keys/passphrases and pending
+credential private keys. It preserves empty values separately from absent
+optional values. Explicit keychain-to-keychain migration upgrades the legacy
+vault/individual format to immutable references. Immutable stores never discover
+stale legacy values. A legacy vault with unmodelled secrets refuses retirement
+until its inventory is reconciled. Stored configuration fields that the running
+CLI cannot preserve also refuse before staging; use a compatible CLI and retain
+the original config and custody.
 
-After migration, restart the agent to use the new backend. If saving the updated config fails, the agent keeps using the source backend and does not delete the source secrets. If cleanup of the previous backend fails after the save succeeds, the migration still completes and prints warnings so you can remove the stale secrets manually.
+A private `.nyxid-storage-migration.json` journal binds the exact original config,
+complete source digest, owned target attempt, recovery records and retirement
+inventory. The complete plan must fit its size bound before any target is staged;
+`node_migration_capacity_exceeded` leaves the source usable without a marker.
+While that marker exists, normal secret readers, writers, config
+publication and garbage collection refuse. Keep the same profile/config and
+selected target when resuming. Recovery accepts only the recorded source bytes
+or the exact prepared installed bytes; another generation or target refuses.
+Staging is idempotent and read-back verified. A crash or uncertain directory sync
+keeps the source, targets and journal; it never triggers destructive rollback.
+After the config switch, restart recovery finishes installation and cleanup before
+the runtime can use the new generation. Cleanup validates every remaining owned
+artifact and the entire target before deleting any predecessor. Missing source
+artifacts are accepted only after the durable cleanup transition.
+
+OAuth recovery envelopes move with the selected backend, including ambiguous
+provider outcomes. Relocation authenticates and re-encrypts returned responses,
+preserving their receipt time and payload without contacting the provider. Only
+a return bound to the exact pre-migration generation follows that unchanged
+projection to the new generation. A stale return refuses migration before
+staging: restore its original configuration and custody, recover the returned
+response, then rerun migration. This preserves the existing recovery path without
+authorizing a stale response. An unknown provider outcome remains a replay
+barrier requiring fresh authorization. The
+source envelope is retired only after the target and installed recovery record
+are durable. A process interrupted after OAuth publication recognizes the exact
+installed generation and completes cleanup without applying the return twice.
+
+Migration output contains fixed states, validated backend names and counts;
+it never prints secret values, object references or provider bodies. Target
+key initialization is deliberate and never replaces an existing key. Runtime
+lookups and migration status do not generate keys. Restart the node explicitly
+after a completed migration. Support for real OS custody, daemon cutover and the
+manual first-upgrade acknowledgement remains a required follow-up before this
+branch's W9.6 gate can close.
 
 ---
 

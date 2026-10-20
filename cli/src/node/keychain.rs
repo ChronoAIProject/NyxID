@@ -1,14 +1,19 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use zeroize::Zeroizing;
 
+#[cfg(test)]
 use super::config::NodeConfig;
 use super::error::{Error, Result};
 
@@ -21,6 +26,8 @@ enum KeychainClient {
     Memory(Arc<Mutex<HashMap<String, String>>>),
     #[cfg(test)]
     Faulty(String),
+    #[cfg(test)]
+    Disk(std::path::PathBuf),
 }
 
 #[cfg(test)]
@@ -65,6 +72,25 @@ impl KeychainBackend {
             client: KeychainClient::Faulty(message.to_string()),
             read_probe: None,
         }
+    }
+
+    /// Persistent fake key service for actual child-process crash controls.
+    /// This never contacts an OS keyring; its disposable directory is private.
+    #[cfg(test)]
+    pub(crate) fn new_disk_mock(node_id: &str, directory: &std::path::Path) -> Self {
+        Self {
+            node_id: node_id.into(),
+            client: KeychainClient::Disk(directory.into()),
+            read_probe: None,
+        }
+    }
+    #[cfg(test)]
+    fn disk_name(&self, key: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}.mock-secret",
+            hex::encode(Sha256::digest(self.user(key).as_bytes()))
+        )
     }
 
     #[cfg(test)]
@@ -113,6 +139,12 @@ impl KeychainBackend {
             }
             #[cfg(test)]
             KeychainClient::Faulty(message) => Err(Error::Keychain(message.clone())),
+            #[cfg(test)]
+            KeychainClient::Disk(path) => {
+                let directory = super::storage::Directory::open(path)?;
+                let name = self.disk_name(key);
+                directory.publish(std::ffi::OsStr::new(&name), value.as_bytes(), true)
+            }
         }
     }
 
@@ -138,6 +170,10 @@ impl KeychainBackend {
                 .ok_or_else(|| Error::Keychain(format!("Failed to retrieve '{key}': no entry"))),
             #[cfg(test)]
             KeychainClient::Faulty(message) => Err(Error::Keychain(message.clone())),
+            #[cfg(test)]
+            KeychainClient::Disk(_) => self
+                .get_optional(key)?
+                .ok_or_else(|| Error::Keychain("Fake key service entry absent".into())),
         }
     }
 
@@ -164,6 +200,20 @@ impl KeychainBackend {
                 .cloned()),
             #[cfg(test)]
             KeychainClient::Faulty(message) => Err(Error::Keychain(message.clone())),
+            #[cfg(test)]
+            KeychainClient::Disk(path) => {
+                let directory = super::storage::Directory::open(path)?;
+                match directory.read(
+                    std::ffi::OsStr::new(&self.disk_name(key)),
+                    super::storage::MAX_CONFIG_BYTES,
+                ) {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .map(Some)
+                        .map_err(|_| Error::Keychain("Invalid fake key-service value".into())),
+                    Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
         }
     }
 
@@ -188,6 +238,14 @@ impl KeychainBackend {
             }
             #[cfg(test)]
             KeychainClient::Faulty(message) => Err(Error::Keychain(message.clone())),
+            #[cfg(test)]
+            KeychainClient::Disk(path) => {
+                let directory = super::storage::Directory::open(path)?;
+                match directory.remove(std::ffi::OsStr::new(&self.disk_name(key))) {
+                    Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    result => result,
+                }
+            }
         }
     }
 
@@ -203,8 +261,11 @@ impl KeychainBackend {
 }
 
 // Well-known key names
+#[cfg(test)]
 pub const KEY_AUTH_TOKEN: &str = "auth_token";
+#[cfg(test)]
 pub const KEY_SIGNING_SECRET: &str = "signing_secret";
+#[cfg(test)]
 const VAULT_KEY: &str = "vault";
 
 /// Keyring key for a service credential value.
@@ -217,6 +278,7 @@ pub fn credential_key(service_slug: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// All secrets stored in one keychain entry to avoid per-item password prompts.
+#[cfg(test)]
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct VaultData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,6 +292,7 @@ pub struct VaultData {
     pub pending_crypto_keys: BTreeMap<String, Zeroizing<String>>,
 }
 
+#[cfg(test)]
 mod zeroizing_string_btreemap {
     use std::collections::BTreeMap;
 
@@ -264,6 +327,7 @@ mod zeroizing_string_btreemap {
     }
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for VaultData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VaultData")
@@ -289,11 +353,13 @@ impl std::fmt::Debug for VaultData {
 
 /// A single-entry keychain vault that caches all secrets in memory.
 /// Reads trigger one keychain prompt; subsequent access is from memory.
+#[cfg(test)]
 pub struct KeychainVault {
     backend: KeychainBackend,
     vault: Mutex<VaultData>,
 }
 
+#[cfg(test)]
 impl KeychainVault {
     /// Create an empty vault (used during registration before any secrets exist).
     pub fn new(node_id: &str) -> Self {
@@ -492,16 +558,6 @@ impl KeychainVault {
             .unwrap()
             .pending_crypto_keys
             .remove(pending_id);
-        self.flush()
-    }
-
-    pub fn delete_auth_token(&self) -> Result<()> {
-        self.vault.lock().unwrap().auth_token = None;
-        self.flush()
-    }
-
-    pub fn delete_signing_secret(&self) -> Result<()> {
-        self.vault.lock().unwrap().signing_secret = None;
         self.flush()
     }
 

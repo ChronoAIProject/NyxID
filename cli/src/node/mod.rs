@@ -12,6 +12,7 @@ pub mod managed_config;
 pub mod managed_deadline;
 pub mod managed_runtime;
 pub mod metrics;
+pub(crate) mod migration;
 pub mod oauth;
 pub mod proxy_executor;
 pub mod proxy_upload;

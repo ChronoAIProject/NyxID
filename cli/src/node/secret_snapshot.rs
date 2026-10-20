@@ -58,6 +58,7 @@ impl SecretSnapshot {
         selected_file: Option<&LocalEncryption>,
     ) -> Result<Self> {
         let _writer = directory.writer_lock()?;
+        directory.require_idle()?;
         secret_transaction::live_references(config)?;
         secret_transaction::check_observed(directory, path, config.publication.snapshot())?;
         // A valid CAS token alone cannot authorize a caller-supplied field
@@ -71,6 +72,27 @@ impl SecretSnapshot {
         {
             return Err(invalid());
         }
+        Self::read_projection_in(
+            directory,
+            config,
+            path,
+            keychain,
+            previous_legacy,
+            selected_file,
+        )
+    }
+
+    /// Migration validates the exact journal generation itself. This helper
+    /// still validates the entire typed graph and key health, under its lock.
+    pub(crate) fn read_projection_in(
+        directory: &super::storage::Directory,
+        config: &NodeConfig,
+        path: &Path,
+        keychain: Option<&KeychainBackend>,
+        previous_legacy: Option<&LegacySnapshot>,
+        selected_file: Option<&LocalEncryption>,
+    ) -> Result<Self> {
+        secret_transaction::live_references(config)?;
         let mut values = BTreeMap::new();
         let mut legacy = None;
         match config.storage_backend.as_str() {
@@ -140,6 +162,20 @@ impl SecretSnapshot {
             values,
             legacy,
         })
+    }
+
+    /// Includes typed slots and explicit None/Some(empty) sentinels; never
+    /// printed or used as a replacement for reading authoritative custody.
+    pub(crate) fn value_digest(&self) -> Result<[u8; 32]> {
+        let mut hash = Sha256::new();
+        hash.update(b"nyxid-node-migration-values-v1");
+        for (field, value) in &self.values {
+            let encoded =
+                Zeroizing::new(serde_json::to_vec(&(field, value)).map_err(|_| invalid())?);
+            hash.update((encoded.len() as u64).to_be_bytes());
+            hash.update(&encoded);
+        }
+        Ok(hash.finalize().into())
     }
 
     pub(crate) fn get(&self, field: &SecretField) -> Result<Option<Zeroizing<String>>> {

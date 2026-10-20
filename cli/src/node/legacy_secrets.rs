@@ -2,7 +2,7 @@
 //! consolidates or deletes entries, and never falls back from a present vault.
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::config::{KeychainFormat, NodeConfig};
@@ -39,7 +39,8 @@ impl LegacyVault {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LegacySource {
     Vault,
     Individual,
@@ -171,6 +172,53 @@ impl LegacySnapshot {
             values,
         })
     }
+    /// Refuse to delete a vault containing unmodelled secrets. Shadowed legacy
+    /// entries are inventoried separately; their exact bytes are fenced before
+    /// retirement and never become authoritative snapshot values.
+    pub(crate) fn retirement_keys(
+        config: &NodeConfig,
+        backend: &KeychainBackend,
+    ) -> Result<Vec<String>> {
+        let fields = secret_fields::fields(config)?;
+        let has_signing = fields
+            .iter()
+            .any(|(field, _)| matches!(field, SecretField::SigningSecret));
+        let mut keys = vec!["vault".into()];
+        let mut credential_keys = std::collections::BTreeSet::new();
+        let mut pending_keys = std::collections::BTreeSet::new();
+        for (field, _) in fields {
+            match &field {
+                SecretField::AuthToken | SecretField::SigningSecret => {
+                    keys.push(field.legacy_key())
+                }
+                SecretField::PendingPrivate { pending_id } => {
+                    pending_keys.insert(pending_id.clone());
+                }
+                _ => {
+                    credential_keys.insert(field.legacy_key());
+                    keys.push(credential_key(&field.legacy_key()));
+                }
+            }
+        }
+        if let Some(raw) = backend.get_optional("vault").map_err(|_| invalid())? {
+            let raw = Zeroizing::new(raw);
+            let vault: LegacyVault = serde_json::from_str(&raw).map_err(|_| invalid())?;
+            if (vault.signing_secret.is_some() && !has_signing)
+                || vault
+                    .credentials
+                    .keys()
+                    .any(|key| !credential_keys.contains(key))
+                || vault
+                    .pending_crypto_keys
+                    .keys()
+                    .any(|key| !pending_keys.contains(key))
+            {
+                return Err(Error::Config("node_migration_unmodelled_legacy_secret: retain the legacy vault and reconcile its credential inventory before migration".into()));
+            }
+        }
+        Ok(keys)
+    }
+
     pub(crate) fn get(&self, field: &SecretField) -> Result<Option<Zeroizing<String>>> {
         self.values.get(field).cloned().ok_or_else(invalid)
     }

@@ -1669,7 +1669,7 @@ cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -
 Artifacts: .nyxid-storage-oauth-<binding>.json/.lock and file envelope .nyxid-storage-oauth-<UUID>.key; keychain object/v1/oauth-recovery/<UUID>, within existing broad contracts. Native file/mock key-service controls only; actual OS/Linux custody remains unverified.
 Forced termination before the first durable response write leaves the dispatch barrier and requires fresh authorization; no replay or secret output. Logs:/tmp/nyxid-w96-oauth-{check,tests,tests-retry,node-tests,clippy}.log. No push.
 
-## W9.6 checkpoint 5 — guarded managed registration, 2026-10-20 (awaiting PM review)
+## W9.6 checkpoint 5 — guarded managed registration, 2026-10-20 (PM accepted 0cfbd976e)
 
 PM accepted OAuth a0b4c768f; EXECUTION/REVIEW remain local/untracked. This checkpoint does not close PRE-08.
 Managed ticket/Kubernetes bootstrap retains one validated Directory and registration lease through recipient work, provider awaits, complete source reads, guarded publication and owned cleanup.
@@ -1682,3 +1682,16 @@ Exact shared Cargo environment used throughout; target locks honored and other s
 cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings exits0/zero diagnostics. Owned rustfmt/diff checks pass; no tests/bounds/security controls removed or weakened.
 Artifact/keychain namespace unchanged. Native file/mock HTTP checks only; resumable migration including OAuth recovery, actual daemon stop/status/wait/manual cutover, Linux/OS custody and W9.5 remain open.
 Logs:/tmp/nyxid-w96-managed-{check,tests,tests-retry,node-tests,clippy}.log. No push or OS service/keyring action.
+
+## W9.6 checkpoint 6 — resumable migration engine, 2026-10-20 (review pending)
+
+Managed registration0cfbd976e is PM accepted. EXECUTION/REVIEW remain local/untracked; PRE-08 stays open.
+Pinned migration journal binds exact source/prepared bytes, typed values, owned target attempts, OAuth recovery and source retirement; file↔immutable keychain and legacy in-place conversion resume without destructive rollback.
+Every secret class and None/Some(empty) survive; unknown config/vault fields, complete-plan capacity, generation/target drift and stale returned OAuth refuse before destructive effects. Installed uncertainty retains recovery.
+Normal readers/writers/publication/GC refuse while migration is pending; full target/source preflight precedes retirement. OAuth envelopes relocate without provider contact; ambiguous dispatch remains a replay barrier.
+Production mutation still refuses node_migration_quiescence_required pending actual daemon stop/status/wait/manual upgrade admission. Internal dry-run/status tests expose no secrets; CLI flag wiring awaits two-file ownership approval.
+Immediate undeclared LocalEncryption/unused-import/argument errors corrected; legacy mutable constructors are test-only and obsolete destructive helpers removed, without lint suppressions.
+Shared Cargo policy used exactly. Initial all-target check and CLI Clippy exit0/zero warnings. Migration18/0/0 in27.34s; initial full node585/0/3 existing ignored in82.84s.
+Feature library initially260/3/3: hard-coded binary child-test prefix selected zero library tests (confirmed by both exact listings). Derive the name from module_path; all original denial/crash/winner assertions and bounds retained.
+Final feature-library263/0/3 in28.80s; binary storage13/0/1 in0.24s; rebuilt full node585/0/3 in74.79s. Final all-target/node-proxy-test CLI Clippy exit0/zero diagnostics; owned rustfmt/diff checks pass. Overlapping totals, existing ignores unchanged; daemon guard moved unchanged before tests for Clippy ordering.
+Artifacts remain within .nyxid-storage-* and object/v1/*; native disposable-file/mock-key-service controls only. Daemon activation, CLI flags, real OS/Linux custody and W9.5 remain open. No push, OS service/keyring action or guest use.

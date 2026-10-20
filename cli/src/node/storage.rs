@@ -23,7 +23,20 @@ fn invalid() -> Error {
 /// privileged changes are outside this custody boundary.
 pub(crate) struct Directory(File);
 
+pub(crate) const MIGRATION_NAME: &str = ".nyxid-storage-migration.json";
+
 impl Directory {
+    /// A partial backend switch is never a usable runtime generation. Only
+    /// explicit migration recovery may read or publish while this marker exists.
+    pub(crate) fn require_idle(&self) -> Result<()> {
+        match self.read(std::ffi::OsStr::new(MIGRATION_NAME), MAX_CONFIG_BYTES) {
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(Error::Config(
+                "node_migration_pending: stop all node processes, then resume `nyxid node migrate --to keychain|file` with the original profile/config; do not remove recovery files".into(),
+            )),
+        }
+    }
     pub(crate) fn sync(&self) -> Result<()> {
         self.0.sync_all().map_err(Error::StorageDurabilityUncertain)
     }
@@ -837,10 +850,16 @@ mod tests {
     }
 
     fn start_child(directory: &Path, role: &str) -> std::process::Child {
+        // This module is shared by the CLI binary and node-proxy test library;
+        // their harnesses expose different module prefixes, without the crate.
+        let (_, module) = module_path!()
+            .split_once("::")
+            .expect("storage tests are nested inside a crate module");
+        let child_test = format!("{module}::publication_process_child");
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "node::storage::tests::publication_process_child",
+                &child_test,
                 "--ignored",
                 "--test-threads=1",
                 "--nocapture",

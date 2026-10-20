@@ -18,7 +18,7 @@ use super::secret_fields::{self, SecretField};
 use super::storage::{Directory, MAX_CONFIG_BYTES};
 
 const PREFIX: &str = "nyxid-key:v1:";
-const MAX_OBJECTS: usize = 4096;
+pub(crate) const MAX_OBJECTS: usize = 4096;
 
 fn invalid() -> Error {
     Error::Config(
@@ -264,13 +264,106 @@ impl Attempt {
             journal: Mutex::new(journal),
         })
     }
+    pub(crate) fn resume_in(
+        directory: &Directory,
+        path: &Path,
+        id: Uuid,
+        observed: Option<[u8; 32]>,
+        node_id: &str,
+    ) -> Result<Self> {
+        let _writer = directory.writer_lock()?;
+        check_observed(directory, path, observed)?;
+        let lease = directory
+            .try_existing_lease(OsStr::new(&lease_name(id)))?
+            .ok_or_else(invalid)?;
+        let journal = Journal::read(directory, id)?;
+        if journal.observed != observed
+            || journal.node_id != node_id
+            || Some(journal.config_name.as_str()) != path.file_name().and_then(OsStr::to_str)
+            || journal.purpose != Purpose::Ordinary
+            || journal.objects.iter().any(|o| o.phase == Phase::Retired)
+            || journal
+                .objects
+                .iter()
+                .map(|o| &o.field)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != journal.objects.len()
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            directory: directory.try_clone()?,
+            _lease: lease,
+            journal: Mutex::new(journal),
+        })
+    }
+
+    /// Migration reuses its durably owned slot after a crash, verifying the
+    /// exact source value instead of allocating a replacement or overwriting.
+    pub(crate) fn stage_migration(
+        &self,
+        field: SecretField,
+        value: &str,
+        store: &impl ObjectStore,
+    ) -> Result<String> {
+        {
+            let _writer = self.directory.writer_lock()?;
+            let mut journal = self.journal.lock().map_err(|_| invalid())?;
+            check_observed(
+                &self.directory,
+                Path::new(&journal.config_name),
+                journal.observed,
+            )?;
+            if store.owner_id() != journal.node_id {
+                return Err(invalid());
+            }
+            if let Some(index) = journal.objects.iter().position(|o| o.field == field) {
+                let intent = &journal.objects[index];
+                if intent.phase == Phase::Retired {
+                    return Err(invalid());
+                }
+                let actual = store.get(intent.reference)?;
+                match actual {
+                    Some(actual) if actual.as_str() == value => {}
+                    None if intent.phase == Phase::Planned => {
+                        store.put(intent.reference, value)?;
+                        if store.get(intent.reference)?.as_deref().map(String::as_str)
+                            != Some(value)
+                        {
+                            return Err(invalid());
+                        }
+                    }
+                    _ => return Err(invalid()),
+                }
+                let encoded = intent.reference.encode();
+                journal.objects[index].phase = Phase::Ready;
+                journal.persist(&self.directory, true)?;
+                return Ok(encoded);
+            }
+        }
+        self.stage_inner(field, value, store, true)
+    }
+
     pub(crate) fn stage(
         &self,
         field: SecretField,
         value: &str,
         store: &impl ObjectStore,
     ) -> Result<String> {
+        self.stage_inner(field, value, store, false)
+    }
+    fn stage_inner(
+        &self,
+        field: SecretField,
+        value: &str,
+        store: &impl ObjectStore,
+        migration: bool,
+    ) -> Result<String> {
         let _writer = self.directory.writer_lock()?;
+        if !migration {
+            self.directory.require_idle()?;
+        }
         let mut journal = self.journal.lock().map_err(|_| invalid())?;
         if store.owner_id() != journal.node_id {
             return Err(invalid());
@@ -301,6 +394,10 @@ impl Attempt {
         });
         journal.persist(&self.directory, true)?;
         store.put(reference, value)?;
+        #[cfg(test)]
+        if std::env::var_os("NYXID_TEST_SECRET_EXIT_AFTER_PUT").is_some() {
+            std::process::exit(0);
+        }
         let actual = store.get(reference)?.ok_or_else(invalid)?;
         if actual.as_str() != value {
             return Err(invalid());
@@ -463,6 +560,7 @@ pub(crate) fn collect_one_in(
 ) -> Result<Cleanup> {
     let name = path.file_name().ok_or_else(invalid)?;
     let _writer = directory.writer_lock()?;
+    directory.require_idle()?;
     let Some(_lease) = directory.try_existing_lease(OsStr::new(&lease_name(id)))? else {
         return Ok(Cleanup {
             active: true,
@@ -555,6 +653,10 @@ fn collect_locked(
         .collect();
     for index in retire {
         store.delete(journal.objects[index].reference)?;
+        #[cfg(test)]
+        if std::env::var_os("NYXID_TEST_SECRET_EXIT_AFTER_DELETE").is_some() {
+            std::process::exit(0);
+        }
         journal.objects[index].phase = Phase::Retired;
         journal.persist(directory, true)?;
         result.retired += 1;
@@ -577,8 +679,18 @@ pub(crate) fn collect_all_in(
     store: &impl ObjectStore,
 ) -> Result<()> {
     let _writer = directory.writer_lock()?;
+    directory.require_idle()?;
+    collect_migration_in(directory, path, store)
+}
+
+/// Only the migration journal authorizes cleanup while ordinary GC is fenced.
+pub(crate) fn collect_migration_in(
+    directory: &Directory,
+    path: &Path,
+    store: &impl ObjectStore,
+) -> Result<()> {
     let config_name = path.file_name().ok_or_else(invalid)?;
-    let mut authority = None;
+    let mut owners = Vec::new();
     for name in directory.names()? {
         let Some(name) = name.to_str() else {
             continue;
@@ -596,17 +708,21 @@ pub(crate) fn collect_all_in(
         let Some(_lease) = directory.try_existing_lease(OsStr::new(&lease_name(id)))? else {
             continue;
         };
-        if authority.is_none() {
-            authority = Some(cleanup_authority(directory, config_name, store)?);
+        let journal = Journal::read(directory, id)?;
+        if journal.node_id != store.owner_id()
+            || Some(journal.config_name.as_str()) != config_name.to_str()
+        {
+            return Err(invalid());
         }
-        // Reuse the complete graph/key-health read throughout this locked pass.
-        collect_locked(
-            directory,
-            config_name,
-            id,
-            store,
-            authority.as_ref().ok_or_else(invalid)?,
-        )?;
+        owners.push((id, _lease));
+    }
+    if !owners.is_empty() {
+        // Read and validate every ownership artifact before the first delete,
+        // retaining all original inactive lease inodes throughout the pass.
+        let authority = cleanup_authority(directory, config_name, store)?;
+        for (id, _lease) in owners {
+            collect_locked(directory, config_name, id, store, &authority)?;
+        }
     }
     Ok(())
 }
@@ -1232,6 +1348,73 @@ mod tests {
         ] {
             assert!(!debug.contains(&encoded));
         }
+    }
+
+    #[test]
+    fn migration_resume_reuses_planned_and_ready_ownership_without_overwrite() {
+        let (dir, path, config, store) = fixture();
+        let directory = Directory::open(dir.path()).unwrap();
+        let attempt =
+            Attempt::begin_in(&directory, &path, config.publication.snapshot(), "node").unwrap();
+        let id = attempt.id().unwrap();
+        store.fail_put.store(true, Ordering::SeqCst);
+        assert!(
+            attempt
+                .stage_migration(SecretField::AuthToken, "migration-value", &store)
+                .is_err()
+        );
+        let journal = Journal::read(&directory, id).unwrap();
+        assert!(journal.objects[0].phase == Phase::Planned);
+        let planned = journal.objects[0].reference;
+        drop(attempt);
+        store.fail_put.store(false, Ordering::SeqCst);
+        let resumed =
+            Attempt::resume_in(&directory, &path, id, config.publication.snapshot(), "node")
+                .unwrap();
+        let encoded = resumed
+            .stage_migration(SecretField::AuthToken, "migration-value", &store)
+            .unwrap();
+        assert!(reference(&encoded) == planned);
+        assert_eq!(store.puts.load(Ordering::SeqCst), 2);
+        drop(resumed);
+        let resumed =
+            Attempt::resume_in(&directory, &path, id, config.publication.snapshot(), "node")
+                .unwrap();
+        assert_eq!(
+            resumed
+                .stage_migration(SecretField::AuthToken, "migration-value", &store)
+                .unwrap(),
+            encoded
+        );
+        assert!(
+            resumed
+                .stage_migration(SecretField::AuthToken, "wrong-value", &store)
+                .is_err()
+        );
+        assert_eq!(store.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn migration_resume_requires_original_inactive_lease_and_exact_generation() {
+        let (dir, path, config, store) = fixture();
+        let directory = Directory::open(dir.path()).unwrap();
+        let attempt =
+            Attempt::begin_in(&directory, &path, config.publication.snapshot(), "node").unwrap();
+        let id = attempt.id().unwrap();
+        assert!(
+            Attempt::resume_in(&directory, &path, id, config.publication.snapshot(), "node")
+                .is_err()
+        );
+        drop(attempt);
+        directory.remove(OsStr::new(&lease_name(id))).unwrap();
+        assert!(
+            Attempt::resume_in(&directory, &path, id, config.publication.snapshot(), "node")
+                .is_err()
+        );
+        assert!(!dir.path().join(lease_name(id)).exists());
+        assert_eq!(store.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -72,17 +72,18 @@ fn test_credentials(
     token: Option<&str>,
 ) -> error::Result<CredentialStore> {
     let config_dir = tempfile::tempdir()?;
-    let backend = secret_backend::SecretBackend::new("file", "test-node", config_dir.path())?;
+    let directory = storage::Directory::open(config_dir.path())?;
+    let encryption = {
+        let _lock = directory.writer_lock()?;
+        encryption::LocalEncryption::initialize_in_locked(&directory)?
+    };
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert(
         service_slug.to_string(),
         match token {
             Some(token) => config::CredentialConfig::new_header(
                 "Authorization".into(),
-                Some(
-                    encryption::LocalEncryption::open_existing(config_dir.path())?
-                        .encrypt(&format!("Bearer {token}"))?,
-                ),
+                Some(encryption.encrypt(&format!("Bearer {token}"))?),
                 Some(target_url.into()),
             ),
             None => config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
@@ -98,7 +99,7 @@ fn test_credentials(
         },
         node: config::NodeSection {
             id: "test-node".to_string(),
-            auth_token_encrypted: String::new(),
+            auth_token_encrypted: encryption.encrypt("node-proxy-test-auth")?,
         },
         managed_runtime: None,
         managed_capabilities: None,
@@ -110,6 +111,10 @@ fn test_credentials(
         ssh_keys: Vec::new(),
         pending_crypto_keys: std::collections::BTreeMap::new(),
     };
+    let path = config_dir.path().join("config.toml");
+    config.save(&path)?;
+    let config = config::NodeConfig::load(&path)?;
+    let backend = secret_backend::SecretBackend::reader(&config, config_dir.path())?;
     CredentialStore::from_config_with_backend(&config, &backend)
 }
 

@@ -52,6 +52,7 @@ impl SecretOperation {
     /// Credential edits may advance; runtime identity/backend changes require
     /// a stopped daemon and explicit restart rather than cached-key fallback.
     pub(crate) fn current(&self) -> Result<(NodeConfig, Self)> {
+        self.directory.require_idle()?;
         let baseline = NodeConfig::load_in(&self.directory, &self.path)?;
         if baseline.node.id != self.baseline.node.id
             || baseline.storage_backend != self.baseline.storage_backend
@@ -128,6 +129,7 @@ impl SecretOperation {
         directory: Directory,
         keychain: KeychainBackend,
     ) -> Result<Self> {
+        directory.require_idle()?;
         let baseline = NodeConfig::load_in(&directory, path)?;
         let supplied = Zeroizing::new(toml::to_string(config).map_err(|_| invalid())?);
         let actual = Zeroizing::new(toml::to_string(&baseline).map_err(|_| invalid())?);
@@ -193,6 +195,7 @@ impl SecretOperation {
         }
         let file = {
             let _writer = directory.writer_lock()?;
+            directory.require_idle()?;
             secret_transaction::check_observed(&directory, path, config.publication.snapshot())?;
             match config.storage_backend.as_str() {
                 "file" => Some(if initialize {
@@ -237,6 +240,7 @@ impl SecretOperation {
             }
             {
                 let _writer = self.directory.writer_lock()?;
+                self.directory.require_idle()?;
                 secret_transaction::check_observed(
                     &self.directory,
                     &self.path,
@@ -245,6 +249,7 @@ impl SecretOperation {
             }
             if let (Some(file), Some(source)) = (&self.file, &self.source) {
                 let _writer = self.directory.writer_lock()?;
+                self.directory.require_idle()?;
                 secret_transaction::check_observed(
                     &self.directory,
                     &self.path,
@@ -295,6 +300,7 @@ impl SecretOperation {
         let result = (|| match &self.file {
             Some(file) => {
                 let _writer = self.directory.writer_lock()?;
+                self.directory.require_idle()?;
                 secret_transaction::check_observed(
                     &self.directory,
                     &self.path,
@@ -367,6 +373,7 @@ impl SecretOperation {
             return Err(invalid());
         }
         let _writer = self.directory.writer_lock()?;
+        self.directory.require_idle()?;
         secret_transaction::check_observed(
             &self.directory,
             &self.path,
