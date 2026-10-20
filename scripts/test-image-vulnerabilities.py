@@ -111,14 +111,6 @@ class ImageVulnerabilities(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'actual final image config'): self.exercise_scan(corrupt_report=True)
         self.assertFalse((self.stage / 'new-scan/image-scan.json').exists())
 
-    def test_machine_runtime_rejects_build_headers_even_without_reported_vulnerabilities(self):
-        for component in ('machine-node-only', 'nyxid-node-machine', 'machine-hosted-desktop', 'machine-hosted'):
-            for package in ('linux-libc-dev', 'build-essential'):
-                report = copy.deepcopy(self.report)
-                report['Results'][0]['Packages'].append({'Name': package, 'Version': '1'})
-                with self.subTest(component=component, package=package), self.assertRaisesRegex(ValueError, 'build-only packages'):
-                    policy.evaluate(report, self.image_id, component)
-
     def test_all_blocked_severities_and_unfixed_findings_fail(self):
         for severity in policy.BLOCKED:
             report = copy.deepcopy(self.report)

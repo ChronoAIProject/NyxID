@@ -6,8 +6,9 @@ severity change is introduced by this report.
 
 The October 20 signed APT catalog refresh adds a runtime upgrade to the Glama
 image; trixie-security has `liblzma5 5.8.1-1+deb13u2`, fixing DSA-6549-1 and
-TEMP-1147318-639065. Machine runtimes omit build-essential, which introduced
-linux-libc-dev. The final scanner rejects both packages even without CVEs.
+TEMP-1147318-639065. Machine workstation runtimes retain build-essential and its Linux UAPI header
+closure for the documented owner build workloads. The rejected removal and
+package-presence prohibition have been reversed; actual findings remain gated.
 Hosted desktop retains GitHub CLI, updated from Ubuntu 2.45.0 to checksum-pinned
 upstream 2.102.0. Both Linux archive SHA-256 values were verified locally;
 Renovate covers this new pin. Native package replay and final image rescans

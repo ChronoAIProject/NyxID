@@ -327,3 +327,9 @@
 - Add one exact monthly synthetic-test-fixture identity with introducing revision, sites, owner, rationale and full-line/value/match hashes; no node source edited and no prose exception added.
 - Real pinned gitleaks policy suite: 19/19 passed, 0 failed; the new fixture case refuses a changed value, moved path and same-line added key. Existing rule/content/expiry and historical negatives remain required.
 - PR jobs: Scanner Policy, Full History Secret Scan, Security Scans Passed and CI Pipeline. Full committed scan reruns after this focused commit.
+
+## W7 CI82 follow-up — restore machine workstation tooling
+- Restore build-essential in the three Ubuntu machine workstation images; keep the checksum-pinned gh upgrade and snapshot pins.
+- Remove the incorrect package-presence prohibition and its test; all actual HIGH/CRITICAL/UNKNOWN finding gates remain required.
+- Correct the runtime documentation against MACHINE_CONTEXT_SPIKE.md's C/C++, make, npm-native and pip-wheel contract.
+- Local: image vulnerability 14/14, build-input 22/22 and APT policy 23/23; 59 passed, 0 failed; diff check passes. Native image builds/scans remain PR CI evidence.

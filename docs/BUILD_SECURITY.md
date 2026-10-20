@@ -428,10 +428,13 @@ After merge, dispatch `provision-apk-archives.yml` on `main` with `catalog_commi
 set to the full reviewed commit containing the current catalogs, then rerun the
 availability check. No provisioning is performed by PR jobs.
 
-Machine runtime images omit `build-essential` and its Linux UAPI header closure;
-NyxID is compiled in the separate Rust builder. The final image scan also rejects
-`linux-libc-dev` or `build-essential` in machine runtime inventories even if no
-CVE is reported. Hosted desktop keeps GitHub CLI for agent workflows, installed
+Machine images are agent workstations. Their declared runtime tool surface
+includes `build-essential` and its compiler/header closure for C/C++ builds,
+make, npm native installs and pip local wheels, as validated in
+`MACHINE_CONTEXT_SPIKE.md`. Package presence alone is not a vulnerability;
+HIGH/CRITICAL/UNKNOWN findings still block until fixed or individually reviewed
+under the exact policy in `RELEASE_IMAGE_REMEDIATION.md`.
+Hosted desktop keeps GitHub CLI for agent workflows, installed
 from the checksum-pinned upstream gh 2.102.0 archives for each architecture,
 rather than Ubuntu's vulnerable gh 2.45.0. Renovate covers that version pin;
 changed release archive hashes require review. The Glama runtime now upgrades
