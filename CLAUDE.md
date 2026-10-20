@@ -107,6 +107,7 @@ Add new entries here when introducing additional vendored URN types.
 
 - `NodeWsManager`: in-memory connection pool shared via `Arc` in `AppState`; `DashMap` for lock-free concurrent access
 - `Node.user_id` is the polymorphic owner field (person or org user, matching `UserService`/`UserApiKey`). Do not add a separate `org_id` to node-related models; ACL via `org_service::resolve_owner_access(actor, node.user_id)`.
+- Disabled orgs confer no membership authority: owner resolution and authority membership walkers require an active org, and org-owned keys/service accounts require an active owner at auth. Only GET /orgs includes disabled orgs with `is_active: false`; platform-admin dismantling bypasses remain. See `docs/ORG_MODEL.md#disabled-organizations`.
 - Registration tokens carry the chosen owner at mint time; admin role is verified at issuance, not redemption -- a revoked admin can still complete registration within the token TTL (default 1h, `NODE_REGISTRATION_TOKEN_TTL_SECS`). When removing org admins, also delete their pending registration tokens.
 - Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32 random bytes; only SHA-256 hashes stored. HMAC signing secrets are generated at registration: SHA-256 hash on server, encrypted locally on the node agent.
 - WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware

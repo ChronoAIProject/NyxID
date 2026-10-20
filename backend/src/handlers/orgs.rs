@@ -173,6 +173,8 @@ pub struct OrgListItem {
     pub contact_email: Option<String>,
     /// Caller's membership role, or Admin as the read projection of Direct ownership.
     pub your_role: OrgRoleWire,
+    /// Disabled organizations remain visible without granting resource access.
+    pub is_active: bool,
     pub created_at: String,
 }
 
@@ -730,7 +732,8 @@ pub(crate) async fn create_org_with_id(
 
 /// GET /api/v1/orgs
 ///
-/// API-key readable: list a person's active memberships, or just the owning
+/// API-key readable: list a person's unrevoked memberships, including disabled
+/// organizations with `is_active: false`, or just the owning
 /// org for an org-owned key, with Direct access projected as `your_role: admin`.
 pub async fn list_orgs(
     State(state): State<AppState>,
@@ -745,7 +748,8 @@ pub async fn list_orgs(
         vec![(org, role)]
     } else {
         let memberships =
-            org_service::list_memberships_for_member(&state.db, &actor, false).await?;
+            org_service::list_memberships_for_member_including_inactive(&state.db, &actor, false)
+                .await?;
         let mut orgs = Vec::with_capacity(memberships.len());
         for membership in memberships {
             let org = match org_service::get_org_user(&state.db, &membership.org_user_id).await {
@@ -770,6 +774,7 @@ pub async fn list_orgs(
             avatar_url: org.avatar_url,
             contact_email,
             your_role: role.into(),
+            is_active: org.is_active,
             created_at: org.created_at.to_rfc3339(),
         });
     }

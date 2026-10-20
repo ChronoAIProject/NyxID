@@ -1108,6 +1108,23 @@ impl FromRequestParts<AppState> for AuthUser {
                                 )
                             })?;
 
+                        // Service accounts require a live person or org owner,
+                        // matching the owner-activity gate on API keys.
+                        if state
+                            .db
+                            .collection::<User>(USERS)
+                            .find_one(doc! {
+                                "_id": sa.effective_owner_user_id(),
+                                "is_active": true,
+                            })
+                            .await?
+                            .is_none()
+                        {
+                            return Err(AppError::Unauthorized(
+                                "Service account owner is inactive or not found".into(),
+                            ));
+                        }
+
                         // Check token revocation
                         let token_record = state
                             .db

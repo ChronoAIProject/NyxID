@@ -13,6 +13,7 @@
 //! 4. The [`OwnerAccess`] helper that other handlers use to extend their
 //!    "must be owner" checks to "owner OR admin of the owning org".
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -997,9 +998,60 @@ pub async fn create_membership(
     }
 }
 
-/// List the memberships of a given member user. Active by default;
-/// pass `include_revoked = true` to include soft-deleted rows.
+/// Active, unrevoked membership predicate shared by direct and transactional reads.
+fn active_membership_filter(org_user_id: &str, member_user_id: &str) -> bson::Document {
+    doc! {
+        "org_user_id": org_user_id,
+        "member_user_id": member_user_id,
+        "revoked_at": bson::Bson::Null,
+    }
+}
+
+/// Batch-check live organization owners for membership-based authority.
+async fn active_org_ids(
+    db: &mongodb::Database,
+    org_user_ids: &[&str],
+) -> AppResult<HashSet<String>> {
+    if org_user_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    Ok(db
+        .collection::<User>(USERS)
+        .distinct(
+            "_id",
+            doc! {
+                "_id": { "$in": org_user_ids },
+                "user_type": "org",
+                "is_active": true,
+            },
+        )
+        .await?
+        .into_iter()
+        .filter_map(|value| match value {
+            bson::Bson::String(id) => Some(id),
+            _ => None,
+        })
+        .collect())
+}
+
+/// List memberships conferring authority through active organizations only.
+/// `include_revoked` controls membership tombstones, never organization activity.
 pub async fn list_memberships_for_member(
+    db: &mongodb::Database,
+    member_user_id: &str,
+    include_revoked: bool,
+) -> AppResult<Vec<OrgMembership>> {
+    let mut memberships =
+        list_memberships_for_member_including_inactive(db, member_user_id, include_revoked).await?;
+    let org_ids: Vec<_> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
+    let active = active_org_ids(db, &org_ids).await?;
+    memberships.retain(|membership| active.contains(&membership.org_user_id));
+    Ok(memberships)
+}
+
+/// Display-only memberships, including disabled organizations. This does not
+/// confer authority; GET /orgs uses it to show the organization's inactive state.
+pub async fn list_memberships_for_member_including_inactive(
     db: &mongodb::Database,
     member_user_id: &str,
     include_revoked: bool,
@@ -1024,6 +1076,9 @@ pub async fn list_members_for_org(
     org_user_id: &str,
     include_revoked: bool,
 ) -> AppResult<Vec<OrgMembership>> {
+    if active_org_ids(db, &[org_user_id]).await?.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut filter = doc! { "org_user_id": org_user_id };
     if !include_revoked {
         filter.insert("revoked_at", bson::Bson::Null);
@@ -1039,19 +1094,18 @@ pub async fn list_members_for_org(
 }
 
 /// Look up a single membership by `(org_user_id, member_user_id)`.
-/// Active rows only -- revoked memberships return `None`.
+/// Unrevoked rows in active organizations only; otherwise returns `None`.
 pub async fn get_active_membership(
     db: &mongodb::Database,
     org_user_id: &str,
     member_user_id: &str,
 ) -> AppResult<Option<OrgMembership>> {
+    if active_org_ids(db, &[org_user_id]).await?.is_empty() {
+        return Ok(None);
+    }
     let row = db
         .collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .find_one(doc! {
-            "org_user_id": org_user_id,
-            "member_user_id": member_user_id,
-            "revoked_at": bson::Bson::Null,
-        })
+        .find_one(active_membership_filter(org_user_id, member_user_id))
         .await?;
     Ok(row)
 }
@@ -1172,6 +1226,9 @@ pub async fn list_admin_user_ids(
     db: &mongodb::Database,
     org_user_id: &str,
 ) -> AppResult<Vec<String>> {
+    if active_org_ids(db, &[org_user_id]).await?.is_empty() {
+        return Ok(Vec::new());
+    }
     let cursor = db
         .collection::<OrgMembership>(ORG_MEMBERSHIPS)
         .find(doc! {
@@ -1222,7 +1279,11 @@ pub async fn find_active_memberships_with_timeout(
             })
             .with_options(opts)
             .await?;
-        let memberships: Vec<OrgMembership> = cursor.try_collect().await?;
+        let mut memberships: Vec<OrgMembership> = cursor.try_collect().await?;
+        // Keep the owner activity read within the same fallback timeout.
+        let org_ids: Vec<_> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
+        let active = active_org_ids(db, &org_ids).await?;
+        memberships.retain(|membership| active.contains(&membership.org_user_id));
         Ok::<_, AppError>(memberships)
     };
 
@@ -1409,10 +1470,17 @@ async fn resolve_owner_access_with_session(
     target_owner_id: &str,
 ) -> AppResult<OwnerAccess> {
     if actor_user_id == target_owner_id {
+        // Authenticated org actors cannot bypass activity checks: org users
+        // cannot log in, org-owned keys require a live owner at authentication,
+        // and service-account tokens carry the SA id rather than its owner id.
         return Ok(OwnerAccess::Direct);
     }
     let owners = db.collection::<User>(USERS);
-    let query = owners.find_one(doc! { "_id": target_owner_id });
+    let query = owners.find_one(doc! {
+        "_id": target_owner_id,
+        "user_type": "org",
+        "is_active": true,
+    });
     let owner = match session.as_deref_mut() {
         Some(session) => query.session(session).await?,
         None => query.await?,
@@ -1422,11 +1490,7 @@ async fn resolve_owner_access_with_session(
         _ => return Ok(OwnerAccess::Forbidden),
     };
     let memberships = db.collection::<OrgMembership>(ORG_MEMBERSHIPS);
-    let query = memberships.find_one(doc! {
-        "org_user_id": &owner.id,
-        "member_user_id": actor_user_id,
-        "revoked_at": bson::Bson::Null,
-    });
+    let query = memberships.find_one(active_membership_filter(&owner.id, actor_user_id));
     let membership = match session.as_deref_mut() {
         Some(session) => query.session(session).await?,
         None => query.await?,
@@ -1559,34 +1623,49 @@ mod tests {
                 }
             }
         }
-        // Open security finding: inactive orgs currently retain membership access.
-        // This parity hook deliberately pins that behavior; deny it separately in both paths.
-        db.collection::<User>(USERS)
-            .update_one(doc! {"_id": &org}, doc! {"$set": {"is_active": false}})
-            .await
-            .unwrap();
-        let expected = resolve_owner_access(&db, &actor, &org).await.unwrap();
-        assert!(
-            expected.can_read(),
-            "pin current inactive-org behavior pending the separate finding"
-        );
+        // Decision 4 closes the inactive-org finding on both read paths.
+        // Re-enabling restores each role's exact prior access and scope.
+        for role in OrgRole::ALL {
+            membership.role = role;
+            db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                .replace_one(doc! {"_id": &membership.id}, &membership)
+                .await
+                .unwrap();
+            let expected = resolve_owner_access(&db, &actor, &org).await.unwrap();
+            assert!(expected.can_read());
+            for active in [false, true] {
+                db.collection::<User>(USERS)
+                    .update_one(doc! {"_id": &org}, doc! {"$set": {"is_active": active}})
+                    .await
+                    .unwrap();
+                let direct = resolve_owner_access(&db, &actor, &org).await.unwrap();
+                assert_eq!(
+                    direct,
+                    if active {
+                        expected.clone()
+                    } else {
+                        OwnerAccess::Forbidden
+                    }
+                );
+                let context = (&db, &actor, &org);
+                let transactional = super::super::audit_runtime::transaction::run(
+                    &db,
+                    &context,
+                    |session, (db, actor, owner)| {
+                        Box::pin(resolve_owner_access_in_session(db, session, actor, owner))
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(transactional, direct);
+            }
+        }
+        // The Direct shortcut relies on the verified-authentication boundary;
+        // org login and inactive owner credentials are refused before this call.
         assert_eq!(
             resolve_owner_access(&db, &org, &org).await.unwrap(),
             OwnerAccess::Direct
         );
-        let mut session = db.client().start_session().await.unwrap();
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .await
-            .unwrap();
-        assert_eq!(
-            resolve_owner_access_in_session(&db, &mut session, &actor, &org)
-                .await
-                .unwrap(),
-            expected
-        );
-        session.abort_transaction().await.unwrap();
         db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
             .update_one(
                 doc! {"_id": &membership.id},

@@ -17,6 +17,7 @@ This is an opt-in feature. Users without org memberships continue using their pe
 - [Concepts](#concepts)
 - [Data Model](#data-model)
 - [Auth: Why Orgs Cannot Log In](#auth-why-orgs-cannot-log-in)
+- [Disabled Organizations](#disabled-organizations)
 - [Proxy Credential Resolution](#proxy-credential-resolution)
 - [Multi-Org Tiebreaker](#multi-org-tiebreaker)
 - [Audit Trail](#audit-trail)
@@ -292,6 +293,26 @@ flowchart TD
 Callers who need to confirm whether an email belongs to an org must do so through an authenticated admin path (`/admin/users`), not through public auth endpoints.
 
 ---
+
+## Disabled Organizations
+
+Disabling an organization (`users.is_active = false`) removes all authority derived
+from its memberships. Admins, Members and Viewers cannot read, change or proxy its
+resources; membership-based listings, approval policies and feature overrides omit
+it. Org-owned API keys and service accounts cannot authenticate while their owner
+is inactive. Service accounts owned by an inactive person are refused as well.
+Memberships and resources stay stored, so re-enabling the organization restores
+access according to the current membership role and scope.
+
+`GET /orgs` continues to list the user's unrevoked memberships, including disabled
+organizations with `is_active: false`. That display does not confer resource access.
+Platform administrators retain their existing administrative bypasses to transfer
+resources and delete a disabled organization. An organization administrator needs
+the organization re-enabled before managing it.
+
+This is a deny-only tightening with no data migration. Every application replica
+must be upgraded for consistent enforcement; old replicas continue to allow the
+previous membership behavior until they are upgraded.
 
 ## Proxy Credential Resolution
 
