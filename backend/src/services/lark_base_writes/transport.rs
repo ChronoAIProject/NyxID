@@ -15,6 +15,15 @@ pub(super) enum Reply {
     Json(u16, Value),
     Transport,
 }
+
+pub(super) struct NotSent(pub AppError);
+
+impl From<AppError> for NotSent {
+    fn from(error: AppError) -> Self {
+        Self(error)
+    }
+}
+
 impl Transport<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn send(
@@ -27,7 +36,7 @@ impl Transport<'_> {
         query: Option<&str>,
         body: Option<bytes::Bytes>,
         content_type: &str,
-    ) -> AppResult<Reply> {
+    ) -> Result<Reply, NotSent> {
         let canonical = super::super::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
         let (_, selected) = super::super::destination_routing::select_target(
             &self.target.service,
@@ -35,7 +44,7 @@ impl Transport<'_> {
             &canonical,
         )?;
         if selected != self.target.target_id {
-            return Err(attachment::refused());
+            return Err(attachment::refused().into());
         }
         guard.revalidate_effect(row, phase).await?;
         let mut headers = reqwest::header::HeaderMap::new();
@@ -82,7 +91,20 @@ impl Transport<'_> {
                     serde_json::from_slice(&bytes).unwrap_or(Value::Null),
                 ))
             }
-            Err(proxy::ForwardRequestError::PreDispatchRejected(error)) => Err(error),
+            Err(proxy::ForwardRequestError::PreDispatchRejected(error)) => Err(NotSent(error)),
+            // For these two direct HTTP auth paths, every Application error is
+            // before the create send: credential preparation (including tenant
+            // exchange) is at proxy_service.rs:4511-4559; request.send() is at
+            // :4628. Adapter-specific Application errors can follow a send, so
+            // other auth paths conservatively retain an unknown outcome.
+            Err(proxy::ForwardRequestError::Application(error))
+                if matches!(
+                    self.target.auth_method.as_str(),
+                    "bearer" | "token_exchange"
+                ) =>
+            {
+                Err(NotSent(error))
+            }
             Err(_) => Ok(Reply::Transport),
         }
     }

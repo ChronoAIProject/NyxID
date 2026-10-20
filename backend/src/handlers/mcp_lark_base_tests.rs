@@ -35,7 +35,7 @@ struct PausedTokenExchange {
 }
 
 impl PausedTokenExchange {
-    async fn start() -> Self {
+    async fn start(fail_create_preparation: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         let reached = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -43,20 +43,39 @@ impl PausedTokenExchange {
         let signal = reached.clone();
         let resume = release.clone();
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let app = axum::Router::new().route("/token", axum::routing::post(move || {
-            let count = count.clone();
-            let signal = signal.clone();
-            let resume = resume.clone();
-            async move {
-                if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
-                    signal.notify_one();
-                    resume.notified().await;
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let count = count.clone();
+                let signal = signal.clone();
+                let resume = resume.clone();
+                async move {
+                    if count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+                        signal.notify_one();
+                        resume.notified().await;
+                        if fail_create_preparation {
+                            return (
+                                axum::http::StatusCode::BAD_GATEWAY,
+                                axum::Json(json!({"error":"exchange unavailable"})),
+                            );
+                        }
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({"token":"tenant-test-token","expires_in":60})),
+                    )
                 }
-                axum::Json(json!({"token":"tenant-test-token","expires_in":60}))
-            }
-        }));
-        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        Self { endpoint, reached, release, task }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            endpoint,
+            reached,
+            release,
+            task,
+        }
     }
 }
 
@@ -1519,9 +1538,9 @@ async fn lark_base_write_single_card_binds_canonical_body_and_all_four_contracts
 
 #[tokio::test]
 async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_preparation() {
-    for drift in ["key", "stop", "credential", "contract"] {
+    for drift in ["key", "stop", "credential", "contract", "token_preparation"] {
         let u = setup("base_final_send").await;
-        let exchange = PausedTokenExchange::start().await;
+        let exchange = PausedTokenExchange::start(drift == "token_preparation").await;
         let instance =
             u.f.state
                 .db
@@ -1566,9 +1585,12 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
             .unwrap();
         let auth = authenticate(&u.f).await;
         let (response, ()) = tokio::join!(call(&u, &auth, false, args(&u.attachment_id)), async {
-            tokio::time::timeout(std::time::Duration::from_secs(20), exchange.reached.notified())
-                .await
-                .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                exchange.reached.notified(),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 ledger(&u).await.state,
                 crate::models::lark_base_write::WriteState::Dispatching
@@ -1601,12 +1623,13 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
                         .db
                         .collection::<bson::Document>("user_api_keys")
                         .update_one(
-                            doc! {"_id":credential},
+                            doc! {"_id":&credential},
                             doc! {"$inc":{"credential_epoch":1i64}},
                         )
                         .await
                         .unwrap();
                 }
+                "token_preparation" => {}
                 _ => {
                     u.f.state
                         .db
@@ -1623,9 +1646,96 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
         });
         assert_eq!(response["result"]["isError"], true, "{drift}: {response}");
         assert_no_create(&u).await;
+        let failed = ledger(&u).await;
         assert_eq!(
-            ledger(&u).await.state,
-            crate::models::lark_base_write::WriteState::Uncertain
+            failed.state,
+            crate::models::lark_base_write::WriteState::FailedDefinite,
+            "{drift}"
+        );
+        assert_eq!(failed.last_code.as_deref(), Some("not_sent"), "{drift}");
+        assert_eq!(
+            u.f.state
+                .db
+                .collection::<bson::Document>(crate::models::lark_base_write_photo::COLLECTION_NAME)
+                .count_documents(doc! {"write_id":&failed.id})
+                .await
+                .unwrap(),
+            0,
+            "{drift}"
+        );
+        match drift {
+            "key" => {
+                u.f.state
+                    .db
+                    .collection::<bson::Document>("api_keys")
+                    .update_one(
+                        doc! {"_id":&u.f.chat.api_key_id},
+                        doc! {"$set":{"is_active":true}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "stop" => {
+                u.f.state
+                    .db
+                    .collection::<bson::Document>("assistant_conversations")
+                    .update_one(
+                        doc! {"_id":&u.f.row.id},
+                        doc! {"$set":{"active_turn.stop_requested":false}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "contract" => {
+                u.f.state
+                    .db
+                    .collection::<bson::Document>(service_endpoint::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"service_id":&u.catalog.id,"name":attachment::CREATE_OPERATION},
+                        doc! {"$set":{"publication":"published"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let fresh_auth = authenticate(&u.f).await;
+        assert_eq!(
+            payload(&call(&u, &fresh_auth, true, args(&u.attachment_id)).await)["record_id"],
+            "rec_receipt",
+            "{drift}"
+        );
+        let succeeded = ledger(&u).await;
+        assert_ne!(succeeded.client_token, failed.client_token, "{drift}");
+        assert_eq!(
+            succeeded.state,
+            crate::models::lark_base_write::WriteState::Succeeded,
+            "{drift}"
+        );
+        let sent = requests(&u).await;
+        let creates: Vec<_> = sent
+            .iter()
+            .filter(|request| request.url.path().ends_with("/records"))
+            .collect();
+        assert_eq!(creates.len(), 1, "{drift}");
+        assert_eq!(
+            creates[0]
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "client_token")
+                .unwrap()
+                .1,
+            succeeded.client_token
+        );
+        assert_eq!(
+            u.f.state
+                .db
+                .collection::<bson::Document>(crate::models::lark_base_write_photo::COLLECTION_NAME)
+                .count_documents(doc! {"write_id":&succeeded.id,"attempt":&succeeded.attempt})
+                .await
+                .unwrap(),
+            1,
+            "{drift}"
         );
         cleanup(u).await;
     }

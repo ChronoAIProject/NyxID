@@ -235,6 +235,17 @@ pub(crate) mod transport;
 use super::assistant_service_execution::LarkManagedGuard;
 use transport::{Reply, Transport};
 
+enum RunError {
+    NotSent(AppError),
+    Other(AppError),
+}
+
+impl From<AppError> for RunError {
+    fn from(error: AppError) -> Self {
+        Self::Other(error)
+    }
+}
+
 pub(crate) async fn execute(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -313,7 +324,9 @@ pub(crate) async fn execute(
     match work {
         Ok(Ok(value)) => Ok(value),
         outcome => {
-            let (state, code) = if row.state == WriteState::Uploading {
+            let (state, code) = if matches!(&outcome, Ok(Err(RunError::NotSent(_)))) {
+                (WriteState::FailedDefinite, "not_sent")
+            } else if row.state == WriteState::Uploading {
                 (WriteState::FailedPreDispatch, "pre_dispatch")
             } else {
                 (WriteState::Uncertain, "outcome_unknown")
@@ -322,7 +335,7 @@ pub(crate) async fn execute(
             // by the flag-independent sweeper using these same attempt fences.
             ledger::terminal(db, &row, state, code, None).await?;
             match outcome {
-                Ok(Err(error)) => Err(error),
+                Ok(Err(RunError::NotSent(error) | RunError::Other(error))) => Err(error),
                 _ => Err(AppError::Conflict(
                     "Base write timed out; check its recorded outcome before retrying".into(),
                 )),
@@ -365,7 +378,8 @@ async fn field_schema(
                 None,
                 "application/json",
             )
-            .await?;
+            .await
+            .map_err(|error| error.0)?;
         effect_gate(db, row, WriteState::Uploading).await?;
         let Reply::Json(status, body) = response else {
             return Err(AppError::BadRequest(
@@ -444,7 +458,7 @@ async fn run(
     transport: &Transport<'_>,
     row: &mut LarkBaseWrite,
     photos: &[String],
-) -> AppResult<Value> {
+) -> Result<Value, RunError> {
     field_schema(db, prepared, guard, transport, row).await?;
     for input in &prepared.uploads {
         if row
@@ -459,7 +473,7 @@ async fn run(
         effect_gate(db, row, WriteState::Uploading).await?;
         let bytes = uploads::egress_bytes(db, keys, &prepared.chat, &attachment).await?;
         if hex::encode(Sha256::digest(&bytes)) != input.sha256 {
-            return Err(invalid());
+            return Err(invalid().into());
         }
         let args = json!({"attachment_id":input.id,"parent_type":if attachment.content_type().starts_with("image/") {"bitable_image"}else{"bitable_file"},"parent_node":prepared.app});
         let fields = attachment::multipart::fields(&args, attachment.label(), input.size)?;
@@ -481,7 +495,8 @@ async fn run(
                     Some(body.clone()),
                     &content_type,
                 )
-                .await?;
+                .await
+                .map_err(|error| error.0)?;
             effect_gate(db, row, WriteState::Uploading).await?;
             let retry = match reply {
                 Reply::Json(status, reply) => {
@@ -494,13 +509,14 @@ async fn run(
                         if token.is_none() {
                             return Err(AppError::BadRequest(
                                 "Base upload returned no usable file_token".into(),
-                            ));
+                            )
+                            .into());
                         }
                         false
                     } else if matches!(code, Some(1061045 | 1061006)) {
                         true
                     } else {
-                        return Err(permission_error(transport.target, code, "upload"));
+                        return Err(permission_error(transport.target, code, "upload").into());
                     }
                 }
                 Reply::Transport => true,
@@ -511,7 +527,8 @@ async fn run(
             if !retry || attempt == 3 {
                 return Err(AppError::BadRequest(
                     "Base upload rate-limited or unavailable; no record was created".into(),
-                ));
+                )
+                .into());
             }
             let jitter = rand::random::<u8>() as u64;
             tokio::time::sleep(std::time::Duration::from_millis(
@@ -574,23 +591,26 @@ async fn run(
             Some(encoded.into()),
             "application/json",
         )
-        .await?;
+        .await
+        .map_err(|error| RunError::NotSent(error.0))?;
     let (state, code, record) = classify(reply);
     if !ledger::terminal(db, row, state, &code, record.as_deref()).await? {
         return Err(AppError::Conflict(
             "Base write result was already settled; check the Base".into(),
-        ));
+        )
+        .into());
     }
     if state == WriteState::Succeeded {
         return Ok(json!({"record_id":record,"already_created":false}));
     }
-    Err(if state == WriteState::FailedDefinite {
+    Err((if state == WriteState::FailedDefinite {
         permission_error(transport.target, code.parse().ok(), "record create")
     } else {
         AppError::Conflict(
             "Base write outcome unknown; check the Base; NyxID will not create it again".into(),
         )
     })
+    .into())
 }
 
 fn classify(reply: Reply) -> (WriteState, String, Option<String>) {
