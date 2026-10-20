@@ -282,8 +282,10 @@ only `fields` and `attachments`. The managed operation's reserved path is
 NyxID executes it internally and refuses forwarding that path to a provider.
 The capability requires matching, published SYSTEM catalog contracts for the
 composite, field listing, media upload and ordinary record create. Instance
-specs and edited contracts cannot grant it. The composite is excluded from
-`/mcp/config`, exact descriptors, non-chat, durable and async execution. Ordinary
+specs and edited contracts cannot grant it. Both `bitable_media_upload` and the
+composite require an owner chat key and `assistant:attachment-writes`; they are
+excluded from `/mcp/config`, exact descriptors, non-chat, durable and async
+execution. Ordinary
 `bitable_record_create` retains its existing contract and discovery behavior.
 
 One owner decision binds the connection, method, reserved path, canonical JSON
@@ -305,14 +307,26 @@ Base writers retain their own responsibility for complete receipt values.
 
 A stable content identity and transactional per-photo reservations protect the
 same owner/Base/table for 400 days. An identical successful call returns
-`{record_id, already_created: true}`; changed fields or attachment assignments
-require updating the existing record. Overlapping batches cannot create a
-second row containing a reserved photo. A proven pre-dispatch or definite
-provider refusal releases that attempt's reservations. An unknown outcome
-retains them: check the Base manually; NyxID never automatically resends a
-record create after its persisted dispatch barrier. Uploaded file tokens remain
-bound to the connection principal and contract versions. The whole active
-operation has a 180-second deadline.
+`{record_id, already_created: true}`, even if the connection principal or
+published contracts have since changed; this replay reads the stored result
+without sending another provider request. Changed fields or attachment
+assignments require updating the existing record. Overlapping batches cannot
+create a second row containing a reserved photo.
+
+An active upload or dispatch reports “A Base write for this photo is in
+progress; try again shortly”. An expired dispatch becomes `uncertain` before
+the refusal is returned. An unknown outcome reports “Base write outcome
+unknown; check the Base; NyxID will not create it again” and retains its photo
+reservations. Transport loss, timeouts and ambiguous provider responses do not
+permit an automatic record-create retry after the persisted dispatch barrier.
+
+A proven pre-dispatch failure or definite provider refusal releases only that
+attempt's reservations. A refusal after the dispatch barrier that provably sent
+nothing becomes `failed_definite` with code `not_sent` and also releases that
+attempt's reservations; a fresh tool call may then try again with a new client
+token. Uploaded file-token reuse and reactivation still require the same live
+connection principal and contract versions. The whole active operation has a
+180-second deadline.
 
 ### Managed Base-write rollout
 
@@ -341,11 +355,34 @@ Also complete the inbound drain gates and early queue conversion procedure in
 [uploads](chat/10-uploads.md#channel-rollout-and-rollback). Queued media is eligible for
 normal forced conversion after six days; orphan turns require the existing
 75-second stale heartbeat. Completion depends on bounded sweep progress, not a
-fixed waiting period. Before deploying the old release, remove the two new
-attachment operation rows (`bitable_media_upload` and
-`bitable_record_create_with_attachments`) for all four Lark/Feishu slugs, and
-remove saved scopes using `Number`, as described in the inbound rollback
-procedure. Old executors' rejection of the reserved JSON route is a provider
+fixed waiting period. Remove saved scopes using `Number`, including compiled
+key copies, as described in the inbound rollback procedure.
+
+After those drain gates reach zero, use a first-party human Admin session to
+remove the two attachment operations immediately before deploying the old
+release. The existing catalog endpoint API supports deleting seeded SYSTEM
+rows:
+
+1. Call `GET /api/v1/services?include_inactive=true`. In the response's
+   `services` array, resolve the catalog `id` for each exact slug: `api-lark`,
+   `api-lark-bot`, `api-feishu`, and `api-feishu-bot`. Use catalog service IDs,
+   rather than connection IDs.
+2. For each service, call `GET /api/v1/services/{service_id}/endpoints`. From
+   its `endpoints` array, select the `id` of every row whose `name` is
+   `bitable_media_upload` or `bitable_record_create_with_attachments`.
+3. Delete each selected row with
+   `DELETE /api/v1/services/{service_id}/endpoints/{endpoint_id}`. A successful
+   response is `200` with `{"message":"Endpoint deleted"}`. Preserve
+   `bitable_fields_list`, ordinary `bitable_record_create`, and all other rows.
+4. Repeat the endpoint GET for all four services and verify that neither
+   attachment operation name remains before rolling out the old release.
+
+The new binary additively restores these seeded operations at startup. Do not
+restart it or rerun catalog discovery/sync between deletion and rollback; if
+either occurs, repeat deletion and the final absence check. The CLI's catalog
+endpoint commands do not currently provide deletion; use the API above.
+
+Old executors' rejection of the reserved JSON route is a provider
 compatibility assumption requiring the live preflight; it is never the local
 security boundary of this release.
 
