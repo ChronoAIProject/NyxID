@@ -292,6 +292,52 @@ fn setup(name: &'static str) -> futures::future::BoxFuture<'static, BaseFixture>
         }
     })
 }
+async fn use_paused_tenant_exchange(u: &BaseFixture, exchange: &PausedTokenExchange) -> String {
+    let instance =
+        u.f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .find_one(doc! {"_id":&u.instance})
+            .await
+            .unwrap()
+            .unwrap();
+    let credential = instance.get_str("api_key_id").unwrap().to_owned();
+    let encrypted = u.f.state.encryption_keys.encrypt(b"{}").await.unwrap();
+    u.f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":&credential},doc! {"$set":{
+        "credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    u.f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&u.instance},
+            doc! {"$set":{"auth_method":"token_exchange"}},
+        )
+        .await
+        .unwrap();
+    let config = crate::models::downstream_service::TokenExchangeConfig {
+        endpoint: exchange.endpoint.clone(),
+        request_encoding: "json".into(),
+        request_template: json!({}),
+        token_response_path: "token".into(),
+        ttl_response_path: Some("expires_in".into()),
+        default_ttl_secs: 1,
+        injection: "bearer".into(),
+        error_code_path: None,
+        error_message_path: None,
+        credential_fields: vec![],
+    };
+    u.f.state
+        .db
+        .collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&u.catalog.id},
+            doc! {"$set":{"token_exchange_config":bson::to_bson(&config).unwrap()}},
+        )
+        .await
+        .unwrap();
+    credential
+}
+
 async fn authenticate(f: &Fixture) -> McpAuthContext {
     let key = crate::services::assistant_agent_credential_service::load_for_conversation(
         &f.state.db,
@@ -1299,6 +1345,8 @@ async fn lark_base_write_same_photo_distinct_conversations_refuses_stalled_dispa
         assistant_acknowledgement_service as acks, assistant_authority_tests::new_orchestrator,
     };
     let u = setup("base_two_chats").await;
+    let exchange = PausedTokenExchange::start(false).await;
+    use_paused_tenant_exchange(&u, &exchange).await;
     let auth = authenticate(&u.f).await;
     let row = new_orchestrator(&u.f.state, &u.f.owner, "Another receipt").await;
     assert_ne!(row.id, u.f.row.id);
@@ -1317,21 +1365,22 @@ async fn lark_base_write_same_photo_distinct_conversations_refuses_stalled_dispa
     let id = bind_upload(&f, b"receipt-a bytes").await;
     assert_ne!(id, u.attachment_id);
     let auth2 = authenticate(&f).await;
-    Mock::given(method("POST"))
-        .and(path("/open-apis/bitable/v1/apps/base/tables/table/records"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(std::time::Duration::from_millis(600))
-                .set_body_json(json!({"code":0,"data":{"record":{"record_id":"rec_receipt"}}})),
-        )
-        .with_priority(1)
-        .mount(&u.server)
-        .await;
     let params =
         json!({"name":"receipts__bitable_record_create_with_attachments","arguments":args(&id)});
     let (first, second) = tokio::join!(call(&u, &auth, false, args(&u.attachment_id)), async {
-        wait_path(&u, "/records").await;
-        rpc(&f, &auth2, "tools/call", Some(params.clone())).await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            exchange.reached.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ledger(&u).await.state,
+            crate::models::lark_base_write::WriteState::Dispatching
+        );
+        let response = rpc(&f, &auth2, "tools/call", Some(params.clone())).await;
+        exchange.release.notify_one();
+        response
     });
     assert_eq!(payload(&first)["record_id"], "rec_receipt");
     assert_error(&second);
@@ -1609,48 +1658,7 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
     for drift in ["key", "stop", "credential", "contract", "token_preparation"] {
         let u = setup("base_final_send").await;
         let exchange = PausedTokenExchange::start(drift == "token_preparation").await;
-        let instance =
-            u.f.state
-                .db
-                .collection::<bson::Document>("user_services")
-                .find_one(doc! {"_id":&u.instance})
-                .await
-                .unwrap()
-                .unwrap();
-        let credential = instance.get_str("api_key_id").unwrap().to_owned();
-        let encrypted = u.f.state.encryption_keys.encrypt(b"{}").await.unwrap();
-        u.f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":&credential},doc! {"$set":{
-            "credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
-        u.f.state
-            .db
-            .collection::<bson::Document>("user_services")
-            .update_one(
-                doc! {"_id":&u.instance},
-                doc! {"$set":{"auth_method":"token_exchange"}},
-            )
-            .await
-            .unwrap();
-        let config = crate::models::downstream_service::TokenExchangeConfig {
-            endpoint: exchange.endpoint.clone(),
-            request_encoding: "json".into(),
-            request_template: json!({}),
-            token_response_path: "token".into(),
-            ttl_response_path: Some("expires_in".into()),
-            default_ttl_secs: 1,
-            injection: "bearer".into(),
-            error_code_path: None,
-            error_message_path: None,
-            credential_fields: vec![],
-        };
-        u.f.state
-            .db
-            .collection::<bson::Document>(downstream_service::COLLECTION_NAME)
-            .update_one(
-                doc! {"_id":&u.catalog.id},
-                doc! {"$set":{"token_exchange_config":bson::to_bson(&config).unwrap()}},
-            )
-            .await
-            .unwrap();
+        let credential = use_paused_tenant_exchange(&u, &exchange).await;
         let auth = authenticate(&u.f).await;
         let (response, ()) = tokio::join!(call(&u, &auth, false, args(&u.attachment_id)), async {
             tokio::time::timeout(
