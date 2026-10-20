@@ -2124,7 +2124,8 @@ async fn handle_tools_list(
     )
     .await
     {
-        return rpc_error(request.id.clone(), -32603, &error.to_string());
+        tracing::warn!(code = error.error_code(), "Failed to filter tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
     }
 
     crate::services::agent_operation_scope_service::filter_catalog(

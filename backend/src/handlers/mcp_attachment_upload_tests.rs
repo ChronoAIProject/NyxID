@@ -444,6 +444,46 @@ async fn lark_attachment_mounted_remote_and_exact_hosted_overlays_never_gain_pro
 }
 
 #[tokio::test]
+async fn lark_attachment_discovery_failure_returns_fixed_public_error() {
+    let u = setup("attachment_discovery_failure").await;
+    let auth = authenticate(&u.f).await;
+    u.f.state
+        .db
+        .collection::<bson::Document>("feature_flag_overrides")
+        .update_one(
+            doc! {"flag_key":crate::services::feature_flag_service::ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+                "target_kind":"user","target_key":&u.f.owner},
+            doc! {"$set":{"enabled":"private override detail"}},
+        )
+        .await
+        .unwrap();
+    let mut services = mcp_service::load_operation_catalog(
+        &u.f.state.db,
+        u.f.state.node_ws_manager.as_ref(),
+        &auth.user_id,
+        mcp_node_scope(&auth),
+        mcp_service_scope(&auth),
+    )
+    .await
+    .unwrap()
+    .services;
+    let error = attachment::filter_discovery(&u.f.state.db, auth.chat.as_ref(), &mut services)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::errors::AppError::DatabaseError(_)),
+        "{error}"
+    );
+    assert_eq!(
+        rpc(&u.f, &auth, "tools/list", None).await,
+        json!({"jsonrpc":"2.0","id":1,
+            "error":{"code":-32603,"message":"Failed to load tools"}})
+    );
+    assert_no_requests(&u).await;
+    u.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn lark_attachment_discovery_chat_flag_matrix_config_and_exact_keep_plain_create() {
     let u = setup("attachment_discovery").await;
     let mut auth = authenticate(&u.f).await;
