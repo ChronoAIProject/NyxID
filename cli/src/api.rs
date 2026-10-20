@@ -720,38 +720,8 @@ impl ApiClient {
     }
 
     pub async fn delete<T: DeserializeOwned>(&mut self, path: &str) -> Result<T> {
-        let url = format!("{}{path}", self.base_url);
-        let resp = self
-            .client
-            .delete(&url)
-            .bearer_auth(&self.access_token)
-            .headers(crate::telemetry::account_binding::device_headers(
-                self.profile.as_deref(),
-                self.base_url_root(),
-                &self.access_token,
-            ))
-            .send()
+        self.delete_with_headers(path, reqwest::header::HeaderMap::new())
             .await
-            .with_context(|| format!("DELETE {path} failed"))?;
-
-        self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
-            let resp = self
-                .client
-                .delete(&url)
-                .bearer_auth(&self.access_token)
-                .headers(crate::telemetry::account_binding::device_headers(
-                    self.profile.as_deref(),
-                    self.base_url_root(),
-                    &self.access_token,
-                ))
-                .send()
-                .await
-                .with_context(|| format!("DELETE {path} failed (retry)"))?;
-            return Self::handle_response(resp, path).await;
-        }
-
-        Self::handle_response(resp, path).await
     }
 
     pub async fn delete_with_body<T: DeserializeOwned, B: Serialize>(
@@ -775,6 +745,7 @@ impl ApiClient {
             .with_context(|| format!("DELETE {path} failed"))?;
         self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
             && self.try_refresh_token_with_client(&client).await
         {
             let resp = client
@@ -1456,6 +1427,87 @@ mod tests {
             Some("GitHub")
         );
         assert_eq!(api_error.body_json(), Some(&body));
+    }
+
+    #[test]
+    fn write_refresh_policy_covers_delete_helpers_and_preserves_read_refresh() {
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = HomeGuard::set(temp.path());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for disabled in [false, true] {
+                    for operation in ["delete", "delete_with_body", "get"] {
+                        let server = MockServer::start().await;
+                        let refresh_allowed = !disabled || operation == "get";
+                        let method_name = if operation == "get" { "GET" } else { "DELETE" };
+                        Mock::given(method("POST"))
+                            .and(path("/api/v1/auth/refresh"))
+                            .respond_with(ResponseTemplate::new(200).set_body_json(
+                                serde_json::json!({
+                                    "access_token": "renewed-access",
+                                    "refresh_token": "renewed-refresh"
+                                }),
+                            ))
+                            .expect(u64::from(refresh_allowed))
+                            .mount(&server)
+                            .await;
+                        Mock::given(method(method_name))
+                            .and(path("/api/v1/resource"))
+                            .and(header("authorization", "Bearer original-access"))
+                            .respond_with(ResponseTemplate::new(401))
+                            .expect(1)
+                            .mount(&server)
+                            .await;
+                        Mock::given(method(method_name))
+                            .and(path("/api/v1/resource"))
+                            .and(header("authorization", "Bearer renewed-access"))
+                            .respond_with(
+                                ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+                            )
+                            .expect(u64::from(refresh_allowed))
+                            .mount(&server)
+                            .await;
+                        let profile = Some("write-refresh-policy");
+                        crate::auth::save_tokens_for(
+                            profile,
+                            "original-access",
+                            Some("original-refresh"),
+                        )
+                        .unwrap();
+                        let mut api = ApiClient::new_with_profile(
+                            &server.uri(),
+                            "original-access".into(),
+                            profile.map(str::to_owned),
+                        )
+                        .unwrap();
+                        if disabled {
+                            api = api.without_write_refresh();
+                        }
+                        let result: anyhow::Result<serde_json::Value> = match operation {
+                            "delete" => api.delete("/resource").await,
+                            "delete_with_body" => {
+                                api.delete_with_body("/resource", &serde_json::json!({"once":true}))
+                                    .await
+                            }
+                            "get" => api.get("/resource").await,
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(result.is_ok(), refresh_allowed, "{operation}, {disabled}");
+                        if !refresh_allowed {
+                            let error = result.unwrap_err();
+                            assert_eq!(
+                                error.downcast_ref::<ApiError>().unwrap().status(),
+                                reqwest::StatusCode::UNAUTHORIZED
+                            );
+                        }
+                        server.verify().await;
+                    }
+                }
+            });
     }
 
     async fn assert_override_is_fail_closed(auth: &AuthArgs, expected_token: &str) {
