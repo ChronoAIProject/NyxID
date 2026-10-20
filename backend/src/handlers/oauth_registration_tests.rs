@@ -2,8 +2,10 @@ use super::*;
 use crate::models::oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient, ScopeProvenance};
 use crate::test_utils::{connect_test_database, test_app_state};
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::Request;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use tower::ServiceExt;
 
 async fn registration(
@@ -21,7 +23,10 @@ async fn post_oauth(
     content_type: Option<&str>,
 ) -> (StatusCode, Value) {
     let (public, _) = crate::routes::build_router_with_state(state.clone());
-    let mut request = Request::builder().method("POST").uri(path);
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43123))));
     if let Some(content_type) = content_type {
         request = request.header("content-type", content_type);
     }

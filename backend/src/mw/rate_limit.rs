@@ -1298,10 +1298,10 @@ pub(crate) fn warn_if_proxy_attribution_is_collapsed(
     trusted_proxies: &[TrustedProxyRange],
 ) {
     static WARNED: OnceLock<()> = OnceLock::new();
-    if trusted_proxies.is_empty() && peer_ip.is_some_and(|ip| !is_global_unicast(ip)) {
+    if trusted_proxies.is_empty() && peer_ip.is_some_and(is_private_or_loopback) {
         WARNED.get_or_init(|| {
             tracing::warn!(
-                "Request peer is private or loopback while TRUSTED_PROXY_IPS is empty; client IP attribution and per-IP rate limiting may be collapsing to the proxy address. Configure TRUSTED_PROXY_IPS with only trusted proxy addresses or CIDR ranges."
+                "Private/loopback request peer observed with TRUSTED_PROXY_IPS empty; audit/login IPs fall back to the proxy and dedicated per-IP limits share its bucket. Multi-hop ingress also shares the general limiter bucket; configure only actual sanitizing proxy IPs/CIDRs."
             );
         });
     }

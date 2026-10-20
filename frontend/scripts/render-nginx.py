@@ -42,10 +42,35 @@ def path_literal(value: Path) -> str:
     return f'"{value}"'
 
 
+def trusted_ingress(value: str) -> list[str]:
+    """Only explicit IPs/CIDRs can authorize an outer proxy's XFF chain."""
+    if not value:
+        return []
+    entries = value.split(",")
+    if len(value) > 8192 or len(entries) > 64:
+        raise ValueError("NYXID_TRUSTED_INGRESS_IPS exceeds its bounded IP/CIDR list")
+    networks = set()
+    for entry in entries:
+        entry = entry.strip(" ")
+        if not re.fullmatch(r"[0-9a-fA-F:./]+", entry):
+            raise ValueError("NYXID_TRUSTED_INGRESS_IPS must contain only IPs/CIDRs")
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            raise ValueError("NYXID_TRUSTED_INGRESS_IPS must contain only IPs/CIDRs") from None
+        if network.version == 6 and network.network_address.ipv4_mapped is not None:
+            network = ipaddress.ip_network((network.network_address.ipv4_mapped, network.prefixlen - 96))
+        if network.prefixlen == 0 or network.network_address.is_unspecified:
+            raise ValueError("NYXID_TRUSTED_INGRESS_IPS must not trust wildcard/unspecified addresses")
+        networks.add(str(network))
+    return sorted(networks)
+
+
 def render(env: dict[str, str], template: str, output: Path, root: Path,
            legal_cache: Path, port: int = 8080) -> dict[str, str]:
     backend = origin(env.get("BACKEND_URL", "http://backend:3001"), "BACKEND_URL")
     public = origin(env.get("NYXID_PUBLIC_ORIGIN", "http://localhost:8080"), "NYXID_PUBLIC_ORIGIN")
+    ingress = trusted_ingress(env.get("NYXID_TRUSTED_INGRESS_IPS", ""))
     extra = env.get("NYXID_BROWSER_CONNECT_ORIGINS", "").split()
     if len(extra) > 16 or len(env.get("NYXID_BROWSER_CONNECT_ORIGINS", "")) > 8192:
         raise ValueError("NYXID_BROWSER_CONNECT_ORIGINS exceeds its bounded origin list")
@@ -93,10 +118,26 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
         'add_header Permissions-Policy $nyxid_proxy_permissions always;',
         'add_header Content-Security-Policy $nyxid_proxy_csp always;',
     ]
+    request = [f"set_real_ip_from {network};" for network in ingress] + [
+        "real_ip_header X-Forwarded-For;", "real_ip_recursive on;",
+        'proxy_set_header Host $host;',
+        # This ingress has no authenticated Cloudflare hop. All consumed CF
+        # identity/geography fields are discarded, even from trusted ingress.
+        'proxy_set_header CF-Connecting-IP "";', 'proxy_set_header CF-IPCountry "";',
+        'proxy_set_header CF-IPCity "";', 'proxy_set_header CF-Region "";',
+        'proxy_set_header CF-IPContinent "";', 'proxy_set_header CF-Timezone "";',
+        'proxy_set_header Forwarded "";',
+        # Terminate provenance at this boundary. Never re-forward an unchecked
+        # client prefix to the backend's whole-chain strict parser.
+        'proxy_set_header X-Real-IP $remote_addr;',
+        'proxy_set_header X-Forwarded-For $remote_addr;',
+        'proxy_set_header X-Forwarded-Proto $scheme;',
+    ]
     values = {
         "@@BACKEND_URL@@": backend,
         "@@STATIC_HEADERS@@": path_literal(output / "spa-headers.conf"),
         "@@PROXY_HEADERS@@": path_literal(output / "proxy-headers.conf"),
+        "@@PROXY_REQUEST_HEADERS@@": path_literal(output / "proxy-request-headers.conf"),
         "@@ROOT@@": path_literal(root), "@@LEGAL_CACHE@@": path_literal(legal_cache),
         "@@PORT@@": str(port),
     }
@@ -105,7 +146,8 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
     if "@@" in template or not 1024 <= port <= 65535:
         raise ValueError("invalid template marker or listen port")
     return {"default.conf": template, "spa-headers.conf": "\n".join(static) + "\n",
-            "proxy-headers.conf": "\n".join(proxy) + "\n"}
+            "proxy-headers.conf": "\n".join(proxy) + "\n",
+            "proxy-request-headers.conf": "\n".join(request) + "\n"}
 
 
 def main() -> None:

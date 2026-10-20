@@ -60,6 +60,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
 | `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
 | `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API/analytics destinations; matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+| `NYXID_TRUSTED_INGRESS_IPS` | *(empty; production Compose: `172.30.0.1`)* | Frontend nginx's comma-separated outer-ingress IP/CIDR allowlist (at most 64 entries / 8,192 characters). Only these peers can supply XFF for `real_ip_header X-Forwarded-For` with recursive resolution. IPs/CIDRs are validated before writing configuration; wildcard/unspecified addresses, hostnames, ports and nginx fragments are rejected. Empty trusts no outer ingress. This is distinct from the backend's `TRUSTED_PROXY_IPS`. |
 
 See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
 CSP, supported resources, split credential routing and the production harness.
@@ -334,14 +335,38 @@ for this compatibility path. The private-peer warning remains active. This
 exception supplies neither audit attribution nor a rate-limit exemption.
 Missing transport evidence never authorizes forwarded headers.
 
-The shipped frontend nginx uses `$proxy_add_x_forwarded_for`: for a client
-connecting directly to nginx, the rightmost element is that client's socket IP,
-regardless of a forged leftmost prefix. **Multi-hop deployments must configure
-`TRUSTED_PROXY_IPS` for every forwarding hop.** Production Compose binds frontend
-nginx to `127.0.0.1:3000`; adding an outer TLS proxy introduces another hop and
-requires explicit trust configuration. The deployment guide also describes an
-nginx ingress directly serving backend traffic. Do not infer production proxy
-trust or Cloudflare authentication merely from a private backend peer.
+Production Compose handles the shipped two-hop topology without manual tuning:
+host TLS proxy → `127.0.0.1:3000` → frontend nginx → backend. Its dedicated
+`frontend_backend` bridge is `172.30.0.0/24`, with gateway `172.30.0.1`, fixed
+frontend address `172.30.0.10`, and dynamic backend allocation in
+`172.30.0.128/25`. The backend defaults `TRUSTED_PROXY_IPS` to exactly
+`172.30.0.10`; frontend defaults `NYXID_TRUSTED_INGRESS_IPS` to exactly the
+gateway. Both allowlists can be overridden in `.env.production`. MongoDB stays
+on the separate default network. Keep the published frontend port loopback-only:
+host processes reaching that gateway are trusted to assert client addresses.
+
+The host TLS proxy must overwrite XFF with its client socket IP or append that IP
+after any client-supplied prefix. nginx uses `set_real_ip_from` plus
+`real_ip_recursive on` to select the rightmost untrusted hop only from an
+allowlisted outer peer. An untrusted peer's XFF cannot change `$remote_addr`.
+Every backend proxy location includes one rendered request policy that discards
+the incoming provenance, sends the normalized `$remote_addr` as both XFF and
+`X-Real-IP`, and clears consumed CF identity/geography fields. Thus backend trust
+needs only the frontend address after this normalization. With additional outer
+proxy hops, configure every actual sanitizing outer hop in
+`NYXID_TRUSTED_INGRESS_IPS`; when bypassing frontend nginx, configure every hop
+needed by the backend's raw XFF scan in `TRUSTED_PROXY_IPS`.
+
+**Upgrade note for custom (non-Compose) deployments:** set `TRUSTED_PROXY_IPS`
+to the actual sanitizing ingress addresses before upgrading. Otherwise audit and
+login IPs collapse to the proxy address and dedicated per-IP limits are shared;
+multi-hop ingress can also share the general limiter bucket. Set the frontend's
+outer-ingress allowlist separately if using this nginx behind another proxy.
+The backend emits a startup warning for empty trust and one additional warning
+on its first private/loopback peer. Do not infer proxy trust or Cloudflare
+authentication merely from a private backend peer. If the fixed Compose subnet
+conflicts with a host network, change its subnet, gateway, frontend address and
+both default allowlists together before deployment.
 
 `TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
 exemption by itself. To exempt an operator-controlled client, set
@@ -360,7 +385,7 @@ Missing peer information never becomes an exempt loopback address. IPv4-mapped I
 
 Before enabling trusted proxy attribution in production:
 
-1. Verify each ingress sanitizes client-supplied provenance. The shipped frontend nginx clears `CF-Connecting-IP`, `CF-IPCountry`, `CF-IPCity`, `CF-Region`, `CF-IPContinent`, and `CF-Timezone` in every backend proxy location. It sets `X-Real-IP` to the socket peer and appends that peer to XFF. Repo deployment configuration does not establish an authenticated Cloudflare hop.
+1. Verify each ingress sanitizes client-supplied provenance. The shipped frontend nginx clears `CF-Connecting-IP`, `CF-IPCountry`, `CF-IPCity`, `CF-Region`, `CF-IPContinent`, `CF-Timezone`, and unused RFC `Forwarded` in every backend proxy location. It replaces XFF and `X-Real-IP` with the normalized client address after its own outer-ingress trust gate. Repo deployment configuration does not establish an authenticated Cloudflare hop.
 2. Prefer the narrow actual ingress addresses/CIDRs over broad private ranges. A trusted peer can assert client identity, so unrelated private-network clients must not match.
 3. List every intermediary in XFF. Otherwise the rightmost unlisted proxy becomes the apparent client and rate-limit key. For Cloudflare, keep its published IPv4/IPv6 ranges current as well as the origin ingress ranges.
 4. A custom Cloudflare ingress may preserve CF fields only when it authenticates the Cloudflare hop, overwrites client-supplied fields, and prevents direct-to-origin bypass. The default nginx deliberately removes them; changing `TRUSTED_PROXY_IPS` alone does not enable CF geography through that template.

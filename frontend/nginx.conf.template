@@ -65,19 +65,7 @@ server {
         proxy_buffers 8 32k;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        include @@PROXY_REQUEST_HEADERS@@;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
 
@@ -85,6 +73,10 @@ server {
         # nginx's default 1 MiB cap from rejecting complete 2 MiB text replies.
         location ~ ^/api/v1/channel-relay/(reply|thread-reply)$ {
             client_max_body_size 32m;
+            include @@PROXY_REQUEST_HEADERS@@;
+            # Local request headers replace the parent's complete set.
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
             proxy_pass @@BACKEND_URL@@;
         }
     }
@@ -94,19 +86,7 @@ server {
     location ^~ /credential-accept/ {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        include @@PROXY_REQUEST_HEADERS@@;
     }
 
     # TEMPORARY: pre-rename backends redirect popup completions to /oauth.
@@ -120,57 +100,21 @@ server {
     location ^~ /oauth/ {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        include @@PROXY_REQUEST_HEADERS@@;
     }
 
     # Proxy OIDC discovery endpoints to the backend
     location ^~ /.well-known {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        include @@PROXY_REQUEST_HEADERS@@;
     }
 
     # Proxy MCP StreamableHTTP endpoint to the backend
     location ^~ /mcp {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        include @@PROXY_REQUEST_HEADERS@@;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
@@ -180,16 +124,7 @@ server {
     location ^~ /health {
         include @@PROXY_HEADERS@@;
         proxy_pass @@BACKEND_URL@@;
-        proxy_set_header Host $host;
-
-        # This ingress has no authenticated Cloudflare hop. Never forward
-        # client-supplied identity or geography as trusted proxy evidence.
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header CF-IPCountry "";
-        proxy_set_header CF-IPCity "";
-        proxy_set_header CF-Region "";
-        proxy_set_header CF-IPContinent "";
-        proxy_set_header CF-Timezone "";
+        include @@PROXY_REQUEST_HEADERS@@;
         proxy_hide_header Cache-Control;
         add_header Cache-Control "no-store" always;
     }
