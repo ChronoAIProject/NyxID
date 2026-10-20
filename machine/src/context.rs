@@ -15,7 +15,7 @@ pub struct Support {
 
 /// Versioned, node-observed prerequisites for selecting a *new* separated
 /// assignment. The older Support advertisement is deliberately insufficient:
-/// it predates the browser-namespace probe. None means not observed, never true.
+/// it predates browser launch diagnostics. None means not observed, never true.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Evidence {
@@ -26,13 +26,16 @@ pub struct Evidence {
     pub managed_browser_configured: Option<bool>,
     pub command_seccomp: Option<bool>,
     pub landlock_enforced: Option<bool>,
-    /// Both secure and developer identities can establish mapped user, PID and
-    /// network namespaces. This is a mechanism probe, not a browser health check
-    /// or a claim of VM-level isolation.
-    pub browser_user_namespaces: Option<bool>,
+    /// The configured Chromium executable reports namespace, PID, network and
+    /// seccomp sandboxing under both browser identities, with NNP enforced.
+    pub managed_browser_sandbox: Option<bool>,
+    /// Diagnostic only: actual browser launch decides support under AppArmor.
+    pub apparmor_userns_restricted: Option<bool>,
 }
 
-pub const EVIDENCE_VERSION: u32 = 1;
+// v1 probed namespaces before exec and could not observe AppArmor's browser
+// attachment. Only v2's real Chromium sandbox result can select a new default.
+pub const EVIDENCE_VERSION: u32 = 2;
 pub const MIN_LANDLOCK_ABI: u32 = 6;
 
 impl Evidence {
@@ -55,8 +58,8 @@ impl Evidence {
             (self.command_seccomp, "separated_seccomp_probe_failed"),
             (self.landlock_enforced, "separated_landlock_probe_failed"),
             (
-                self.browser_user_namespaces,
-                "separated_browser_namespace_probe_failed",
+                self.managed_browser_sandbox,
+                "separated_browser_sandbox_probe_failed",
             ),
         ] {
             match observation {
@@ -313,7 +316,8 @@ mod tests {
             managed_browser_configured: Some(true),
             command_seccomp: Some(true),
             landlock_enforced: Some(true),
-            browser_user_namespaces: Some(true),
+            managed_browser_sandbox: Some(true),
+            apparmor_userns_restricted: None,
         }
     }
 
@@ -352,8 +356,8 @@ mod tests {
             ("command_seccomp", "separated_seccomp_probe_failed"),
             ("landlock_enforced", "separated_landlock_probe_failed"),
             (
-                "browser_user_namespaces",
-                "separated_browser_namespace_probe_failed",
+                "managed_browser_sandbox",
+                "separated_browser_sandbox_probe_failed",
             ),
         ] {
             for value in [serde_json::Value::Null, serde_json::json!(false)] {
@@ -414,6 +418,13 @@ mod tests {
             ),
             (
                 Evidence {
+                    version: 1,
+                    ..confirmed()
+                },
+                "separated_probe_version_unsupported",
+            ),
+            (
+                Evidence {
                     version: EVIDENCE_VERSION + 1,
                     ..confirmed()
                 },
@@ -436,6 +447,18 @@ mod tests {
         assert_eq!(
             select_new(Choice::Automatic, old.separation_evidence.as_ref()),
             Err("separated_capabilities_not_reported")
+        );
+        let v1: Evidence = serde_json::from_value(serde_json::json!({
+            "version": 1, "os": "linux", "landlock_abi": 8,
+            "separate_users": true, "managed_browser_configured": true,
+            "command_seccomp": true, "landlock_enforced": true,
+            "browser_user_namespaces": true
+        }))
+        .unwrap();
+        assert_eq!(v1.managed_browser_sandbox, None);
+        assert_eq!(
+            select_new(Choice::Automatic, Some(&v1)),
+            Err("separated_probe_version_unsupported")
         );
     }
 
