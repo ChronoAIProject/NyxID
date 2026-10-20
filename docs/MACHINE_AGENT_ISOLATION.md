@@ -114,16 +114,33 @@ external legacy consent are rejected by the upgraded server with an explanation.
 
 #### Capability evidence and owner-visible support
 
-The v2 report confirms Linux, Landlock ABI 6+, a root supervisor with three
+The v3 report confirms Linux, Landlock ABI 6+, a root supervisor with three
 distinct non-root users, the command seccomp filter, actual Landlock enforcement,
-and the configured managed Chromium's sandbox under both browser identities.
+the secure browser's effective managed policy, and the configured managed
+Chromium's sandbox under both browser identities.
 Every mechanism needs a positive observation; absent fields, unknown versions
-and the pre-v2 support boolean are insufficient. The browser probe executes the
-real managed binary and reads `chrome://sandbox`; it does not infer browser
-permission from `/bin/true` or a successful `unshare` before exec. On Ubuntu,
+and v1/v2 reports are insufficient for new automatic/required assignments. The
+browser probe executes the real managed binary with a fresh private profile,
+the runtime UID/GID and no-new-privileges. It observes a live renderer descendant
+with the same executable and all four UID/GID values, NNP=1, extra seccomp filters
+relative to its browser parent, nested PID IDs, and distinct user/PID/network
+namespaces. It rechecks the process after observation. The probe uses no DevTools
+transport and does not infer browser permission from `/bin/true` or a successful
+`unshare` before exec. On Ubuntu,
 AppArmor's unprivileged-user-namespace sysctl is diagnostic only: the executable's
 profile attachment decides its user-namespace permission. Keep that restriction
 enabled. macOS has no supported per-agent separation backend in this runtime.
+
+Setup resolves the configured executable and verifies its package metadata
+before selecting a policy layout: packaged Debian Chromium uses
+`/etc/chromium/policies/managed`, the actual Ubuntu Snap Chromium binary uses
+`/etc/chromium-browser/policies/managed`, and packaged Google Chrome uses
+`/etc/opt/chrome/policies/managed`. Unknown layouts fail closed; setup does not
+create a compatibility alias. The secure identity must explicitly refuse
+`--remote-debugging-port=0`, remain alive, and open no DevTools port or TCP
+listener. Missing or ineffective policy gives
+`separated_browser_policy_not_effective`; a timed-out observation retains
+`separated_probe_timeout`. Disabling the secure policy is not a probe workaround.
 
 Settings distinguish confirmed support, failed prerequisites and unknown evidence.
 `separated_probe_timeout` has its own retry guidance: a cold Chromium start can
@@ -135,7 +152,7 @@ promise that support will remain available; execution still checks current fence
 The machine-level badge says **Sharing set per agent**. The assignment label is
 **Shared legacy**, **Separate workspace and browser**, or **Owner selection
 required**. Capability support and command-versus-node-secret separation are
-different facts: neither `commands_isolated` nor successful v2 probes change an
+different facts: neither `commands_isolated` nor successful v3 probes change an
 existing assignment. An unknown host remains usable under an existing legacy
 assignment, subject to its live ACLs and restrictions. Browserless node-only
 containers need explicit legacy consent; a separate container per agent is the
@@ -150,6 +167,11 @@ ancestors prevent a context from widening access to siblings by chmod or rename.
 Legacy roots become supervisor-owned with only the legacy group able to traverse
 them; world-writable files below them remain unreachable to context UIDs. This
 change happens only as part of the owner's explicit opt-in, not on upgrade.
+Legacy browser homes instead receive an exact UID ACL behind a supervisor-owned
+gate: context browsers share a policy-reading group, which must not grant access
+to those homes. The legacy browser can still write its home but cannot chmod the
+gate. Reinstalling managed resources preserves existing developer-deny ACLs on
+the policy, native-host manifest, launcher and copied executable.
 
 Linux Landlock ABI **6 or later**, verified by a real execution probe, provides
 additional read/write/execute restrictions and signal/abstract-socket scoping.
@@ -759,45 +781,66 @@ Agent labels are batch-resolved from the listed contexts' agent IDs, including
 organization agents. Shared Linux secure/dev display control remains independent;
 a developer-display takeover does not select the secure browser.
 
-Native browser acceptance remains a release gate. D-5 ran natively in the
-expendable Lima guest `nyxid-security-validation`: Ubuntu 24.04.5 aarch64,
-kernel 7.0.0-38-generic, Landlock ABI 8, with the AppArmor unprivileged-userns
-restriction still enabled. The guest uses an enforcing executable AppArmor
-attachment for the real Snap Chromium binary. The shared worktree was copied
-from committed source into the guest; it was not mounted writable.
+Run native acceptance only as root in an expendable Linux VM/runner with the
+documented browser/display prerequisites, `node-ws`, `libnss3-tools`, Python
+venv/pip, git, npm, C/C++/make and Rust installed. Use a supported packaged
+Chromium or Google Chrome and the pinned cua driver for the runner architecture.
+Keep the host's real AppArmor/user-namespace restrictions; the actual executable
+must have the permission its normal launch needs. Do not add `--no-sandbox` or
+relax secure managed policies to make acceptance pass.
 
-The native runner is `cli/tests/machine_native_e2e.mjs --disposable`, with
-`NYXID_TEST_CLI` and `NYXID_TEST_CUA_DRIVER` naming the built CLI and pinned
-Linux driver. On committed D-5 source through `7bf31eadb`, fresh
-`--separate-users --separation require-separated` setup, two-context command/file
-operations, reconnect replay and a real daemon restart with unchanged allocation
-journal/private files passed before browser startup failed. That run did not
-reach saved-login binding, browser/display/D-Bus/native-host cross-context
-denials, quarantine or the final renderer checks; none is claimed as passing.
+Build the committed CLI and the standalone fixture with their checked-in locks,
+then invoke the checked-in entrypoint:
 
-The existing adversarial `machine_context_spike/check.py --disposable
---native-profile` suite passed all 44 checks, including its negative controls,
-private roots, inherited descriptors, signals, ptrace, sockets and offline tool
-workloads. The launcher imported the committed production process/sandbox
-modules through a temporary standalone crate with the missing `thiserror` and
-Tokio I/O/time dependencies; the checked-in fixture manifests remain unchanged.
-System metadata mutation, shared-memory names/capacity and public pathname Unix
-sockets retain their documented residuals.
+```sh
+cargo build --locked -p nyxid-cli --bin nyxid
+cargo build --locked --manifest-path cli/tests/machine_context_spike/Cargo.toml
+sudo env NYXID_TEST_CLI=/absolute/path/to/nyxid \
+  NYXID_TEST_CUA_DRIVER=/absolute/path/to/pinned/cua-driver \
+  NYXID_TEST_CONTEXT_SPIKE=/absolute/path/to/nyxid-machine-context-spike \
+  bash cli/tests/machine_native_acceptance.sh --disposable
+```
 
-The guest's Chromium reads `/etc/chromium-browser/policies`; setup currently
-writes `/etc/chromium/policies`. A root-owned alias made it load the same
-protected files without changing their contents or permissions. With the secure
-policy actually loaded, Chromium refuses the DevTools transport used internally
-by `--dump-dom`, logging that remote debugging is disallowed by the administrator.
-The v2 `chrome://sandbox` probe then produced no output and still had not finished
-at 120 seconds. Increasing the five-second timeout alone does not fix this
-policy conflict. Keep `RemoteDebuggingAllowed=false`; the policy-compatible
-probe correction and full native browser rerun are pending PM review.
+The entrypoint creates a fresh native profile, synthetic loopback registration
+and HTTPS sign-in fixtures, and distinct browser/command identities. It verifies
+complete v3 evidence, removes the secure policy as a negative control and
+restores the exact inode, then exercises two contexts, reconnects, restart,
+private roots, secure/dev browsers, delayed cold starts and lost native probes,
+login binding, D-Bus/accessibility, cross-context file/native-host/display
+denials, four desktop streams, owner takeover and quarantine. After another
+restart, each active secure UID must have a real renderer with the expected
+executable, all UID/GID fields, NNP, additional seccomp filters and separate
+user/PID/network namespaces. It also verifies no context account needs
+subordinate UID/GID allocations.
 
-A diagnostic prototype without DevTools observed actual renderer namespaces,
-NNP and seccomp under both browser identities. Its preliminary timings are not
-a calibration of shipped production code or hosted amd64 acceptance. Hosted
-Docker/amd64 timing and lifecycle checks are still required. Unsupported or
-unobserved hosts must never silently become `shared_legacy`; existing stored
-assignments retain their mode. The feature remains gated pending browser and
-rollout acceptance.
+The full existing adversarial suite runs with its negative controls and offline
+tool workloads. A private mount namespace gives it a fresh fixture root, `/tmp`
+and `/dev/shm` without deleting earlier test data; no production mount permission
+is inferred from this supervisor-only fixture operation. System metadata mutation, shared-memory
+names/capacity and public pathname Unix sockets retain their documented residuals.
+The script changes global managed resources and creates test accounts, homes and
+sentinels, so never run it on an owner node. Stop competing validation workloads
+before taking calibration measurements.
+
+The same entrypoint collects 100 samples from the shipped probe, each with a
+fresh process/profile, and prints fixed-label durations, median, observed p99,
+maximum and twice-p99 headroom for each browser probe. OS file caches can warm
+between samples; preserve the first observation too. For hosted image timing,
+run this helper inside the actual full machine image with its normal init,
+seccomp and shared-memory settings and no token environment or identity/workspace
+mounts:
+
+```sh
+python3 cli/tests/machine_probe_acceptance.py --disposable \
+  --binary /usr/local/bin/nyxid --container --samples 100
+```
+
+Hosted amd64 Docker timing and lifecycle checks remain a separate release gate
+from native aarch64 acceptance. The browser observation bound remains five
+seconds until actual hosted measurements justify changing it; extending the
+old DOM timeout could not fix its conflict with the secure DevTools policy.
+Unsupported or unobserved hosts must never silently become `shared_legacy`;
+existing stored assignments retain their mode. Keep the feature gated until
+the native, hosted and rollout acceptance gates have passed. Actual batch
+counts, source commits and guest mutations are recorded in
+`docs/SECURITY_W9_MACHINE_LOG.md`.
