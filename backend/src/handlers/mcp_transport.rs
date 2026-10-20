@@ -3422,6 +3422,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
         agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
         api_key_id: auth.api_key_id.as_deref(),
+        api_key_credential_id: auth.api_key_credential_id.as_deref(),
         allow_all_nodes: auth.allow_all_nodes,
         allowed_node_ids: &auth.allowed_node_ids,
     }

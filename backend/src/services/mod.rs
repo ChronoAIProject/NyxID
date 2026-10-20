@@ -200,6 +200,7 @@ pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub mod reporting_identity_service;
 pub mod resource_adapter;
+pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
 pub mod service_account_key_read_service;

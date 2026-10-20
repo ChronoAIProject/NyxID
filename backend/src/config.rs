@@ -199,6 +199,8 @@ pub struct AppConfig {
     pub frontend_url: String,
     /// Eight-character public codes; false retains the old v2 marker for rollout rollback.
     pub auth_device_eight_char_codes: bool,
+    /// Opt-in request-bound read identity proofs for registered resource servers.
+    pub resource_request_proof_enabled: bool,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -1036,6 +1038,7 @@ impl AppConfig {
         );
 
         Self {
+            resource_request_proof_enabled: parse_bool_env("NYXID_RESOURCE_REQUEST_PROOF_ENABLED", false),
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
@@ -1905,6 +1908,7 @@ mod tests {
         AppConfig {
             port: 3001,
             auth_device_eight_char_codes: true,
+            resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],

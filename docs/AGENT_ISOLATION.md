@@ -457,6 +457,61 @@ unexpected database failures in agent-key verification return 503 so consumers
 can distinguish an outage from revocation. Existing JWT introspection remains
 unchanged, apart from the additive optional audience field.
 
+## Request-bound NyxBot resource reads
+
+The default-off `NYXID_RESOURCE_REQUEST_PROOF_ENABLED` flag adds a narrow read
+transport for an owner's live, unstopped personal NyxBot turn. Both the HTTP
+proxy and NyxBot's MCP service-call path retain their existing authorization,
+approval, billing and final egress gates. Only direct GET/HEAD requests with an
+empty body are eligible. The key must have current `proxy` and service access;
+the target must be an active, provider-less, no-auth HTTP catalog connection with
+JWT identity propagation and a registered confidential introspection client.
+The authenticated child credential, when present, remains part of the binding.
+
+After building the final HTTP request, NyxID signs a 60-second RS256 JWT with
+`typ=nyxid-resource-request+jwt`. `aud` and `nyx_service_id` identify the immutable
+catalog UUID. The dedicated `X-NyxID-Resource-Request` header is generated only
+at this point; caller, catalog, user, delegation and node header layers cannot
+supply it. Ordinary `X-NyxID-Identity-Token` propagation remains separate and
+unchanged. The proof signs the exact final method, encoded path and raw query,
+single Content-Type value and SHA-256 of the empty body. An Idempotency-Key,
+method override, nonempty/streaming body or non-identity Content-Encoding is
+refused. The final destination must match the admitted URL and redirects are
+not followed.
+
+A resource server sends the proof to authenticated `POST /oauth/introspect` with
+`token_type_hint=resource_request`, its `client_id` and `client_secret`, catalog
+`service_id`, `request_method`, `request_path_and_query`,
+`request_body_sha256`, and optional `request_content_type`. NyxID checks its own
+configured issuer, exact audience, signature, UUID `jti`, expiry, exact request
+descriptor, client registration and current live authority. Successful evidence
+has `token_type=resource_request`, `scope=proxy`, current subject and complete
+RBAC permissions, the exact `resource_request` descriptor, and
+`independent_commands=false`. Invalid or unsupported proofs return
+`{"active":false}`; unexpected provider failures return 503. There is no
+completed-proof verification cache. Identical reads can be retried during the
+short lifetime only while all current authority checks still pass.
+
+The initial slice requires the current service approval policy to resolve to
+AutoAllow. A new Deny or RequireApproval policy invalidates an issued proof;
+explicit per-request approvals are not consumed again or translated into wider
+authority. The shared approval evaluator matches method/path/verb and currently
+has no query/body predicates; raw query remains bound by the proof. Guest,
+specialist, organization-agent, node, mutation, durable-command and independent
+continuation authority are unsupported. A resource server must never retain
+the proof as a reusable API credential, accept it as ordinary Bearer authority,
+or use it for a mutation. When the explicit proof header is present, malformed,
+expired, unavailable or disabled proof verification must fail closed without
+falling back to ambient bearer/cookie authority.
+
+Deploy all resource verifiers and all NyxID introspection readers before
+enabling issuance. Register the catalog's confidential client, enable the
+resource verifier, then enable the NyxID flag and validate isolated requests.
+Rollback stops issuance first and keeps verification available for the maximum
+60-second lifetime. This integration changes no sandbox, PV or running agent
+session. Ordinary-key introspection by itself remains insufficient evidence of
+NyxBot compatibility; the exact MCP/HTTP request path must also pass acceptance.
+
 ### NyxBot access authority
 
 Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.

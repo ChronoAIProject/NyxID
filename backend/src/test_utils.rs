@@ -1756,6 +1756,7 @@ pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
         auth_device_eight_char_codes: false,
+        resource_request_proof_enabled: false,
         base_url: "http://localhost:3001".to_string(),
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],

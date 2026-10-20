@@ -134,6 +134,7 @@ async fn oauth_endpoint_authenticates_client_and_returns_service_bound_evidence(
                 client_id: Some(f.client.id.clone()),
                 client_secret: Some(credential),
                 service_id: service,
+                resource_request: Default::default(),
             }),
         )
         .await;

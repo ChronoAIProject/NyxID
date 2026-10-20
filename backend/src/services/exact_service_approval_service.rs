@@ -519,6 +519,7 @@ pub async fn redeem_request(
             agent_owner: caller.agent_owner.as_deref(),
             operation_scopes: Some(&caller.operation_scopes),
             api_key_id: caller.api_key_id.as_deref(),
+            api_key_credential_id: None,
             allow_all_nodes: caller.allow_all_nodes,
             allowed_node_ids: &caller.allowed_node_ids,
         };

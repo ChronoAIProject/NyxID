@@ -205,6 +205,8 @@ pub struct IntrospectRequest {
     pub client_secret: Option<String>,
     /// Catalog service whose registered confidential client verifies an agent key.
     pub service_id: Option<String>,
+    #[serde(flatten)]
+    pub resource_request: crate::services::resource_request_proof::IntrospectionInput,
 }
 
 #[derive(Debug, Serialize)]
@@ -3093,6 +3095,30 @@ pub async fn introspect(
         }
         Err(_) => return Json(inactive).into_response(),
     };
+
+    if body.token_type_hint.as_deref() == Some("resource_request") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let Ok(descriptor) = body.resource_request.descriptor() else {
+            return Json(inactive).into_response();
+        };
+        return match crate::services::resource_request_proof::introspect(
+            &state,
+            &client,
+            service_id,
+            &body.token,
+            descriptor,
+        )
+        .await
+        {
+            Ok(evidence) => Json(evidence).into_response(),
+            Err(AppError::DatabaseError(_) | AppError::Internal(_) | AppError::OrgQueryTimeout) => {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+            Err(_) => Json(inactive).into_response(),
+        };
+    }
 
     if body.token.starts_with("nyx_") || body.token.starts_with("nyxid_ag_") {
         let Some(service_id) = body.service_id.as_deref() else {

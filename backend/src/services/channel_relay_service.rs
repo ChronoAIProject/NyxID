@@ -1650,6 +1650,7 @@ mod tests {
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
             auth_device_eight_char_codes: false,
+            resource_request_proof_enabled: false,
             port: 0,
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),
