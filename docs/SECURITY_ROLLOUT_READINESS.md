@@ -95,13 +95,27 @@ does not automatically clear this marker or provide a live downgrade command.
 
 ## Required approval and delivery
 
-A user with no settings row requires approval on the first ordinary
-programmatic request, before a settings GET materializes the row. Newly created
-settings use `approval_required=true` and a 300-second timeout. Existing stored
-false values stay false. Legacy documents missing the preference still read
-false, and existing timeouts remain unchanged (legacy missing timeout reads
-30 seconds). Explicit per-service/org policies, auto-connected exemptions,
-session bypasses and existing grant semantics retain their precedence.
+A user with no explicit global preference defaults to **Writes only**: reads
+pass, while writes and destructive operations require approval. This holds on
+the first execution, before notification settings exist. Lazy channel creation,
+including tool approval, leaves the preference absent and uses a 300-second
+timeout. Explicit stored true means **All requests**; stored false means **Off**.
+Existing booleans are never reinterpreted or migrated. The earlier unreleased
+W9.3 build also wrote true lazily, without provenance: those rows keep true until
+the owner deliberately chooses Writes only. Missing preference fields now mean
+Writes only; missing timeout fields retain the legacy 30-second timeout.
+Per-service and org policies, Deny effects, auto-connected exemptions, Session
+bypass, guest restrictions, and scheduled/durable checks keep their precedence.
+
+**All-replica cutover is mandatory.** Main-era replicas treat an absent channel
+or preference as not-required and can execute a new user's writes unapproved.
+The earlier unreleased W9.3 build instead requires all verbs and persists true
+on lazy creation. Drain both versions from all ingress, internal routes and
+workers; upgrade every participating replica before accepting new-user
+programmatic traffic under the writes-only guarantee. Capability diagnostics do
+not prove an old process is gone. A rollback reopens the old missing-preference
+behavior; drain affected traffic before rolling back. Do not backfill booleans
+as a substitute for completing the cutover.
 
 When approval is required, a pending request is persisted before notifications
 are attempted. Missing registration, absent provider credentials, invalidated
@@ -115,7 +129,8 @@ Notification settings distinguish these facts:
 
 | Field | Meaning |
 | --- | --- |
-| `approval_required` | Stored global preference, independent of delivery. |
+| `global_approval_mode` | `writes_only`, `all`, or `off`; preserves the distinct unset default. |
+| `approval_required` | Compatibility flag: true for writes-only/all, false for off. Legacy boolean updates explicitly select all/off. |
 | `approval_suspended` | Always false on this implementation; retained for older clients. |
 | `approval_web_available` | Explicit true confirms this server implements required web decisions without delivery. |
 | `approval_delivery_configured` | An enabled registration has matching initialized provider configuration. Delivery may still fail. |

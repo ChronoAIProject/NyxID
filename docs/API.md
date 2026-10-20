@@ -7847,6 +7847,7 @@ Authorization: Bearer <access_token>
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
   "approval_delivery_configured": true,
@@ -7856,7 +7857,31 @@ Authorization: Bearer <access_token>
 }
 ```
 
-The stored `approval_required` preference is enforced independently of notification delivery. This server returns `approval_suspended: false` and `approval_web_available: true`: pending requests can be decided in Approval History even without Telegram or push. `approval_delivery_configured` reports an enabled registration with initialized server provider credentials/configuration; it does not promise a successful send. Each request records its actual delivery result. Newly created settings use `approval_required: true` and a 300-second timeout; the same required preference applies on a first execution before any settings GET. Existing settings keep their stored preference and timeout, including the legacy false/30-second read defaults for missing fields. Older servers may omit the new fields or report suspension; clients must retain cautious channel guidance in that case. The all-replica upgrade/drain contract is documented in [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+`global_approval_mode` is `writes_only` (the unset default), `all`, or `off`.
+Writes only requires approval for write and destructive operations and allows reads;
+All requests requires approval for every verb; Off removes only the global fallback.
+Explicit per-service rules and organization policies retain their precedence.
+The compatibility boolean `approval_required` is true for writes-only and all;
+clients must use `global_approval_mode` to distinguish them. Older servers omit
+that field: a stored/returned true means All requests, and false means Off.
+
+New channels leave the stored preference absent and use a 300-second timeout.
+Lazy settings reads and tool-approval creation never choose a preference. Stored
+true/false rows retain their exact behavior, including rows from the unreleased
+W9.3 lazy-creation build. They have no reliable provenance marker and are never
+silently reset. An owner can explicitly select Writes only to clear the choice.
+A missing preference on any row means writes-only; existing timeout values and
+the legacy missing-timeout default of 30 seconds remain unchanged.
+
+Approval enforcement is independent of notification delivery. This server returns
+`approval_suspended: false` and `approval_web_available: true`: pending requests
+can be decided in Approval History without Telegram or push.
+`approval_delivery_configured` reports enabled registration plus initialized
+provider configuration; it does not promise a successful send. Older servers may
+omit these fields or report suspension, so clients retain cautious channel guidance.
+Upgrade and drain every old replica before relying on write approval for new
+users; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+
 
 **curl:**
 
@@ -7878,13 +7903,18 @@ Content-Type: application/json
 ```json
 {
   "telegram_enabled": true,
-  "approval_required": true,
+  "global_approval_mode": "writes_only",
   "approval_timeout_secs": 60,
   "grant_expiry_days": 14
 }
 ```
 
-All fields are optional. Only provided fields are updated.
+All fields are optional. Only provided fields are updated. `global_approval_mode`
+accepts `writes_only`, `all`, or `off`. Selecting `writes_only` clears the stored
+boolean. The legacy `approval_required` write remains supported: true selects
+All requests, false selects Off. Conflicting mode/boolean writes return 400;
+omitting both preserves the current choice. The authorization evidence endpoint
+also includes `global_approval_mode`.
 
 **Validation:**
 - `approval_timeout_secs`: 10..=300
@@ -7901,6 +7931,7 @@ All fields are optional. Only provided fields are updated.
   "telegram_enabled": true,
   "push_enabled": true,
   "push_device_count": 1,
+  "global_approval_mode": "writes_only",
   "approval_required": true,
   "approval_suspended": false,
   "approval_delivery_configured": true,
@@ -8305,7 +8336,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
 
-Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 
@@ -8340,7 +8371,7 @@ Content-Type: application/json
 
 **Auth:** Required (human-only).
 
-Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (only the global fallback is subject to channel suspension and the auto-connected exemption).
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Request:**
 
@@ -8386,7 +8417,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only).
 
-Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback is subject to channel suspension and the auto-connected exemption).
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback retains the auto-connected exemption; delivery never suspends approval).
 
 **Response (200):**
 
