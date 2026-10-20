@@ -111,7 +111,8 @@ class Policy(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        for name in ('cli/Dockerfile.machine-hosted', 'cli/resources/cua/release.json'):
+        for name in ('cli/Dockerfile.machine-hosted', 'cli/resources/cua/release.json',
+                     'security/hosted-tools/package.json', 'security/hosted-tools/package-lock.json', 'security/hosted-tools/.npmrc'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, path)
@@ -139,6 +140,85 @@ class Policy(unittest.TestCase):
             data['assets'][0][field] = value
             path.write_text(json.dumps(data))
             with self.subTest(field=field): self.assertTrue(policy.check(self.root))
+
+    def test_unlocked_global_and_exec_variants_rejected(self):
+        path = self.root / 'cli/Dockerfile.machine-hosted'
+        original = path.read_text()
+        for command in ('npm install --global @openai/codex@0.147.0', 'npm --global install @openai/codex@0.147.0',
+                        'npm install -g @openai/codex@0.147.0', 'npm install --location=global @openai/codex@0.147.0',
+                        'npx codex', '/usr/bin/npm ci --ignore-scripts', '/opt/nyxid-npm/npm rebuild',
+                        'sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble -- nodejs $(npm install -g unreviewed)',
+                        'sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble -- nodejs `npm install -g unreviewed`'):
+            path.write_text(original + '\nRUN ' + command + '\n')
+            with self.subTest(command=command):
+                self.assertIn('unlocked/global installs', '\n'.join(policy.check(self.root)))
+
+    def test_missing_or_overridden_ignore_scripts_rejected(self):
+        path = self.root / 'cli/Dockerfile.machine-hosted'
+        original = path.read_text()
+        for changed in (original.replace('ci --ignore-scripts', 'ci'),
+                        original.replace('ci --ignore-scripts', 'ci --ignore-scripts=false'),
+                        original.replace('ci --ignore-scripts', 'ci --ignore-scripts --ignore-scripts=false'),
+                        original + '\nENV NPM_CONFIG_IGNORE_SCRIPTS=false\n'):
+            path.write_text(changed)
+            with self.subTest(changed=changed[-60:]): self.assertTrue(policy.check(self.root))
+
+    def test_root_lifecycle_hook_or_approval_rejected(self):
+        path = self.root / 'security/hosted-tools/package.json'
+        original = json.loads(path.read_text())
+        for field, value in (('scripts', {'install': 'touch /tmp/hook'}), ('allowScripts', {'*': True})):
+            data = {**original, field: value}
+            path.write_text(json.dumps(data))
+            with self.subTest(field=field):
+                self.assertIn('zero lifecycle hooks', '\n'.join(policy.check(self.root)))
+
+    def test_dependency_install_hook_rejected(self):
+        path = self.root / 'security/hosted-tools/package-lock.json'
+        data = json.loads(path.read_text())
+        data['packages']['node_modules/@openai/codex']['hasInstallScript'] = True
+        path.write_text(json.dumps(data))
+        self.assertIn('zero install hooks', '\n'.join(policy.check(self.root)))
+
+    def test_unbound_external_or_linked_dependency_rejected(self):
+        path = self.root / 'security/hosted-tools/package-lock.json'
+        original = json.loads(path.read_text())
+        for field, value in (('integrity', ''), ('integrity', 'sha256-fixture'),
+                             ('resolved', 'http://registry.npmjs.org/package.tgz'),
+                             ('resolved', 'https://registry.npmjs.org.evil/package.tgz'), ('link', True)):
+            data = json.loads(json.dumps(original))
+            data['packages']['node_modules/zod'][field] = value
+            path.write_text(json.dumps(data))
+            with self.subTest(field=field, value=value):
+                self.assertIn('exact registry archive', '\n'.join(policy.check(self.root)))
+
+    def test_manifest_range_or_lock_drift_rejected(self):
+        package = self.root / 'security/hosted-tools/package.json'
+        data = json.loads(package.read_text())
+        data['dependencies']['@openai/codex'] = '^0.147.0'
+        package.write_text(json.dumps(data))
+        errors = '\n'.join(policy.check(self.root))
+        self.assertIn('exactly match reviewed tool versions', errors)
+        self.assertIn('manifest and npm lock must agree', errors)
+
+    def test_changed_locked_direct_dependency_rejected(self):
+        path = self.root / 'security/hosted-tools/package-lock.json'
+        data = json.loads(path.read_text())
+        data['packages']['node_modules/@openai/codex']['version'] = '0.148.0'
+        path.write_text(json.dumps(data))
+        self.assertIn('locked direct dependency differs', '\n'.join(policy.check(self.root)))
+
+    def test_missing_lock_or_disabled_config_rejected(self):
+        path = self.root / 'security/hosted-tools/.npmrc'
+        path.write_text('ignore-scripts=false\n')
+        self.assertIn('lifecycle execution must be disabled', '\n'.join(policy.check(self.root)))
+        (self.root / 'security/hosted-tools/package-lock.json').unlink()
+        self.assertIn('invalid hosted npm inputs', '\n'.join(policy.check(self.root)))
+
+    def test_runtime_omitting_hoisted_transitive_dependencies_rejected(self):
+        path = self.root / 'cli/Dockerfile.machine-hosted'
+        path.write_text(path.read_text().replace('COPY --from=tools /usr/local/lib/node_modules/ /usr/local/lib/node_modules/',
+                                               'COPY --from=tools /usr/local/lib/node_modules/@openai/ /usr/local/lib/node_modules/@openai/'))
+        self.assertIn('complete runtime dependency tree', '\n'.join(policy.check(self.root)))
 
 
 if __name__ == '__main__':

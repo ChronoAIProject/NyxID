@@ -77,6 +77,18 @@ class CatalogWorkflowBoundary(unittest.TestCase):
         self.assertEqual({item['arch'] for item in workflow['jobs']['apk-candidate']['strategy']['matrix']['include']},
                          {'amd64', 'arm64'})
 
+    def test_hosted_native_jobs_build_actual_locked_target_and_run_offline(self):
+        workflow = self.load('build-input-maintenance.yml')
+        job = workflow['jobs']['hosted-tools']
+        self.assertEqual({item['arch'] for item in job['strategy']['matrix']['include']}, {'amd64', 'arm64'})
+        self.assertEqual(job['needs'], 'policy')
+        text = str(job['steps'])
+        self.assertIn('--file cli/Dockerfile.machine-hosted --target hosted-tools', text)
+        self.assertIn('--network=none', text)
+        self.assertIn('input=b""', text)
+        self.assertNotIn('--push', text)
+        self.assertNotIn('--build-context', text)
+
     def test_only_schedule_publisher_can_write_after_native_verification(self):
         workflow = self.load('refresh-build-inputs.yml')
         events = workflow.get('on', workflow.get(True))

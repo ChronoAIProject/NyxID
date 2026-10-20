@@ -277,6 +277,31 @@ before acceptance. CUA admission rejects a changed version tag with old archive
 identities. Distro/CA weekly updates use the repository-owned workflow above
 and do not depend on Renovate activation.
 
+The repository requires these explicit admin/maintainer steps:
+
+| Prerequisite | Action | Until it is complete |
+| --- | --- | --- |
+| Renovate activation | Enable the Renovate GitHub App for this repository. | Standalone tool, hosted Node/Heca, CUA and CMA revision proposals are absent. Dependabot and the repository-owned APT/APK/CA refresh workflow still operate; committed pin verification stays enforced. |
+| Private CMA access | Grant the Renovate App installation read access to `ChronoAIProject/cma`, as well as this repository. | CMA revision lookups and update proposals fail. Existing hosted builds still require the reviewed patch hashes, and public pin proposals remain available. |
+| Initial durable APK archives | After merge, dispatch **Provision APK Archives** on **main**, with the full reviewed catalog commit SHA in `catalog_commit`, as detailed above. Retain the resulting archive releases. | The durability job reports missing assets (non-blocking on PRs, failing on schedule). Builds warn and use upstream only after a durable HTTP 404, with all checksum/signature/identity checks intact. Removal of an unprovisioned upstream version can then break builds. |
+| Scheduled maintenance publication | Allow GitHub Actions to create pull requests and permit the scheduled job token to create archive releases/upload assets. | Native candidate checks still run, but the publisher cannot complete archive storage or open its refresh PR. Without reviewed manual refreshes, the freshness gates eventually fail. |
+
+The hosted provider dependencies use `security/hosted-tools/package-lock.json`
+with exact Codex 0.147.0 and ACP 1.4.0 roots. The initial lock contains 24
+SHA-512-bound registry packages, including optional platform binaries, with no
+install hooks. The independently buildable `hosted-tools` Dockerfile stage uses
+the checksummed npm bootstrap and `npm ci --ignore-scripts`; its committed
+`.npmrc` also disables hooks. Offline checks retain the existing shim, native
+binary and ACP output identities. Both later stages copy the complete locked
+`node_modules` tree so hoisted transitive dependencies reach the shipped image.
+Policy rejects global/unlocked installs, hook-bearing dependencies, lifecycle
+approvals, missing integrity, manifest/lock drift and incomplete runtime copies.
+`Hosted Locked Tools (amd64/arm64)` builds this actual public target on native
+PR and scheduled runners, then checks the unchanged lock, installed hook
+absence, Codex execution and ACP startup with closed stdin and no network.
+These checks require neither private CMA access nor an application compilation;
+full hosted-image behavior still needs its private-context build acceptance.
+
 The hosted machine's external CMA patches are bound by
 `security/hosted-context.tsv` to a source commit and three ordered SHA-256 values.
 `verify-hosted-context.py` verifies every file before any Node execution, rejects

@@ -29,6 +29,64 @@ jobs:
       - run: python3 scripts/test-apt-inputs.py
       - run: python3 scripts/check-build-input-freshness.py --validate-only
 
+  hosted-tools:
+    name: Hosted Locked Tools (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build the exact public hosted dependency target without application or private inputs
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/hosted-tools"
+          docker buildx build --load --no-cache --provenance=false --platform 'linux/${{ matrix.arch }}' \
+            --file cli/Dockerfile.machine-hosted --target hosted-tools --tag nyxid-hosted-tools:ci . \
+            2>&1 | tee "$RUNNER_TEMP/hosted-tools/build.log"
+      - name: Verify lock preservation, installed hook absence and real offline CLI startup
+        run: |
+          set -o pipefail
+          LOCK_SHA256=$(sha256sum security/hosted-tools/package-lock.json | cut -d ' ' -f 1)
+          export LOCK_SHA256
+          docker run --rm --network=none --entrypoint python3 -e LOCK_SHA256 nyxid-hosted-tools:ci -c '
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          root = Path("/usr/local/lib")
+          lock = root / "package-lock.json"
+          assert hashlib.sha256(lock.read_bytes()).hexdigest() == os.environ["LOCK_SHA256"], "lock drift"
+          installed = 0
+          for name, entry in json.loads(lock.read_text())["packages"].items():
+              path = root / name / "package.json"
+              assert not name or entry.get("optional") or path.is_file(), "missing required dependency"
+              if name and path.is_file():
+                  package = json.loads(path.read_text())
+                  assert not set(package.get("scripts", {})) & {"preinstall", "install", "postinstall"}, "installed lifecycle hook"
+                  installed += 1
+          assert installed >= 2, "empty dependency tree"
+          subprocess.run(["node", str(root / "node_modules/@openai/codex/bin/codex.js"), "--version"], check=True, timeout=30)
+          subprocess.run(["node", str(root / "node_modules/@agentclientprotocol/codex-acp/dist/index.js")], input=b"", check=True, timeout=30)
+          print(f"Offline hosted tool startup passed; {installed} installed packages, no install hooks, no lock drift.")
+          ' 2>&1 | tee "$RUNNER_TEMP/hosted-tools/runtime.log"
+      - name: Retain public build and offline startup evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-locked-tools-${{ matrix.arch }}
+          path: ${{ runner.temp }}/hosted-tools/
+          if-no-files-found: error
+          retention-days: 7
+
   freshness:
     name: Build Input Catalog Freshness
     needs: policy

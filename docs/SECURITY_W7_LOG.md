@@ -74,3 +74,16 @@
 - Local: helpers 26/0, build 20/0, APT 21/0, APK 43/0, preflight 5/0, archives 33/0, catalogs 29/0, hosted 11/0, workflow YAML 8/0 (196/0).
 - Policies, freshness, workflow YAML/permissions and syntax pass; native replay/image evidence awaits PR CI. No push or remote workflow run.
 - Hosted npm lock root/wiring still awaits PM's explicit manifest approval; D's real Docker CLI/separation coverage is assigned to C-4.
+
+## C-3 completion — approved hosted npm lock and required native checks
+- PM-approved hosted root preserves Codex 0.147.0 / ACP 1.4.0; 24 registry packages have SHA-512 integrity and zero install hooks.
+- Focused manifest commit b3d7f7ad7 adds the lock, ignore-scripts config, script-policy root and weekly Dependabot coverage.
+- A separate pinned public hosted-tools Dockerfile stage uses the checked npm bootstrap and npm ci --ignore-scripts, with existing output hashes.
+- Both consuming stages retain the complete locked node_modules tree, including hoisted transitive dependencies.
+- Policy negatives reject global/unlocked installs, shell-substitution bypasses, hook execution/approvals, unbound archives, lock drift and partial runtime copies.
+- Required Hosted Locked Tools PR/weekly jobs build that exact target on amd64/arm64 and check unchanged locks, hook absence and offline CLI startup.
+- BUILD_SECURITY explicitly lists Renovate activation/private-CMA access, post-merge APK dispatch, Actions publication prerequisites and effects while absent.
+- Local suites: helpers 26/0, build 20/0, APT 21/0, APK 43/0, preflight 5/0, archives 33/0, catalogs 29/0, hosted 20/0, YAML 9/0, Node policy 4/0 (210/0).
+- Exact committed root clean-installs with scripts disabled and no lock drift; policies, syntax and workflow/permission checks pass.
+- No local Docker/application build, push or remote workflow; hosted tool/maintenance/image acceptance remains pending PR CI.
+- C-4 will propose D's local registration fixture, separation flags, credential non-creation assertions, restart persistence and probe cleanup contract.
