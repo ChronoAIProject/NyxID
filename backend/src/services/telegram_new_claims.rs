@@ -89,7 +89,7 @@ pub(super) fn scrub_claim_codes(text: &str) -> Option<String> {
         }
     });
     let query_changed = query_redacted != text;
-    let text = query_redacted.as_ref();
+    let text: &str = query_redacted.as_ref();
     let mut cores = Vec::new();
     let mut start = None;
     for (index, ch) in text.char_indices() {
@@ -414,6 +414,8 @@ impl TelegramNewService<'_> {
             .await?
             .ok_or_else(unavailable)?;
         let request = TelegramBotRequest {
+            setup_authority: None,
+            connection_generation: 0,
             id: uuid::Uuid::new_v4().to_string(),
             actor_user_id: actor.into(),
             owner_user_id: owner.into(),

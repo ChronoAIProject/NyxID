@@ -20,6 +20,12 @@ pub struct ReportedLlmUsage {
     pub cached_tokens: u64,
     /// Cache-write tokens (Anthropic `cache_creation_input_tokens`).
     pub cache_creation_tokens: u64,
+    /// Audio subsets of prompt/completion (OpenAI/xAI realtime and audio chat).
+    pub audio_input_tokens: u64,
+    pub audio_output_tokens: u64,
+    /// Image subsets of prompt/completion; not additional tokens.
+    pub image_input_tokens: u64,
+    pub image_output_tokens: u64,
     pub reported_cost: Option<f64>,
     pub cached_tokens_included_in_prompt: bool,
     pub images: u64,
@@ -33,6 +39,10 @@ impl ReportedLlmUsage {
             && self.total_tokens == 0
             && self.cached_tokens == 0
             && self.cache_creation_tokens == 0
+            && self.audio_input_tokens == 0
+            && self.audio_output_tokens == 0
+            && self.image_input_tokens == 0
+            && self.image_output_tokens == 0
             && self.reported_cost.is_none()
             && self.images == 0
     }
@@ -53,7 +63,16 @@ impl ReportedLlmUsage {
         usage.cache_read_tokens = clamp(self.cached_tokens);
         usage.cache_write_tokens = clamp(self.cache_creation_tokens);
         usage.images = clamp(self.images);
-        usage.with_token_breakdown(Some(self.token_breakdown()))
+        usage
+            .with_token_breakdown(Some(self.token_breakdown()))
+            .with_audio_tokens(Some(crate::models::service_billing::AudioTokens {
+                input_tokens: clamp(self.audio_input_tokens),
+                output_tokens: clamp(self.audio_output_tokens),
+            }))
+            .with_image_tokens(Some(crate::models::service_billing::ImageTokens {
+                input_tokens: clamp(self.image_input_tokens),
+                output_tokens: clamp(self.image_output_tokens),
+            }))
     }
 
     /// Per-class breakdown for the usage meter row, following each
@@ -78,6 +97,10 @@ pub struct ReportedLlmUsageAccumulator {
     total_tokens: u64,
     cached_tokens: u64,
     cache_creation_tokens: u64,
+    audio_input_tokens: u64,
+    audio_output_tokens: u64,
+    image_input_tokens: u64,
+    image_output_tokens: u64,
     reported_cost: Option<f64>,
     cached_tokens_included_in_prompt: bool,
     images: u64,
@@ -260,6 +283,10 @@ impl ReportedLlmUsageAccumulator {
         self.total_tokens = self.total_tokens.max(usage.total_tokens);
         self.cached_tokens = self.cached_tokens.max(usage.cached_tokens);
         self.cache_creation_tokens = self.cache_creation_tokens.max(usage.cache_creation_tokens);
+        self.audio_input_tokens = self.audio_input_tokens.max(usage.audio_input_tokens);
+        self.audio_output_tokens = self.audio_output_tokens.max(usage.audio_output_tokens);
+        self.image_input_tokens = self.image_input_tokens.max(usage.image_input_tokens);
+        self.image_output_tokens = self.image_output_tokens.max(usage.image_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(
@@ -289,6 +316,18 @@ impl ReportedLlmUsageAccumulator {
         self.cache_creation_tokens = self
             .cache_creation_tokens
             .saturating_add(usage.cache_creation_tokens);
+        self.audio_input_tokens = self
+            .audio_input_tokens
+            .saturating_add(usage.audio_input_tokens);
+        self.audio_output_tokens = self
+            .audio_output_tokens
+            .saturating_add(usage.audio_output_tokens);
+        self.image_input_tokens = self
+            .image_input_tokens
+            .saturating_add(usage.image_input_tokens);
+        self.image_output_tokens = self
+            .image_output_tokens
+            .saturating_add(usage.image_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
@@ -303,11 +342,12 @@ impl ReportedLlmUsageAccumulator {
     }
 
     pub fn finalize(self) -> Option<ReportedLlmUsage> {
-        let total_tokens = if self.total_tokens > 0 {
-            self.total_tokens
-        } else {
-            self.prompt_tokens.saturating_add(self.completion_tokens)
-        };
+        // Native streams may report input and output in separate snapshots.
+        // Preserve larger explicit totals (e.g. reasoning tokens), but never
+        // lose a class that arrived in a different snapshot.
+        let total_tokens = self
+            .total_tokens
+            .max(self.prompt_tokens.saturating_add(self.completion_tokens));
 
         let usage = ReportedLlmUsage {
             prompt_tokens: self.prompt_tokens,
@@ -315,6 +355,10 @@ impl ReportedLlmUsageAccumulator {
             total_tokens,
             cached_tokens: self.cached_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
+            audio_input_tokens: self.audio_input_tokens,
+            audio_output_tokens: self.audio_output_tokens,
+            image_input_tokens: self.image_input_tokens,
+            image_output_tokens: self.image_output_tokens,
             reported_cost: self.reported_cost,
             cached_tokens_included_in_prompt: self.cached_tokens_included_in_prompt,
             images: self.images,
@@ -337,6 +381,13 @@ pub fn token_quantity_or_estimate(usage: Option<&ReportedLlmUsage>, fallback_byt
             (usage.total_tokens > 0).then_some(usage.total_tokens.min(i64::MAX as u64) as i64)
         })
         .unwrap_or_else(|| estimate_tokens_from_bytes(fallback_bytes))
+}
+
+pub fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
+    matches!(
+        service_slug,
+        "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
+    )
 }
 
 pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool {
@@ -484,6 +535,66 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     )
     .unwrap_or(0);
 
+    let audio_input_tokens = token_at(
+        value,
+        &[
+            "/input_token_details/audio_tokens",
+            "/usage/input_token_details/audio_tokens",
+            "/response/usage/input_token_details/audio_tokens",
+            "/prompt_tokens_details/audio_tokens",
+            "/usage/prompt_tokens_details/audio_tokens",
+            "/response/usage/prompt_tokens_details/audio_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
+    let audio_output_tokens = token_at(
+        value,
+        &[
+            "/output_token_details/audio_tokens",
+            "/usage/output_token_details/audio_tokens",
+            "/response/usage/output_token_details/audio_tokens",
+            "/completion_tokens_details/audio_tokens",
+            "/usage/completion_tokens_details/audio_tokens",
+            "/response/usage/completion_tokens_details/audio_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
+    let image_input_tokens = token_at(
+        value,
+        &[
+            "/input_tokens_details/image_tokens",
+            "/usage/input_tokens_details/image_tokens",
+            "/response/usage/input_tokens_details/image_tokens",
+            "/input_token_details/image_tokens",
+            "/usage/input_token_details/image_tokens",
+            "/response/usage/input_token_details/image_tokens",
+            "/prompt_tokens_details/image_tokens",
+            "/usage/prompt_tokens_details/image_tokens",
+            "/response/usage/prompt_tokens_details/image_tokens",
+        ],
+    )
+    .or_else(|| gemini_image_tokens(value, "promptTokensDetails"))
+    .unwrap_or(0);
+
+    let image_output_tokens = token_at(
+        value,
+        &[
+            "/output_tokens_details/image_tokens",
+            "/usage/output_tokens_details/image_tokens",
+            "/response/usage/output_tokens_details/image_tokens",
+            "/output_token_details/image_tokens",
+            "/usage/output_token_details/image_tokens",
+            "/response/usage/output_token_details/image_tokens",
+            "/completion_tokens_details/image_tokens",
+            "/usage/completion_tokens_details/image_tokens",
+            "/response/usage/completion_tokens_details/image_tokens",
+        ],
+    )
+    .or_else(|| gemini_image_tokens(value, "candidatesTokensDetails"))
+    .unwrap_or(0);
+
     let reported_cost = [
         "/usage/reported_cost",
         "/usage/cost_usd",
@@ -510,6 +621,10 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         total_tokens,
         cached_tokens,
         cache_creation_tokens,
+        audio_input_tokens,
+        audio_output_tokens,
+        image_input_tokens,
+        image_output_tokens,
         reported_cost,
         cached_tokens_included_in_prompt: [
             "/prompt_tokens_details/cached_tokens",
@@ -539,6 +654,22 @@ pub fn is_image_generation_path(path: &str) -> bool {
         .any(|suffix| path.ends_with(suffix))
 }
 
+fn gemini_image_tokens(value: &serde_json::Value, details: &str) -> Option<u64> {
+    let tokens = value.get("usageMetadata")?.get(details)?.as_array()?;
+    let mut found = false;
+    let total = tokens.iter().fold(0_u64, |sum, entry| {
+        if entry.get("modality").and_then(serde_json::Value::as_str) == Some("IMAGE")
+            && let Some(count) = entry.get("tokenCount").and_then(serde_json::Value::as_u64)
+        {
+            found = true;
+            sum.saturating_add(count)
+        } else {
+            sum
+        }
+    });
+    found.then_some(total)
+}
+
 pub fn extract_reported_usage_for_path(
     value: &serde_json::Value,
     path: &str,
@@ -546,6 +677,9 @@ pub fn extract_reported_usage_for_path(
 ) -> Option<ReportedLlmUsage> {
     let mut usage = extract_reported_usage(value).unwrap_or_default();
     if successful && is_image_generation_path(path) {
+        // OpenAI Images output_tokens describes generated images, while
+        // input_tokens may contain both text and image input.
+        usage.image_output_tokens = usage.completion_tokens;
         usage.images = value
             .get("data")
             .and_then(serde_json::Value::as_array)
@@ -558,45 +692,17 @@ pub fn extract_reported_usage_for_path(
 /// response capture. Oversized events are discarded through their separator.
 #[derive(Default)]
 pub struct BoundedUsageEvents {
-    buffer: Vec<u8>,
-    discarding: bool,
-    line_empty: bool,
+    decoder: super::sse_parser::BoundedEventDecoder,
     accumulator: ReportedLlmUsageAccumulator,
 }
 impl BoundedUsageEvents {
     pub fn push(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            if self.discarding {
-                if byte == b'\n' {
-                    if self.line_empty {
-                        self.discarding = false;
-                        self.line_empty = false;
-                    } else {
-                        self.line_empty = true;
-                    }
-                } else if byte != b'\r' {
-                    self.line_empty = false;
-                }
-                continue;
-            }
-            self.buffer.push(byte);
-            if self.buffer.ends_with(b"\n\n") || self.buffer.ends_with(b"\r\n\r\n") {
-                // The shared parser consumes LF separators. Normalize complete
-                // CRLF events only after enforcing this observer's byte limit.
-                let mut text = String::from_utf8_lossy(&self.buffer).replace("\r\n", "\n");
-                if let Some(event) = super::sse_parser::parse_next_event(&mut text)
-                    && let Some((usage, mode)) = extract_reported_usage_from_sse_event(
-                        event.event_type.as_deref(),
-                        &event.data,
-                    )
-                {
-                    self.accumulator.observe(usage, mode);
-                }
-                self.buffer.clear();
-            } else if self.buffer.len() >= 512 * 1024 {
-                self.buffer.clear();
-                self.discarding = true;
-                self.line_empty = byte == b'\n';
+            if let Some(Ok(event)) = self.decoder.push_byte(byte)
+                && let Some((usage, mode)) =
+                    extract_reported_usage_from_sse_event(event.event_type.as_deref(), &event.data)
+            {
+                self.accumulator.observe(usage, mode);
             }
         }
     }
@@ -693,6 +799,7 @@ pub fn extract_reported_usage_from_sse_event(
         Some("image_generation.completed" | "image_edit.completed")
     ) {
         let mut usage = extract_reported_usage(&value).unwrap_or_default();
+        usage.image_output_tokens = usage.completion_tokens;
         usage.images = 1;
         usage.completed_image_index = Some(
             value
@@ -752,6 +859,78 @@ mod tests {
         extract_reported_usage, extract_reported_usage_from_sse_event,
         force_stream_options_include_usage, token_quantity_or_estimate,
     };
+
+    #[test]
+    fn pool_native_usage_preserves_cr_only_and_split_utf8_frames() {
+        for (ending, separator) in [
+            ("\r", "\r\r"),
+            ("\n", "\n\n"),
+            ("\r\n", "\r\n\r\n"),
+            ("\n", "\n\r"),
+            ("\r", "\r\n\r"),
+        ] {
+            let native = format!(
+                "event: message_start{ending}data: {{\"type\":\"message_start\",\"message\":{{\"model\":\"你好\",\"usage\":{{\"input_tokens\":7,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}}}}{separator}event: message_delta{ending}data: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":4}}}}{separator}"
+            );
+            let mut observer = super::BoundedUsageEvents::default();
+            for byte in native.as_bytes() {
+                observer.push(&[*byte]);
+            }
+            let usage = observer.finalize().expect("native reported usage");
+            assert_eq!(
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.cached_tokens,
+                    usage.cache_creation_tokens,
+                    usage.total_tokens
+                ),
+                (7, 4, 3, 2, 11)
+            );
+            let priced = super::platform_usage(Some(&usage), 0, false);
+            assert_eq!(
+                (
+                    priced.input_tokens,
+                    priced.output_tokens,
+                    priced.cache_read_tokens,
+                    priced.cache_write_tokens,
+                    priced.tokens
+                ),
+                (7, 4, 3, 2, 11)
+            );
+            assert_eq!(priced.token_breakdown, Some(usage.token_breakdown()));
+        }
+    }
+
+    #[test]
+    fn partial_usage_snapshots_include_all_classes_and_preserve_larger_provider_total() {
+        for explicit_total in [0, 50] {
+            let mut accumulator = ReportedLlmUsageAccumulator::default();
+            for value in [
+                serde_json::json!({"usage":{"input_tokens":7}}),
+                serde_json::json!({"usage":{"output_tokens":4}}),
+            ] {
+                accumulator.observe_snapshot(extract_reported_usage(&value).unwrap());
+            }
+            if explicit_total > 0 {
+                accumulator.observe_snapshot(
+                    extract_reported_usage(
+                        &serde_json::json!({"usage":{"total_tokens":explicit_total}}),
+                    )
+                    .unwrap(),
+                );
+            }
+            let usage = accumulator.finalize().unwrap();
+            assert_eq!(
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens
+                ),
+                (7, 4, explicit_total.max(11))
+            );
+        }
+    }
 
     #[test]
     fn provider_token_counts_accept_floats_and_preserve_integer_precision() {
@@ -877,6 +1056,170 @@ mod tests {
         assert_eq!(summary.estimated_response_count, 0);
         assert_eq!(summary.uncovered_bytes, 0);
         assert_eq!(summary.token_quantity(), 42);
+    }
+
+    #[test]
+    fn realtime_collector_sums_audio_token_details_without_changing_prices() {
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"input_tokens":120,"output_tokens":80,"total_tokens":200,"input_token_details":{"text_tokens":20,"audio_tokens":100,"cached_tokens":0},"output_token_details":{"text_tokens":15,"audio_tokens":65}}}}"#,
+        );
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_2","usage":{"input_tokens":40,"output_tokens":30,"total_tokens":70,"input_token_details":{"audio_tokens":25},"output_token_details":{"audio_tokens":20}}}}"#,
+        );
+
+        let summary = collector.finalize();
+        let usage = summary.reported_usage.as_ref().expect("reported usage");
+        assert_eq!(
+            (usage.audio_input_tokens, usage.audio_output_tokens),
+            (125, 85)
+        );
+        let platform = super::platform_usage(Some(usage), 0, false);
+        assert_eq!(
+            platform.audio_tokens,
+            Some(crate::models::service_billing::AudioTokens {
+                input_tokens: 125,
+                output_tokens: 85,
+            })
+        );
+        // Audio is a subset of the priced classes, never added to them.
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.tokens
+            ),
+            (160, 110, 270)
+        );
+    }
+
+    #[test]
+    fn chat_audio_token_details_are_captured_and_text_only_usage_has_none() {
+        let audio = extract_reported_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 50, "completion_tokens": 40, "total_tokens": 90,
+                "prompt_tokens_details": { "audio_tokens": 30, "cached_tokens": 0 },
+                "completion_tokens_details": { "audio_tokens": 35 },
+            }
+        }))
+        .expect("usage");
+        assert_eq!(
+            (audio.audio_input_tokens, audio.audio_output_tokens),
+            (30, 35)
+        );
+
+        let text = extract_reported_usage(&serde_json::json!({
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        }))
+        .expect("usage");
+        assert!(
+            super::platform_usage(Some(&text), 0, false)
+                .audio_tokens
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn image_token_details_are_subsets_and_do_not_increase_total_or_priced_classes() {
+        let usage = super::extract_reported_usage_for_path(
+            &serde_json::json!({
+                "data": [{"url": "image"}],
+                "usage": {
+                    "input_tokens": 120, "output_tokens": 40,
+                    "input_tokens_details": {"image_tokens": 80, "text_tokens": 40, "cached_tokens": 20}
+                }
+            }),
+            "/v1/images/edits?model=gpt-image-1",
+            true,
+        ).expect("image usage");
+        assert_eq!(
+            (usage.image_input_tokens, usage.image_output_tokens),
+            (80, 40)
+        );
+        assert_eq!(usage.total_tokens, 160);
+        let platform = super::platform_usage(Some(&usage), 0, false);
+        assert_eq!(
+            platform.image_tokens,
+            Some(crate::models::service_billing::ImageTokens {
+                input_tokens: 80,
+                output_tokens: 40,
+            })
+        );
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.cache_read_tokens,
+                platform.tokens
+            ),
+            (100, 40, 20, 160)
+        );
+
+        let text = extract_reported_usage(&serde_json::json!({
+            "usage": {"prompt_tokens": 120, "completion_tokens": 40}
+        }))
+        .unwrap();
+        assert!(
+            super::platform_usage(Some(&text), 0, false)
+                .image_tokens
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn captures_chat_and_gemini_image_subsets_and_preserves_stream_deduplication() {
+        let chat = extract_reported_usage(&serde_json::json!({
+            "response": {"usage": {"input_tokens": 100, "output_tokens": 30,
+                "input_tokens_details": {"image_tokens": 70},
+                "output_tokens_details": {"image_tokens": 20}}}
+        }))
+        .unwrap();
+        let gemini = extract_reported_usage(&serde_json::json!({
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 30,
+                "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 30}, {"modality": "IMAGE", "tokenCount": 70}],
+                "candidatesTokensDetails": [{"modality": "IMAGE", "tokenCount": 20}, {"modality": "TEXT", "tokenCount": 10}]}
+        })).unwrap();
+        assert_eq!(
+            (chat.image_input_tokens, chat.image_output_tokens),
+            (70, 20)
+        );
+        assert_eq!(
+            (gemini.image_input_tokens, gemini.image_output_tokens),
+            (70, 20)
+        );
+        let mut snapshots = ReportedLlmUsageAccumulator::default();
+        snapshots.observe_snapshot(chat.clone());
+        snapshots.observe_snapshot(chat);
+        let snapshots = snapshots.finalize().unwrap();
+        assert_eq!(
+            (
+                snapshots.image_input_tokens,
+                snapshots.image_output_tokens,
+                snapshots.total_tokens
+            ),
+            (70, 20, 130)
+        );
+
+        let event = r#"{"type":"image_generation.completed","image_index":0,"usage":{"input_tokens":10,"output_tokens":30,"input_tokens_details":{"image_tokens":4}}}"#;
+        let (first, mode) = extract_reported_usage_from_sse_event(None, event).unwrap();
+        let mut stream = ReportedLlmUsageAccumulator::default();
+        stream.observe(first.clone(), mode);
+        stream.observe(first, mode);
+        let second = event.replace("\"image_index\":0", "\"image_index\":1");
+        let (next, mode) = extract_reported_usage_from_sse_event(None, &second).unwrap();
+        stream.observe(next, mode);
+        let stream = stream.finalize().unwrap();
+        assert_eq!(
+            (
+                stream.images,
+                stream.image_input_tokens,
+                stream.image_output_tokens,
+                stream.total_tokens
+            ),
+            (2, 8, 60, 80)
+        );
     }
 
     #[test]

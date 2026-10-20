@@ -469,7 +469,23 @@ async fn list_user_services_inner(
     user_id: &str,
     include_disabled: bool,
 ) -> AppResult<Vec<UserService>> {
+    list_user_services_selected(db, user_id, include_disabled, None, None).await
+}
+
+async fn list_user_services_selected(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_disabled: bool,
+    selected: Option<&[String]>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Vec<UserService>> {
     let mut filter = doc! { "user_id": user_id };
+    if let Some(ids) = selected {
+        filter.insert("_id", doc! { "$in": ids });
+    }
+    if let Some(id) = catalog_service_id {
+        filter.insert("catalog_service_id", id);
+    }
     if !include_disabled {
         filter.insert("is_active", true);
     }
@@ -620,8 +636,58 @@ pub(crate) async fn list_user_services_with_sources_and_memberships(
     include_disabled: bool,
     memberships: &[crate::models::org_membership::OrgMembership],
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_selected(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        memberships,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn list_user_services_with_sources_selected(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+    selected: Option<&[String]>,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_selected_in_group(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        memberships,
+        ServiceSelection {
+            ids: selected,
+            catalog_service_id: None,
+        },
+    )
+    .await
+}
+
+pub(crate) struct ServiceSelection<'a> {
+    pub ids: Option<&'a [String]>,
+    pub catalog_service_id: Option<&'a str>,
+}
+
+pub(crate) async fn list_user_services_with_sources_selected_in_group(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+    selection: ServiceSelection<'_>,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    let ServiceSelection {
+        ids: selected,
+        catalog_service_id,
+    } = selection;
     let mut out: Vec<UserServiceWithSource> =
-        list_user_services_inner(db, user_id, include_disabled)
+        list_user_services_selected(db, user_id, include_disabled, selected, catalog_service_id)
             .await?
             .into_iter()
             .map(|s| UserServiceWithSource {
@@ -655,7 +721,14 @@ pub(crate) async fn list_user_services_with_sources_and_memberships(
             meta
         };
 
-        let org_services = list_user_services_inner(db, &m.org_user_id, include_disabled).await?;
+        let org_services = list_user_services_selected(
+            db,
+            &m.org_user_id,
+            include_disabled,
+            selected,
+            catalog_service_id,
+        )
+        .await?;
         for svc in org_services {
             // The normal listing drops services outside the effective member
             // scope because its response contains endpoint, key, and auth
@@ -1127,6 +1200,7 @@ pub async fn create_user_service_with_id(
         auth_method: auth_method.to_string(),
         auth_key_name: auth_key_name.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
+        icon_url: None,
         node_id: node_id.map(|s| s.to_string()),
         node_priority,
         service_type: service_type.to_string(),
@@ -1552,6 +1626,83 @@ pub async fn update_user_service(
     }
 
     Ok(())
+}
+
+pub fn validate_service_icon_url(raw_url: &str) -> AppResult<()> {
+    if raw_url.len() > 2048 {
+        return Err(AppError::ValidationError(
+            "Icon URL must be at most 2048 characters".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(raw_url).map_err(|_| {
+        AppError::ValidationError("Icon URL must be a valid HTTP(S) URL".to_string())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Icon URL must be an HTTP(S) URL without credentials or a fragment".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Update display metadata without changing an auto-connected service's route.
+pub async fn update_service_icon(
+    db: &mongodb::Database,
+    owner_id: &str,
+    service_id: &str,
+    raw_url: &str,
+) -> AppResult<()> {
+    let trimmed = raw_url.trim();
+    let value = if trimmed.is_empty() {
+        bson::Bson::Null
+    } else {
+        validate_service_icon_url(trimmed)?;
+        bson::Bson::String(trimmed.to_string())
+    };
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": service_id, "user_id": owner_id },
+            doc! {
+                "$set": {
+                    "icon_url": value,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+                "$inc": { "state_version": 1_i64 },
+            },
+        )
+        .await?;
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_icon_url_tests {
+    use super::validate_service_icon_url;
+
+    #[test]
+    fn accepts_http_images_and_rejects_unsafe_urls() {
+        assert!(validate_service_icon_url("https://example.com/icon.svg?version=2").is_ok());
+        assert!(validate_service_icon_url("http://localhost:5173/icon.png").is_ok());
+        for url in [
+            "data:image/svg+xml,<svg/>",
+            "javascript:alert(1)",
+            "https://user:secret@example.com/icon.svg",
+            "https://example.com/icon.svg#private",
+        ] {
+            assert!(validate_service_icon_url(url).is_err(), "{url}");
+        }
+        assert!(
+            validate_service_icon_url(&format!("https://example.com/{}", "x".repeat(2048)))
+                .is_err()
+        );
+    }
 }
 
 /// Pre-validate the field combination a `PUT /keys` request intends to
@@ -2682,6 +2833,10 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -2698,6 +2853,7 @@ mod tests {
             credential_encrypted: Vec::new(),
             platform_key: None,
             auth_type: Some("ssh".to_string()),
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -2716,6 +2872,10 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -2730,6 +2890,8 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

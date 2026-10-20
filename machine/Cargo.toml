@@ -1,0 +1,28 @@
+[package]
+name = "nyxid-machine"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+zeroize = "1"
+urlencoding = "2.1"
+uuid = { workspace = true }
+semver = "1"
+
+# Managed bootstrap uses a dedicated RSA-OAEP / AES-GCM envelope.
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+# Enable available upstream cleanup paths; these features do not propagate.
+aes = { version = "0.8", features = ["zeroize"] }
+ghash = { version = "0.5.1", features = ["zeroize"] }
+polyval = { version = "0.6.2", features = ["zeroize"] }
+rand = "0.8.5"
+rsa = "0.9.10"

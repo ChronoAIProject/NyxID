@@ -1,4 +1,6 @@
 pub mod admin;
+pub mod admin_catalog;
+mod admin_catalog_playbook;
 pub mod admin_platform_credentials;
 pub mod ai_setup;
 pub mod api_key;
@@ -17,6 +19,7 @@ pub mod endpoint;
 pub mod external_key;
 pub(crate) mod grant_cascade;
 pub mod lark_permission;
+pub(crate) mod machine_native_update;
 pub mod mcp;
 pub mod mfa;
 pub mod node;
@@ -140,3 +143,15 @@ mod tests {
         );
     }
 }
+
+pub mod catalog_tools;
+
+pub mod admin_tools;
+
+pub mod admin_billing;
+pub mod admin_credits;
+pub mod admin_usage;
+pub mod billing_executions;
+pub(crate) mod billing_support;
+mod managed_billing;
+pub mod nyxbot;

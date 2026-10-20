@@ -20,12 +20,13 @@ import type {
 
 // --- Role Hooks ---
 
-export function useRoles() {
+export function useRoles({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["admin", "roles"],
     queryFn: async (): Promise<RoleListResponse> => {
       return api.get<RoleListResponse>("/admin/roles");
     },
+    enabled,
   });
 }
 

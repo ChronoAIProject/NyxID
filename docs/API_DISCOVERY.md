@@ -36,6 +36,8 @@ When you create or update a downstream service, NyxID tries to discover document
 - `/swagger.json`
 - `/docs/openapi.json`
 - `/.well-known/openapi`
+- `/openapi.yaml`
+- `/openapi.yml`
 
 ### AsyncAPI probe order
 
@@ -156,7 +158,31 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
-The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
+Path parameters normally encode their entire value, including `/`. An explicit
+`allowReserved: true` on a path parameter opts it into multiple segments. NyxID
+hosted overlays and stored endpoint rows may also use
+`x-nyxid-path-segments: true`; remote specifications cannot enable that extension
+(it is discarded after resolving parameter references and overrides). The
+parameter's name never grants this behavior. Each segment is encoded separately;
+empty segments in a nonempty value, dot segments, backslashes, controls and
+nested encoded separators/dot segments are refused. A wholly empty value remains
+zero segments for GitHub repository-root reads. The final path still passes the
+unchanged proxy validator. Other reserved characters are not exempted from it.
+The opt-in changes encoding only; existing operation allowlists are not widened.
+
+The shared operation argument builder is used by MCP, node dispatch and exact
+approval creation/redemption. REST proxy requests already carry a concrete path
+and use the same unchanged validator. Endpoint contract digests bind this
+parameter metadata, so adding or removing the opt-in invalidates an old exact
+approval; argument and execution-authority digest formats are unchanged.
+
+The GitHub contents overlay opts in its repository path. Its current overlay has
+no create/update/delete-file or Git tree/blob operations to annotate; any such
+addition must declare file-path parameters explicitly (tree/blob SHA identifiers
+and JSON-body paths do not need this option). Drive and Lark/Feishu overlays use
+file/document IDs or tokens, not multi-segment path parameters.
+
+The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching. Specs may be JSON or YAML: JSON is parsed first and behaves as before; any other body is read as a single YAML 1.2 document (`yes`/`no` stay strings, integer response codes become string keys, anchors, aliases and `<<` merge keys expand) and must be a mapping with an `openapi`, `swagger`, or `asyncapi` field, so text or HTML pages are never taken for a spec. Expanded YAML is bounded separately from the response size (1,000,000 nodes, 10 MiB of text, 64 levels of nesting), which rejects alias bombs. At most four YAML documents are parsed at once per server; a request that waits more than 10 seconds for a slot is answered with 429, while JSON specs never wait. Failures report `Spec was not valid JSON or YAML: <reason>`. The manual `POST /services/{id}/discover-endpoints` route uses the same parser.
 
 ### Rich catalog metadata
 
@@ -181,7 +207,7 @@ nyxid catalog endpoints <slug>          # parsed OpenAPI endpoints
 
 ## Hosted Catalog Overlay Specs
 
-Most official upstream APIs either publish no OpenAPI document, publish one in YAML (unsupported), or publish one far above the 5MB fetch limit. For those, NyxID ships small hand-curated OpenAPI 3.1 overlays in-tree under `backend/specs/catalog/` and serves them publicly at:
+Most official upstream APIs either publish no OpenAPI document, publish one far broader than agents need, or publish one far above the 5MB fetch limit. For those, NyxID ships small hand-curated OpenAPI 3.1 overlays in-tree under `backend/specs/catalog/` and serves them publicly at:
 
 ```text
 GET /api/v1/catalog-specs/{spec_key}/openapi.json
@@ -235,6 +261,26 @@ advertised model-call protocol. `wire_protocol` is `anthropic_messages`,
 own pagination fields. Optional `realtime=true` advertises WebSocket
 `/api/v1/proxy/s/{slug}/realtime`. xAI and OpenAI preserve the bearer-injected
 `wss://api.x.ai/v1/realtime` and `wss://api.openai.com/v1/realtime` transports.
+
+
+`inference.voice` adds structured voice discovery to catalog, key and MCP
+responses: `{protocol, models: [{id,label,default?}], voices: [{id,label}],
+usage_source, billing_metrics}`. `capabilities.supports_realtime_voice` derives
+solely from presence of that block; it is response-only, and `realtime` is also
+true when the block is present. Legacy `realtime:true` without voice metadata
+does not admit a NyxBot voice call. `realtime` alone does not identify the transport:
+OpenAI Live uses its dedicated session/WebRTC adapter, not the legacy `/realtime`
+proxy. Provider origins remain fixed in adapters.
+
+`nyxid catalog show` displays models, default, voices, protocol, usage source and
+billing units. Voice options read these catalog choices, intersect supported
+adapter protocols, then apply live visibility/binding and tariff/rollout gates.
+Phase 3 supports OpenAI Live; seeded xAI metadata does not enable its Phase 4
+adapter. Admins can add models without code changes after provider availability
+is verified. Startup backfills only missing voice metadata and respects
+`inference_admin_modified`, including explicit null clears. Price information
+continues through the existing admin-authored, Lago-synced lane DTOs; no default
+prices accompany voice metadata.
 
 `binding` is computed for the caller. `platform` means an authorized server-held
 key is available and omits `status_slug`; it does not change the binding of an
@@ -296,13 +342,60 @@ and `/api/v1/mcp/config` for the whole user.
 
 ### Tool search semantics
 
-`nyx__search_tools` splits the query on non-alphanumeric characters and matches
-each word as a case-insensitive substring of the qualified tool name
-(`<slug>__<operation>`), the service name and the description. Tools containing
-every word rank first, then partial matches in catalog order, capped at 25. Word
-order is irrelevant, so "skill search" and "search skills" both find
-`ornn-api__searchskills`, and concatenated operation names such as
-`getentitystate` match "entity state". An empty query lists the first 25 tools.
+Personal agent order applies within an immutable catalog group, preserving
+slots occupied by unrelated services. `nyx__list_connected_services` starts from
+the caller's original loader vector and refills each group's existing slots with
+its ranked connections first, then unranked connections in their original order.
+Custom singleton connections and platform/internal catalog entries keep their
+slots and have `preference_rank: null`.
+
+`nyx__search_tools` splits its nonempty query on non-alphanumeric characters,
+ignores common filler words, and matches the remaining words as case-insensitive
+substrings of the qualified tool name
+(`<connection-slug>__<operation>`), service name and description. Relevance sorts
+by matched words descending, words in the name descending, then original loader
+candidate order. Within each equal-relevance bucket, only slots occupied by the
+same catalog group are refilled by connection preference; operations of each
+connection keep their relative order. Search always consumes the original loader
+vector, never the listing permutation. Native machine/upload candidates join the
+service matches in one stable relevance ranking, then the combined result is
+capped at 25. Equal relevance retains the preference-ordered service slots and
+original candidate order. Better matches remain above preferred partial matches.
+With no ranks, existing search and listing order is preserved. Word order is irrelevant and concatenated names
+such as `getentitystate` match "entity state". The pure helper also accepts an
+empty query using the same slot rule; the transport requires a nonempty query.
+
+Every search match and listing row carries `preference_rank` (dense within the
+caller's discovered catalog group, or null) and `executable`. Enabled rows with
+revoked, expired or missing credentials may appear with `executable: false`;
+disabled rows are not loaded. Native machine/upload search matches carry
+`preference_rank: null` and `executable: true` while competing with service
+matches by relevance. Ranks do not verify downstream providers or grant execution.
+
+Ranks derive after all existing membership, allowlist, node, operation and guest
+filters. For example, a disabled saved position 1 appears as `Saved #1 · disabled` in the
+owner's UI; a restricted key seeing only the owner's Discovery #2 and #4 sees MCP
+ranks 1 and 2, in the same relative order. Guest connected search/list includes
+only granted UserManaged/Platform connections and drops Internal catalog entries;
+native `nyxid` virtual tools retain their separate guest authorization.
+
+The minimal grouped GET and human-only scoped PUT/hidden DELETE are documented
+in [API.md](API.md#agent-discovery-order-per-service-group). Relay REST reads and
+writes are rejected; scoped MCP applies the verified relay owner's order.
+Service-account subjects normally have no human document and retain default
+order. Delegated/OAuth metadata GET follows management policy; they cannot write,
+and MCP order applies only when existing proxy scopes authorize the request.
+
+NyxBot enforces saved connection priority at execution, within each catalog
+service group: eligible personal connections first, then eligible organization
+connections, using saved order within each tier. Default order remains personal
+newest first, then organization membership order and newest within each org.
+Custom connections are singletons. Exact named calls stay exact: an out-of-order
+proposal is refused with an eligible preferred target, never silently rerouted.
+Account-specific alternatives require server-known equivalence or an authenticated
+owner's one-turn connection choice. Independent external clients retain advisory
+discovery ordering. Service Pools retain their own strategy and bind the actual
+approved member. See [NyxBot service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 ### Image tool results
 
@@ -314,3 +407,73 @@ Images over 1 MiB are described in the note but not inlined. Assistant chat keys
 receive the note only, because the image is shown in the chat instead. Every other response
 type keeps its previous text form. Assistant chat keys additionally get the image
 attached to the live chat turn (see `docs/chat/08-nyxagent-engine.md`, Tool images).
+
+## AI pool aliases
+
+`GET /api/v1/llm/pools?offset=0&limit=100` discovers active priority AI chat aliases
+that the caller can resolve through the normal personal/organization cascade.
+Entries include `id: "pool:<slug>"`, `pool_id`, `name`, `owner_id`, `slug_route`
+and availability; follow `next_offset` to continue. Read-only planning applies
+service/node scopes and live contract metadata without decrypting credentials or
+dispatching a request. Availability is a current snapshot, not a reservation.
+
+Use the alias as `model` at the chat gateway or call its slug route. Management
+candidates are paged at `/service-pools/candidates` or `/{pool_id}/candidates`;
+health/reset use `/{pool_id}/health` and `/{pool_id}/health/reset`. See
+[Service pools](SERVICE_POOLS.md) for draft peer compatibility, native operation
+selection, atomic edits and authorization.
+
+
+## Assistant async operation contracts
+
+`x-nyxid-async-operation` is NyxID-owned catalog metadata on an asynchronous
+submit operation. Only stored catalog endpoint rows and compiled, NyxID-hosted
+overlays can supply it. Remote OpenAPI documents cannot opt into background
+execution; their extension is ignored. Ordinary tool calls retain their existing
+execution path and perform no async-watch database reads.
+
+```json
+"x-nyxid-async-operation": {
+  "status_operation": "get_execution_handler",
+  "result_operation": "get_execution_result_handler",
+  "cancel_operation": "cancel_execution_handler",
+  "id_field": "/operation_id",
+  "id_parameter": "operation_id",
+  "status_field": "/status",
+  "success_states": ["succeeded"],
+  "failure_states": ["failed", "cancelled", "outcome_uncertain"],
+  "error_field": "/failure"
+}
+```
+
+Operation references are exact operation names on the same service and destination.
+Submit and optional cancel use POST; status and result use GET. `id_field`,
+`status_field` and optional `error_field` are JSON pointers. The ID parameter is
+the sole path parameter of each referenced operation. The model never supplies
+a polling URL, credentials, or a delivery destination. Changed contracts fail
+closed for existing watches. A successful admitted submission through a
+user-managed connection snapshots its execution-authority digest in the private
+watch's `execution_binding` and `contract_binding` fields (`authority_version: 1`
+for new submissions). Legacy watches with no version retain their already-submitted
+bounded lifecycle under live checks. This bounds status/result/cancel use to the
+original operation and current lease even after the originating turn completes. Live key, membership,
+service scope and credential/configuration checks remain mandatory at egress;
+watch authority cannot authorize another submission. No new environment variable
+is required.
+
+The `chrono-sandbox` overlay follows
+<https://sandbox.chrono-ai.fun/openapi.json>. It exposes async `/executions`
+submission/status/result/cancel plus the existing synchronous and streaming
+execution operations, including session execution. Submission requires the
+upstream `Idempotency-Key` header. Startup additively synchronizes registered
+async overlays for administrator-created catalog rows as well as system rows;
+endpoints with other names are preserved. A mounted hosted overlay also receives
+the contract, using compiled bytes rather than a network-fetched extension.
+
+Both concrete MCP tools and `nyx__call_tool` automatically reserve a watch when
+an owner assistant chat key submits a marked operation. Other API-key classes
+retain the ordinary response. Guests cannot register watches. The tool response
+explains that NyxID will resume the originating thread and that the model should
+end its turn or do other work, without polling. See
+[async event delivery](chat/09-nyxbot-orchestrator.md#asynchronous-service-results)
+for limits and lifecycle semantics.

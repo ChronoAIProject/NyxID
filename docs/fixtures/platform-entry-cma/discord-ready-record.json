@@ -1,0 +1,101 @@
+{
+  "channel_id": "cmaeg1.ch.1.4uc9w2F_h7aejSwNYz8EFtmubOsEzOOarT82QmJJNodqvm64xr38XzMVz1mJt7Cj1M3cQk0JlgycLfDBLverGbgIp9K3NIkG8U6Vd8z97lody6ZHJUJIVSjPjLKTN6hn11IGmyCr-WSB9QRdvWHOMxmyPowagadgTfPXeGDgd53uTBVOqHwMpp-mOmDzbVbmNKyNglPeKgKz2P2rsf4YoGpv9ObSuKKNFn9gGTJ-eB0ZwpgMfUVrxPo5vP1w",
+  "record_id": "22222222-2222-4222-8222-222222222222",
+  "version": 2,
+  "provider": {
+    "slug": "nyxbot",
+    "binding_id": "bnd_22222222222242228222222222222222",
+    "level": "l1",
+    "honoured": [],
+    "refused": []
+  },
+  "endpoints": {
+    "nyxid_callback_url": "https://gateway.example/v1/callbacks/cmaeg1.ch.1.4uc9w2F_h7aejSwNYz8EFtmubOsEzOOarT82QmJJNodqvm64xr38XzMVz1mJt7Cj1M3cQk0JlgycLfDBLverGbgIp9K3NIkG8U6Vd8z97lody6ZHJUJIVSjPjLKTN6hn11IGmyCr-WSB9QRdvWHOMxmyPowagadgTfPXeGDgd53uTBVOqHwMpp-mOmDzbVbmNKyNglPeKgKz2P2rsf4YoGpv9ObSuKKNFn9gGTJ-eB0ZwpgMfUVrxPo5vP1w",
+    "custom_event_url": "https://gateway.example/v1/channels/cmaeg1.ch.1.4uc9w2F_h7aejSwNYz8EFtmubOsEzOOarT82QmJJNodqvm64xr38XzMVz1mJt7Cj1M3cQk0JlgycLfDBLverGbgIp9K3NIkG8U6Vd8z97lody6ZHJUJIVSjPjLKTN6hn11IGmyCr-WSB9QRdvWHOMxmyPowagadgTfPXeGDgd53uTBVOqHwMpp-mOmDzbVbmNKyNglPeKgKz2P2rsf4YoGpv9ObSuKKNFn9gGTJ-eB0ZwpgMfUVrxPo5vP1w/events"
+  },
+  "definition": {
+    "schema_version": 1,
+    "name": "NyxID shared entry",
+    "record_id": "22222222-2222-4222-8222-222222222222",
+    "creation": {
+      "channel_id": "cmaeg1.ch.1.4uc9w2F_h7aejSwNYz8EFtmubOsEzOOarT82QmJJNodqvm64xr38XzMVz1mJt7Cj1M3cQk0JlgycLfDBLverGbgIp9K3NIkG8U6Vd8z97lody6ZHJUJIVSjPjLKTN6hn11IGmyCr-WSB9QRdvWHOMxmyPowagadgTfPXeGDgd53uTBVOqHwMpp-mOmDzbVbmNKyNglPeKgKz2P2rsf4YoGpv9ObSuKKNFn9gGTJ-eB0ZwpgMfUVrxPo5vP1w",
+      "fingerprint": "sha256:8b0aa5a3e208547e6e86b445e84c043d29f55004398ac892f3cd167fc9fa3f54",
+      "ready": true
+    },
+    "owner": {
+      "kind": "human",
+      "subject": "11111111-1111-4111-8111-111111111111"
+    },
+    "profile": {
+      "schema_version": 1,
+      "metadata": {
+        "name": "NyxID shared entry",
+        "description": "Public help and sender-consented personal NyxBot",
+        "owner": {
+          "kind": "human",
+          "subject": "11111111-1111-4111-8111-111111111111"
+        },
+        "provider": "nyxbot"
+      },
+      "model": {
+        "access": "managed",
+        "service": "llm-nyx",
+        "api_type": "responses",
+        "model": "nyxagent/chat",
+        "thinking_effort": "low"
+      },
+      "permission": {
+        "action_mode": "autonomous",
+        "service_scope": []
+      },
+      "context": {
+        "skills": [],
+        "system_prompt": "",
+        "mcp_servers": []
+      }
+    },
+    "profile_digest": "sha256:c44970eccc99a9cce5ee3b3651a53c3100e03ae30ffacf7811c7b6e49afa6e56",
+    "provider": {
+      "slug": "nyxbot",
+      "binding_id": "bnd_22222222222242228222222222222222",
+      "level": "l1"
+    },
+    "sources": [
+      {
+        "type": "nyxid_relay",
+        "issuer": "https://nyxid.example",
+        "jwks_url": "https://nyxid.example/.well-known/jwks.json",
+        "key_id": "33333333-3333-4333-8333-333333333333",
+        "route_ids": [
+          "44444444-4444-4444-8444-444444444444"
+        ],
+        "platform": "discord",
+        "trust_normalized": true,
+        "admission": {
+          "type": "scoped",
+          "senders": {
+            "type": "open"
+          },
+          "chats": {
+            "type": "open"
+          },
+          "groups": "deny"
+        }
+      }
+    ],
+    "partition": {
+      "version": 1,
+      "key": "conversation_and_sender"
+    },
+    "reply": {
+      "auto_final": false,
+      "ack_after_ms": 2500,
+      "sinks": []
+    },
+    "secrets": {
+      "agent_key_hash": "sha256:b49688d91597f5ff9bb8e3aaf3b02da7ffe52cd7fb0ba9fd3e1d060a7fb58576"
+    },
+    "created_at": "2026-10-17T04:51:06.671518Z",
+    "version": 2
+  }
+}

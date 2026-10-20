@@ -16,7 +16,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::services::{
-    audit_service, auth_service, invite_code_service, role_service, token_service,
+    audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
+    token_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -32,9 +33,7 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
-    /// Invite code. Required when `AppConfig::invite_code_required` is true
-    /// (the default). When the gate is disabled for public launch the
-    /// handler accepts a missing or empty invite code.
+    /// Required when the invitation-code feature flag is enabled.
     #[serde(default)]
     pub invite_code: Option<String>,
     pub display_name: Option<String>,
@@ -340,8 +339,8 @@ pub(crate) fn resolve_auth_client_mode(
 
 /// POST /api/v1/auth/register
 ///
-/// Create a new user account. Returns the user ID and sends an email
-/// verification link (when SMTP is configured).
+/// Process registration and return sign-in guidance. Email verification status
+/// follows AUTO_VERIFY_EMAIL; password login currently accepts active accounts.
 pub async fn register(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -359,7 +358,7 @@ pub async fn register(
     // we reserve one slot up front. When it is disabled (public launch),
     // any invite code the client sent is ignored and registration proceeds
     // without reserving anything.
-    let invite_code_id = if state.config.invite_code_required {
+    let invite_code_id = if feature_flag_service::invitation_code_required(&state.db).await? {
         let raw_code = body
             .invite_code
             .as_deref()
@@ -378,11 +377,7 @@ pub async fn register(
             // still recorded for audit/monitoring.
             Err(AppError::InviteCodeAlreadyRedeemed) => {
                 tracing::warn!("Registration attempt with an already-redeemed invite code");
-                let message = if state.config.auto_verify_email {
-                    "Registration processed. You can now sign in.".to_string()
-                } else {
-                    "Check your email for a verification link to complete registration.".to_string()
-                };
+                let message = "Registration processed. You can now sign in.".to_string();
                 let fake_user_id = uuid::Uuid::new_v4().to_string();
                 audit_service::log_async(
                     state.db.clone(),
@@ -462,17 +457,7 @@ pub async fn register(
         ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
     }
 
-    #[cfg(debug_assertions)]
-    tracing::debug!(
-        token = %result.email_verification_token,
-        "Email verification token (dev only)"
-    );
-
-    let message = if state.config.auto_verify_email {
-        "Registration processed. You can now sign in.".to_string()
-    } else {
-        "Check your email for a verification link to complete registration.".to_string()
-    };
+    let message = "Registration processed. You can now sign in.".to_string();
 
     // Telemetry: user.signed_up. Pre-auth path, so surface comes from
     // the `X-NyxID-Client` header rather than from `AuthUser`.
@@ -491,9 +476,6 @@ pub async fn register(
         let source = if invite_code_id.is_some() {
             "invite_code".to_string()
         } else {
-            // Reached only when `INVITE_CODE_REQUIRED=false`. Once the
-            // public-launch flag is flipped, all email signups have a
-            // code and `invite_code` is the only `source` we emit.
             "direct".to_string()
         };
         emit_event(

@@ -251,7 +251,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No permissions assigned.
             </p>
           </div>

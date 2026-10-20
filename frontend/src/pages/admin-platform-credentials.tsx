@@ -1,3 +1,4 @@
+import { ChannelAdapterResources } from "@/components/admin/channel-adapter-resources";
 import { useState } from "react";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
@@ -37,8 +38,8 @@ import { ServiceIcon } from "@/components/service-icon";
 
 /**
  * Describes what a per-field clear on a shared OAuth backing interrupts. X keeps
- * its OAuth app credentials in the shared provider, while its webhook secrets
- * only affect DM webhook delivery, subscription setup and cleanup.
+ * its OAuth app credentials in the shared provider; the Client Secret also
+ * authenticates modern X webhooks.
  */
 function sharedClearImpact(
   providerId: string,
@@ -58,18 +59,23 @@ function sharedClearImpact(
   const oauthImpact = `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`;
   const clearsWebhook =
     providerId === "x" &&
-    (fields.app_bearer_token === null || fields.consumer_secret === null);
+    (fields.app_bearer_token === null ||
+      fields.consumer_secret === null ||
+      fields.client_secret === null);
   if (!clearsWebhook) {
     return { field: "Shared OAuth credentials", after: oauthImpact };
   }
   const webhookImpact = [
+    fields.client_secret === null
+      ? "Clearing the X Client Secret stops OAuth 2.0 webhook signature verification: deliveries with the OAuth 2.0 header are rejected without legacy fallback. CRC challenges use the legacy API key secret if configured."
+      : "",
     fields.consumer_secret === null
-      ? "Clearing the X API key secret stops verified DM webhook delivery and webhook setup until restored."
+      ? `Clearing the X API key secret stops legacy webhook signature verification.${fields.client_secret === null || fields.app_bearer_token === null ? "" : " OAuth 2.0 webhook verification and setup remain available with the Client Secret and app bearer token."}`
       : "",
     fields.app_bearer_token === null
       ? "Clearing the X app bearer token stops subscription setup and cleanup until restored. Existing subscriptions can continue delivering billable events."
       : "",
-    "Registered channels do not fall back to polling; restore the credentials and select Verify on each channel.",
+    "Registered channels do not fall back to polling. If delivery or setup is interrupted, restore the required credentials and select Verify on each affected channel.",
   ]
     .filter(Boolean)
     .join(" ");
@@ -220,7 +226,7 @@ function CredentialForm({
         ) : (
           <KeyRound className="size-4 text-muted-foreground" />
         )}
-        <h2 className="text-[15px] font-semibold">{provider.label}</h2>
+        <h2 className="text-15 font-semibold">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
             ? "Refresh required"
@@ -361,7 +367,7 @@ function CredentialForm({
         )}
       </div>
       <div className="max-w-2xl space-y-3">
-        <h3 className="text-[13px] font-medium">Setup checklist</h3>
+        <h3 className="text-13 font-medium">Setup checklist</h3>
         <ol className="list-decimal space-y-3 pl-4 text-xs text-muted-foreground">
           {provider.setup_checklist.map((step) => (
             <li key={step}>{step}</li>
@@ -416,6 +422,7 @@ export function AdminPlatformCredentialsPage() {
   return (
     <div className="space-y-8">
       <PageHeader title="Platform Credentials" />
+      <ChannelAdapterResources />
       {query.error && (
         <ErrorBanner
           message="Unable to refresh platform credentials"

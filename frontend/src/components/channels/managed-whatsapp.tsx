@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -54,6 +55,7 @@ export function ManagedWhatsApp({
   readonly onConnected: (bot: CreateChannelBotResponse) => void;
   readonly fullPage?: boolean;
 }) {
+  const link = useChannelConnectLinkContext();
   const [sdk, setSdk] = useState<FacebookSdk | null>(null);
   const [sdkAttempt, setSdkAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -156,6 +158,7 @@ export function ManagedWhatsApp({
         setStage,
         controller.signal,
         runtimeConfig.api_base_url,
+        link?.token,
       )
         .then(async (result) => {
           if (!active) return;

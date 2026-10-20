@@ -1,3 +1,4 @@
+use axum::response::IntoResponse;
 use axum::{
     Json,
     body::Body,
@@ -12,37 +13,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
-use crate::models::usage_meter::CredentialClass;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
     llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
 
-fn llm_credential_class(
-    resolved_via_user_service: bool,
-    master_credential: bool,
-    credential_source: Option<&str>,
-    target: &proxy_service::ProxyTarget,
-) -> CredentialClass {
-    if target.auth_method == "none" && target.credential.is_empty() {
-        CredentialClass::NoAuth
-    } else if resolved_via_user_service {
-        // Auto-provisioned UserServices with no user key inject the
-        // catalog master credential; classify by whose key was used.
-        if master_credential {
-            CredentialClass::NyxidManagedMaster
-        } else if credential_source == Some("platform") {
-            CredentialClass::NyxidPlatformOauthApp
-        } else {
-            CredentialClass::UserOwned
-        }
-    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
-        CredentialClass::NyxidManagedMaster
-    } else {
-        CredentialClass::UserOwned
-    }
-}
+use crate::services::llm_gateway_service::credential_class as llm_credential_class;
 
 fn resale_usage_from_optional_reported(
     metric: BillingMetric,
@@ -209,6 +186,7 @@ pub async fn llm_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<llm_gateway_service::LlmStatusResponse>> {
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -218,6 +196,144 @@ pub async fn llm_status(
             .await?;
 
     Ok(Json(status))
+}
+
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct PoolAliasesQuery {
+    pub offset: Option<u64>,
+    pub limit: Option<u32>,
+}
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct PoolAlias {
+    pub id: String,
+    pub pool_id: String,
+    pub name: String,
+    pub owner_id: String,
+    pub slug_route: String,
+    pub available: bool,
+}
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct PoolAliasesResponse {
+    pub pools: Vec<PoolAlias>,
+    pub next_offset: Option<u64>,
+}
+
+#[utoipa::path(get,path="/api/v1/llm/pools",params(PoolAliasesQuery),responses((status=200,body=PoolAliasesResponse)),tag="LLM Gateway")]
+pub async fn pool_aliases(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    axum::extract::Query(query): axum::extract::Query<PoolAliasesQuery>,
+) -> AppResult<Json<PoolAliasesResponse>> {
+    use crate::models::service_pool::{PoolMemberContract, PoolStrategy, ServicePool};
+    use futures::TryStreamExt;
+    llm_gateway_service::require_ordinary_purpose(auth.api_key_purpose)?;
+    auth.ensure_llm_proxy_access()?;
+    let actor = auth.proxy_resolution_user_id();
+    let mut owners = vec![actor.clone()];
+    owners.extend(
+        crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
+            .await?
+            .into_iter()
+            .filter(|m| m.role.can_proxy())
+            .map(|m| m.org_user_id),
+    );
+    let offset = query.offset.unwrap_or(0);
+    if offset > 1_000_000 {
+        return Err(AppError::BadRequest("Invalid alias offset".into()));
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 100) as usize;
+    let mut rows:Vec<ServicePool>=state.db.collection("service_pools").find(doc! {"user_id":{"$in":owners},"is_active":true,"strategy":"priority","member_contract":"ai_chat"}).sort(doc! {"slug":1,"_id":1}).skip(offset).limit((limit+1) as i64).await?.try_collect().await?;
+    let next_offset = (rows.len() > limit).then_some(offset + limit as u64);
+    rows.truncate(limit);
+    let allowed =
+        (!auth.allow_all_services).then(|| auth.allowed_service_ids.iter().cloned().collect());
+    let nodes = (!auth.allow_all_nodes).then(|| auth.allowed_node_ids.iter().cloned().collect());
+    let mut pools = Vec::new();
+    for row in rows {
+        let selected =
+            match super::proxy::find_pool_for_proxy_actor(&state, &auth, &actor, &row.slug).await {
+                Ok(Some(pool)) => pool,
+                Ok(None) => continue,
+                Err(error) if crate::services::service_pool_service::member_unavailable(&error) => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        if selected.id != row.id
+            || selected.strategy != PoolStrategy::Priority
+            || selected.member_contract != PoolMemberContract::AiChat
+        {
+            continue;
+        }
+        let plan = crate::services::service_pool_service::plan_candidates_with_allowlist(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            auth.api_key_id.as_deref(),
+            &row.user_id,
+            &row.slug,
+            &Method::POST,
+            Some("chat/completions"),
+            0,
+            Some(br#"{"messages":[{"role":"user","content":""}]}"#),
+            allowed.as_ref(),
+            nodes.as_ref(),
+        )
+        .await;
+        let available = match plan {
+            Ok(plan) => {
+                if !auth.assistant_operation_scopes.is_empty()
+                    && !plan.candidates.iter().any(|candidate| {
+                        let Some(chat) = candidate.chat_plan.as_ref() else {
+                            return false;
+                        };
+                        let Ok(path) =
+                            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                                &chat.path,
+                            )
+                        else {
+                            return false;
+                        };
+                        // Discovery uses the same translated member operation as
+                        // execution, using only the already-loaded candidate.
+                        crate::services::agent_operation_scope_service::authorize(
+                            &auth.assistant_operation_scopes,
+                            &candidate.service.id,
+                            candidate.service.catalog_service_id.as_deref(),
+                            None,
+                            "POST",
+                            &path,
+                            false,
+                            false,
+                        )
+                        .is_ok()
+                    })
+                {
+                    continue;
+                }
+                !plan.candidates.is_empty()
+            }
+            Err(
+                AppError::ServicePoolNoViableMember(_)
+                | AppError::ServicePoolMemberInvalid(_)
+                | AppError::BadRequest(_),
+            ) => continue,
+            Err(error) => return Err(error),
+        };
+        pools.push(PoolAlias {
+            id: format!("pool:{}", row.slug),
+            pool_id: row.id,
+            name: row.name,
+            owner_id: row.user_id,
+            slug_route: format!(
+                "{}/api/v1/proxy/s/{}/chat/completions",
+                state.config.base_url.trim_end_matches('/'),
+                row.slug
+            ),
+            available,
+        });
+    }
+    Ok(Json(PoolAliasesResponse { pools, next_offset }))
 }
 
 /// ANY /api/v1/llm/{provider_slug}/v1/{*path}
@@ -230,7 +346,15 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "llm.provider")
+        .await?;
+    if !auth_user.assistant_operation_scopes.is_empty() {
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
+    }
+
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmProvider,
@@ -257,7 +381,19 @@ pub async fn llm_proxy_request(
         super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
             .await?;
 
-    preflight_llm_deny_before_resolution(
+    let operation_path = if !auth_user.assistant_operation_scopes.is_empty()
+        && provider_slug == "openai-codex"
+        && !body_bytes.is_empty()
+    {
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes)
+            .map_err(|_| AppError::BadRequest("Invalid request JSON".into()))?;
+        llm_gateway_service::get_translator(&provider_slug)
+            .translate_request(&path, &json)?
+            .path
+    } else {
+        path.clone()
+    };
+    Box::pin(preflight_llm_deny_before_resolution(
         &state,
         &auth_user,
         &service_id,
@@ -268,8 +404,24 @@ pub async fn llm_proxy_request(
         } else {
             Some(&body_bytes)
         },
-    )
+    ))
     .await?;
+
+    let tool_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                &operation_path,
+            )?;
+            crate::services::tool_publication_service::gate(
+                &state.db,
+                &service,
+                &request_method_str,
+                &canonical,
+            )
+            .await?
+        } else {
+            None
+        };
 
     // Two-tier credential resolution:
     //   1. Prefer the new UserService / UserApiKey model (created via
@@ -290,22 +442,55 @@ pub async fn llm_proxy_request(
     // user has a perfectly valid UserService linked by catalog_service_id.
     let mut is_auto_connected_for_approval = false;
     let mut credential_source = None;
+    let mut operation_user_service_id = None;
+    let (mut dispatch_path, dispatch_body, dispatch_headers, dispatch_base) =
+        if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+            let translator = llm_gateway_service::get_translator(&provider_slug);
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                .map_err(|_| AppError::BadRequest("Invalid model request".into()))?;
+            let translated = translator.translate_request(&path, &json)?;
+            (
+                translated.path,
+                bytes::Bytes::from(
+                    serde_json::to_vec(&translated.body)
+                        .map_err(|_| AppError::BadRequest("Invalid model request".into()))?,
+                ),
+                chatgpt_translator::execution_headers(),
+                translator.gateway_base_url().map(str::to_owned),
+            )
+        } else {
+            (
+                path.clone(),
+                force_stream_usage_bytes_for_provider(&provider_slug, &path, body_bytes.clone()),
+                Vec::new(),
+                None,
+            )
+        };
+    let projection = crate::services::assistant_service_execution::HttpProjection {
+        apply_agent_override: false,
+        replace_headers: provider_slug == "openai-codex",
+        base_url: dispatch_base,
+        extra_headers: dispatch_headers,
+        ..Default::default()
+    };
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
-        match proxy_service::resolve_proxy_target_from_user_service(
-            &state.db,
-            &state.encryption_keys,
-            &state.node_ws_manager,
-            &user_id_str,
-            None,
-            Some(&service_id),
-            proxy_service::ProxyExecutionContext::new(
-                Some(&state.connection_expiry_notifier),
-                state.platform_user_rate_limit,
-            ),
+        match crate::services::assistant_service_execution::resolve_implicit_for_request(
+            &state,
+            &auth_user,
+            &service_id,
+            Some((
+                &request_method_str,
+                &dispatch_path,
+                query.as_deref(),
+                &dispatch_body,
+                &headers,
+                &projection,
+            )),
         )
         .await?
         {
             Some(resolution) => {
+                operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 let effective_owner = resolution
@@ -343,9 +528,60 @@ pub async fn llm_proxy_request(
                 (legacy, false, false, None)
             }
         };
+    let llm_scope = Box::pin(enforce_agent_llm_operations(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        method.as_str(),
+        &operation_path,
+        &headers,
+        query.as_deref(),
+        &body_bytes,
+    ))
+    .await?;
+    if llm_scope.identity.is_some() {
+        crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
+    }
+    let path = if provider_slug == "openai-codex" {
+        path
+    } else {
+        llm_scope.forwarding.clone().unwrap_or(path)
+    };
+    if provider_slug != "openai-codex" {
+        dispatch_path.clone_from(&path);
+    }
+    // Input limits check the bytes dispatch will send (Codex translation or
+    // stream-usage normalization are deterministic), before approvals and billing.
+    if llm_scope.identity.is_some() {
+        if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+            let translated = llm_gateway_service::get_translator(&provider_slug)
+                .translate_request(&path, &json)?;
+            llm_scope.check_outbound(
+                &auth_user,
+                method.as_str(),
+                &translated.path,
+                query.as_deref(),
+                &serde_json::to_vec(&translated.body).unwrap_or_default(),
+                &headers,
+            )?;
+        } else {
+            llm_scope.check_outbound(
+                &auth_user,
+                method.as_str(),
+                &path,
+                query.as_deref(),
+                &force_stream_usage_bytes_for_provider(&provider_slug, &path, body_bytes.clone()),
+                &headers,
+            )?;
+        }
+    }
+
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
-    check_llm_approval(
+    let approval_auto = check_llm_approval(
         &state,
         &auth_user,
         &service_id,
@@ -359,8 +595,33 @@ pub async fn llm_proxy_request(
         },
         owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
+        llm_scope.guest,
     )
     .await?;
+
+    let mut target = target;
+    projection.apply(&mut target);
+    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
+        &state,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        owner_for_approval.as_deref(),
+        &target,
+        &request_method_str,
+        &dispatch_path,
+        query.as_deref(),
+        &dispatch_body,
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None,
+        &headers,
+        &projection,
+    )
+    .await?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
 
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = owner_for_approval
@@ -372,6 +633,16 @@ pub async fn llm_proxy_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -380,14 +651,15 @@ pub async fn llm_proxy_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id.clone(),
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -397,8 +669,24 @@ pub async fn llm_proxy_request(
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
-    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let priced_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            tool_operation
+        } else {
+            state
+                .billing
+                .http_operation(&billing_ctx, &request_method_str, &operation_path)
+                .await
+                .inspect_err(|error| request_audit.admission_error(error))?
+        };
+    let billing_ctx = billing_ctx
+        .with_operation(priced_operation.as_deref())
+        .with_request_body(Some(&body_bytes));
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve credentials for injection. The new UserService path bakes the
     // credential into `target` (via auth_method / credential), so we only need
@@ -437,118 +725,219 @@ pub async fn llm_proxy_request(
 
     // OpenAI Codex: use the specialized HTTP SSE transport with Responses API
     // translation and Codex-specific headers.
-    let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
-        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
-            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
-        let usage_context = llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: Some(provider_slug.clone()),
-            service_id: Some(service_id.clone()),
-            model: body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            path: path.clone(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        };
+    let concurrency = crate::services::service_concurrency_service::acquire(
+        &state.db,
+        &target.service,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
+        admission
+            .http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                method.as_str(),
+                &dispatch_path,
+            )
+            .projected(&projection)
+    });
+    let execution = Box::pin(async {
+        if let (Some(chat), Some(admission), Some(id)) = (
+            auth_user.assistant_chat.as_deref(),
+            assistant_decision.admission.as_ref(),
+            operation_user_service_id.as_deref(),
+        ) {
+            let validation = async {
+                crate::services::assistant_service_execution::verify_resolved_projected(
+                    &state.db,
+                    &state.encryption_keys,
+                    chat,
+                    id,
+                    &target,
+                    method.as_str(),
+                    &dispatch_path,
+                    &projection,
+                )
+                .await?;
+                admission.revalidate(&state.db, id, Some(&target)).await
+            }
+            .await;
+            if let Err(error) = validation {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
+        let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+            let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+            let usage_context = llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: Some(provider_slug.clone()),
+                service_id: Some(service_id.clone()),
+                model: body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                path: path.clone(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            };
 
-        // Path determines response format: chat/completions → Chat Completions,
-        // responses → Responses API passthrough
-        let is_chat_completions_path = path.contains("chat/completions");
+            // Path determines response format: chat/completions → Chat Completions,
+            // responses → Responses API passthrough
+            let is_chat_completions_path = path.contains("chat/completions");
 
-        let translator = llm_gateway_service::get_translator(&provider_slug);
-        let translated = translator.translate_request(&path, &body_json)?;
-        let request_len = serde_json::to_vec(&translated.body)
-            .map(|bytes| bytes.len() as i64)
-            .unwrap_or(body_bytes.len() as i64);
+            let translator = llm_gateway_service::get_translator(&provider_slug);
+            let translated = translator.translate_request(&path, &body_json)?;
 
-        let bearer_token = extract_bearer_token(&delegated)?;
-        let is_streaming = body_json
-            .get("stream")
-            .and_then(|s| s.as_bool())
-            .unwrap_or(false);
-        let usage_complete = chatgpt_usage_callback(
-            state.billing.clone(),
-            metered.clone(),
-            request_len,
-            metered
-                .route
-                .as_ref()
-                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
-            body_json
-                .get("model")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-        );
+            let request_len = serde_json::to_vec(&translated.body)
+                .map(|bytes| bytes.len() as i64)
+                .unwrap_or(body_bytes.len() as i64);
 
-        state.billing.mark_forwarded(&metered).await?;
-        chatgpt_translator::send_to_chatgpt(
-            &translated.body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(usage_context),
-            Some(usage_complete),
-            billing_egress_permit,
-        )
-        .await?
-    } else {
-        let body = if body_bytes.is_empty() {
-            None
+            let bearer_token = extract_bearer_token(&delegated)?;
+            let is_streaming = body_json
+                .get("stream")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            let usage_complete = chatgpt_usage_callback(
+                state.billing.clone(),
+                metered.clone(),
+                request_len,
+                metered
+                    .route
+                    .as_ref()
+                    .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+                body_json
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+            );
+
+            state.billing.mark_forwarded(&metered).await?;
+            if let Some(guard) = egress_guard.as_ref()
+                && let Err(error) = guard.revalidate().await
+            {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+            chatgpt_translator::send_to_chatgpt(
+                &translated.body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(usage_context),
+                Some(usage_complete),
+                billing_egress_permit,
+            )
+            .await?
         } else {
-            Some(force_stream_usage_bytes_for_provider(
-                &provider_slug,
+            let body = if body_bytes.is_empty() {
+                None
+            } else {
+                Some(force_stream_usage_bytes_for_provider(
+                    &provider_slug,
+                    &path,
+                    body_bytes,
+                ))
+            };
+            let request_len = body.as_ref().map(|bytes| bytes.len() as i64).unwrap_or(0);
+
+            let reqwest_method = convert_method(&method)?;
+            let reqwest_headers = convert_headers(&headers);
+
+            state.billing.mark_forwarded(&metered).await?;
+            let downstream_result = proxy_service::forward_request_with_egress_guard(
+                llm_scope.client(&state.http_client),
+                &target,
+                reqwest_method,
                 &path,
-                body_bytes,
-            ))
+                query.as_deref(),
+                reqwest_headers,
+                proxy_service::ProxyBody::Buffered(body),
+                vec![], // no identity headers for LLM proxy
+                delegated,
+                None,
+                &state.token_exchange_cache,
+                &state.cloud_response_cache,
+                Vec::new(),
+                billing_egress_permit,
+                egress_guard.as_ref(),
+            )
+            .await;
+            if matches!(
+                &downstream_result,
+                Err(proxy_service::ForwardRequestError::PreDispatchRejected(_))
+            ) {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+            }
+            let downstream_response =
+                crate::services::assistant_service_execution::observe_transport(
+                    &state.db,
+                    auth_user.assistant_chat.as_deref(),
+                    assistant_decision.admission.as_ref(),
+                    downstream_result,
+                )
+                .await?;
+
+            let usage_context = llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: Some(provider_slug.clone()),
+                service_id: Some(service_id.clone()),
+                model: None,
+                path: path.clone(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            };
+
+            build_filtered_response(
+                downstream_response,
+                Some(usage_context),
+                state.config.proxy_stream_idle_timeout_secs,
+                metered.clone(),
+                state.billing.clone(),
+                request_len,
+            )
+            .await?
         };
-        let request_len = body.as_ref().map(|bytes| bytes.len() as i64).unwrap_or(0);
 
-        let reqwest_method = convert_method(&method)?;
-        let reqwest_headers = convert_headers(&headers);
-
-        state.billing.mark_forwarded(&metered).await?;
-        let downstream_response = proxy_service::forward_request(
-            &state.http_client,
-            &target,
-            reqwest_method,
-            &path,
-            query.as_deref(),
-            reqwest_headers,
-            proxy_service::ProxyBody::Buffered(body),
-            vec![], // no identity headers for LLM proxy
-            delegated,
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            billing_egress_permit,
-        )
-        .await?;
-
-        let usage_context = llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: Some(provider_slug.clone()),
-            service_id: Some(service_id.clone()),
-            model: None,
-            path: path.clone(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
-        };
-
-        build_filtered_response(
-            downstream_response,
-            Some(usage_context),
-            state.config.proxy_stream_idle_timeout_secs,
-            metered.clone(),
-            state.billing.clone(),
-            request_len,
-        )
-        .await?
+        Ok(response)
+    });
+    let response = match concurrency {
+        Some(lease) => {
+            let response = lease.run(execution).await?;
+            lease.hold_response(response)
+        }
+        None => execution.await?,
     };
+    let receipt_operation =
+        operation_descriptor::build_llm_descriptor(&request_method_str, &path, None);
+    let response = assistant_decision
+        .finish_http(
+            response,
+            state.db.clone(),
+            auth_user.assistant_chat.as_deref().cloned(),
+            &request_method_str,
+            crate::services::assistant_service_execution::HttpApprovalReceipt::new(
+                approval_auto,
+                &service_id,
+                &service.name,
+                &receipt_operation,
+            ),
+        )
+        .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -564,6 +953,7 @@ pub async fn llm_proxy_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
@@ -572,13 +962,32 @@ pub async fn llm_proxy_request(
 /// OpenAI-compatible gateway. Accepts OpenAI-format requests, routes to the
 /// correct provider based on the `model` field, translates request/response
 /// formats as needed.
-pub async fn gateway_request(
+pub fn gateway_request(
+    state: State<AppState>,
+    auth_user: AuthUser,
+    path: Path<String>,
+    request: Request<Body>,
+) -> futures::future::BoxFuture<'static, AppResult<Response>> {
+    Box::pin(gateway_request_inner(state, auth_user, path, request))
+}
+
+async fn gateway_request_inner(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(path): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    if !auth_user.assistant_operation_scopes.is_empty() {
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
+    }
+    let gateway_started_at = std::time::Instant::now();
+    let gateway_uri = request.uri().clone();
+    let gateway_extensions = request.extensions().clone();
+    llm_gateway_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
     auth_user.ensure_llm_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "llm.gateway")
+        .await?;
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmGateway,
@@ -586,8 +995,6 @@ pub async fn gateway_request(
 
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
-
-    let user_id_str = auth_user.user_id.to_string();
 
     let method = request.method().clone();
     let query = request.uri().query().map(String::from);
@@ -602,7 +1009,7 @@ pub async fn gateway_request(
     .await?;
 
     // Parse body as JSON to extract model
-    let mut body_json: serde_json::Value = if body_bytes.is_empty() {
+    let body_json: serde_json::Value = if body_bytes.is_empty() {
         return Err(AppError::ValidationError(
             "Request body is required with a 'model' field".to_string(),
         ));
@@ -621,6 +1028,69 @@ pub async fn gateway_request(
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
 
+    if let Some(pool_slug) = model.strip_prefix("pool:") {
+        if pool_slug.is_empty() || pool_slug.contains('/') {
+            return Err(AppError::BadRequest("Invalid pool model alias".into()));
+        }
+        let mut pool_request = Request::builder()
+            .method(method)
+            .uri(gateway_uri)
+            .body(Body::from(body_bytes))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        *pool_request.headers_mut() = headers;
+        *pool_request.extensions_mut() = gateway_extensions;
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::PoolGatewayIngress);
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::PoolIngressAdmitted);
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::ProxyExchangeStartedAt(gateway_started_at));
+        return Box::pin(super::proxy::proxy_request_by_slug(
+            State(state),
+            auth_user,
+            crate::telemetry::TelemetryContext::default(),
+            Path((pool_slug.to_owned(), path)),
+            pool_request,
+        ))
+        .await;
+    }
+
+    Box::pin(gateway_provider_request(
+        state,
+        auth_user,
+        path,
+        method,
+        query,
+        headers,
+        body_bytes,
+        body_json,
+        model,
+        is_streaming,
+        billing_egress_permit,
+    ))
+    .await
+}
+
+// Provider-specific resolution and translation is outside the pool entrance's
+// poll frame. A pool never constructs or polls this larger state machine.
+#[allow(clippy::too_many_arguments)]
+async fn gateway_provider_request(
+    state: AppState,
+    auth_user: AuthUser,
+    path: String,
+    method: Method,
+    query: Option<String>,
+    headers: axum::http::HeaderMap,
+    body_bytes: bytes::Bytes,
+    mut body_json: serde_json::Value,
+    model: String,
+    is_streaming: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
     // Resolve provider slug from model name
     let primary_slug =
         llm_gateway_service::resolve_provider_for_model(&model).ok_or_else(|| {
@@ -631,8 +1101,7 @@ pub async fn gateway_request(
 
     // Try to find the user's active token for the resolved provider.
     // For OpenAI models, fall back to openai-codex if openai is not connected.
-    let provider_slug =
-        resolve_provider_slug_with_fallback(&state.db, &user_id_str, primary_slug).await?;
+    let provider_slug = resolve_provider_slug_for_caller(&state, &auth_user, primary_slug).await?;
     body_json = force_stream_usage_for_provider(&provider_slug, &path, body_json);
 
     // Resolve the downstream service
@@ -644,7 +1113,25 @@ pub async fn gateway_request(
     // Get the translator
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
-    preflight_llm_deny_before_resolution(
+    // Apply translation if needed
+    let (final_path, final_body_bytes, extra_headers) = if translator.needs_translation() {
+        let translated = translator.translate_request(&path, &body_json)?;
+
+        let translated_bytes = serde_json::to_vec(&translated.body).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize translated request: {e}"))
+        })?;
+
+        (
+            translated.path,
+            Some(bytes::Bytes::from(translated_bytes)),
+            translated.extra_headers,
+        )
+    } else {
+        // M-2: body_bytes guaranteed non-empty (validated above), use directly
+        (path.clone(), Some(body_bytes.clone()), vec![])
+    };
+
+    Box::pin(preflight_llm_deny_before_resolution(
         &state,
         &auth_user,
         &service_id,
@@ -655,8 +1142,20 @@ pub async fn gateway_request(
         } else {
             Some(&body_bytes)
         },
-    )
+    ))
     .await?;
+
+    let tool_operation = if service.offering_kind
+        == crate::models::downstream_service::OfferingKind::Tool
+    {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(&final_path)?;
+        crate::services::tool_publication_service::gate(&state.db, &service, "POST", &canonical)
+            .await?
+    } else {
+        None
+    };
+    let requested_path = final_path.clone();
 
     // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
     //   1. Prefer the new UserService / UserApiKey model, which bakes the
@@ -674,22 +1173,36 @@ pub async fn gateway_request(
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
     let mut credential_source = None;
+    let mut operation_user_service_id = None;
+    let projection = crate::services::assistant_service_execution::HttpProjection {
+        apply_agent_override: false,
+        replace_headers: provider_slug == "openai-codex",
+        base_url: translator.gateway_base_url().map(str::to_owned),
+        extra_headers: if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_headers()
+        } else {
+            extra_headers.clone()
+        },
+        ..Default::default()
+    };
     let (target, resolved_via_user_service, master_credential) =
-        match proxy_service::resolve_proxy_target_from_user_service(
-            &state.db,
-            &state.encryption_keys,
-            &state.node_ws_manager,
-            &user_id_str,
-            None,
-            Some(&service_id),
-            proxy_service::ProxyExecutionContext::new(
-                Some(&state.connection_expiry_notifier),
-                state.platform_user_rate_limit,
-            ),
+        match crate::services::assistant_service_execution::resolve_implicit_for_request(
+            &state,
+            &auth_user,
+            &service_id,
+            Some((
+                "POST",
+                &final_path,
+                query.as_deref(),
+                final_body_bytes.as_deref().unwrap_or_default(),
+                &headers,
+                &projection,
+            )),
         )
         .await?
         {
             Some(resolution) => {
+                operation_user_service_id = Some(resolution.user_service_id.clone());
                 credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 effective_owner_for_approval = Some(
@@ -780,9 +1293,35 @@ pub async fn gateway_request(
             }
         };
 
+    let llm_scope = Box::pin(enforce_agent_llm_operations(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        method.as_str(),
+        &final_path,
+        &headers,
+        query.as_deref(),
+        final_body_bytes.as_deref().unwrap_or_default(),
+    ))
+    .await?;
+    if llm_scope.identity.is_some() {
+        crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
+    }
+    let final_path = llm_scope.forwarding.clone().unwrap_or(final_path);
+    // The gateway sends `final_body_bytes` unchanged on every branch.
+    llm_scope.check_outbound(
+        &auth_user,
+        method.as_str(),
+        &final_path,
+        query.as_deref(),
+        final_body_bytes.as_deref().unwrap_or_default(),
+        &headers,
+    )?;
+
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
-    check_llm_approval(
+    let approval_auto = check_llm_approval(
         &state,
         &auth_user,
         &service_id,
@@ -796,8 +1335,33 @@ pub async fn gateway_request(
         },
         effective_owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
+        llm_scope.guest,
     )
     .await?;
+
+    let mut target = target;
+    projection.apply(&mut target);
+    let assistant_decision = crate::services::assistant_service_execution::check_http_projected(
+        &state,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        effective_owner_for_approval.as_deref(),
+        &target,
+        "POST",
+        &final_path,
+        query.as_deref(),
+        final_body_bytes.as_deref().unwrap_or_default(),
+        headers
+            .get(crate::services::assistant_service_execution::ACK_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None,
+        &headers,
+        &projection,
+    )
+    .await?;
+    if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        return Ok((axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response());
+    }
 
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = effective_owner_for_approval
@@ -809,6 +1373,16 @@ pub async fn gateway_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -817,14 +1391,15 @@ pub async fn gateway_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id,
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -834,8 +1409,24 @@ pub async fn gateway_request(
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
-    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let priced_operation =
+        if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+            tool_operation
+        } else {
+            state
+                .billing
+                .http_operation(&billing_ctx, "POST", &requested_path)
+                .await
+                .inspect_err(|error| request_audit.admission_error(error))?
+        };
+    let billing_ctx = billing_ctx
+        .with_operation(priced_operation.as_deref())
+        .with_request_body(Some(&body_bytes));
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve delegated credentials. When the target came from the new
     // UserService path, the credential is already baked into `target`; we only
@@ -868,44 +1459,6 @@ pub async fn gateway_request(
                 provider_slug, e
             ))
         })?
-    };
-
-    // Apply translation if needed
-    let (final_path, final_body_bytes, extra_headers) = if translator.needs_translation() {
-        let translated = translator.translate_request(&path, &body_json)?;
-
-        let translated_bytes = serde_json::to_vec(&translated.body).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize translated request: {e}"))
-        })?;
-
-        (
-            translated.path,
-            Some(bytes::Bytes::from(translated_bytes)),
-            translated.extra_headers,
-        )
-    } else {
-        // M-2: body_bytes guaranteed non-empty (validated above), use directly
-        (path.clone(), Some(body_bytes), vec![])
-    };
-
-    // L-4: Override base URL immutably via shadow binding
-    let target = match translator.gateway_base_url() {
-        // M-5: Google AI uses OpenAI-compatible format but at a different base URL.
-        // No body translation needed, but the base URL must be overridden.
-        Some(base) => proxy_service::ProxyTarget {
-            workspace_destinations_pending: false,
-            target_id: None,
-            base_url: base.to_string(),
-            auth_method: target.auth_method,
-            auth_key_name: target.auth_key_name,
-            credential: target.credential,
-            service: target.service,
-            catalog_default_headers: target.catalog_default_headers,
-            user_service_default_headers: target.user_service_default_headers,
-            ws_frame_injections: target.ws_frame_injections,
-            connection_id: target.connection_id,
-        },
-        None => target,
     };
 
     let reqwest_method = convert_method(&method)?;
@@ -952,65 +1505,162 @@ pub async fn gateway_request(
 
     // OpenAI Codex: use the specialized HTTP SSE transport and preserve query
     // parameters on the translated request.
-    let response = if provider_slug == "openai-codex" {
-        let bearer_token = extract_bearer_token(&delegated)?;
-        // final_body_bytes is already the translated Responses API body
-        let translated_body: serde_json::Value =
-            serde_json::from_slice(final_body_bytes.as_deref().unwrap_or(&[]))
-                .map_err(|e| AppError::Internal(format!("Failed to parse translated body: {e}")))?;
+    let concurrency = crate::services::service_concurrency_service::acquire(
+        &state.db,
+        &target.service,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let egress_guard = assistant_decision.admission.as_ref().map(|admission| {
+        admission
+            .http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                method.as_str(),
+                &final_path,
+            )
+            .projected(&projection)
+    });
+    let execution = Box::pin(async {
+        if let (Some(chat), Some(admission), Some(id)) = (
+            auth_user.assistant_chat.as_deref(),
+            assistant_decision.admission.as_ref(),
+            billing_ctx.user_service_id.as_deref(),
+        ) {
+            let validation = async {
+                crate::services::assistant_service_execution::verify_resolved_projected(
+                    &state.db,
+                    &state.encryption_keys,
+                    chat,
+                    id,
+                    &target,
+                    method.as_str(),
+                    &final_path,
+                    &projection,
+                )
+                .await?;
+                admission.revalidate(&state.db, id, Some(&target)).await
+            }
+            .await;
+            if let Err(error) = validation {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+        }
+        let response = if provider_slug == "openai-codex" {
+            let bearer_token = extract_bearer_token(&delegated)?;
+            // final_body_bytes is already the translated Responses API body
+            let translated_body: serde_json::Value = serde_json::from_slice(
+                final_body_bytes.as_deref().unwrap_or(&[]),
+            )
+            .map_err(|e| AppError::Internal(format!("Failed to parse translated body: {e}")))?;
 
-        // Path determines response format: chat/completions → translate back
-        // to Chat Completions, responses → return Responses API as-is
-        let is_chat_completions_path = path.contains("chat/completions");
-        let usage_complete = chatgpt_usage_callback(
-            state.billing.clone(),
-            metered.clone(),
-            request_len,
-            metered
-                .route
-                .as_ref()
-                .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
-            Some(model.to_string()),
-        );
+            // Path determines response format: chat/completions → translate back
+            // to Chat Completions, responses → return Responses API as-is
+            let is_chat_completions_path = path.contains("chat/completions");
+            let usage_complete = chatgpt_usage_callback(
+                state.billing.clone(),
+                metered.clone(),
+                request_len,
+                metered
+                    .route
+                    .as_ref()
+                    .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric)),
+                Some(model.to_string()),
+            );
 
-        state.billing.mark_forwarded(&metered).await?;
-        chatgpt_translator::send_to_chatgpt(
-            &translated_body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(usage_context),
-            Some(usage_complete),
-            billing_egress_permit,
-        )
-        .await?
-    } else {
-        state.billing.mark_forwarded(&metered).await?;
-        let downstream_response = proxy_service::forward_request(
-            &state.http_client,
-            &target,
-            reqwest_method,
-            &final_path,
-            query.as_deref(),
-            reqwest_headers,
-            proxy_service::ProxyBody::Buffered(final_body_bytes),
-            vec![],
-            delegated,
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            billing_egress_permit,
-        )
-        .await?;
+            state.billing.mark_forwarded(&metered).await?;
+            if let Some(guard) = egress_guard.as_ref()
+                && let Err(error) = guard.revalidate().await
+            {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+                return Err(error);
+            }
+            chatgpt_translator::send_to_chatgpt(
+                &translated_body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(usage_context),
+                Some(usage_complete),
+                billing_egress_permit,
+            )
+            .await?
+        } else {
+            state.billing.mark_forwarded(&metered).await?;
+            let downstream_result = proxy_service::forward_request_with_egress_guard(
+                llm_scope.client(&state.http_client),
+                &target,
+                reqwest_method,
+                &final_path,
+                query.as_deref(),
+                reqwest_headers,
+                proxy_service::ProxyBody::Buffered(final_body_bytes),
+                vec![],
+                delegated,
+                None,
+                &state.token_exchange_cache,
+                &state.cloud_response_cache,
+                Vec::new(),
+                billing_egress_permit,
+                egress_guard.as_ref(),
+            )
+            .await;
+            if matches!(
+                &downstream_result,
+                Err(proxy_service::ForwardRequestError::PreDispatchRejected(_))
+            ) {
+                state
+                    .billing
+                    .reject_before_send(&metered, "assistant_authority_changed", false)
+                    .await?;
+            }
+            let downstream_response =
+                crate::services::assistant_service_execution::observe_transport(
+                    &state.db,
+                    auth_user.assistant_chat.as_deref(),
+                    assistant_decision.admission.as_ref(),
+                    downstream_result,
+                )
+                .await?;
 
-        // If translator needs translation, parse and translate the response
-        if translator.needs_translation() {
-            if is_streaming {
-                // Streaming: translate SSE events on the fly
-                build_translated_sse_response(
+            // If translator needs translation, parse and translate the response
+            if translator.needs_translation() {
+                if is_streaming {
+                    // Streaming: translate SSE events on the fly
+                    build_translated_sse_response(
+                        downstream_response,
+                        translator,
+                        Some(usage_context),
+                        idle_timeout_secs,
+                        metered.clone(),
+                        state.billing.clone(),
+                        request_len,
+                    )
+                    .await?
+                } else {
+                    // Non-streaming: buffer and translate the full response
+                    build_translated_json_response(
+                        downstream_response,
+                        translator.as_ref(),
+                        Some(usage_context),
+                        metered.clone(),
+                        state.billing.clone(),
+                        request_len,
+                    )
+                    .await?
+                }
+            } else {
+                build_filtered_response(
                     downstream_response,
-                    translator,
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -1018,30 +1668,33 @@ pub async fn gateway_request(
                     request_len,
                 )
                 .await?
-            } else {
-                // Non-streaming: buffer and translate the full response
-                build_translated_json_response(
-                    downstream_response,
-                    translator.as_ref(),
-                    Some(usage_context),
-                    metered.clone(),
-                    state.billing.clone(),
-                    request_len,
-                )
-                .await?
             }
-        } else {
-            build_filtered_response(
-                downstream_response,
-                Some(usage_context),
-                idle_timeout_secs,
-                metered.clone(),
-                state.billing.clone(),
-                request_len,
-            )
-            .await?
+        };
+
+        Ok(response)
+    });
+    let response = match concurrency {
+        Some(lease) => {
+            let response = lease.run(execution).await?;
+            lease.hold_response(response)
         }
+        None => execution.await?,
     };
+    let receipt_operation = operation_descriptor::build_llm_descriptor("POST", &path, None);
+    let response = assistant_decision
+        .finish_http(
+            response,
+            state.db.clone(),
+            auth_user.assistant_chat.as_deref().cloned(),
+            "POST",
+            crate::services::assistant_service_execution::HttpApprovalReceipt::new(
+                approval_auto,
+                &service_id,
+                &service.name,
+                &receipt_operation,
+            ),
+        )
+        .await;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1058,12 +1711,88 @@ pub async fn gateway_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Assistant selection is resolved before legacy provider fallback. In
+/// particular an org primary must reach its exact consent gate instead of
+/// silently becoming a personal Codex request.
+async fn resolve_provider_slug_for_caller(
+    state: &AppState,
+    auth: &AuthUser,
+    primary: &str,
+) -> AppResult<String> {
+    let Some(chat) = auth.assistant_chat.as_deref() else {
+        return resolve_provider_slug_with_fallback(&state.db, &auth.user_id.to_string(), primary)
+            .await;
+    };
+    let selection = state
+        .db
+        .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+        .find_one(doc! {
+            "kind":"selection", "user_id":&chat.user_id,
+            "conversation_id":&chat.conversation_id, "api_key_id":&chat.api_key_id,
+            "turn_id":&chat.turn_id, "expires_at":{"$gt":bson::DateTime::now()},
+        })
+        .await?;
+    let mut slugs = vec![primary];
+    if primary == "openai" {
+        slugs.push("openai-codex");
+    }
+    let mut primary_available = false;
+    for slug in slugs {
+        let (service, _) =
+            match llm_gateway_service::resolve_llm_service_by_slug(&state.db, slug).await {
+                Ok(resolved) => resolved,
+                Err(AppError::NotFound(_) | AppError::BadRequest(_)) => continue,
+                Err(error) => return Err(error),
+            };
+        if selection.as_ref().is_some_and(|row| {
+            row.get_str("catalog_service_id") == Ok(service.id.as_str())
+                || row
+                    .get_document("operation")
+                    .ok()
+                    .and_then(|op| op.get_str("provider").ok())
+                    == Some(service.id.as_str())
+        }) {
+            return Ok(slug.to_owned());
+        }
+        if slug == primary {
+            let memberships = crate::services::org_service::list_memberships_for_member(
+                &state.db,
+                &chat.user_id,
+                false,
+            )
+            .await?;
+            let rows = crate::services::user_service_service::list_user_services_with_sources_selected_in_group(
+                &state.db, &chat.user_id, false, false, &memberships,
+                crate::services::user_service_service::ServiceSelection {
+                    ids: None, catalog_service_id: Some(&service.id),
+                },
+            ).await?;
+            primary_available = rows.iter().any(|row| {
+                !matches!(
+                    row.source,
+                    crate::services::user_service_service::CredentialSource::Org {
+                        allowed: false,
+                        ..
+                    }
+                ) && (auth.allow_all_services
+                    || auth.allowed_service_ids.contains(&row.service.id)
+                    || service.inference.is_some())
+            });
+        }
+    }
+    if primary_available {
+        return Ok(primary.to_owned());
+    }
+    resolve_provider_slug_with_fallback(&state.db, &chat.user_id, primary).await
+}
 
 /// Try primary slug, then fall back to openai-codex for OpenAI models.
 async fn resolve_provider_slug_with_fallback(
@@ -1696,6 +2425,9 @@ async fn preflight_llm_deny_before_resolution(
         is_auto_connected: false,
     });
 
+    // Operation scopes are checked after credential resolution, which runs
+    // before approvals, billing and dispatch. Checking here would use the
+    // catalog-only identity and intersect sibling connections' scopes.
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
     let denied = approval_service::evaluate_deny_only(
         &state.db,
@@ -1727,11 +2459,12 @@ async fn check_llm_approval(
     body: Option<&[u8]>,
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
-) -> AppResult<()> {
+    operation_guest: bool,
+) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
-    let approval_outcome = approval_service::evaluate_and_check(
+    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -1741,11 +2474,16 @@ async fn check_llm_approval(
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected,
+        auth_user.assistant_chat.as_deref(),
     )
     .await?;
 
+    crate::services::agent_operation_scope_service::check_guest_approval(
+        operation_guest,
+        &approval_outcome,
+    )?;
     let pending = match approval_outcome {
-        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
+        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
         approval_service::ApprovalOutcome::Denied => {
             return Err(AppError::Forbidden(
                 "Operation denied by approval policy".to_string(),
@@ -1767,10 +2505,17 @@ async fn check_llm_approval(
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
     let timeout_secs = channel.approval_timeout_secs;
-    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.assistant_group = crate::services::org_group_service::approval_binding(
+        &state.db,
+        auth_user.assistant_group_id.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+    )
+    .await?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1802,7 +2547,12 @@ async fn check_llm_approval(
                 &req_id,
                 &state.config.frontend_url,
             )
-        })
+        })?;
+    if let Some(chat) = auth_user.assistant_chat.as_deref() {
+        crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
+            .await?;
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1811,6 +2561,134 @@ fn should_bypass_approval_flow(
     auth_method: &crate::mw::auth::AuthMethod,
 ) -> bool {
     !requires_approval || *auth_method == crate::mw::auth::AuthMethod::Session
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enforce_agent_llm_operations(
+    db: &mongodb::Database,
+    auth: &AuthUser,
+    user_service: Option<&str>,
+    catalog: &str,
+    method: &str,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+    body: &[u8],
+) -> AppResult<LlmOperationScope> {
+    use crate::services::agent_operation_scope_service as operations;
+    Box::pin(crate::services::org_agent_service::authorize_execution(
+        db,
+        auth,
+        user_service,
+    ))
+    .await?;
+    let (id, catalog_id) = operations::execution_identity(auth, user_service, catalog);
+    let scoped = operations::is_scoped(&auth.assistant_operation_scopes, id, catalog_id);
+    let method_override =
+        crate::services::mcp_service::http_carries_method_override(method, headers, query, body);
+    if !scoped {
+        // Guest and webhook limits are turn authority and apply to unscoped
+        // services too; ordinary keys return without database reads.
+        if method_override
+            && auth
+                .assistant_chat
+                .as_deref()
+                .is_some_and(|chat| chat.guest || chat.confirmation_policy.is_some())
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Guest and webhook calls forbid method overrides".into(),
+            ));
+        }
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path).ok();
+        let guest = Box::pin(operations::check_non_mcp_context(
+            db,
+            auth,
+            false,
+            id,
+            catalog_id,
+            method,
+            canonical.as_ref(),
+        ))
+        .await?;
+        return Ok(LlmOperationScope {
+            guest,
+            ..Default::default()
+        });
+    }
+    let canonical = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?;
+    let forwarding = operations::authorize(
+        &auth.assistant_operation_scopes,
+        id,
+        catalog_id,
+        None,
+        method,
+        &canonical,
+        method_override,
+        headers.contains_key(axum::http::header::UPGRADE),
+    )?;
+    let guest = Box::pin(operations::check_non_mcp_context(
+        db,
+        auth,
+        true,
+        id,
+        catalog_id,
+        method,
+        Some(&canonical),
+    ))
+    .await?;
+    Ok(LlmOperationScope {
+        forwarding,
+        guest,
+        identity: Some((id.to_owned(), catalog_id.map(str::to_owned))),
+    })
+}
+
+/// The operation scope that applied to an LLM call, kept until dispatch: input
+/// limits check the bytes actually sent (after translation and stream-usage
+/// normalization), and a scoped call never follows a redirect.
+#[derive(Default)]
+struct LlmOperationScope {
+    forwarding: Option<String>,
+    guest: bool,
+    identity: Option<(String, Option<String>)>,
+}
+
+impl LlmOperationScope {
+    fn check_outbound(
+        &self,
+        auth: &AuthUser,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        body: &[u8],
+        headers: &axum::http::HeaderMap,
+    ) -> AppResult<()> {
+        let Some((id, catalog)) = &self.identity else {
+            return Ok(());
+        };
+        crate::services::agent_operation_scope_service::check_inputs(
+            &auth.assistant_operation_scopes,
+            id,
+            catalog.as_deref(),
+            None,
+            method,
+            &crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?,
+            query,
+            body,
+            headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        )
+    }
+
+    fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
+        if self.identity.is_some() {
+            proxy_service::no_redirect_http_client()
+        } else {
+            shared
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2320,5 +3198,203 @@ mod tests {
     #[test]
     fn max_response_body_size_is_50mb() {
         assert_eq!(MAX_RESPONSE_BODY_SIZE, 50 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod agent_operation_tests {
+    use super::*;
+    use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
+    #[tokio::test]
+    async fn assistant_operation_scope_denies_llm_passthrough_gateway_and_inference_alias() {
+        use crate::models::{
+            agent_operation_scope::OperationSelection, api_key::ApiKey,
+            assistant_agent::AgentGrants,
+        };
+        use crate::services::{
+            agent_operation_scope_service as scopes,
+            assistant_authority_tests::{connected, fixture},
+            assistant_team_service as team,
+        };
+        let f = fixture("scoped_llm").await;
+        crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let provider:crate::models::provider_config::ProviderConfig=mongodb::bson::from_document(doc!{
+            "_id":&provider_id,"slug":"openai","name":"Test provider","provider_type":"api_key","is_active":true,
+            "created_by":&f.owner,"created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()
+        }).unwrap();
+        f.state
+            .db
+            .collection(crate::models::provider_config::COLLECTION_NAME)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.slug = "llm-openai".into();
+        catalog.provider_config_id = Some(provider_id);
+        f.state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let id = connected(&f.state.db, &f.owner, "limited-llm", "http://127.0.0.1:9").await;
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"catalog_service_id":&catalog.id}},
+            )
+            .await
+            .unwrap();
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Add(AgentGrants {
+                service_ids: vec![id.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        scopes::set(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &id,
+            &OperationSelection {
+                expected_revision: 0,
+                all_operations: false,
+                endpoint_ids: vec![],
+                rules: vec![],
+                contract_digest: None,
+                inputs: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        let key = f
+            .state
+            .db
+            .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id":&f.chat.api_key_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        for gateway in [false, true] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/llm/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(BillingRoutePolicy::Metered(if gateway {
+                    BillingIngress::LlmGateway
+                } else {
+                    BillingIngress::LlmProvider
+                }));
+            let response = if gateway {
+                gateway_request(
+                    State(f.state.clone()),
+                    auth.clone(),
+                    Path("chat/completions".into()),
+                    request,
+                )
+                .await
+            } else {
+                Box::pin(llm_proxy_request(
+                    State(f.state.clone()),
+                    auth.clone(),
+                    Path(("openai".into(), "chat/completions".into())),
+                    request,
+                ))
+                .await
+            };
+            assert!(
+                matches!(response, Err(AppError::ApiKeyScopeForbidden(_))),
+                "LLM path must refuse before any provider lookup effects"
+            );
+        }
+        let alias = scopes::execution_identity(&auth, Some("ungranted-instance"), &catalog.id);
+        assert!(
+            scopes::authorize(
+                &auth.assistant_operation_scopes,
+                alias.0,
+                alias.1,
+                None,
+                "POST",
+                &crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(
+                    "/chat/completions"
+                )
+                .unwrap(),
+                false,
+                false
+            )
+            .is_err()
+        );
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"_id": &catalog.id},
+                doc! {"$set":{"offering_kind":"tool"}},
+            )
+            .await
+            .unwrap();
+        let mut unrestricted = auth.clone();
+        unrestricted.assistant_operation_scopes.clear();
+        for gateway in [false, true] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/llm/openai/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(BillingRoutePolicy::Metered(if gateway {
+                    BillingIngress::LlmGateway
+                } else {
+                    BillingIngress::LlmProvider
+                }));
+            let response = if gateway {
+                gateway_request(
+                    State(f.state.clone()),
+                    unrestricted.clone(),
+                    Path("chat/completions".into()),
+                    request,
+                )
+                .await
+            } else {
+                Box::pin(llm_proxy_request(
+                    State(f.state.clone()),
+                    unrestricted.clone(),
+                    Path(("openai".into(), "chat/completions".into())),
+                    request,
+                ))
+                .await
+            };
+            assert!(
+                matches!(response, Err(AppError::ToolOperationNotPublished)),
+                "unpublished LLM Tool must fail before credential resolution: {response:?}"
+            );
+        }
+        f.state.db.drop().await.unwrap();
     }
 }

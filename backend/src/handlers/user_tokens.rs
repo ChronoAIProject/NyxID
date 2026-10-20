@@ -1635,6 +1635,12 @@ mod tests {
 
     fn test_auth_user() -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: String::new(),
@@ -1692,6 +1698,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1738,6 +1745,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
@@ -1745,6 +1753,7 @@ mod tests {
             attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
+            authorization_nonce: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
@@ -1754,6 +1763,7 @@ mod tests {
     fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),
@@ -2550,6 +2560,7 @@ mod tests {
                 use_platform_key: None,
                 service_id: Uuid::new_v4().to_string(),
                 label: None,
+                endpoint_url: None,
                 requested_by: None,
                 requesting_app_id: None,
                 requesting_app_name: None,

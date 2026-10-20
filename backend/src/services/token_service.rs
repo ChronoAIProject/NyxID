@@ -162,7 +162,7 @@ pub async fn create_session(
     create_session_with_transaction(db, user_id, ip_address, user_agent, None).await
 }
 
-async fn create_session_with_transaction(
+pub(crate) async fn create_session_with_transaction(
     db: &mongodb::Database,
     user_id: &str,
     ip_address: Option<&str>,
@@ -313,6 +313,7 @@ pub async fn prepare_session_tokens(
 
     // Persist refresh token metadata
     let new_refresh = RefreshToken {
+        protected_consent: None,
         id: refresh_id,
         jti: refresh_jti,
         client_id: Uuid::nil().to_string(), // first-party client
@@ -384,7 +385,7 @@ pub async fn create_mfa_pending_session(
 /// Does NOT generate a new session token (reuses the existing session).
 ///
 /// When `mcp_sessions` is provided, session revocations also cascade
-/// to MCP sessions for the affected user.
+/// to the affected user's bearer-less (session-fallback) MCP sessions.
 pub async fn refresh_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -457,12 +458,16 @@ pub async fn refresh_tokens(
                     }},
                 )
                 .await?;
-            return Err(AppError::Unauthorized(
+            // A distinct variant so `/oauth/token` keeps reporting this as
+            // `invalid_client` (the client must re-register) while every
+            // other refresh failure becomes `invalid_grant`. Same HTTP 401.
+            return Err(AppError::AuthenticationFailed(
                 "Issuing OAuth client is no longer active".to_string(),
             ));
         }
     }
 
+    let original_protected_consent = stored.protected_consent.clone();
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.
     //
@@ -549,6 +554,20 @@ pub async fn refresh_tokens(
         RefreshTokenDisposition::Rotate(token) => (token, false),
         RefreshTokenDisposition::Reuse(token) => (token, true),
     };
+    if active_token.protected_consent != original_protected_consent {
+        return Err(super::consent_service::grant_changed());
+    }
+    super::consent_service::validate_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        active_token
+            .scope
+            .as_deref()
+            .unwrap_or(FIRST_PARTY_ACCESS_SCOPES),
+        active_token.protected_consent.as_ref(),
+    )
+    .await?;
     let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
@@ -598,7 +617,7 @@ pub async fn refresh_tokens(
             restrictions,
         )?
     } else {
-        jwt::generate_oauth_access_token(
+        jwt::generate_oauth_access_token_with_consent(
             jwt_keys,
             config,
             &user_id,
@@ -609,10 +628,19 @@ pub async fn refresh_tokens(
             None,
             restrictions,
             &active_token.client_id,
+            active_token.protected_consent.as_ref(),
         )?
     };
 
     if reuse_existing_refresh_token {
+        super::consent_service::fence_protected_reference(
+            db,
+            &active_token.user_id,
+            &active_token.client_id,
+            scope,
+            active_token.protected_consent.as_ref(),
+        )
+        .await?;
         touch_session_last_active(db, session_id.as_deref(), now).await?;
         return build_reused_refresh_response(
             jwt_keys,
@@ -669,6 +697,17 @@ pub async fn refresh_tokens(
                 replacement_id = %recovered.id,
                 "Concurrent refresh rotation resolved to active replacement token"
             );
+            if recovered.protected_consent != active_token.protected_consent {
+                return Err(super::consent_service::grant_changed());
+            }
+            super::consent_service::fence_protected_reference(
+                db,
+                &active_token.user_id,
+                &active_token.client_id,
+                scope,
+                active_token.protected_consent.as_ref(),
+            )
+            .await?;
             touch_session_last_active(db, session_id.as_deref(), now).await?;
             return build_reused_refresh_response(
                 jwt_keys,
@@ -687,6 +726,7 @@ pub async fn refresh_tokens(
 
     // Persist new refresh token
     let new_refresh = RefreshToken {
+        protected_consent: active_token.protected_consent.clone(),
         id: new_refresh_id,
         jti: new_jti,
         client_id: active_token.client_id.clone(),
@@ -707,6 +747,18 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
+    if let Err(error) = super::consent_service::fence_protected_reference(
+        db,
+        &active_token.user_id,
+        &active_token.client_id,
+        scope,
+        active_token.protected_consent.as_ref(),
+    )
+    .await
+    {
+        super::oauth_service::revoke_issued_refresh(db, &new_refresh.jti).await?;
+        return Err(error);
+    }
     touch_session_last_active(db, session_id.as_deref(), now).await?;
 
     // Reuse the existing session token rather than generating a new orphan token.
@@ -752,9 +804,10 @@ pub async fn revoke_session(
         )
         .await?;
 
-    // Cascade: remove MCP sessions for the affected user
+    // Cascade: end the user's MCP sessions that authenticate without a bearer
     if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
-        mcp.remove_by_user_id(&session.user_id).await?;
+        mcp.remove_fallback_sessions_by_user_id(&session.user_id)
+            .await?;
     }
 
     tracing::info!(session_id = %session_id, "Session revoked");
@@ -979,6 +1032,7 @@ mod tests {
         let allowed_service_ids = vec!["svc-1".to_string()];
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: None,
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),
@@ -1154,6 +1208,7 @@ mod tests {
             crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
+                protected_consent: None,
                 id: Uuid::new_v4().to_string(),
                 jti: refresh_jti,
                 client_id: client_id.clone(),

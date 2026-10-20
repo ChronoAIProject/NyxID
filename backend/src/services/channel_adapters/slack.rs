@@ -38,6 +38,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "edit_window_closed",
 ];
 
+#[path = "slack_thread.rs"]
+mod thread;
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
 
@@ -281,19 +284,7 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
         "text": text,
     });
 
-    // Thread the reply correctly. Slack expects `thread_ts` to be the
-    // ROOT message's `ts`. The relay layer surfaces the inbound event's
-    // root in `metadata.thread_ts`, so prefer that. Fall back to
-    // `reply_to_platform_message_id` only when the agent is explicitly
-    // replying to a specific message (Slack will auto-resolve to the
-    // parent thread, but the explicit root anchor is more reliable).
-    let thread_ts = reply
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("thread_ts"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| reply.reply_to_platform_message_id.clone());
+    let thread_ts = crate::services::channel_image_audience::native_thread("slack", reply);
     if let Some(ts) = thread_ts {
         body["thread_ts"] = serde_json::json!(ts);
     }
@@ -332,7 +323,7 @@ fn build_update_message_body(
 
 #[cfg(test)]
 impl SlackAdapter {
-    pub(super) fn media_test_adapter(base: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
         Self {
             base_url: base.into(),
         }
@@ -341,6 +332,55 @@ impl SlackAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for SlackAdapter {
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        _ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(self.resolve_native_thread(facts))
+    }
+
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+
+    async fn thread_history(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        self.history_in_thread(http, credentials, target, before)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::slack(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            thread_history: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Slack"
     }
@@ -548,7 +588,7 @@ impl PlatformAdapter for SlackAdapter {
             let mut last = None;
             let context = build_post_message_body(reply, conversation_id);
             for attachment in &reply.attachments {
-                let upload = media::response_json(
+                let upload = media::platform_json(
                     http.post(format!("{}/files.getUploadURLExternal", self.base_url))
                         .bearer_auth(credentials.token)
                         .form(&[
@@ -558,10 +598,22 @@ impl PlatformAdapter for SlackAdapter {
                             ),
                             ("length", attachment.bytes.len().to_string()),
                         ]),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
                 )
                 .await?;
-                if upload["ok"] != true {
-                    return Err(media::upload_failed());
+                match upload["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                upload["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
                 }
                 let url = upload["upload_url"]
                     .as_str()
@@ -575,6 +627,7 @@ impl PlatformAdapter for SlackAdapter {
                     Some(&self.base_url),
                 )
                 .await?;
+                crate::services::channel_platform::mark_provider_attempt();
                 let response = client
                     .put(url)
                     .body(attachment.bytes.clone())
@@ -582,7 +635,13 @@ impl PlatformAdapter for SlackAdapter {
                     .await
                     .map_err(|_| media::upload_failed())?;
                 if !response.status().is_success() {
-                    return Err(media::upload_failed());
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            "Slack",
+                            &format!("HTTP {}: upload refused", response.status()),
+                            &[],
+                        ),
+                    );
                 }
                 let mut body =
                     serde_json::json!({"files": [{"id": id}], "channel_id": conversation_id});
@@ -592,25 +651,49 @@ impl PlatformAdapter for SlackAdapter {
                 if let Some(thread) = context.get("thread_ts") {
                     body["thread_ts"] = thread.clone();
                 }
-                let completed = media::response_json(
+                let completed = media::platform_json(
                     http.post(format!("{}/files.completeUploadExternal", self.base_url))
                         .bearer_auth(credentials.token)
                         .json(&body),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
                 )
                 .await?;
-                if completed["ok"] != true {
-                    return Err(media::upload_failed());
+                match completed["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                completed["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
                 }
                 // Completion returns file IDs, not chat message timestamps. Resolve
                 // the share receipt so subsequent /reply/update uses a real ts.
-                let info = media::response_json(
+                let info = media::platform_json(
                     http.get(format!("{}/files.info", self.base_url))
                         .bearer_auth(credentials.token)
                         .query(&[("file", id)]),
+                    "Slack",
+                    UNREACHABLE_TARGET_MARKERS,
                 )
                 .await?;
-                if info["ok"] != true {
-                    return Err(media::upload_failed());
+                match info["ok"].as_bool() {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Slack",
+                                info["error"].as_str().unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    None => return Err(media::upload_failed()),
                 }
                 last = ["public", "private"].iter().find_map(|scope| {
                     info["file"]["shares"][scope][conversation_id]
@@ -626,6 +709,7 @@ impl PlatformAdapter for SlackAdapter {
         let body = build_post_message_body(reply, conversation_id);
 
         let url = format!("{}/chat.postMessage", self.base_url);
+        crate::services::channel_platform::mark_provider_attempt();
         let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
@@ -795,6 +879,7 @@ impl PlatformAdapter for SlackAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: bot_id.to_string(),
+            display_name: None,
             platform_bot_username: username.to_string(),
         })
     }
@@ -929,6 +1014,7 @@ mod tests {
 
     fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
@@ -21,7 +22,7 @@ use crate::models::credit_schedule_period::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
-use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
+use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
 mod progress;
 
@@ -30,7 +31,7 @@ pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
 pub const PERIOD_LEASE_SECS: i64 = 300;
 const MAX_SCHEDULES_PER_TICK: i64 = 500;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CreateScheduleInput {
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
@@ -43,11 +44,16 @@ pub struct CreateScheduleInput {
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
     pub created_by: String,
+    pub amount: Option<Credits>,
+    pub service_limits: Vec<crate::models::credit_service_limit::CreditServiceLimitInput>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct UpdateScheduleInput {
     pub amount_credits: Option<i64>,
+    pub amount: Option<Credits>,
+    pub service_limits: Option<Vec<crate::models::credit_service_limit::CreditServiceLimitInput>>,
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
@@ -82,7 +88,19 @@ pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
 ) -> AppResult<CreditSchedule> {
-    let amount_micros = validate_amount(input.amount_credits)?;
+    let payload = serde_json::to_string(&input).map_err(|e| AppError::Internal(e.to_string()))?;
+    if let Some(row) =
+        super::submissions::existing(db, &input.created_by, input.request_id.as_deref(), &payload)
+            .await?
+    {
+        let schedule: CreditSchedule =
+            bson::from_document(row.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+        return insert_schedule_once(db, schedule).await;
+    }
+    let amount = match input.amount {
+        Some(amount) => validate_exact_amount(amount)?,
+        None => validate_amount(input.amount_credits)?,
+    };
     validate_expiry(&input.expiry)?;
     super::targets::validate_shape(
         input.target_kind,
@@ -100,11 +118,15 @@ pub async fn create_schedule(
     .await?;
     let scope =
         super::grants::resolve_service_scope(db, input.all_services, &input.service_refs).await?;
+    let service_limits =
+        super::service_limits::resolve(db, &scope, amount, &input.service_limits).await?;
     let now = Utc::now();
+    let request_id = input.request_id.clone();
+    let actor = input.created_by.clone();
     let schedule = CreditSchedule {
         id: Uuid::new_v4().to_string(),
-        amount_credits: input.amount_credits,
-        amount_micros,
+        amount_credits: amount.display_whole(),
+        amount,
         recurrence: input.recurrence,
         expiry: input.expiry,
         target_kind: input.target_kind,
@@ -112,6 +134,7 @@ pub async fn create_schedule(
         target_org_ids: input.target_org_ids,
         target_group_ids: input.target_group_ids,
         scope,
+        service_limits,
         reason: normalize_reason(input.reason)?,
         is_active: true,
         created_by: input.created_by,
@@ -121,10 +144,67 @@ pub async fn create_schedule(
         last_disbursed_at: None,
         skipped_periods: 0,
     };
+    if let Some(key) = request_id {
+        let mut schedule = schedule;
+        schedule.id = super::submissions::identity(&actor, &key)?;
+        let snapshot = encode(&schedule, "allocation schedule")?
+            .as_document()
+            .cloned()
+            .ok_or_else(|| AppError::Internal("Invalid schedule snapshot".into()))?;
+        let frozen = super::submissions::freeze(db, &actor, &key, &payload, snapshot).await?;
+        let schedule =
+            bson::from_document(frozen.snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+        insert_schedule_once(db, schedule).await
+    } else {
+        // A legacy caller cannot safely replay an error after success. Keep
+        // the original insert-and-return path without a new post-write read.
+        db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+            .insert_one(&schedule)
+            .await?;
+        Ok(schedule)
+    }
+}
+
+async fn insert_schedule_once(
+    db: &mongodb::Database,
+    schedule: CreditSchedule,
+) -> AppResult<CreditSchedule> {
+    let encoded = bson::to_document(&schedule).map_err(|e| AppError::Internal(e.to_string()))?;
+    let result = db
+        .collection::<CreditSchedule>(CREDIT_SCHEDULES)
+        .update_one(
+            doc! { "_id": &schedule.id },
+            doc! { "$setOnInsert": encoded },
+        )
+        .upsert(true)
+        .await;
+    match result {
+        Ok(_) => {}
+        Err(e) if is_duplicate_key_error(&e) => {}
+        Err(e) => return Err(e.into()),
+    }
     db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
-        .insert_one(&schedule)
-        .await?;
-    Ok(schedule)
+        .find_one(doc! { "_id": schedule.id })
+        .await?
+        .ok_or_else(|| AppError::Internal("Allocation schedule disappeared".into()))
+}
+
+fn validate_amount(amount_credits: i64) -> AppResult<Credits> {
+    if !(1..=MAX_GRANT_CREDITS).contains(&amount_credits) {
+        return Err(AppError::ValidationError(format!(
+            "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
+        )));
+    }
+    Ok(Credits::from_whole(amount_credits))
+}
+
+fn validate_exact_amount(amount: Credits) -> AppResult<Credits> {
+    if amount <= Credits::ZERO || amount > Credits::from_whole(MAX_GRANT_CREDITS) {
+        return Err(AppError::ValidationError(
+            "Allocation amount must be positive and at most 1000000 credits".into(),
+        ));
+    }
+    Ok(amount)
 }
 
 pub async fn update_schedule(
@@ -146,8 +226,11 @@ async fn update_schedule_with_current(
     input: UpdateScheduleInput,
     current: CreditSchedule,
 ) -> AppResult<CreditSchedule> {
-    let amount_credits = input.amount_credits.unwrap_or(current.amount_credits);
-    let amount_micros = validate_amount(amount_credits)?;
+    let amount = match (input.amount, input.amount_credits) {
+        (Some(amount), _) => validate_exact_amount(amount)?,
+        (None, Some(amount_credits)) => validate_amount(amount_credits)?,
+        (None, None) => validate_exact_amount(current.amount)?,
+    };
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
     validate_expiry(&expiry)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);
@@ -187,6 +270,25 @@ async fn update_schedule_with_current(
     } else {
         current.scope.clone()
     };
+    let service_limits = match input.service_limits {
+        Some(rules) => super::service_limits::resolve(db, &scope, amount, &rules).await?,
+        None => {
+            // Sparse status/reason updates never depend on current catalog metadata.
+            // Frozen canonical rules remain valid after a service is retired.
+            for rule in &current.service_limits {
+                if rule.limit > amount
+                    || (!scope.all_services
+                        && rule
+                            .service_ids
+                            .iter()
+                            .any(|id| !scope.service_ids.contains(id)))
+                {
+                    return Err(AppError::ValidationError("Existing service limits must remain within the amount and eligibility; update limits together".into()));
+                }
+            }
+            current.service_limits.clone()
+        }
+    };
     let reason = match input.reason {
         Some(reason) => normalize_reason(reason)?,
         None => current.reason.clone(),
@@ -205,14 +307,15 @@ async fn update_schedule_with_current(
                 "updated_at": bson::DateTime::from_chrono(current.updated_at),
             },
             doc! { "$set": {
-                "amount_credits": amount_credits,
-                "amount_micros": amount_micros,
+                "amount_credits": amount.display_whole(),
+                "amount": amount,
                 "expiry": encode(&expiry, "schedule expiry")?,
                 "target_kind": encode(&target_kind, "schedule target kind")?,
                 "target_user_ids": encode(&target_user_ids, "schedule targets")?,
                 "target_org_ids": &target_org_ids,
                 "target_group_ids": &target_group_ids,
                 "scope": encode(&scope, "schedule scope")?,
+                "service_limits": encode(&service_limits, "service limits")?,
                 "reason": reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
                 "is_active": input.is_active.unwrap_or(current.is_active),
                 "updated_at": bson::DateTime::from_chrono(updated_at),
@@ -276,6 +379,7 @@ pub async fn disburse_due(
     now: DateTime<Utc>,
     budget: usize,
 ) -> AppResult<DisbursementStats> {
+    super::exact_migration::require_ready(db).await?;
     let mut stats = DisbursementStats::default();
     abandon_elapsed_periods(db, now, &mut stats).await?;
     if budget == 0 {
@@ -345,7 +449,7 @@ pub async fn disburse_due(
                     BillingLedgerEventType::GrantIssued,
                     &grant.recipient_user_id,
                     &grant.id,
-                    grant.amount_micros,
+                    grant.amount,
                     None,
                     format!("grant-issued:{}", grant.id),
                 )
@@ -434,7 +538,7 @@ async fn claim_period(
             "period_start": bson::DateTime::from_chrono(period.start),
             "period_end": bson::DateTime::from_chrono(period.end),
             "status": "disbursing",
-            "amount_micros": schedule.amount_micros,
+            "amount": schedule.amount,
             "expires_at": resolve_expiry(&schedule.expiry, &period, claim_time)
                 .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
             "target_kind": encode(&schedule.target_kind, "period target kind")?,
@@ -442,6 +546,7 @@ async fn claim_period(
             "target_org_ids": &schedule.target_org_ids,
             "target_group_ids": &schedule.target_group_ids,
             "scope": encode(&schedule.scope, "period scope")?,
+            "service_limits": encode(&schedule.service_limits, "period limits")?,
             "reason": schedule.reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
             "cursor_user_id": Bson::Null,
             "disbursed_count": 0_i64,
@@ -565,35 +670,38 @@ fn grants_for_recipients(
             target_kind: period.target_kind,
             target_org_ids: period.target_org_ids.clone(),
             target_group_ids: period.target_group_ids.clone(),
-            amount_credits: period.amount_micros / CREDIT_MICROS,
-            amount_micros: period.amount_micros,
-            remaining_micros: period.amount_micros,
-            reserved_micros: 0,
+            amount_credits: period.amount.display_whole(),
+            amount: period.amount,
+            remaining: period.amount,
+            reserved: Credits::ZERO,
             scope: period.scope.clone(),
+            service_limits: period.service_limits.clone(),
             expires_at: period.expires_at,
             reason: period.reason.clone(),
             granted_by: schedule.created_by.clone(),
             status: CreditGrantStatus::Active,
             issued_ledgered_at: None,
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: Credits::ZERO,
             active_settlement: None,
             created_at: now,
             updated_at: now,
             consumed_at: None,
             expired_at: None,
             revoked_at: None,
+            revoke_requested_at: None,
+            revoke_requested_by: None,
         })
         .collect()
 }
 
-struct InsertChunkOutcome {
+pub(super) struct InsertChunkOutcome {
     inserted_indices: Vec<usize>,
     inserted_count: usize,
     duplicate_count: usize,
 }
 
-async fn insert_grant_chunk(
+pub(super) async fn insert_grant_chunk(
     db: &mongodb::Database,
     grants: &[CreditGrant],
 ) -> AppResult<InsertChunkOutcome> {
@@ -769,17 +877,6 @@ async fn abandon_elapsed_periods(
     Ok(())
 }
 
-fn validate_amount(amount_credits: i64) -> AppResult<i64> {
-    if !(1..=MAX_GRANT_CREDITS).contains(&amount_credits) {
-        return Err(AppError::ValidationError(format!(
-            "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
-        )));
-    }
-    amount_credits
-        .checked_mul(CREDIT_MICROS)
-        .ok_or_else(|| AppError::ValidationError("credit schedule amount is too large".to_string()))
-}
-
 fn validate_expiry(expiry: &CreditExpiryPolicy) -> AppResult<()> {
     if let CreditExpiryPolicy::AfterDays { days } = expiry
         && !(1..=3_650).contains(days)
@@ -827,7 +924,7 @@ fn encode<T: serde::Serialize>(value: &T, label: &str) -> AppResult<Bson> {
         .map_err(|error| AppError::Internal(format!("failed to encode {label}: {error}")))
 }
 
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     match error.kind.as_ref() {
         mongodb::error::ErrorKind::Command(command) => command.code == 11000,
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error)) => {

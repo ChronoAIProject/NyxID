@@ -533,6 +533,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     scheduled_write_enabled: bool,
     session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<CreatedApiKey> {
+    require_ordinary_purpose(purpose)?;
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
@@ -546,6 +547,19 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     let node_ids = allowed_node_ids.unwrap_or(&[]).to_vec();
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
+
+    if purpose == ApiKeyPurpose::PermissionBound
+        && (all_svcs
+            || all_nodes
+            || allow_auto_connected_services.unwrap_or(false)
+            || scopes != "proxy"
+            || svc_ids.len() != 1
+            || !node_ids.is_empty()
+            || callback_url.is_some()
+            || scheduled_write_enabled)
+    {
+        return Err(AppError::ValidationError("Permission-bound keys require one connection, proxy scope, and no node or callback authority".into()));
+    }
 
     if purpose == ApiKeyPurpose::ScheduledInvocation
         && (all_svcs
@@ -628,11 +642,15 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         is_active: true,
         created_at: now,
         rotation_predecessor_id: None,
+        machine_external_grants_present: false,
         state_version: 1,
         updated_at: Some(now),
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_platform_service_ids: Vec::new(),
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
         allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
@@ -701,7 +719,31 @@ pub async fn effective_allowed_service_ids(
     db: &mongodb::Database,
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
+    let access = super::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    effective_allowed_service_ids_with_access(db, key, access.as_deref()).await
+}
+
+pub async fn effective_allowed_service_ids_with_access(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Vec<String>> {
+    require_ordinary_purpose(key.purpose)?;
+    if let Some(ids) = super::org_agent_service::key_services(db, key, access).await? {
+        return Ok(ids);
+    }
     let mut ids = key.allowed_service_ids.clone();
+    if !key.allowed_platform_service_ids.is_empty() {
+        ids.extend(key.allowed_platform_service_ids.iter().cloned());
+        ids.sort();
+        ids.dedup();
+    }
     if key.allow_auto_connected_services && !key.allow_all_services {
         ids.extend(active_auto_connected_service_ids(db, &key.user_id).await?);
         ids.sort();
@@ -736,7 +778,7 @@ pub async fn active_auto_connected_service_ids(
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -748,7 +790,7 @@ pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<V
 /// Get a single API key by ID, verifying ownership.
 pub async fn get_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<ApiKey> {
     db.collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))
 }
@@ -779,7 +821,8 @@ pub(crate) async fn delete_api_key_in_session(
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
     let collection = db.collection::<ApiKey>(API_KEYS);
-    let read = collection.find_one(doc! {"_id": key_id, "user_id": user_id});
+    let read = collection
+        .find_one(doc! {"_id": key_id, "user_id": user_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]}});
     let key = match session.as_deref_mut() {
         Some(session) => read.session(session).await?,
         None => read.await?,
@@ -996,7 +1039,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                 {
-                    if existing.user_id != user_id {
+                    if existing.user_id != user_id || matches!(existing.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
                         return Err(AppError::NotFound("API key not found".to_string()));
                     }
                     if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
@@ -1021,6 +1064,12 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                if matches!(old_key.purpose, ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport) {
+                    return Err(AppError::NotFound("API key not found".into()));
+                }
+                if old_key.purpose == ApiKeyPurpose::PermissionBound {
+                    return Err(AppError::Forbidden("Reissue permission-bound keys through /permission-keys, then revoke the predecessor".into()));
+                }
                 if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
                     return Err(AppError::DurableGrantMismatch(
                         "scheduled_invocation keys must be reprovisioned from a fresh scope plan"
@@ -1131,11 +1180,17 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     is_active: true,
                     created_at: rotation_material.created_at,
                     rotation_predecessor_id: Some(old_key.id.clone()),
+                    machine_external_grants_present: false,
                     state_version: 1,
                     updated_at: Some(rotation_material.created_at),
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_platform_service_ids: Vec::new(),
+                    assistant_group_id: None,
+                    assistant_agent_owner_id: None,
+                    // Ordinary keys keep their operation scopes; conversation
+                    // keys are overwritten from agent authority below.
+                    assistant_operation_scopes: old_key.assistant_operation_scopes.clone(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
                     allow_auto_connected_services: old_key.allow_auto_connected_services,
@@ -1198,30 +1253,79 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .session(&mut *session)
                         .await?
                         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-                    let full = conversation.access_mode
-                        == crate::models::assistant_conversation::AccessMode::Full;
-                    successor.scopes =
-                        super::assistant_agent_credential_service::ASSISTANT_SCOPES.into();
-                    if full {
-                        successor.scopes.push(' ');
-                        successor
-                            .scopes
-                            .push_str(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE);
-                    }
-                    successor.allowed_service_ids.clear();
-                    successor.allowed_node_ids.clear();
-                    successor.allow_all_services = full;
+                    // The successor carries exactly its thread's agent authority:
+                    // Full for NyxBot, the durable grants for a specialist.
+                    let authority =
+                        super::assistant_agent_credential_service::authority_in_session(
+                            &db,
+                            &conversation,
+                            &mut *session,
+                        )
+                        .await?;
+                    let fields = authority.key_fields();
+                    successor.scopes = fields.get_str("scopes").unwrap_or("proxy").to_owned();
+                    successor.allow_all_services =
+                        fields.get_bool("allow_all_services").unwrap_or(false);
                     successor.allow_all_nodes = true;
-                    successor.allow_auto_connected_services = true;
+                    successor.allow_auto_connected_services = fields
+                        .get_bool("allow_auto_connected_services")
+                        .unwrap_or(false);
+                    match &authority {
+                        super::assistant_agent_credential_service::KeyAuthority::Subagent(
+                            grants,
+                            scopes,
+                            owner,
+                        ) => {
+                            successor.assistant_agent_owner_id = Some(owner.clone());
+                            successor.assistant_operation_scopes = scopes.clone();
+                            successor.allowed_service_ids = grants.service_ids.clone();
+                            successor.allowed_platform_service_ids =
+                                grants.platform_service_ids.clone();
+                        }
+                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            successor.assistant_operation_scopes.clear();
+                            successor.allowed_service_ids.clear();
+                            successor.allowed_platform_service_ids.clear();
+                        }
+                    }
+                    successor.allowed_node_ids.clear();
+                    successor.assistant_group_id = conversation
+                        .group_request_id
+                        .as_ref()
+                        .and(conversation.group_id.clone());
+                    if successor.assistant_group_id.is_some() {
+                        // Group authentication binds the key to its hidden
+                        // thread. Move that binding with the encrypted successor,
+                        // rather than waiting for the next turn to refresh it.
+                        db.collection::<bson::Document>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &conversation.id, "user_id": &user_id,
+                            "credential_api_key_id": &old_key.id},
+                            doc! {"$set": {"credential_api_key_id": &successor.id}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    }
+                    let mut update = fields;
+                    update.insert(
+                        "assistant_group_id",
+                        bson::to_bson(&successor.assistant_group_id)
+                            .expect("group binding serialization"),
+                    );
+                    update.insert("allowed_node_ids", bson::Bson::Array(Vec::new()));
+                    if !update.contains_key("allowed_service_ids") {
+                        update.insert("allowed_service_ids", bson::Bson::Array(Vec::new()));
+                        update.insert(
+                            "allowed_platform_service_ids",
+                            bson::Bson::Array(Vec::new()),
+                        );
+                    }
                     key_mutations::update_one(
                         &db,
                         doc! {"_id": &successor.id, "user_id": &user_id},
-                        doc! {"$set": {
-                            "scopes": &successor.scopes,
-                            "allowed_service_ids": [], "allowed_node_ids": [],
-                            "allow_all_services": full, "allow_all_nodes": true,
-                            "allow_auto_connected_services": true,
-                        }},
+                        doc! {"$set": update},
                         Some(&mut *session),
                     )
                     .await?;
@@ -1374,13 +1478,34 @@ pub async fn update_api_key_scope_with_expected_state_version(
 ) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
         && existing.state_version != expected
     {
         return Err(stale_api_key_conflict());
+    }
+
+    if existing.purpose == ApiKeyPurpose::PermissionBound {
+        return Err(AppError::Forbidden("Permission-bound key authority is immutable; use /permission-keys to pause or reissue it".into()));
+    }
+    if existing
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != user_id)
+        && (scopes.is_some()
+            || allowed_service_ids.is_some()
+            || allowed_node_ids.is_some()
+            || allow_all_services.is_some()
+            || allow_all_nodes.is_some()
+            || allow_auto_connected_services.is_some()
+            || platform.is_some()
+            || callback_url.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization thread authority is managed through the agent's grants".into(),
+        ));
     }
 
     if existing.purpose == ApiKeyPurpose::ScheduledInvocation
@@ -1531,7 +1656,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Ok(existing);
     }
 
-    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true };
+    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} };
     if let Some(expected) = expected_state_version {
         filter.insert("state_version", expected);
     }
@@ -1547,7 +1672,21 @@ pub async fn update_api_key_scope_with_expected_state_version(
         .ok_or_else(|| AppError::Internal("API key disappeared after update".to_string()))
 }
 
-/// Validate an API key from a request. Returns the user_id if valid.
+/// Public runtime keys never acquire ordinary owner, service or node authority.
+/// This boundary is independent of feature flags and of caller-supplied scopes.
+pub(crate) fn require_ordinary_purpose(purpose: ApiKeyPurpose) -> AppResult<()> {
+    if matches!(
+        purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) {
+        return Err(AppError::Forbidden(
+            "Public runtime keys cannot use ordinary execution".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a primary or child credential without widening the parent purpose.
 pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
@@ -1579,9 +1718,18 @@ pub async fn validate_api_key(
         (parent, Some(child.id))
     };
 
+    if matches!(
+        key.purpose,
+        ApiKeyPurpose::PublicNyxbot | ApiKeyPurpose::SharedEntryTransport
+    ) && credential_id.is_some()
+    {
+        return Err(AppError::Unauthorized(
+            "Public runtime keys cannot have child credentials".into(),
+        ));
+    }
     // Check expiration
     if let Some(expires_at) = key.expires_at
-        && expires_at < Utc::now()
+        && expires_at <= Utc::now()
     {
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
@@ -1623,6 +1771,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -1754,17 +1905,14 @@ mod tests {
         let (prefix, full_key, hash) = generate_scoped_api_key();
         assert!(
             prefix.starts_with("nyxid_ag_"),
-            "prefix should start with nyxid_ag_, got: {prefix}"
+            "prefix should start with nyxid_ag_"
         );
         assert!(
             full_key.starts_with("nyxid_ag_"),
-            "full_key should start with nyxid_ag_, got: {full_key}"
+            "full_key should start with nyxid_ag_"
         );
         assert_eq!(hash.len(), 64, "hash should be 64 hex chars");
-        assert!(
-            hex::decode(&hash).is_ok(),
-            "hash should be valid hex: {hash}"
-        );
+        assert!(hex::decode(&hash).is_ok(), "hash should be valid hex");
     }
 
     #[test]

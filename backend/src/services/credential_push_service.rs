@@ -992,6 +992,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
@@ -1059,7 +1060,10 @@ mod no_auth_strict_push_tests {
         mgr.record_capabilities(
             "node-1",
             &NodeCapabilitiesMsg {
+                machine: None,
                 http_signature_v2: false,
+                proxy_upload_v1: false,
+                http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: false,
                 proxy_max_body_size: None,

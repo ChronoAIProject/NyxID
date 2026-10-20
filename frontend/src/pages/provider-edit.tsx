@@ -1,6 +1,7 @@
 import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
-import type { ProviderConfig } from "@/types/api";
+import { canAdminWrite, type ProviderConfig } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
 import {
   useChangeReview,
@@ -17,6 +18,7 @@ import {
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { Separator } from "@/components/ui/separator";
 import {
   useAppForm,
@@ -50,6 +52,7 @@ import {
 export function ProviderEditPage() {
   const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
+  useBreadcrumbLabel(provider?.name);
   if (isLoading && !provider) return <Skeleton className="h-96 w-full" />;
   if (!provider)
     return (
@@ -69,6 +72,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
   const isMounted = useEditorMounted();
   const navigate = useNavigate();
   const updateMutation = useUpdateProvider(providerId);
+  const isAdmin = canAdminWrite(useAuthStore((state) => state.user));
 
   const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
@@ -174,7 +178,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -194,7 +198,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             />
 
             <div>
-              <p className="text-[12px] font-medium mb-1">Slug</p>
+              <p className="text-12 font-medium mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -202,7 +206,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             </div>
 
             <div>
-              <p className="text-[12px] font-medium mb-1">Provider Type</p>
+              <p className="text-12 font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -220,7 +224,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -318,7 +322,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -430,6 +434,16 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <p className="text-xs text-muted-foreground">
                         Only fill in if you want to change the client secret.
                       </p>
+                      {!isAdmin && provider.has_client_secret && (
+                        <p className="text-xs text-muted-foreground">
+                          Catalog Managers: on a provider someone else
+                          created, URLs, credential mode and token settings
+                          can change only before anyone has connected, and
+                          only with the current client ID and secret
+                          re-entered here. Replacing the client requires an
+                          Admin.
+                        </p>
+                      )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -455,13 +469,36 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     </FormItem>
                   )}
                 />
+                <FormField
+                  control={form.control}
+                  name="authorization_nonce_required"
+                  render={({ field }) => (
+                    <FormItem className="flex items-center justify-between rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <FormLabel>Authorization nonce required</FormLabel>
+                        <p className="text-xs text-muted-foreground">
+                          Generate a fresh nonce for each hosted OAuth
+                          authorization attempt.
+                          Enable only when the provider requires it, after
+                          upgrading all backend replicas.
+                        </p>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value ?? false}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
               </>
             )}
 
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -595,7 +632,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   Telegram Widget Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -651,7 +688,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">
+                <h3 className="text-13 font-semibold">
                   API Key Configuration
                 </h3>
 
@@ -663,7 +700,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />

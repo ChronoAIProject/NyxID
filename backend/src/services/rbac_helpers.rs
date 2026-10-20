@@ -299,6 +299,7 @@ mod tests {
             client_id: format!("sa_{id}"),
             client_secret_hash: "hash".to_string(),
             platform_protected: false,
+            catalog_scope_authorized: false,
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             curation_grant: None,
             credential_generation: 0,

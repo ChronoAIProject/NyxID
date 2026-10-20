@@ -1109,7 +1109,7 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     baseProps.onSuccess = vi.fn();
   });
 
-  it("keeps required send permission when a CLI scope override omits it", async () => {
+  it("keeps a read-only CLI scope override without adding send", async () => {
     const user = userEvent.setup();
     const read = "https://www.googleapis.com/auth/gmail.readonly";
     const send = "https://www.googleapis.com/auth/gmail.send";
@@ -1125,7 +1125,7 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
               scope: send,
               label: "Gmail (send)",
               description: "Send email.",
-              required: true,
+              required: false,
             },
           ],
         };
@@ -1141,12 +1141,10 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     const reauth = await screen.findByRole("button", {
       name: /Re-authorize with these permissions/i,
     });
-    expect(
-      screen.getByRole("button", { name: /Gmail \(send\)/ }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Gmail \(send\)/ })).toBeEnabled();
     await user.click(reauth);
     expect(mockOAuthFlow).toHaveBeenCalledWith(
-      expect.objectContaining({ scopeOverride: [read, send] }),
+      expect.objectContaining({ scopeOverride: [read] }),
     );
   });
 

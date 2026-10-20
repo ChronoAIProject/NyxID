@@ -1,6 +1,7 @@
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
-    COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceInference,
+    COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceCapabilities,
+    ServiceInference, VoiceInference,
 };
 use crate::models::service_billing::{BillingMetric, LanePricing, PricingSyncStatus};
 use mongodb::bson::{self, doc};
@@ -16,6 +17,7 @@ pub struct InferenceView {
     pub status_slug: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub realtime: bool,
+    pub voice: Option<VoiceInference>,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -24,10 +26,18 @@ pub struct LanePricingView {
     pub credits_per_unit: String,
     pub sync_status: PricingSyncStatus,
     pub components: Vec<LaneComponentView>,
+    pub operations: Vec<OperationPricingView>,
 }
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct LaneComponentView {
     pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    pub sync_status: PricingSyncStatus,
+}
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct OperationPricingView {
+    pub operation: String,
+    pub label: String,
     pub credits_per_unit: String,
     pub sync_status: PricingSyncStatus,
 }
@@ -37,6 +47,16 @@ impl From<&LanePricing> for LanePricingView {
             metric: price.metric,
             credits_per_unit: price.credits_per_unit.clone(),
             sync_status: price.sync_status,
+            operations: price
+                .operations
+                .iter()
+                .map(|o| OperationPricingView {
+                    operation: o.operation.clone(),
+                    label: crate::services::channel_billing_service::operation_label(&o.operation),
+                    credits_per_unit: o.credits_per_unit.clone(),
+                    sync_status: o.sync_status,
+                })
+                .collect(),
             components: price
                 .components
                 .iter()
@@ -63,7 +83,8 @@ pub fn view(
     service.inference.as_ref().map(|inference| InferenceView {
         wire_protocol: inference.wire_protocol,
         model_list: inference.model_list,
-        realtime: inference.realtime,
+        realtime: inference.realtime || inference.voice.is_some(),
+        voice: inference.voice.clone(),
         binding: if available { "platform" } else { "user" }.to_string(),
         status_slug: (!available).then(|| provider_slug.unwrap_or(&service.slug).to_string()),
     })
@@ -84,6 +105,7 @@ pub fn default_inference(slug: &str) -> Option<ServiceInference> {
         wire_protocol,
         model_list: true,
         realtime,
+        voice: super::inference_voice::default_voice(slug),
     })
 }
 
@@ -102,6 +124,76 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
             doc! { "slug": slug, "inference": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
             doc! { "$set": { "inference": bson::to_bson(&default_inference(slug)).expect("inference serialization") } },
         ).await?;
+        if let Some(voice) = super::inference_voice::default_voice(slug) {
+            // Do not replace an existing inference block or resurrect an admin clear.
+            db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
+                doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
+                doc! { "$set": { "inference.voice": bson::to_bson(&voice).expect("voice serialization") } },
+            ).await?;
+        }
     }
     Ok(())
+}
+
+/// Response-only projection: the derived voice flag is never persisted or accepted on writes.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ServiceCapabilitiesView {
+    #[serde(flatten)]
+    pub transport: ServiceCapabilities,
+    pub supports_realtime_voice: bool,
+}
+
+pub fn capabilities(service: &DownstreamService) -> Option<ServiceCapabilitiesView> {
+    let voice = service.inference.as_ref().and_then(|i| i.voice.as_ref());
+    (service.capabilities.is_some() || voice.is_some()).then(|| ServiceCapabilitiesView {
+        transport: service.capabilities.clone().unwrap_or_default(),
+        supports_realtime_voice: voice.is_some(),
+    })
+}
+
+pub fn normalized(inference: &ServiceInference) -> ServiceInference {
+    let mut inference = inference.clone();
+    inference.realtime |= inference.voice.is_some();
+    inference
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LanePricingView;
+    use crate::models::service_billing::{
+        BillingMetric, LanePricing, OperationPrice, PricingSyncStatus,
+    };
+
+    #[test]
+    fn operation_labels_describe_only_channel_operations() {
+        let price = |operation: &str| OperationPrice {
+            operation: operation.into(),
+            credits_per_unit: "1".into(),
+            lago_metric_code: format!("op_{operation}"),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        // A non-X service, such as an overlay with its own `get_me`.
+        let view = LanePricingView::from(&LanePricing {
+            metric: BillingMetric::Requests,
+            credits_per_unit: "1".into(),
+            lago_metric_code: "platform_svc_api-reddit_byok".into(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+            components: vec![],
+            operations: ["get_me", "create_tweet", "channel_dm_send"]
+                .map(price)
+                .to_vec(),
+        });
+        assert_eq!(
+            view.operations
+                .iter()
+                .map(|operation| operation.label.as_str())
+                .collect::<Vec<_>>(),
+            ["get_me", "create_tweet", "Channel direct message sent"]
+        );
+        assert!(
+            crate::services::channel_billing_service::declared_operations("api-reddit").is_empty()
+        );
+    }
 }

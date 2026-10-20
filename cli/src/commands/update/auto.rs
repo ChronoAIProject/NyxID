@@ -1,3 +1,6 @@
+use crate::tls::environment::{
+    ca_environment_from_env, plist_ca_environment, systemd_ca_environment,
+};
 use std::{
     fs,
     io::Write,
@@ -166,6 +169,8 @@ pub async fn run(command: AutoUpdateCommands) -> Result<()> {
     };
     match command {
         AutoUpdateCommands::Enable { interval_hours } => {
+            crate::tls::shared_config()?;
+            let ca_environment = ca_environment_from_env()?;
             let binary = super::active_binary_path()?;
             let binary = if binary.is_absolute() {
                 binary
@@ -183,7 +188,7 @@ pub async fn run(command: AutoUpdateCommands) -> Result<()> {
             policy.next_eligible_check = Some(Utc::now());
             write_in(&root, &policy)?;
             install_controller(&root, &std::env::current_exe()?)?;
-            if let Err(error) = install_scheduler(&root, &binary).await {
+            if let Err(error) = install_scheduler(&root, &binary, &ca_environment).await {
                 policy.last_result = Some("scheduler_install_failed".into());
                 write_in(&root, &policy)?;
                 return Err(error);
@@ -556,7 +561,8 @@ fn unit_quote(value: &str, exec: bool) -> String {
     )
 }
 
-fn launchd_plist(root: &Path, binary: &Path) -> String {
+fn launchd_plist(root: &Path, binary: &Path, ca: &[(&str, String)]) -> String {
+    let ca_environment = plist_ca_environment(ca);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -565,7 +571,7 @@ fn launchd_plist(root: &Path, binary: &Path) -> String {
 <key>ProgramArguments</key><array><string>{controller}</string><string>update</string><string>auto</string><string>run</string></array>
 <key>StartInterval</key><integer>{TICK_SECONDS}</integer><key>RunAtLoad</key><true/>
 <key>ProcessType</key><string>Background</string>
-<key>EnvironmentVariables</key><dict><key>NYXID_INSTALL_ROOT</key><string>{root}</string><key>NYXID_ACTIVE_SYMLINK</key><string>{binary}</string><key>NYXID_NO_UPDATE_CHECK</key><string>1</string><key>NYXID_TELEMETRY</key><string>0</string></dict>
+<key>EnvironmentVariables</key><dict><key>NYXID_INSTALL_ROOT</key><string>{root}</string><key>NYXID_ACTIVE_SYMLINK</key><string>{binary}</string><key>NYXID_NO_UPDATE_CHECK</key><string>1</string><key>NYXID_TELEMETRY</key><string>0</string>{ca_environment}</dict>
 </dict></plist>
 "#,
         binary = xml(&binary.to_string_lossy()),
@@ -574,9 +580,10 @@ fn launchd_plist(root: &Path, binary: &Path) -> String {
     )
 }
 
-fn systemd_service(root: &Path, binary: &Path) -> String {
+fn systemd_service(root: &Path, binary: &Path, ca: &[(&str, String)]) -> String {
+    let ca_environment = systemd_ca_environment(ca);
     format!(
-        "[Unit]\nDescription=NyxID verified automatic upgrade\n[Service]\nType=oneshot\nExecStart={} update auto run\nEnvironment={} {} NYXID_NO_UPDATE_CHECK=1 NYXID_TELEMETRY=0\nTimeoutStartSec=16min\nKillMode=control-group\n",
+        "[Unit]\nDescription=NyxID verified automatic upgrade\n[Service]\nType=oneshot\nExecStart={} update auto run\nEnvironment={} {} NYXID_NO_UPDATE_CHECK=1 NYXID_TELEMETRY=0\n{ca_environment}TimeoutStartSec=16min\nKillMode=control-group\n",
         unit_quote(&root.join(".update-controller").to_string_lossy(), true),
         unit_quote(&format!("NYXID_INSTALL_ROOT={}", root.display()), false),
         unit_quote(&format!("NYXID_ACTIVE_SYMLINK={}", binary.display()), false)
@@ -638,7 +645,7 @@ fn write_schedule(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-async fn install_scheduler(root: &Path, binary: &Path) -> Result<()> {
+async fn install_scheduler(root: &Path, binary: &Path, ca: &[(&str, String)]) -> Result<()> {
     let directory = scheduler_dir()?;
     if cfg!(target_os = "macos") {
         if scheduler_loaded().await {
@@ -652,7 +659,7 @@ async fn install_scheduler(root: &Path, binary: &Path) -> Result<()> {
             );
         }
         let path = directory.join(format!("{LABEL}.plist"));
-        write_schedule(&path, &launchd_plist(root, binary))?;
+        write_schedule(&path, &launchd_plist(root, binary, ca))?;
         anyhow::ensure!(
             control(
                 "launchctl",
@@ -662,7 +669,7 @@ async fn install_scheduler(root: &Path, binary: &Path) -> Result<()> {
             "launchd could not load the updater. Run this command in the signed-in desktop user session"
         );
     } else {
-        write_schedule(&directory.join(SERVICE), &systemd_service(root, binary))?;
+        write_schedule(&directory.join(SERVICE), &systemd_service(root, binary, ca))?;
         write_schedule(
             &directory.join(TIMER),
             "[Unit]\nDescription=NyxID update eligibility check\n[Timer]\nOnCalendar=*-*-* *:*:00\nPersistent=true\nAccuracySec=1s\n[Install]\nWantedBy=timers.target\n",

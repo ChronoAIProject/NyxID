@@ -101,20 +101,27 @@ pub async fn receive_trigger(
             }));
         }
     };
-    let delivery = trigger_service::deliver_event(
-        &state.db,
-        &state.encryption_keys,
-        &state.http_client,
-        &state.config,
-        &state.jwt_keys,
-        &state.per_channel_event_limiter,
-        state.fcm_auth.as_deref(),
-        state.apns_auth.as_deref(),
-        &trigger,
-        &event_id,
-        payload,
-    )
-    .await;
+    let delivery = if matches!(
+        trigger.delivery,
+        crate::models::trigger::TriggerDelivery::Assistant { .. }
+    ) {
+        super::trigger_scheduler::webhook(&state, &trigger, &event_id, &payload).await
+    } else {
+        trigger_service::deliver_event(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            &state.config,
+            &state.jwt_keys,
+            &state.per_channel_event_limiter,
+            state.fcm_auth.as_deref(),
+            state.apns_auth.as_deref(),
+            &trigger,
+            &event_id,
+            payload,
+        )
+        .await
+    };
     if let Err(error) = delivery {
         if let Err(release_error) =
             crate::services::event_dedup_cache::EventDedupStore::release(&state.db, &claim).await
@@ -146,6 +153,7 @@ pub async fn receive_trigger(
                 crate::models::trigger::TriggerDelivery::Webhook { .. } => "webhook",
                 crate::models::trigger::TriggerDelivery::Agent { .. } => "agent",
                 crate::models::trigger::TriggerDelivery::Notification => "notification",
+                crate::models::trigger::TriggerDelivery::Assistant{..} => "assistant",
             },
         })),
         None,
@@ -236,6 +244,11 @@ mod tests {
                 None
             };
         let trigger = Trigger {
+            source: Default::default(),
+            setup_watch_id: None,
+            schedule: None,
+            schedule_state: Default::default(),
+            overlap: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             label: "Inbound build event".to_string(),
@@ -650,7 +663,9 @@ mod tests {
         .await
         .expect("failure is isolated from ingress");
         assert_eq!(response.status, "accepted");
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        // Generous deadlines only bound a failure; success returns immediately,
+        // and the full suite can delay retries and the chained audit append.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while attempts.load(Ordering::SeqCst) < 3 {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
@@ -658,7 +673,7 @@ mod tests {
         .await
         .expect("three bounded attempts");
 
-        let audit = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Some(audit) = db
                     .collection::<AuditLog>(AUDIT_LOGS)

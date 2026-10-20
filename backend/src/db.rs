@@ -10,7 +10,10 @@ use mongodb::{Client, Database, IndexModel};
 use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::assistant_wire_log::AssistantWireLog;
-use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
+use crate::models::auth_device_code::{
+    AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES,
+    RESERVATION_COLLECTION_NAME as AUTH_DEVICE_CODE_RESERVATIONS,
+};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
 use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
 use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
@@ -28,6 +31,7 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
+use crate::models::oauth_consent_request::COLLECTION_NAME as OAUTH_CONSENT_REQUESTS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -114,10 +118,185 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
+        crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"created_at":1})
+            .options(
+                IndexOptions::builder()
+                    .name("assistant_skill_draft_attempts_ttl".to_owned())
+                    .expire_after(Duration::from_secs(86400))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    // Poll index groups and migrations sequentially without retaining the
+    // large index-construction frame while a migration calls into MongoDB.
+    Box::pin(ensure_core_indexes(db)).await?;
+    db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id":1,"message_id":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"created_at": -1, "_id": -1})
+                .build(),
+        )
+        .await?;
+    // Transactional conversation and group purges delete by parent id.
+    for key in ["conversation_id", "group_id"] {
+        db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {key: 1})
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .sparse(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+
+    Box::pin(ensure_service_indexes(db)).await?;
+    backfill_downstream_service_types(db).await?;
+    migrate_legacy_ssh_auth_mode(db).await?;
+    backfill_org_scope_sources(db).await?;
+    purge_legacy_channel_message_content(db).await?;
+
+    Ok(())
+}
+
+async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
+            IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+        ]).await?;
+    db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"publication.started":1,"status":1})
+                .build(),
+        )
+        .await?;
+    // Stale legacy release finds dispatched rows by `started` or by
+    // `uncertain_dispatch`; this keeps the second branch off a collection scan.
+    db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"publication.uncertain_dispatch":1,"status":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {"publication.uncertain_dispatch":true})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_upload_limits")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_attachments")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
+                .options(IndexOptions::builder().unique(true).sparse(true).build())
+                .build(),
+        )
+        .await?;
+    Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
+        db,
+    ))
+    .await
+    .map_err(|_| mongodb::error::Error::custom("Attachment retention index migration failed"))?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    crate::services::assistant_invocation_service::ensure_indexes(db).await?;
+    crate::services::assistant_agent_learning::ensure_indexes(db).await?;
+    crate::services::assistant_voice::ensure_indexes(db).await?;
+    crate::services::channel_image_delivery::ensure_indexes(db).await?;
+    crate::services::voice::session::ensure_indexes(db).await?;
+    Box::pin(crate::services::machine_access_service::ensure_indexes(db))
+        .await
+        .map_err(|_| mongodb::error::Error::custom("Machine authority index migration failed"))?;
+    crate::services::remote_machine_service::ensure_indexes(db).await?;
+    crate::services::remote_machine_events::ensure_indexes(db).await?;
+    crate::services::remote_machine_bootstrap::ensure_indexes(db).await?;
+    crate::services::billing::machine_runtime::ensure_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::machine_external_grant_service::create_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::machine_external_service::ensure_indexes(db)
+        .await
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    db.collection::<mongodb::bson::Document>(
+        crate::models::machine_oauth_consent_request::COLLECTION_NAME,
+    )
+    .create_indexes(crate::services::machine_oauth_consent_service::indexes())
+    .await?;
+    // Best effort: a failure only leaves bad home pointers for lazy repair.
+    if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
+        tracing::warn!(%error, "NyxBot home repair deferred");
+    }
+    if let Err(error) = crate::services::assistant_nyxagent::reset_direct_reply_channels(db).await {
+        tracing::warn!(%error, "NyxBot reply channel reset deferred");
+    }
     crate::services::coordination_service::ensure_indexes(db).await?;
+    crate::services::service_concurrency_service::ensure_indexes(db).await?;
+    crate::services::platform_entry_migration::ensure_indexes(db).await?;
+    crate::services::platform_bot_config_service::ensure_indexes(db).await?;
+    crate::services::platform_setup_service::ensure_indexes(db).await?;
+    crate::services::platform_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_bot_runtime_control_service::ensure_indexes(db).await?;
+    crate::services::platform_link_intent_service::ensure_indexes(db).await?;
+    crate::services::platform_personal_binding_service::ensure_indexes(db).await?;
+    crate::services::platform_manager_ingress_service::ensure_indexes(db).await?;
+    crate::services::platform_manager_delivery::ensure_indexes(db).await?;
+    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"platform_personal_retirement_attempted_at":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("personal_retirement_recovery".to_owned())
+                        .partial_filter_expression(
+                            doc! {"platform_personal_retirement_pending":true,"is_active":false},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    crate::services::platform_public_agent_service::ensure_indexes(db).await?;
+    crate::services::platform_public_budget_service::ensure_indexes(db).await?;
+    crate::services::managed_execution_service::ensure_indexes(db).await?;
+    crate::services::platform_public_credential_service::ensure_indexes(db).await?;
+    crate::services::platform_provisioning_service::ensure_indexes(db).await?;
+    crate::services::platform_inference_service::ensure_indexes(db).await?;
+    crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -213,6 +392,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    db.collection::<mongodb::bson::Document>(crate::models::login_approval::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── sessions ──
     let sessions = db.collection::<mongodb::bson::Document>("sessions");
     sessions
@@ -276,6 +468,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 )
                 .build(),
         )
+        .await?;
+
+    db.collection::<Document>(crate::models::permission_policy::COLLECTION_NAME)
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     // ── api_keys ──
@@ -425,12 +621,54 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
 
+    // Bounded machine metadata pages, with and without an agent filter.
+    for keys in [
+        doc! {"event_type":1,"event_data.node_id":1,"created_at":-1,"_id":-1},
+        doc! {"event_type":1,"event_data.node_id":1,"event_data.agent_id":1,"created_at":-1,"_id":-1},
+    ] {
+        db.collection::<mongodb::bson::Document>("audit_log")
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! {"event_type":"machine_operation"})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
     audit
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "event_type": 1, "event_data.user_service_id": 1, "created_at": -1, "_id": -1 })
+                .options(IndexOptions::builder().name("audit_service_requests".to_string()).build())
+                .build(),
+        )
+        .await?;
+    audit
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    // An agent's skill history (pin changes and learning/authoring events).
+    audit
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "event_data.agent_id": 1, "event_type": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("audit_agent_skill_history".to_string())
+                        .partial_filter_expression(
+                            doc! { "event_data.agent_id": { "$exists": true } },
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -716,6 +954,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
     par.create_index(IndexModel::builder().keys(doc! { "client_id": 1 }).build())
+        .await?;
+
+    let consent_requests = db.collection::<mongodb::bson::Document>(OAUTH_CONSENT_REQUESTS);
+    consent_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
         .await?;
 
     // ── service_endpoints ──
@@ -1344,6 +1596,103 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    db.collection::<bson::Document>(crate::models::machine_desktop::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"updated_at":-1})
+                .build(),
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"attempt_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {"attempt_id":{"$type":"string"}})
+                        .build(),
+                )
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"automatic":1,"phase":1,"updated_at":1})
+                .build(),
+        ])
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::ATTEMPTS_COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"user_id": 1}).build(),
+            IndexModel::builder()
+                .keys(doc! {"state.updated_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(90 * 86400))
+                        .build(),
+                )
+                .build(),
+        ])
+        .await?;
+    // Machine records carry metadata only; ephemeral setup proofs are HMACs.
+    let setups = db.collection::<bson::Document>(crate::models::machine_setup::COLLECTION_NAME);
+    for field in ["code_hmac", "device_hmac"] {
+        setups
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {field:1})
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! {field:{"$type":"string"}})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+    setups
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"created_at":-1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"purge_at":1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        ])
+        .await?;
+    let machine_jobs = db.collection::<bson::Document>(crate::models::machine_job::COLLECTION_NAME);
+    machine_jobs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"state":1})
+                .build(),
+        )
+        .await?;
+    // External startup above creates the terminal retain_until index first.
+    // Execution expiry cannot be a history TTL: it previously removed rows an
+    // hour after execution, including active cleanup and 30-day metadata.
+    let job_indexes: Vec<IndexModel> = machine_jobs.list_indexes().await?.try_collect().await?;
+    for index in job_indexes {
+        if index.keys == doc! {"expires_at":1}
+            && let Some(options) = index.options
+            && options.expire_after.is_some()
+            && let Some(name) = options.name
+            && let Err(error) = machine_jobs.drop_index(name).await
+        {
+            match error.kind.as_ref() {
+                mongodb::error::ErrorKind::Command(command) if command.code == 27 => {}
+                _ => return Err(error),
+            }
+        }
+    }
+    db.collection::<bson::Document>(crate::models::saved_login::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"label":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // Agent Key login credentials and exchanges.
     let credentials = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(
         crate::models::api_key_credential::COLLECTION_NAME,
@@ -1433,6 +1782,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         auth_device_codes
             .create_index(
                 IndexModel::builder()
+                    .keys(doc! {"user_code_hmac": 1, "_id": 1})
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
                     .keys(doc! {"user_code_reservation_hmac": 1})
                     .options(
                         IndexOptions::builder()
@@ -1505,6 +1861,33 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         doc! {"$set": {"purge_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(1))}}).await?;
     }
 
+    // Public user codes are accepted by both legacy and grant-capable clients.
+    // A single reservation collection makes uniqueness global across the two
+    // request collections, including when different protocol writers race.
+    let reservations = db.collection::<Document>(AUTH_DEVICE_CODE_RESERVATIONS);
+    reservations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_code_hmac": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    reservations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    crate::services::channel_connect_link_service::ensure_indexes(db).await?;
+
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
     connect_links
@@ -1540,6 +1923,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::trigger_schedule::indexes(db).await?;
     // ── triggers ──
     let triggers = db.collection::<Trigger>(TRIGGERS);
     triggers
@@ -1828,6 +2212,65 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    Ok(())
+}
+
+async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // ── feature_flag_overrides ──
+    // One override per (org, flag definition, target scope). target_key is null for
+    // org-scope rows, the role string for role scope, the member_user_id for
+    // user scope — so the compound key uniquely identifies each override.
+    let feature_flag_overrides =
+        db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "flag_key": 1, "definition_id": 1, "target_kind": 1, "target_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    db.collection::<Document>(crate::models::feature_flag_definition::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "flag_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── feature_flag_metadata ──
+    // Metadata belongs to one built-in or runtime definition.
+    let feature_flag_metadata =
+        db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
+    feature_flag_metadata
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "flag_key": 1, "definition_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    for (collection, name) in [
+        (
+            &feature_flag_overrides,
+            "org_user_id_1_flag_key_1_target_kind_1_target_key_1",
+        ),
+        (&feature_flag_metadata, "flag_key_1"),
+    ] {
+        if let Err(error) = collection.drop_index(name).await
+            && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 27)
+        {
+            return Err(error);
+        }
+    }
+
+    Ok(())
+}
+
+async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
     let _ = db
@@ -2011,6 +2454,72 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+
+    // Passive ServicePool cooldown state is scoped by effective credential and
+    // destination/configuration. TTL bounds retention after a member recovers.
+    let service_pool_health =
+        db.collection::<mongodb::bson::Document>("service_pool_member_health");
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "pool_id": 1,
+                    "user_service_id": 1,
+                    "owner_id": 1,
+                    "pool_config_revision": 1,
+                    "pool_reset_generation": 1,
+                    "member_reset_generation": 1,
+                    "credential_identity": 1,
+                    "credential_epoch": 1,
+                    "destination_fingerprint": 1,
+                    "config_fingerprint": 1,
+                    "model": 1,
+                })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<mongodb::bson::Document>(
+        crate::models::pool_recovery_diagnostic::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"name":1})
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    db.collection::<mongodb::bson::Document>("service_pool_health_observations")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Some(std::time::Duration::from_secs(0)))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "user_service_id": 1 })
+                .build(),
+        )
+        .await?;
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Some(std::time::Duration::from_secs(0)))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     service_pools
         .create_index(
             IndexModel::builder()
@@ -2147,8 +2656,34 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_messages ──
+    crate::services::channel_activity_service::ensure_indexes(db).await?;
     crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
+    for (name, keys) in [
+        (
+            "channel_messages_thread_root_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "thread_context.root_id": 1, "created_at": -1,
+            },
+        ),
+        (
+            "channel_messages_thread_parent_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "platform_message_id": 1,
+            },
+        ),
+    ] {
+        channel_msgs
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(IndexOptions::builder().name(name.to_string()).build())
+                    .build(),
+            )
+            .await?;
+    }
     channel_msgs
         .create_index(
             IndexModel::builder()
@@ -2186,6 +2721,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Reply edits resolve outbound rows by the caller's key, never by the
+    // platform message ID alone: Telegram IDs repeat across chats and tenants.
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "agent_api_key_id": 1, "platform_message_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_messages_outbound_edit_idx".to_string())
+                        .partial_filter_expression(doc! { "direction": "outbound" })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    crate::services::channel_reply_delivery::ensure_indexes(db).await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
@@ -2318,33 +2870,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── feature_flag_overrides ──
-    // One override per (org, flag, target scope). target_key is null for
-    // org-scope rows, the role string for role scope, the member_user_id for
-    // user scope — so the compound key uniquely identifies each override.
-    let feature_flag_overrides =
-        db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
-    feature_flag_overrides
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "org_user_id": 1, "flag_key": 1, "target_kind": 1, "target_key": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
-    // ── feature_flag_metadata ──
-    // At most one admin-authored description/owner row per registry flag key.
-    let feature_flag_metadata =
-        db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
-    feature_flag_metadata
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "flag_key": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
+    ensure_feature_flag_indexes(db).await?;
 
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");
@@ -2488,8 +3014,37 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     crate::services::billing::usage_rollup::ensure_indexes(db).await?;
 
+    db.collection::<Document>(crate::models::usage_meter::POOL_RECOVERY_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "name": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "billing_request_id": 1 })
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "released": 1, "pool_attempt.lease_until": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("pool_attempt_recovery_page".to_string())
+                        .partial_filter_expression(doc! { "pool_attempt": { "$type": "object" } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     usage_meter
         .create_index(
             IndexModel::builder()
@@ -2626,6 +3181,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     credit_grants
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("credit_grants_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! {
                     "recipient_user_id": 1,
                     "status": 1,
@@ -2758,6 +3326,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     allowance_periods
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "active_settlement.usage_row_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_allowance_periods_settlement_usage".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "allowance_id": 1, "owner_user_id": 1, "period_start": 1 })
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
@@ -2800,7 +3381,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     billing_ledger
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "postings.account": 1, "seq": 1 })
+                .build(),
+        )
+        .await?;
+
+    billing_ledger
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    db.collection::<mongodb::bson::Document>("billing_wallet_refresh_requests")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "requested_at": 1 })
                 .build(),
         )
         .await?;
@@ -2848,6 +3445,9 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
     crate::services::oracle_worker_enrollment_service::ensure_indexes(db).await?;
+    crate::services::call_channels::session::ensure_indexes(db)
+        .await
+        .map_err(|e| mongodb::error::Error::custom(e.to_string()))?;
 
     // ── oracle_login_snapshots ──
     let oracle_login_snapshots =
@@ -2871,6 +3471,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+
+    crate::services::oracle_pool_service::ensure_lifecycle_indexes(db).await?;
 
     // ── oracle_worker_commands ──
     let oracle_worker_commands =
@@ -2928,11 +3530,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-
-    backfill_downstream_service_types(db).await?;
-    migrate_legacy_ssh_auth_mode(db).await?;
-    backfill_org_scope_sources(db).await?;
-    purge_legacy_channel_message_content(db).await?;
 
     Ok(())
 }
@@ -4034,6 +4631,12 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
         // Create UserApiKey -- clean up endpoint on failure
         let api_key = UserApiKey {
+            oauth_app_observation: (token.token_type == "oauth2").then(|| {
+                crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
+                    token.credential_user_id.as_deref(),
+                )
+                .observation(1)
+            }),
             credential_source: None,
             id: api_key_id.clone(),
             user_id: token.user_id.clone(),
@@ -4100,6 +4703,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             auth_method,
             auth_key_name,
             catalog_service_id,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type,
@@ -4283,6 +4887,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             .or_else(|| service.auth_type.clone())
             .unwrap_or_else(|| "api_key".to_string());
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: conn.user_id.clone(),
@@ -4338,6 +4943,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: service.service_type.clone(),
@@ -4549,6 +5155,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: binding.user_id.clone(),
@@ -4601,6 +5208,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
+            icon_url: None,
             node_id: Some(binding.node_id.clone()),
             node_priority: binding.priority,
             service_type: service.service_type.clone(),
@@ -4666,6 +5274,184 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn feature_flag_indexes_upgrade_legacy_rows_and_allow_distinct_definitions() {
+        let db = crate::test_utils::connect_test_database("flag_index_upgrade")
+            .await
+            .expect("test database");
+        let overrides =
+            db.collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME);
+        let metadata =
+            db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
+        for (collection, keys) in [
+            (
+                &overrides,
+                doc! { "org_user_id": 1, "flag_key": 1, "target_kind": 1, "target_key": 1 },
+            ),
+            (&metadata, doc! { "flag_key": 1 }),
+        ] {
+            collection
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().unique(true).build())
+                        .build(),
+                )
+                .await
+                .unwrap();
+        }
+        let legacy_override = doc! { "flag_key": "example_ui", "target_kind": "global" };
+        let legacy_metadata = doc! { "flag_key": "example_ui", "description": "Legacy metadata" };
+        overrides.insert_one(legacy_override.clone()).await.unwrap();
+        metadata.insert_one(legacy_metadata.clone()).await.unwrap();
+        ensure_feature_flag_indexes(&db).await.unwrap();
+        ensure_feature_flag_indexes(&db).await.unwrap();
+
+        for (collection, legacy) in [(&overrides, legacy_override), (&metadata, legacy_metadata)] {
+            let indexes: Vec<_> = collection
+                .list_indexes()
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert!(indexes.iter().all(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    != Some(if collection.name() == overrides.name() {
+                        "org_user_id_1_flag_key_1_target_kind_1_target_key_1"
+                    } else {
+                        "flag_key_1"
+                    })
+            }));
+            let mut runtime = legacy.clone();
+            runtime.insert("definition_id", "runtime-id");
+            collection.insert_one(runtime.clone()).await.unwrap();
+            assert!(
+                collection.insert_one(runtime).await.is_err(),
+                "same definition must remain unique"
+            );
+            let mut builtin = legacy;
+            builtin.insert("definition_id", bson::Bson::Null);
+            assert!(
+                collection.insert_one(builtin).await.is_err(),
+                "missing identity remains the built-in identity"
+            );
+            assert_eq!(collection.count_documents(doc! {}).await.unwrap(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_meter_pool_accounting_queries_examine_only_the_current_request() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("pool_accounting_index").await;
+        let meters = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+        let lease_until = bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(5));
+        let mut rows: Vec<_> = (0..4096)
+            .map(|index| {
+                doc! {
+                    "_id": uuid::Uuid::new_v4().to_string(),
+                    "transaction_id": format!("historical:{index}"),
+                    "billing_request_id": format!("historical-{index}"),
+                    "layer": "platform", "released": false,
+                    "status": if index % 2 == 0 { "finalized" } else { "forwarded" },
+                    "pool_attempt": { "lease_until": lease_until, "completion_cause": bson::Bson::Null },
+                }
+            })
+            .collect();
+        for (index, layer) in ["platform", "platform", "resale"].iter().enumerate() {
+            rows.push(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "transaction_id": format!("current:{index}"),
+                "billing_request_id": "current-request",
+                "layer": layer, "released": false,
+                "status": if *layer == "resale" { "finalized" } else { "forwarded" },
+                "quantity": 7_i64, "model": "test-model",
+                "pool_attempt": { "lease_until": lease_until, "completion_cause": bson::Bson::Null },
+            });
+        }
+        meters.insert_many(rows).await.unwrap();
+        ensure_indexes(&db).await.unwrap();
+        let now = bson::DateTime::now();
+        for request_id in ["current-request", "missing-request"] {
+            let queries = [
+                doc! {
+                    "find": meters.name(),
+                    "filter": { "billing_request_id": request_id, "pool_attempt": { "$type": "object" } },
+                },
+                doc! {
+                    "update": meters.name(), "updates": [{
+                        "q": { "billing_request_id": request_id, "pool_attempt": { "$type": "object" }, "pool_attempt.completion_cause": bson::Bson::Null },
+                        "u": { "$set": { "pool_attempt.completion_cause": "complete" } }, "multi": true,
+                    }],
+                },
+                doc! {
+                    "update": meters.name(), "updates": [{
+                        "q": { "billing_request_id": request_id, "released": false, "pool_attempt.lease_until": { "$gt": now } },
+                        "u": { "$max": { "pool_attempt.lease_until": lease_until } }, "multi": true,
+                    }],
+                },
+                doc! {
+                    "find": meters.name(),
+                    "filter": { "billing_request_id": request_id, "layer": "platform" },
+                },
+                doc! {
+                    "find": meters.name(), "limit": 1, "singleBatch": true,
+                    "filter": { "billing_request_id": request_id, "status": "finalized" },
+                },
+                doc! {
+                    "aggregate": meters.name(), "cursor": {},
+                    "pipeline": [
+                        { "$match": {
+                            "billing_request_id": request_id, "layer": "resale",
+                            "status": { "$in": ["finalized", "failed", "dead_letter"] },
+                            "quantity": 7_i64, "model": "test-model",
+                        } },
+                        { "$group": { "_id": 1, "n": { "$sum": 1 } } },
+                    ],
+                },
+            ];
+            for query in queries {
+                let evidence = db
+                    .run_command(doc! { "explain": &query, "verbosity": "executionStats" })
+                    .await
+                    .unwrap();
+                let stats = evidence.get_document("executionStats").unwrap_or_else(|_| {
+                    evidence.get_array("stages").unwrap()[0]
+                        .as_document()
+                        .unwrap()
+                        .get_document("$cursor")
+                        .unwrap()
+                        .get_document("executionStats")
+                        .unwrap()
+                });
+                let number = |field| match stats.get(field).unwrap() {
+                    bson::Bson::Int32(value) => i64::from(*value),
+                    bson::Bson::Int64(value) => *value,
+                    value => panic!("unexpected execution statistic {field}: {value:?}"),
+                };
+                let documents = number("totalDocsExamined");
+                let keys = number("totalKeysExamined");
+                let (max_documents, max_keys) = if request_id == "current-request" {
+                    (3, 4)
+                } else {
+                    (0, 1)
+                };
+                assert!(
+                    documents <= max_documents,
+                    "accounting must not scan unrelated requests: {query:?}"
+                );
+                assert!(
+                    keys <= max_keys,
+                    "accounting must seek the current request: {query:?}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn google_token_migration_never_infers_a_product_from_provider_id() {
@@ -4847,6 +5633,10 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -4863,6 +5653,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -4872,6 +5663,10 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "both".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,
@@ -4886,6 +5681,8 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

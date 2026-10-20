@@ -15,6 +15,9 @@ export function serviceFormValues(
   service: DownstreamService,
 ): UpdateServiceFormData {
   return {
+    offering_kind: service.offering_kind ?? "ai_service",
+    topics: [...(service.topics ?? [])],
+    supplier: service.supplier ?? "",
     proxy_operation_policy: service.proxy_operation_policy ?? null,
     inference: service.inference ?? null,
     platform_key: service.platform_key
@@ -26,6 +29,7 @@ export function serviceFormValues(
         }
       : undefined,
     credential: "",
+    auth_scheme: service.auth_scheme ?? "",
     byok_pricing: laneValues(service.billing?.byok_pricing),
     platform_key_pricing: laneValues(service.billing?.platform_key_pricing),
     platform_charge_nyxid_credentials_only:
@@ -120,10 +124,16 @@ export function serviceFormPayload(
         },
       }
     : {
+        offering_kind: data.offering_kind,
+        topics: normalizedSet(data.topics ?? []),
+        supplier: data.supplier || null,
         name: data.name,
         description: data.description || "",
         visibility: data.visibility,
         base_url: data.base_url || "",
+        ...(service.auth_method === "bearer"
+          ? { auth_scheme: data.auth_scheme || null }
+          : {}),
         openapi_spec_url: data.openapi_spec_url || "",
         asyncapi_spec_url: data.asyncapi_spec_url || "",
         identity_propagation_mode: data.identity_propagation_mode,
@@ -222,8 +232,38 @@ function laneValues(lane: LanePricingView | null | undefined) {
               ),
             }
           : {}),
+        ...(lane.operations
+          ? {
+              operations: lane.operations.map(
+                ({ operation, label, credits_per_unit }) => ({
+                  operation,
+                  ...(label ? { label } : {}),
+                  credits_per_unit,
+                }),
+              ),
+            }
+          : {}),
       }
     : null;
+}
+
+/** Saved lane prices in form shape. */
+export function serviceLaneValues(service: Pick<DownstreamService, "billing">) {
+  return {
+    byok_pricing: laneValues(service.billing?.byok_pricing),
+    platform_key_pricing: laneValues(service.billing?.platform_key_pricing),
+  };
+}
+
+/** Only the lanes that changed; `null` clears a lane. */
+export function serviceLanePatch(
+  service: Pick<DownstreamService, "billing">,
+  data: Pick<UpdateServiceFormData, "byok_pricing" | "platform_key_pricing">,
+) {
+  return changedFields(serviceLaneValues(service), {
+    byok_pricing: laneValues(data.byok_pricing),
+    platform_key_pricing: laneValues(data.platform_key_pricing),
+  });
 }
 
 export function serviceFormPatch(
@@ -235,16 +275,7 @@ export function serviceFormPatch(
   const after = serviceFormPayload(data, service);
   const patch = changedFields(before, after);
   if (patch.billing) {
-    const lanes = changedFields(
-      {
-        byok_pricing: values.byok_pricing,
-        platform_key_pricing: values.platform_key_pricing,
-      },
-      {
-        byok_pricing: laneValues(data.byok_pricing),
-        platform_key_pricing: laneValues(data.platform_key_pricing),
-      },
-    );
+    const lanes = serviceLanePatch(service, data);
     const legacyChanged = [
       "platform_billable",
       "platform_metric",

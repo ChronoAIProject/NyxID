@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
@@ -328,21 +328,119 @@ pub async fn connect(
 pub async fn webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
+    producers: Option<
+        Extension<
+            std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+        >,
+    >,
     body: Bytes,
 ) -> AppResult<StatusCode> {
-    webhook_with_service(&state, &service(&state), &headers, &body).await
+    webhook_with_producers(
+        &state,
+        &service(&state),
+        &headers,
+        &body,
+        producers.map(|Extension(value)| value),
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn webhook_with_service(
     state: &AppState,
     service: &TelegramNewService<'_>,
     headers: &HeaderMap,
     body: &[u8],
 ) -> AppResult<StatusCode> {
+    webhook_with_producers(state, service, headers, body, None).await
+}
+
+pub(crate) async fn webhook_with_producers(
+    state: &AppState,
+    service: &TelegramNewService<'_>,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<
+        std::sync::Arc<crate::services::platform_manager_contract::PlatformManagerProducers>,
+    >,
+) -> AppResult<StatusCode> {
     if let Some((bot, update)) = service.webhook(headers, body).await? {
+        match crate::services::platform_manager_transport::dispatch_update(
+            state, producers, &bot, &update, service,
+        )
+        .await
+        {
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::Handled) => {
+                return Ok(StatusCode::OK);
+            }
+            Ok(
+                crate::services::platform_manager_transport::ManagerDispatch::LegacyConfirmation,
+            ) => {
+                // This explicit compatibility handoff never falls through to guide/owner routing.
+                return match super::platform_binding::handle_command(state, &bot, &update, service)
+                    .await
+                {
+                    Ok(_) => Ok(StatusCode::OK),
+                    Err(error) => Ok(native_dispatch_status(&error)),
+                };
+            }
+            Ok(crate::services::platform_manager_transport::ManagerDispatch::NotOptedIn) => {}
+            Err(error) => {
+                tracing::warn!(bot_id=%bot.id, error_code=error.error_code(), "Personal manager dispatch refused");
+                return Ok(native_dispatch_status(&error));
+            }
+        }
+        let legacy_update = legacy_setup_update(&update);
+        let legacy = legacy_update.as_ref().unwrap_or(&update);
+        match super::platform_binding::handle_command(state, &bot, legacy, service).await {
+            Ok(true) => return Ok(StatusCode::OK),
+            Ok(false) if legacy_update.is_some() => return Ok(StatusCode::OK),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "Platform binding command refused");
+                return Ok(native_dispatch_status(&error));
+            }
+        }
+        match crate::services::platform_guide_service::dispatch(state, &bot, &update, service).await
+        {
+            Ok(true) => return Ok(StatusCode::OK),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "Platform guide reply refused");
+                return Ok(native_dispatch_status(&error));
+            }
+        }
         relay_manager_channel(state.clone(), bot, update).await;
     }
     Ok(StatusCode::OK)
+}
+
+fn legacy_setup_update(update: &serde_json::Value) -> Option<serde_json::Value> {
+    let text = update["message"]["text"].as_str()?;
+    let word = text.split_whitespace().next()?;
+    if word.split('@').next()? != "/onboarding" {
+        return None;
+    }
+    let mut legacy = update.clone();
+    legacy["message"]["text"] = serde_json::json!(text.replacen("/onboarding", "/link", 1));
+    Some(legacy)
+}
+
+/// Intentional closed/invalid/admission outcomes are ACKs; infrastructure failures
+/// before durable admission must let Telegram retry. Receipt dedup prevents replay.
+pub(crate) fn native_dispatch_status(error: &AppError) -> StatusCode {
+    match error {
+        AppError::Conflict(_)
+        | AppError::Forbidden(_)
+        | AppError::NotFound(_)
+        | AppError::ValidationError(_)
+        | AppError::BadRequest(_)
+        | AppError::RateLimited
+        | AppError::ServiceConcurrencyLimited
+        | AppError::ChannelBotNotFound(_)
+        | AppError::ChannelBotInactive(_) => StatusCode::OK,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 pub(crate) async fn relay_manager_channel(

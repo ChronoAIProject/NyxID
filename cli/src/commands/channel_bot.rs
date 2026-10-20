@@ -1,13 +1,58 @@
 use std::io::Write;
+use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
+use serde::Deserialize;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
 use crate::commands::lark_permission::print_permission_block;
 use crate::org_resolver::resolve_org_id;
+
+#[derive(Deserialize)]
+struct CreatedConnectLink {
+    id: String,
+    connect_url: String,
+    expires_at: String,
+    webhook_signing_key_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_signing_secret")]
+    webhook_signing_secret: Option<Zeroizing<String>>,
+}
+
+fn deserialize_signing_secret<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Zeroizing<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|value| value.map(Zeroizing::new))
+}
+
+fn open_webhook_secret_file(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .context("Cannot create webhook signing secret file; choose a new writable path")
+}
+
+fn connect_link_output(result: &CreatedConnectLink, secret_file: Option<&Path>) -> Value {
+    serde_json::json!({
+        "id": result.id,
+        "connect_url": result.connect_url,
+        "expires_at": result.expires_at,
+        "webhook_signing_key_id": result.webhook_signing_key_id,
+        "webhook_signing_secret_file": secret_file,
+    })
+}
 
 async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
     if let Some(result) = api
@@ -26,6 +71,100 @@ async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
+        ChannelBotCommands::ConnectLink {
+            platform,
+            label,
+            org,
+            callback_url,
+            webhook_url,
+            webhook_signing_secret_file,
+            expires_in,
+            requested_by,
+            auth,
+        } => {
+            if webhook_url.is_some() != webhook_signing_secret_file.is_some() {
+                bail!("Use --webhook-url and --webhook-signing-secret-file together");
+            }
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let owner = match org {
+                Some(org) => Some(resolve_org_id(&mut api, &org).await?),
+                None => None,
+            };
+            let mut secret_file = webhook_signing_secret_file
+                .as_deref()
+                .map(open_webhook_secret_file)
+                .transpose()?;
+            let response: Result<CreatedConnectLink> = api
+                .post(
+                    "/channel-connect-links",
+                    &serde_json::json!({
+                        "platform": platform, "label": label, "target_org_id": owner,
+                        "callback_url": callback_url, "webhook_url": webhook_url,
+                        "expires_in": expires_in, "requested_by": requested_by,
+                    }),
+                )
+                .await;
+            let result = match response {
+                Ok(result) => result,
+                Err(error) => {
+                    drop(secret_file);
+                    if let Some(path) = &webhook_signing_secret_file {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(file) = &mut secret_file {
+                let secret = result
+                    .webhook_signing_secret
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .context("The server did not return a webhook signing secret")?;
+                file.write_all(secret.as_bytes())
+                    .and_then(|()| file.sync_all())
+                    .with_context(|| {
+                        format!(
+                            "Could not save the signing secret; cancel connection request {} and create a new one",
+                            result.id
+                        )
+                    })?;
+            }
+            let output = connect_link_output(&result, webhook_signing_secret_file.as_deref());
+            if matches!(auth.output, OutputFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("Connection request: {}", result.id);
+                println!("Open: {}", result.connect_url);
+                println!("Expires: {}", result.expires_at);
+                if let Some(path) = webhook_signing_secret_file {
+                    println!(
+                        "Webhook signing key ID: {}",
+                        result.webhook_signing_key_id.as_deref().unwrap_or("-")
+                    );
+                    println!("Webhook signing secret saved to: {}", path.display());
+                }
+            }
+            Ok(())
+        }
+        ChannelBotCommands::CancelConnectLink { id, auth } => {
+            uuid::Uuid::parse_str(&id).map_err(|_| anyhow::anyhow!("Link ID must be a UUID"))?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!("/channel-connect-links/{id}/cancel"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        ChannelBotCommands::ConnectLinkStatus { id, auth } => {
+            uuid::Uuid::parse_str(&id).map_err(|_| anyhow::anyhow!("Link ID must be a UUID"))?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.get(&format!("/channel-connect-links/{id}")).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         ChannelBotCommands::Platforms { auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get("/channel-platforms").await?;
@@ -568,7 +707,28 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Created:        {created}");
                     eprintln!("Updated:        {updated}");
                     print_permission_block(&bot);
+                    // The detail response carries no diagnostics; Health owns them.
+                    match api
+                        .get::<Value>(&format!("/channel-bots/{bot_id}/health"))
+                        .await
+                    {
+                        Ok(health) => {
+                            eprintln!("Health:");
+                            write_health_lines(&mut std::io::stderr(), &health)?;
+                        }
+                        Err(error) => eprintln!("Health:         unavailable ({error})"),
+                    }
                 }
+            }
+            Ok(())
+        }
+
+        ChannelBotCommands::Health { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let health: Value = api.get(&format!("/channel-bots/{id}/health")).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&health)?),
+                OutputFormat::Table => write_health_lines(&mut std::io::stderr(), &health)?,
             }
             Ok(())
         }
@@ -1029,6 +1189,72 @@ fn env_secret(var: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Human-readable channel health, shared by `channel-bot show` and `health`.
+fn write_health_lines(out: &mut dyn Write, health: &Value) -> Result<()> {
+    let text = |value: &Value| value.as_str().unwrap_or("-").to_string();
+    let error = |value: &Value| {
+        if value.is_null() {
+            "-".to_string()
+        } else {
+            format!(
+                "{} at {}",
+                value["reason"]
+                    .as_str()
+                    .unwrap_or_else(|| value["code"].as_str().unwrap_or("-")),
+                text(&value["at"])
+            )
+        }
+    };
+    let d = &health["diagnostics"];
+    let subscription = &d["subscription_state"];
+    let subscription = if subscription.is_null() {
+        "not checked".to_string()
+    } else if subscription["registered"] == true {
+        format!("registered (checked {})", text(&subscription["checked_at"]))
+    } else {
+        format!(
+            "missing: {} (checked {})",
+            text(&subscription["last_error"]),
+            text(&subscription["checked_at"])
+        )
+    };
+    let rows = [
+        ("Mode", text(&health["mode"])),
+        ("Status", text(&health["status"])),
+        (
+            "Last inbound",
+            format!(
+                "{} ({})",
+                text(&d["last_inbound_at"]),
+                text(&d["last_inbound_source"])
+            ),
+        ),
+        ("Last reply sent", text(&d["last_outbound_at"])),
+        ("Last reply error", error(&d["last_outbound_error"])),
+        ("Last webhook", text(&d["last_webhook_at"])),
+        ("Last webhook error", error(&d["last_webhook_error"])),
+        ("Subscription", subscription),
+        ("Failure", text(&d["failure_reason"])),
+        (
+            "Consecutive errors",
+            d["consecutive_errors"].as_u64().unwrap_or(0).to_string(),
+        ),
+        ("Next poll", text(&health["next_poll_at"])),
+        (
+            "Action",
+            format!(
+                "{}: {}",
+                text(&health["recommended_action"]),
+                text(&health["recommended_action_text"])
+            ),
+        ),
+    ];
+    for (label, value) in rows {
+        writeln!(out, "{:<19} {value}", format!("{label}:"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,6 +1263,254 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    #[test]
+    fn health_output_prints_every_diagnostic_and_the_action() {
+        let health = serde_json::json!({
+            "mode": "webhook", "status": "active", "next_poll_at": null,
+            "recommended_action": "wait_rate_limit",
+            "recommended_action_text": "X rate-limited the last reply. Later replies resume automatically.",
+            "diagnostics": {
+                "last_inbound_at": "2026-10-12T08:00:00+00:00", "last_inbound_source": "webhook",
+                "last_outbound_at": "2026-10-12T08:01:00+00:00",
+                "last_outbound_error": {"code": "10005", "reason": "rate_limited", "at": "2026-10-12T09:00:00+00:00"},
+                "last_webhook_at": "2026-10-12T08:00:00+00:00", "last_webhook_error": null,
+                "subscription_state": {"registered": false, "checked_at": "2026-10-12T09:30:00+00:00", "last_error": "subscription_missing"},
+                "consecutive_errors": 2, "failure_reason": "subscription_missing"
+            }
+        });
+        let mut out = Vec::new();
+        super::write_health_lines(&mut out, &health).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\
+Mode:               webhook
+Status:             active
+Last inbound:       2026-10-12T08:00:00+00:00 (webhook)
+Last reply sent:    2026-10-12T08:01:00+00:00
+Last reply error:   rate_limited at 2026-10-12T09:00:00+00:00
+Last webhook:       2026-10-12T08:00:00+00:00
+Last webhook error: -
+Subscription:       missing: subscription_missing (checked 2026-10-12T09:30:00+00:00)
+Failure:            subscription_missing
+Consecutive errors: 2
+Next poll:          -
+Action:             wait_rate_limit: X rate-limited the last reply. Later replies resume automatically.
+"
+        );
+    }
+
+    #[test]
+    fn health_output_handles_a_never_checked_bot() {
+        let health = serde_json::json!({"mode": "poll", "status": "failed", "recommended_action": "reconnect",
+            "recommended_action_text": "Reconnect.", "diagnostics": {"consecutive_errors": 0, "subscription_state": null,
+            "last_outbound_error": null, "last_webhook_error": null}});
+        let mut out = Vec::new();
+        super::write_health_lines(&mut out, &health).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Subscription:       not checked\n"), "{out}");
+        assert!(out.contains("Last reply error:   -\n"), "{out}");
+        assert!(
+            out.contains("Action:             reconnect: Reconnect.\n"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_link_cancel_uses_bot_route_and_validates_uuid() {
+        use clap::Parser;
+        let id = "00000000-0000-4000-8000-000000000001";
+        crate::cli::Cli::try_parse_from(["nyxid", "channel-bot", "cancel-connect-link", id])
+            .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/channel-connect-links/{id}/cancel")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": id, "status": "cancelled"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ChannelBotCommands::CancelConnectLink {
+            id: id.into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        assert!(
+            run(ChannelBotCommands::CancelConnectLink {
+                id: "invalid/id".into(),
+                auth: mock_auth(server.uri())
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_link_creates_once_without_polling_or_using_connector_routes() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret_path = directory.path().join("webhook.key");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-connect-links"))
+            .and(body_partial_json(serde_json::json!({"platform": "discord", "label": "Support", "webhook_url": "https://example.com/events", "expires_in": 600})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000001", "connect_url": "https://nyxid.example/connect/bot/one-time",
+                "expires_at": "2026-09-30T00:00:00Z", "webhook_signing_secret": "test-one-time-secret", "webhook_signing_key_id": "test-key-id"
+            })))
+            .expect(1).mount(&server).await;
+        run(ChannelBotCommands::ConnectLink {
+            platform: "discord".into(),
+            label: "Support".into(),
+            org: None,
+            callback_url: None,
+            webhook_url: Some("https://example.com/events".into()),
+            webhook_signing_secret_file: Some(secret_path.clone()),
+            expires_in: Some(600),
+            requested_by: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&secret_path).unwrap(),
+            "test-one-time-secret"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&secret_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn connect_link_output_never_contains_the_signing_secret() {
+        let result: CreatedConnectLink = serde_json::from_value(serde_json::json!({
+            "id": "link-id", "connect_url": "https://nyxid.example/connect/bot/token",
+            "expires_at": "2026-09-30T00:00:00Z", "webhook_signing_key_id": "key-id",
+            "webhook_signing_secret": "private-test-key"
+        }))
+        .unwrap();
+        let output = connect_link_output(&result, Some(Path::new("webhook.key")));
+        assert!(output.get("webhook_signing_secret").is_none());
+        assert!(!output.to_string().contains("private-test-key"));
+        assert_eq!(output["webhook_signing_secret_file"], "webhook.key");
+        assert_eq!(output["webhook_signing_key_id"], "key-id");
+        assert_eq!(output["connect_url"], result.connect_url);
+    }
+
+    #[test]
+    fn connect_link_webhook_requires_an_explicit_secret_file() {
+        use clap::Parser;
+        let args = [
+            "nyxid",
+            "channel-bot",
+            "connect-link",
+            "discord",
+            "--label",
+            "Support",
+        ];
+        assert!(crate::cli::Cli::try_parse_from(args).is_ok());
+        for extra in [
+            vec!["--webhook-url", "https://example.com/events"],
+            vec!["--webhook-signing-secret-file", "webhook.key"],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args.into_iter().chain(extra)).is_err());
+        }
+        assert!(
+            crate::cli::Cli::try_parse_from(args.into_iter().chain([
+                "--webhook-url",
+                "https://example.com/events",
+                "--webhook-signing-secret-file",
+                "webhook.key",
+                "--output",
+                "json"
+            ]))
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_link_rejects_an_existing_secret_file_before_creating_a_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret_path = directory.path().join("existing.key");
+        std::fs::write(&secret_path, "existing-content").unwrap();
+        let server = MockServer::start().await;
+        let error = run(ChannelBotCommands::ConnectLink {
+            platform: "discord".into(),
+            label: "Support".into(),
+            org: None,
+            callback_url: None,
+            webhook_url: Some("https://example.com/events".into()),
+            webhook_signing_secret_file: Some(secret_path.clone()),
+            expires_in: None,
+            requested_by: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("choose a new writable path"));
+        assert_eq!(
+            std::fs::read_to_string(secret_path).unwrap(),
+            "existing-content"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_link_secret_file_rejects_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.key");
+        let link = directory.path().join("symlink.key");
+        std::fs::write(&target, "existing-content").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open_webhook_secret_file(&link).is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "existing-content");
+    }
+
+    #[tokio::test]
+    async fn connect_link_removes_the_empty_secret_file_when_creation_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret_path = directory.path().join("webhook.key");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-connect-links"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({"message":"Invalid webhook"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = run(ChannelBotCommands::ConnectLink {
+            platform: "discord".into(),
+            label: "Support".into(),
+            org: None,
+            callback_url: None,
+            webhook_url: Some("https://example.com/events".into()),
+            webhook_signing_secret_file: Some(secret_path.clone()),
+            expires_in: None,
+            requested_by: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert!(!error.to_string().contains("private-test-key"));
+        assert!(!secret_path.exists());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn platforms_fetches_authoritative_catalog_in_both_output_modes() {
@@ -2201,7 +2675,7 @@ mod x_events_tests {
         Mock::given(method("PATCH"))
             .and(path("/api/v1/channel-bots/bot"))
             .and(body_json(
-                serde_json::json!({"x_events": ["dm", "mentions", "replies"]}),
+                serde_json::json!({"x_events": ["dm", "chat", "mentions", "replies", "posts"]}),
             ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "bot"})),
@@ -2215,7 +2689,7 @@ mod x_events_tests {
             "update",
             "bot",
             "--x-events",
-            "dm,mentions,replies",
+            "dm,chat,mentions,replies,posts",
         ])
         .unwrap();
         if let crate::cli::Commands::ChannelBot {

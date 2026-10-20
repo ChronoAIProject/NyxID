@@ -72,6 +72,11 @@ Details of the refresh:
   Lago means free, so the gate stays open without reserving credits.
 - A failed or empty plan fetch leaves existing rows untouched; the TTL
   remains the backstop against sizing reservations on stale prices.
+- Removing a NyxID-authored per-service price does not delete its row.
+  The row is marked `retired_at` so historical usage keeps its price on
+  the Usage and admin usage pages; `fresh_rate` refuses retired rows for
+  new reservations, and a re-authored price replaces the row (clearing
+  the marker) when it syncs.
 - 1 credit = 1 USD (wallets are created with `rate_amount: "1"`), so a
   charge amount of `0.000005` becomes `credits_per_unit_micros: 5`.
 

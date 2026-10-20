@@ -1,3 +1,4 @@
+mod operations;
 mod usage;
 
 use std::collections::BTreeSet;
@@ -200,8 +201,28 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 ];
 
 #[derive(Default)]
-struct FakeLago {
+pub(crate) struct FakeLago {
     wallet_creates: AtomicUsize,
+    wallet_balance: Option<crate::models::credits::Credits>,
+    wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+}
+
+impl FakeLago {
+    pub(crate) fn with_wallet_balance(balance: crate::models::credits::Credits) -> Self {
+        Self {
+            wallet_balance: Some(balance),
+            ..Default::default()
+        }
+    }
+    pub(crate) fn with_wallet_gate(
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            wallet_gate: Some((entered, resume)),
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -216,9 +237,15 @@ impl LagoApi for FakeLago {
 
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         self.wallet_creates.fetch_add(1, Ordering::SeqCst);
+        if let Some((entered, resume)) = &self.wallet_gate {
+            entered.notify_one();
+            resume.notified().await;
+        }
         Ok(LagoWallet {
             id: format!("{customer_id}:wallet"),
-            balance_credits: 10_000,
+            balance_credits: self
+                .wallet_balance
+                .unwrap_or_else(|| crate::models::credits::Credits::from_whole(10_000)),
         })
     }
 
@@ -352,6 +379,95 @@ async fn run_billing_route_coverage_smoke() {
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
 
+    // Permission ingress requires its dedicated key even for a caller with proxy scope.
+    // Accepted effects reuse the Proxy lifecycle exercised below.
+    for (method, path, inventory_path) in [
+        (
+            Method::GET,
+            "/api/v1/permission-execution/rest/drive/v3/files/report",
+            "/api/v1/permission-execution/rest/{*path}",
+        ),
+        (
+            Method::POST,
+            "/api/v1/permission-execution/mcp",
+            "/api/v1/permission-execution/mcp",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(route_request(method, path, &token, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        exercised_routes.insert(inventory_path);
+    }
+
+    // The public callback has its own primary-key authority boundary. Neither
+    // an owner JWT nor an ordinary API key may enter its sponsor funding path.
+    let ordinary_key = crate::services::key_service::create_api_key(
+        &db,
+        &owner_id,
+        "public-callback-boundary",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create ordinary callback-refusal key");
+    for (credential, status) in [
+        (token.as_str(), StatusCode::UNAUTHORIZED),
+        (ordinary_key.full_key.as_str(), StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(route_request(
+                Method::POST,
+                &format!(
+                    "/api/v1/public-nyxbot/models/{}/v1/responses",
+                    proxy_catalog.id
+                ),
+                credential,
+                Body::from(r#"{"model":"test","input":"route boundary"}"#),
+            ))
+            .await
+            .expect("call public model callback boundary");
+        assert_eq!(response.status(), status);
+    }
+    exercised_routes.insert("/api/v1/public-nyxbot/models/{service_id}/{*path}");
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "refused public callback credentials must not open sponsor meters"
+    );
+
+    let aliases = call_mounted_route(
+        &app,
+        route_request(Method::GET, "/api/v1/llm/pools", &token, Body::empty()),
+    )
+    .await;
+    let aliases: serde_json::Value = serde_json::from_slice(&aliases).unwrap();
+    assert_eq!(aliases["pools"], serde_json::json!([]));
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "alias discovery must remain billing-exempt"
+    );
+
     let direct_body = serde_json::json!({
         "messages": [{"role": "user", "content": "route boundary"}],
         "model": "gpt-5.5",
@@ -379,10 +495,28 @@ async fn run_billing_route_coverage_smoke() {
         &downstream_url,
     ))
     .await;
+    // Admission is disabled by default; still exercise the mounted billing boundary.
+    let refusal = app
+        .clone()
+        .oneshot(route_request(
+            Method::POST,
+            "/api/v1/assistant/nyxagent/invocations",
+            &token,
+            Body::from(
+                serde_json::json!({"idempotency_key":Uuid::new_v4().to_string(),"text":"boundary"})
+                    .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refusal.status(), StatusCode::NOT_FOUND);
     exercised_routes.extend([
+        "/api/v1/assistant/nyxagent/invocations",
         "/api/v1/assistant/nyxagent/turns",
         "/api/v1/assistant/nyxagent/models",
         "/api/v1/assistant/nyxagent/conversations/{id}",
+        "/api/v1/assistant/nyxagent/conversations/{id}/capabilities",
+        "/api/v1/assistant/nyxagent/conversations/{id}/steer",
     ]);
 
     call_mounted_route(
@@ -686,6 +820,7 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            assistant_group: None,
             id: request_id.clone(),
             user_id: owner_id.clone(),
             service_id: mcp.id.clone(),
@@ -1070,9 +1205,18 @@ async fn billing_service_lifecycle_regression() {
         );
 
         let wallet = wallet(&db, &owner_id).await;
-        assert_eq!(wallet.overdraft_cap_credits, 7);
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, expected_quantity);
+        assert_eq!(
+            wallet.overdraft_cap_credits,
+            crate::models::credits::Credits::from_whole(7)
+        );
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(expected_quantity)
+        );
     }
 
     assert_eq!(
@@ -1117,6 +1261,7 @@ async fn billing_gate_rejects_missing_and_stale_rate_cache_entries() {
             credits_per_unit_micros: 1_000_000,
             credits_per_unit_pico: None,
             synced_at: Utc::now() - Duration::seconds(901),
+            retired_at: None,
         })
         .await
         .expect("insert stale rate");
@@ -1182,7 +1327,10 @@ async fn settle_after_midstream_suspension_remains_durable() {
     assert_eq!(row.quantity, Some(23));
     let saved_wallet = wallet(&db, &owner_id).await;
     assert!(saved_wallet.suspended);
-    assert_eq!(saved_wallet.pending_lago_debits, 23);
+    assert_eq!(
+        saved_wallet.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(23)
+    );
 }
 
 #[tokio::test]
@@ -1234,8 +1382,14 @@ async fn card_backed_wallet_cannot_reserve_past_the_overdraft_cap() {
 
     let saved_wallet = wallet(&db, &owner_id).await;
     assert_eq!(saved_wallet.plan_kind, PlanKind::Subscription);
-    assert_eq!(saved_wallet.overdraft_cap_credits, 2);
-    assert_eq!(saved_wallet.reserved_credits, 2);
+    assert_eq!(
+        saved_wallet.overdraft_cap_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
+    assert_eq!(
+        saved_wallet.reserved_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     assert!(saved_wallet.suspended);
     assert_eq!(saved_wallet.collection_state, CollectionState::Suspended);
 }
@@ -1360,8 +1514,14 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
         1
     );
     let saved_wallet = wallet(&db, &owner_id).await;
-    assert_eq!(saved_wallet.reserved_credits, 0);
-    assert_eq!(saved_wallet.pending_lago_debits, 1);
+    assert_eq!(
+        saved_wallet.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        saved_wallet.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(1)
+    );
     downstream.abort();
 }
 
@@ -1505,7 +1665,7 @@ async fn exercise_nyxagent_routes(
     )
     .await;
     assert!(String::from_utf8_lossy(&response).contains("\"status\":\"completed\""));
-    let row = crate::services::assistant_nyxagent::list(db, owner, 1, None)
+    let row = crate::services::assistant_nyxagent::list(db, owner, 1, None, None)
         .await
         .unwrap()
         .remove(0);
@@ -1521,6 +1681,59 @@ async fn exercise_nyxagent_routes(
     )
     .await;
     assert!(String::from_utf8_lossy(&models).contains("nyxagent/research"));
+    let capabilities = call_mounted_route(
+        app,
+        route_request(
+            Method::GET,
+            &format!(
+                "/api/v1/assistant/nyxagent/conversations/{}/capabilities",
+                row.id
+            ),
+            token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&capabilities).contains("\"max_per_turn\":20"));
+    // Steering needs a live web turn with a running response on this thread.
+    let turn_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": owner},
+            doc! {"$set": {"active_turn": {
+                "turn_id": &turn_id,
+                "started_at": bson::DateTime::from_chrono(now),
+                "lease_expires_at": bson::DateTime::from_chrono(now + Duration::minutes(5)),
+                "heartbeat_at": bson::DateTime::from_chrono(now),
+                "stop_requested": false,
+                "running_response": {
+                    "credential_api_key_id": &row.credential_api_key_id,
+                    "response_id": BILLING_STEER_RESPONSE,
+                    "session_id": BILLING_STEER_SESSION,
+                },
+            }}},
+        )
+        .await
+        .unwrap();
+    let steered = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/assistant/nyxagent/conversations/{}/steer", row.id),
+            token,
+            Body::from(
+                serde_json::json!({
+                    "text": "billing steer boundary",
+                    "turn_id": turn_id,
+                    "clientRequestId": "billing-steer-1",
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&steered).contains("\"outcome\":\"applied\""));
     call_mounted_route(
         app,
         route_request(
@@ -1531,8 +1744,13 @@ async fn exercise_nyxagent_routes(
         ),
     )
     .await;
-    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 3).await;
+    // turns, models, capabilities, steer (capabilities cached) and delete.
+    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 5).await;
 }
+
+const BILLING_STEER_SESSION: &str = "conv_33333333333333333333333333333333";
+const BILLING_STEER_RESPONSE: &str =
+    "resp_33333333333333333333333333333333_44444444444444444444444444444444";
 
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
@@ -1562,6 +1780,24 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
         if path == "/nyxagent/v1/models" {
             return Json(serde_json::json!({"object":"list","data":[{"id":"nyxagent/research"}]}))
                 .into_response();
+        }
+        if path == "/nyxagent/v1/capabilities" {
+            return Json(
+                serde_json::json!({"steer":{"version":1,"protocol":"nyxagent-steer-v1",
+                "input":["text"],"max_chars":32000,"max_per_turn":20}}),
+            )
+            .into_response();
+        }
+        if path == format!("/nyxagent/v1/conversations/{BILLING_STEER_SESSION}/steer") {
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(request.into_body(), 100_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["input"], "billing steer boundary");
+            assert_eq!(body["expected_response_id"], BILLING_STEER_RESPONSE);
+            return Json(serde_json::json!({"object":"conversation.steer",
+                "conversation_id":BILLING_STEER_SESSION,"response_id":BILLING_STEER_RESPONSE,
+                "status":"accepted"}))
+            .into_response();
         }
 
         if path == "/codex-connection/responses" {
@@ -1909,6 +2145,8 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
 }
 
 async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Bytes {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
     let response = app
         .clone()
         .oneshot(request)
@@ -1920,7 +2158,7 @@ async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Byte
         .expect("consume mounted route response");
     assert!(
         status.is_success(),
-        "mounted route returned {status}: {}",
+        "mounted route {method} {path} returned {status}: {}",
         String::from_utf8_lossy(&body)
     );
     body
@@ -1964,6 +2202,9 @@ async fn insert_route_service(
 async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) -> Node {
     let now = Utc::now();
     let node = Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         id: Uuid::new_v4().to_string(),
         user_id: owner_id.to_string(),
         name: name.to_string(),
@@ -2308,6 +2549,7 @@ async fn insert_llm_route_service(
         extra_auth_params: None,
         device_code_format: "rfc8628".to_string(),
         client_id_param_name: None,
+        authorization_nonce_required: false,
         requires_gateway_url: false,
         created_by: "billing-route-test".to_string(),
         revocation_seed_version: 0,
@@ -2512,7 +2754,7 @@ fn assert_coverage_cases_are_exhaustive() {
     }
 }
 
-fn billing_service(
+pub(crate) fn billing_service(
     db: &mongodb::Database,
     lago: Arc<FakeLago>,
     default_overdraft_cap_credits: i64,
@@ -2559,7 +2801,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         BillingMetric::Tokens => {
             if case.scenario.contains("usage-omitted") {
                 let usage = if case.ingress == BillingIngress::Proxy {
-                    crate::handlers::proxy::llm_platform_usage(None, 19)
+                    crate::services::proxy_http_response::llm_platform_usage(None, 19)
                 } else {
                     crate::handlers::llm_gateway::llm_platform_usage(None, 19)
                 };
@@ -2575,7 +2817,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
     }
 }
 
-async fn create_usage_index(db: &mongodb::Database) {
+pub(crate) async fn create_usage_index(db: &mongodb::Database) {
     db.collection::<UsageMeterRow>(USAGE_METER)
         .create_index(
             IndexModel::builder()
@@ -2599,7 +2841,7 @@ async fn insert_fresh_rates(db: &mongodb::Database) {
         .expect("insert billing coverage rates");
 }
 
-fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
+pub(crate) fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
     BillingRateCache {
         id: BillingRateCache::cache_id(metric, None),
         lago_metric_code: metric.to_string(),
@@ -2607,6 +2849,7 @@ fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
         credits_per_unit_micros: 1_000_000,
         credits_per_unit_pico: None,
         synced_at,
+        retired_at: None,
     }
 }
 

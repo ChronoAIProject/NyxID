@@ -170,7 +170,7 @@ export function AdminUsersPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">Failed to load users</p>
+            <p className="text-12 font-medium text-muted-foreground">Failed to load users</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -178,7 +178,7 @@ export function AdminUsersPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No users found</p>
+            <p className="text-12 font-medium text-muted-foreground">No users found</p>
             <p className="text-xs text-muted-foreground">
               {search ? "No users match your search." : "There are no users to display."}
             </p>
@@ -197,11 +197,11 @@ export function AdminUsersPage() {
                   tabIndex={0}
                   onClick={() => void navigate({ to: "/admin/users/$userId", params: { userId: user.id } })}
                   onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/admin/users/$userId", params: { userId: user.id } }); }}
-                  className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                  className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
                 >
-                  <p className="text-[13px] font-semibold text-foreground truncate">{user.display_name ?? user.email}</p>
+                  <p className="text-13 font-semibold text-foreground truncate">{user.display_name ?? user.email}</p>
                   {user.display_name && (
-                    <p className="text-[11px] text-muted-foreground truncate">{user.email}</p>
+                    <p className="text-11 text-muted-foreground truncate">{user.email}</p>
                   )}
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <Badge variant={user.is_active ? "success" : "destructive"}>
@@ -211,7 +211,7 @@ export function AdminUsersPage() {
                     {role === "operator" && <Badge variant="secondary">Operator</Badge>}
                     {user.mfa_enabled && <Badge variant="success">MFA</Badge>}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                     <span>{user.email_verified ? "Verified" : "Unverified"}</span>
                     <span>{formatDate(user.last_login_at)}</span>
                   </div>
@@ -306,7 +306,7 @@ export function AdminUsersPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-[11px] text-text-tertiary">
+            <p className="text-11 text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               users
@@ -321,7 +321,7 @@ export function AdminUsersPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-[11px] text-text-tertiary">
+              <span className="text-11 text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

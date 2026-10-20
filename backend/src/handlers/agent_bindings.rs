@@ -47,7 +47,7 @@ async fn resolve_binding_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -653,11 +653,15 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -673,6 +677,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),

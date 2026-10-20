@@ -352,7 +352,8 @@ impl AurinkoAdapter {
                 if let Some(message) = self.message(&token, id).await?
                     && let Some(inbound) = normalize(bot, &account, &message)?
                 {
-                    channel_retry_ingress::deliver(context, bot, &inbound, &receipt.id).await?;
+                    channel_retry_ingress::deliver(context, bot, self, &inbound, &receipt.id)
+                        .await?;
                 }
                 Ok::<(), AppError>(())
             })

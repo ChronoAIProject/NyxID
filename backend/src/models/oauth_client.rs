@@ -1,16 +1,16 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// How this client's `allowed_scopes` were determined at creation
+/// How this client's current `allowed_scopes` were determined
 /// (NyxID#1222). Durable provenance so future scope-policy changes can
 /// distinguish inherited defaults from explicit choices — the missing
 /// discriminator that made retroactive scope migrations unsound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeProvenance {
-    /// The registration/creation request explicitly supplied `scope`.
+    /// Known scopes were explicitly requested at creation or edited later.
     Explicit,
-    /// The request omitted `scope`; the server default was applied.
+    /// Server defaults were applied (omitted, blank, or unknown-only DCR scope).
     Defaulted,
     /// Row predates provenance tracking; origin is unknowable and the
     /// row must never be widened retroactively.

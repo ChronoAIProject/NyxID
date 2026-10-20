@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,7 +29,7 @@ pub trait LagoApi: Send + Sync {
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         Ok(LagoWallet {
             id: customer_id.to_string(),
-            balance_credits: 0,
+            balance_credits: Credits::ZERO,
         })
     }
 
@@ -46,17 +47,28 @@ pub trait LagoApi: Send + Sync {
     async fn record_events_batch(&self, events: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError>;
     async fn current_usage(&self, customer_id: &str, subscription_id: &str)
     -> AppResult<LagoUsage>;
+    /// Compatibility method for old adapters. Exact production reads override the method below.
     async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64>;
-    async fn wallet_balance_micros(&self, customer_id: &str) -> AppResult<i64> {
+    async fn wallet_balance_exact(&self, customer_id: &str) -> AppResult<Credits> {
+        self.wallet_balance_credits(customer_id).await
+    }
+    async fn wallet_balance_credits(&self, customer_id: &str) -> AppResult<Credits> {
         self.wallet_balance(customer_id)
             .await
-            .map(|credits| credits.saturating_mul(1_000_000))
+            .map(Credits::from_whole)
     }
     async fn entitlements(&self, subscription_id: &str) -> AppResult<Vec<Entitlement>>;
+    /// Strict live subscription identity for paid Machine admission. Older
+    /// adapters must opt in; feature entitlements alone are not billing proof.
+    async fn runtime_subscription(&self, _subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago runtime subscription verification is not supported".into(),
+        ))
+    }
     /// Per-unit rates for the plan's standard charges, used to refresh the
     /// local rate cache. Defaults to empty so fakes opt in explicitly.
-    async fn plan_rates(&self, _plan_code: &str) -> AppResult<Vec<PlanRate>> {
-        Ok(Vec::new())
+    async fn plan_rates(&self, _plan_code: &str) -> AppResult<PlanRates> {
+        Ok(PlanRates::default())
     }
     /// Credit (top-up) invoices for a customer, used to resolve payment
     /// outcomes for the top-up history. Defaults to empty for fakes.
@@ -90,7 +102,7 @@ pub trait LagoApi: Send + Sync {
     async fn void_wallet_credits(
         &self,
         wallet_id: &str,
-        _amount_micros: i64,
+        _amount: Credits,
         _operation_id: &str,
     ) -> AppResult<String> {
         Err(AppError::BillingProviderUnavailable(format!(
@@ -131,6 +143,16 @@ pub struct InvoiceSummary {
     pub issuing_date: Option<String>,
 }
 
+/// Provider-owned identity and lifecycle of the subscription that will receive
+/// runtime events. No customer profile, payment data or credentials are exposed.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSubscription {
+    pub external_id: String,
+    pub external_customer_id: String,
+    pub plan_code: String,
+    pub status: String,
+}
+
 /// A per-unit price from a Lago plan charge, converted to micro-credits
 /// (1 credit = 1 USD, matching the wallet rate_amount NyxID provisions).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +160,12 @@ pub struct PlanRate {
     pub lago_metric_code: String,
     pub credits_per_unit_micros: i64,
     pub credits_per_unit_pico: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlanRates {
+    pub rates: Vec<PlanRate>,
+    pub rejected: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -382,7 +410,7 @@ impl LagoClient {
         let response = builder.send().await.map_err(LagoError::from_reqwest)?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        let json = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+        let json = parse_lago_json(&text).unwrap_or(Value::Null);
 
         if status.is_success() {
             Ok(json)
@@ -627,6 +655,13 @@ impl LagoApi for LagoClient {
     }
 
     async fn wallet_balance(&self, customer_id: &str) -> AppResult<i64> {
+        Ok(self
+            .wallet_balance_exact(customer_id)
+            .await?
+            .display_whole())
+    }
+
+    async fn wallet_balance_exact(&self, customer_id: &str) -> AppResult<Credits> {
         let value = self
             .json_request(
                 reqwest::Method::GET,
@@ -669,6 +704,41 @@ impl LagoApi for LagoClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    async fn runtime_subscription(&self, subscription_id: &str) -> AppResult<RuntimeSubscription> {
+        if subscription_id.is_empty() || subscription_id != subscription_id.trim() {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription identity is invalid".into(),
+            ));
+        }
+        let value = self
+            .get_one_by_external_id("subscriptions", "subscription", subscription_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago runtime subscription was not found".into(),
+                )
+            })?;
+        let subscription: RuntimeSubscription = serde_json::from_value(value).map_err(|_| {
+            AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof is incomplete".into(),
+            )
+        })?;
+        if subscription.external_id != subscription_id
+            || [
+                subscription.external_customer_id.as_str(),
+                subscription.plan_code.as_str(),
+                subscription.status.as_str(),
+            ]
+            .iter()
+            .any(|value| value.is_empty() || *value != value.trim())
+        {
+            return Err(AppError::BillingProviderUnavailable(
+                "Lago runtime subscription proof does not match".into(),
+            ));
+        }
+        Ok(subscription)
     }
 
     async fn wallet_transaction_invoices(
@@ -723,7 +793,14 @@ impl LagoApi for LagoClient {
                 .cloned()
                 .unwrap_or_default();
             let item_count = items.len();
-            transactions.extend(items.iter().filter_map(wallet_transaction_from_value));
+            for item in &items {
+                transactions.push(wallet_transaction_from_value(item).ok_or_else(|| {
+                    AppError::BillingProviderUnavailable(
+                        "invalid Lago wallet transaction; expiry requires complete exact history"
+                            .into(),
+                    )
+                })?);
+            }
             if item_count < WALLET_TRANSACTION_PAGE_SIZE {
                 break;
             }
@@ -732,7 +809,8 @@ impl LagoApi for LagoClient {
                     wallet_id,
                     max_pages = MAX_WALLET_TRANSACTION_PAGES,
                     page_size = WALLET_TRANSACTION_PAGE_SIZE,
-                    "Lago wallet transaction history reached the safety cap; skipping expiry because FIFO history is incomplete"
+                    "Lago wallet transaction history reached the safety cap; skipping expiry because \
+                     FIFO history is incomplete"
                 );
                 return Err(AppError::BillingProviderUnavailable(format!(
                     "Lago wallet '{wallet_id}' transaction history exceeds the safe pagination limit"
@@ -745,17 +823,17 @@ impl LagoApi for LagoClient {
     async fn void_wallet_credits(
         &self,
         wallet_id: &str,
-        amount_micros: i64,
+        amount: Credits,
         operation_id: &str,
     ) -> AppResult<String> {
-        if amount_micros <= 0 {
+        if amount <= Credits::ZERO {
             return Err(AppError::ValidationError(
                 "wallet void amount must be positive".to_string(),
             ));
         }
         // Lago wallet credits have five decimal places. Transaction amounts
         // returned by Lago are therefore multiples of 10 microcredits.
-        let amount = micros_to_lago_credits(amount_micros);
+        let amount = credits_to_lago_void_amount(amount)?;
         let transaction_name = purchased_credit_expiry_transaction_name(operation_id);
         let value = self
             .json_request(
@@ -783,7 +861,7 @@ impl LagoApi for LagoClient {
             })
     }
 
-    async fn wallet_balance_micros(&self, customer_id: &str) -> AppResult<i64> {
+    async fn wallet_balance_credits(&self, customer_id: &str) -> AppResult<Credits> {
         let value = self
             .json_request(
                 reqwest::Method::GET,
@@ -795,7 +873,7 @@ impl LagoApi for LagoClient {
             )
             .await
             .map_err(lago_error_to_app)?;
-        extract_active_wallet_balance_micros(&value).ok_or_else(|| {
+        extract_active_wallet_balance_exact(&value).ok_or_else(|| {
             AppError::BillingProviderUnavailable(
                 "Lago wallet response did not include a balance".to_string(),
             )
@@ -858,7 +936,7 @@ impl LagoApi for LagoClient {
         }
     }
 
-    async fn plan_rates(&self, plan_code: &str) -> AppResult<Vec<PlanRate>> {
+    async fn plan_rates(&self, plan_code: &str) -> AppResult<PlanRates> {
         let path = format!("plans/{}", urlencoding::encode(plan_code));
         let value = self
             .json_request(reqwest::Method::GET, &path, None)
@@ -872,6 +950,7 @@ impl LagoApi for LagoClient {
             .unwrap_or_default();
 
         let mut rates = Vec::new();
+        let mut rejected = Vec::new();
         for charge in &charges {
             let Some(code) = value_string(charge, &["billable_metric_code"]).or_else(|| {
                 charge
@@ -891,21 +970,32 @@ impl LagoApi for LagoClient {
             }
             let amount = charge
                 .get("properties")
-                .and_then(|properties| value_string(properties, &["amount"]));
-            let Some(micros) = amount.as_deref().and_then(decimal_credits_to_micros) else {
-                tracing::warn!(metric_code = %code, "Skipping Lago charge with unparseable amount in rate cache refresh");
+                .and_then(|properties| properties.get("amount"))
+                .and_then(|amount| match amount {
+                    Value::String(value) => Some(value.clone()),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                });
+            let pico = amount
+                .as_deref()
+                .and_then(|value| value.parse::<Credits>().ok())
+                .filter(|amount| *amount >= Credits::ZERO)
+                .and_then(|amount| i64::try_from(amount.pico()).ok())
+                .filter(|p| *p <= super::amounts::MAX_PRICE_PICO);
+            let Some(pico) = pico else {
+                tracing::error!(metric_code = %code, "Lago charge has an invalid exact rate; metric disabled");
+                rejected.push(code);
                 continue;
             };
-            // Every NyxID-authored decimal fits the precise field. Retain the
-            // legacy mirror for external Lago amounts outside its numeric range.
-            let pico = amount.as_deref().and_then(super::amounts::decimal_to_pico);
+            let micros = pico / 1_000_000;
             rates.push(PlanRate {
                 lago_metric_code: code,
                 credits_per_unit_micros: micros,
-                credits_per_unit_pico: pico,
+                credits_per_unit_pico: Some(pico),
             });
         }
-        Ok(rates)
+        rates.retain(|rate| !rejected.contains(&rate.lago_metric_code));
+        Ok(PlanRates { rates, rejected })
     }
 
     async fn sync_standard_charge(
@@ -1147,7 +1237,7 @@ pub struct OwnerProvisionInput {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LagoWallet {
     pub id: String,
-    pub balance_credits: i64,
+    pub balance_credits: Credits,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1176,8 +1266,8 @@ pub struct LagoWalletTransaction {
     pub status: String,
     pub transaction_status: String,
     pub transaction_type: String,
-    pub credit_amount_micros: i64,
-    pub remaining_credit_micros: Option<i64>,
+    pub credit_amount: Credits,
+    pub remaining_credit: Option<Credits>,
     pub name: Option<String>,
     pub settled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -1416,6 +1506,43 @@ fn lago_error_to_app(error: LagoError) -> AppError {
     AppError::BillingProviderUnavailable(error.message)
 }
 
+/// Preserve provider decimal tokens before any floating-point conversion.
+/// Integral JSON values retain their usual type; fractional or oversized
+/// numbers become decimal strings, which the Lago amount/quantity readers
+/// accept. Keeping this local avoids serde_json's global arbitrary_precision
+/// feature, whose private number serialization is incompatible with BSON.
+fn parse_lago_json(input: &str) -> Result<Value, serde_json::Error> {
+    fn decode(raw: &serde_json::value::RawValue) -> Result<Value, serde_json::Error> {
+        let text = raw.get();
+        match text.as_bytes()[0] {
+            b'{' => {
+                let fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                    serde_json::from_str(text)?;
+                fields
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, decode(&value)?)))
+                    .collect::<Result<serde_json::Map<_, _>, _>>()
+                    .map(Value::Object)
+            }
+            b'[' => {
+                let items: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)?;
+                items
+                    .into_iter()
+                    .map(|value| decode(&value))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Value::Array)
+            }
+            b'-' | b'0'..=b'9' => Ok(text
+                .parse::<i64>()
+                .map(Value::from)
+                .or_else(|_| text.parse::<u64>().map(Value::from))
+                .unwrap_or_else(|_| Value::String(text.to_string()))),
+            _ => serde_json::from_str(text),
+        }
+    }
+    decode(serde_json::from_str::<&serde_json::value::RawValue>(input)?)
+}
+
 fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str))
@@ -1430,9 +1557,9 @@ fn lago_error_message(value: &Value) -> Option<String> {
     value_string(value, &["message", "error"])
 }
 
-pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
+pub fn extract_wallet_balance_credits(value: &Value) -> Option<Credits> {
     find_wallet_object(value).and_then(|wallet| {
-        json_i64_path(
+        json_credits_path(
             wallet,
             &[
                 // OSS Lago's ongoing balance refresh is premium-gated and can
@@ -1467,49 +1594,39 @@ fn invoice_summary_from_value(value: &Value) -> Option<InvoiceSummary> {
     })
 }
 
-/// Parse a Lago decimal amount string ("0.000005", "0.01", "1") into
-/// micro-credits without floating point. Digits beyond micro precision are
-/// truncated. Returns None for negative or malformed values.
-pub fn decimal_credits_to_micros(amount: &str) -> Option<i64> {
-    let amount = amount.trim();
-    if amount.is_empty() {
-        return None;
-    }
-    let (int_part, frac_part) = match amount.split_once('.') {
-        Some((int_part, frac_part)) => (int_part, frac_part),
-        None => (amount, ""),
-    };
-    if int_part.starts_with('-') || frac_part.contains('-') {
-        return None;
-    }
-    let int_value: i64 = if int_part.is_empty() {
-        0
-    } else {
-        int_part.parse().ok()?
-    };
-    if !frac_part.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    let frac_digits: String = frac_part.chars().take(6).collect();
-    let frac_value: i64 = if frac_digits.is_empty() {
-        0
-    } else {
-        let padded = format!("{frac_digits:0<6}");
-        padded.parse().ok()?
-    };
-    int_value
-        .checked_mul(1_000_000)
-        .and_then(|micros| micros.checked_add(frac_value))
+/// Parse a nonnegative provider amount without rounding or floating point.
+fn decimal_credits(amount: &str) -> Option<Credits> {
+    amount
+        .trim()
+        .parse::<Credits>()
+        .ok()
+        .filter(|amount| *amount >= Credits::ZERO)
 }
 
-/// Extract the accrued period usage in cents from a Lago current_usage
-/// response (`{"customer_usage": {"total_amount_cents": ...}}`).
-pub fn extract_current_usage_amount_cents(value: &Value) -> Option<i64> {
+/// Convert currency cents to credits (Lago wallet rate_amount = 1). Missing
+/// accrued usage is zero; a present malformed amount fails the refresh closed.
+pub fn extract_current_usage_credits(value: &Value) -> AppResult<Credits> {
     let usage = value.get("customer_usage").unwrap_or(value);
-    usage
+    let Some(value) = usage
         .get("total_amount_cents")
-        .and_then(json_i64_value)
-        .or_else(|| usage.get("amount_cents").and_then(json_i64_value))
+        .or_else(|| usage.get("amount_cents"))
+    else {
+        return Ok(Credits::ZERO);
+    };
+    let cents = match value {
+        Value::String(value) => decimal_credits(value),
+        Value::Number(value) => decimal_credits(&value.to_string()),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        AppError::BillingProviderUnavailable("invalid Lago accrued usage amount".into())
+    })?;
+    if cents.pico() % 100 != 0 {
+        return Err(AppError::BillingProviderUnavailable(
+            "Lago accrued usage exceeds credit precision".into(),
+        ));
+    }
+    Ok(Credits::from_pico(cents.pico() / 100)?)
 }
 
 /// Pick the first non-terminated wallet from a Lago wallets list response.
@@ -1535,33 +1652,15 @@ pub fn extract_active_wallet(value: &Value) -> Option<LagoWallet> {
 }
 
 /// Extract a balance from a Lago wallets list, skipping terminated entries.
-pub fn extract_active_wallet_balance_credits(value: &Value) -> Option<i64> {
+pub fn extract_active_wallet_balance_credits(value: &Value) -> Option<Credits> {
     if matches!(value.get("wallets"), Some(Value::Array(_))) {
         return active_wallet_value(value).and_then(extract_wallet_balance_credits);
     }
     extract_wallet_balance_credits(value)
 }
 
-fn extract_active_wallet_balance_micros(value: &Value) -> Option<i64> {
-    let wallet = if matches!(value.get("wallets"), Some(Value::Array(_))) {
-        active_wallet_value(value)?
-    } else {
-        find_wallet_object(value)?
-    };
-    [
-        "credits_balance",
-        "credits_ongoing_balance",
-        "credits_ongoing_usage_balance",
-        "ongoing_balance",
-        "balance_credits",
-        "amount",
-    ]
-    .iter()
-    .find_map(|key| match wallet.get(*key)? {
-        Value::String(value) => decimal_credits_to_micros(value),
-        Value::Number(value) => decimal_credits_to_micros(&value.to_string()),
-        _ => None,
-    })
+fn extract_active_wallet_balance_exact(value: &Value) -> Option<Credits> {
+    extract_active_wallet_balance_credits(value)
 }
 
 pub fn extract_wallet(value: &Value) -> Option<LagoWallet> {
@@ -1570,7 +1669,7 @@ pub fn extract_wallet(value: &Value) -> Option<LagoWallet> {
         value_string(wallet, &["id", "lago_id", "wallet_id", "lago_wallet_id"]).or_else(|| {
             find_string_by_keys(wallet, &["id", "lago_id", "wallet_id", "lago_wallet_id"])
         })?;
-    let balance_credits = extract_wallet_balance_credits(wallet).unwrap_or(0);
+    let balance_credits = extract_wallet_balance_credits(wallet)?;
     Some(LagoWallet {
         id,
         balance_credits,
@@ -1613,18 +1712,17 @@ fn wallet_transaction_from_value(value: &Value) -> Option<LagoWalletTransaction>
         status: value_string(value, &["status"]).unwrap_or_default(),
         transaction_status: value_string(value, &["transaction_status"]).unwrap_or_default(),
         transaction_type: value_string(value, &["transaction_type"]).unwrap_or_default(),
-        credit_amount_micros: value_string(value, &["credit_amount"])
-            .as_deref()
-            .and_then(decimal_credits_to_micros)
-            .unwrap_or(0),
-        remaining_credit_micros: value.get("remaining_credit_amount").and_then(|remaining| {
-            match remaining {
-                Value::Null => None,
-                Value::String(value) => decimal_credits_to_micros(value),
-                Value::Number(value) => decimal_credits_to_micros(&value.to_string()),
-                _ => None,
-            }
-        }),
+        credit_amount: match value.get("credit_amount")? {
+            Value::String(value) => decimal_credits(value)?,
+            Value::Number(value) => decimal_credits(&value.to_string())?,
+            _ => return None,
+        },
+        remaining_credit: match value.get("remaining_credit_amount") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(decimal_credits(value)?),
+            Some(Value::Number(value)) => Some(decimal_credits(&value.to_string())?),
+            _ => return None,
+        },
         name: value_string(value, &["name"]),
         settled_at: value_string(value, &["settled_at"])
             .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok()),
@@ -1636,11 +1734,13 @@ pub fn purchased_credit_expiry_transaction_name(operation_id: &str) -> String {
     format!("NyxID purchased-credit expiry {operation_id}")
 }
 
-fn micros_to_lago_credits(micros: i64) -> String {
-    let micros = micros.max(0) / 10 * 10;
-    let whole = micros / 1_000_000;
-    let fractional = (micros % 1_000_000) / 10;
-    format!("{whole}.{fractional:05}")
+fn credits_to_lago_void_amount(amount: Credits) -> AppResult<String> {
+    if amount <= Credits::ZERO || amount.pico() % 10_000_000 != 0 {
+        return Err(AppError::Internal(
+            "Lago void must be positive and exactly representable at five decimals".into(),
+        ));
+    }
+    Ok(amount.to_string())
 }
 
 pub fn extract_wallet_transaction_payment_details(
@@ -1761,41 +1861,6 @@ fn find_string_by_keys(value: &Value, keys: &[&str]) -> Option<String> {
     }
 }
 
-fn json_i64_path(value: &Value, keys: &[&str]) -> Option<i64> {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(parsed) = map.get(*key).and_then(json_i64_value) {
-                    return Some(parsed);
-                }
-            }
-            for key in keys {
-                if let Some(parsed) = map.get(*key).and_then(|inner| json_i64_path(inner, keys)) {
-                    return Some(parsed);
-                }
-            }
-            None
-        }
-        _ => json_i64_value(value),
-    }
-}
-
-fn json_i64_value(value: &Value) -> Option<i64> {
-    match value {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|value| value.round() as i64)),
-        Value::String(value) => value.parse::<i64>().ok().or_else(|| {
-            value
-                .parse::<f64>()
-                .ok()
-                .map(|parsed| parsed.round() as i64)
-        }),
-        Value::Object(map) => map.values().find_map(json_i64_value),
-        _ => None,
-    }
-}
-
 fn body_contains(value: &Value, needle: &str) -> bool {
     match value {
         Value::String(s) => s.eq_ignore_ascii_case(needle) || s.contains(needle),
@@ -1811,15 +1876,28 @@ fn body_contains_any(value: &Value, needles: &[&str]) -> bool {
     needles.iter().any(|needle| body_contains(value, needle))
 }
 
+fn json_credits_path(value: &Value, keys: &[&str]) -> Option<Credits> {
+    match value {
+        Value::Object(map) => keys
+            .iter()
+            .find_map(|key| map.get(*key).filter(|value| !value.is_null()))
+            .and_then(|value| json_credits_path(value, keys)),
+        Value::String(value) => value.parse().ok(),
+        Value::Number(value) => value.to_string().parse().ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::models::credits::Credits;
     use reqwest::StatusCode;
     use serde_json::{Value, json};
 
     use super::{
         LagoApi, LagoClient, LagoError, LagoErrorKind, LagoEvent, LagoEventProperties,
         OwnerProvisionInput, PlanRate, ServicePriceSync, WALLET_TRANSACTION_PAGE_SIZE,
-        classify_lago_failure, decimal_credits_to_micros, extract_active_wallet,
+        classify_lago_failure, decimal_credits, extract_active_wallet,
         extract_wallet_balance_credits, subscription_external_id,
     };
 
@@ -1841,6 +1919,89 @@ mod tests {
             metric_description: "NyxID-managed platform usage price".to_string(),
             credits_per_unit: "0.125".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_reads_live_provider_identity_without_provisioning() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "active",
+                    "lago_id": "provider-internal-id", "unrelated_field": true,
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        let proof = client.runtime_subscription("subscription-1").await.unwrap();
+        assert_eq!(proof.external_id, "subscription-1");
+        assert_eq!(proof.external_customer_id, "owner-1");
+        assert_eq!(proof.plan_code, "nyxid-standard");
+        assert_eq!(proof.status, "active");
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_rejects_missing_malformed_and_mismatched_proof() {
+        let valid = json!({
+            "external_id": "subscription-1", "external_customer_id": "owner-1",
+            "plan_code": "nyxid-standard", "status": "active",
+        });
+        let mut missing_plan = valid.clone();
+        missing_plan.as_object_mut().unwrap().remove("plan_code");
+        let mut wrong_id = valid.clone();
+        wrong_id["external_id"] = json!("another-subscription");
+        let mut numeric_customer = valid.clone();
+        numeric_customer["external_customer_id"] = json!(1234);
+        let mut empty_status = valid.clone();
+        empty_status["status"] = json!("");
+        for body in [
+            Value::Null,
+            json!({}),
+            missing_plan,
+            wrong_id,
+            numeric_customer,
+            empty_status,
+        ] {
+            let app = axum::Router::new().route(
+                "/api/v1/subscriptions/subscription-1",
+                axum::routing::get(move || {
+                    let body = body.clone();
+                    async move { axum::Json(json!({ "subscription": body })) }
+                }),
+            );
+            let client =
+                LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+            assert!(client.runtime_subscription("subscription-1").await.is_err());
+        }
+        let client = LagoClient::new(
+            spawn_lago_mock(axum::Router::new()).await,
+            "test-api-key".into(),
+        )
+        .unwrap();
+        assert!(client.runtime_subscription("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_subscription_preserves_inactive_status_for_admission_to_reject() {
+        let app = axum::Router::new().route(
+            "/api/v1/subscriptions/subscription-1",
+            axum::routing::get(|| async {
+                axum::Json(json!({ "subscription": {
+                    "external_id": "subscription-1", "external_customer_id": "owner-1",
+                    "plan_code": "nyxid-standard", "status": "terminated",
+                } }))
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-api-key".into()).unwrap();
+        assert_eq!(
+            client
+                .runtime_subscription("subscription-1")
+                .await
+                .unwrap()
+                .status,
+            "terminated"
+        );
     }
 
     fn plan_response(charges: serde_json::Value) -> serde_json::Value {
@@ -2289,21 +2450,30 @@ mod tests {
 
     #[test]
     fn decimal_credits_parse_to_micros_without_float_drift() {
-        assert_eq!(decimal_credits_to_micros("0.000005"), Some(5));
-        assert_eq!(decimal_credits_to_micros("0.01"), Some(10_000));
-        assert_eq!(decimal_credits_to_micros("1"), Some(1_000_000));
-        assert_eq!(decimal_credits_to_micros("2.5"), Some(2_500_000));
-        assert_eq!(decimal_credits_to_micros(" 0.25 "), Some(250_000));
-        // Sub-micro digits truncate; malformed and negative values reject.
-        assert_eq!(decimal_credits_to_micros("0.0000019"), Some(1));
-        assert_eq!(decimal_credits_to_micros("-1"), None);
-        assert_eq!(decimal_credits_to_micros("abc"), None);
-        assert_eq!(decimal_credits_to_micros("1.2x"), None);
-        assert_eq!(decimal_credits_to_micros("1.123456x"), None);
-        assert_eq!(decimal_credits_to_micros(""), None);
+        assert_eq!(decimal_credits("0.000005"), Some(Credits::from_micros(5)));
+        assert_eq!(decimal_credits("0.01"), Some(Credits::from_micros(10_000)));
+        assert_eq!(decimal_credits("1"), Some(Credits::from_micros(1_000_000)));
         assert_eq!(
-            decimal_credits_to_micros("1000000001.25"),
-            Some(1_000_000_001_250_000)
+            decimal_credits("2.5"),
+            Some(Credits::from_micros(2_500_000))
+        );
+        assert_eq!(
+            decimal_credits(" 0.25 "),
+            Some(Credits::from_micros(250_000))
+        );
+        // Issue #1672: preserve the sub-micro fraction previously truncated here.
+        assert_eq!(
+            decimal_credits("0.0000019"),
+            Some(Credits::from_pico(1_900_000).unwrap())
+        );
+        assert_eq!(decimal_credits("-1"), None);
+        assert_eq!(decimal_credits("abc"), None);
+        assert_eq!(decimal_credits("1.2x"), None);
+        assert_eq!(decimal_credits("1.123456x"), None);
+        assert_eq!(decimal_credits(""), None);
+        assert_eq!(
+            decimal_credits("1000000001.25"),
+            Some(Credits::from_micros(1_000_000_001_250_000))
         );
     }
 
@@ -2324,7 +2494,11 @@ mod tests {
                             "charge_model": "standard",
                             "properties": { "amount": "0.01" }
                         },
-                        { "billable_metric_code": "platform_svc_image_byok_cache_read_tokens", "charge_model": "standard", "properties": { "amount": "0.000000250001" } },
+                        {
+                            "billable_metric_code": "platform_svc_image_byok_cache_read_tokens",
+                            "charge_model": "standard",
+                            "properties": { "amount": "0.000000250001" },
+                        },
                         {
                             "billable_metric_code": "resale_tokens",
                             "charge_model": "graduated",
@@ -2344,7 +2518,7 @@ mod tests {
         let rates = client.plan_rates("starter").await.expect("plan rates");
 
         assert_eq!(
-            rates,
+            rates.rates,
             vec![
                 PlanRate {
                     lago_metric_code: "platform_tokens".to_string(),
@@ -2445,19 +2619,103 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn rate_refresh_rejects_excess_precision_and_out_of_range_rates() {
+        for price in ["0.0000000000001", "1000000.000000000001", "-0.1"] {
+            let app = axum::Router::new().route(
+                "/api/v1/plans/plan",
+                axum::routing::get(move || async move {
+                    axum::Json(json!({
+                        "plan": {
+                            "charges": [
+                                {
+                                    "billable_metric_code": "metric",
+                                    "charge_model": "standard",
+                                    "properties": { "amount": price },
+                                },
+                                {
+                                    "billable_metric_code": "good",
+                                    "charge_model": "standard",
+                                    "properties": { "amount": "0.125" },
+                                },
+                            ]
+                        }
+                    }))
+                }),
+            );
+            let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+            // An invalid metric must fail closed without disabling good metrics.
+            let rates = client.plan_rates("plan").await.unwrap();
+            assert_eq!(rates.rates.len(), 1);
+            assert_eq!(rates.rates[0].lago_metric_code, "good");
+            assert_eq!(rates.rates[0].credits_per_unit_pico, Some(125_000_000_000));
+            assert_eq!(rates.rejected, vec!["metric"]);
+        }
+        let app = axum::Router::new().route(
+            "/api/v1/plans/plan",
+            axum::routing::get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    r#"{
+                "plan": {
+                    "charges": [{
+                        "billable_metric_code": "metric",
+                        "charge_model": "standard",
+                        "properties": { "amount": 8e-7 }
+                    }]
+                }
+            }"#,
+                )
+            }),
+        );
+        let client = LagoClient::new(spawn_lago_mock(app).await, "test-key".into()).unwrap();
+        assert_eq!(
+            client.plan_rates("plan").await.unwrap().rates[0].credits_per_unit_pico,
+            Some(800_000)
+        );
+    }
+
+    #[test]
+    fn external_boundaries_reject_loss_and_parse_numeric_json_exactly() {
+        // The old void path silently truncated 1.234567 to 1.23456.
+        assert!(super::credits_to_lago_void_amount(Credits::from_micros(1_234_567)).is_err());
+        assert_eq!(
+            super::credits_to_lago_void_amount(Credits::from_micros(1_234_560)).unwrap(),
+            "1.23456"
+        );
+        let value: Value =
+            super::parse_lago_json(r#"{"wallet":{"credits_balance":9007199254740993.12345}}"#)
+                .unwrap();
+        assert_eq!(
+            extract_wallet_balance_credits(&value).unwrap().to_string(),
+            "9007199254740993.12345"
+        );
+        assert_eq!(
+            super::extract_current_usage_credits(&json!({"amount_cents":"0.00008"}))
+                .unwrap()
+                .to_string(),
+            "0.0000008"
+        );
+        assert!(super::extract_current_usage_credits(&json!({"amount_cents":"invalid"})).is_err());
+        // Exact provider parsing must not alter JSON-to-BSON serialization
+        // elsewhere in the application.
+        assert_eq!(bson::to_bson(&json!(0.6)).unwrap(), bson::Bson::Double(0.6));
+    }
+
     #[test]
     fn wallet_balance_extracts_common_lago_shapes() {
         assert_eq!(
             extract_wallet_balance_credits(&json!({
                 "wallet": { "credits_balance": "42.4" }
             })),
-            Some(42)
+            // Issue #1672: fractional provider balances must not round to whole credits.
+            Some("42.4".parse().unwrap())
         );
         assert_eq!(
             extract_wallet_balance_credits(&json!({
                 "wallets": [{ "credits_ongoing_balance": "12.0" }]
             })),
-            Some(12)
+            Some(crate::models::credits::Credits::from_whole(12))
         );
         assert_eq!(
             extract_wallet_balance_credits(&json!({
@@ -2466,7 +2724,7 @@ mod tests {
                     "credits_ongoing_balance": "99.0"
                 }]
             })),
-            Some(9),
+            Some(crate::models::credits::Credits::from_whole(9)),
             "OSS settled balance must win over stale premium ongoing balance"
         );
     }
@@ -2944,8 +3202,14 @@ mod tests {
 
         assert_eq!(transactions.len(), 1);
         assert_eq!(transactions[0].id, "txn-purchase-1");
-        assert_eq!(transactions[0].credit_amount_micros, 12_500_000);
-        assert_eq!(transactions[0].remaining_credit_micros, Some(3_250_000));
+        assert_eq!(
+            transactions[0].credit_amount,
+            crate::models::credits::Credits::from_micros(12_500_000)
+        );
+        assert_eq!(
+            transactions[0].remaining_credit,
+            Some(crate::models::credits::Credits::from_micros(3_250_000))
+        );
         assert_eq!(
             transactions[0].settled_at.map(|value| value.timestamp()),
             Some(1_755_691_200)
@@ -2977,7 +3241,11 @@ mod tests {
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
 
         let transaction_id = client
-            .void_wallet_credits("wallet-1", 1_234_567, "expiry-operation-1")
+            .void_wallet_credits(
+                "wallet-1",
+                crate::models::credits::Credits::from_micros(1_234_560),
+                "expiry-operation-1",
+            )
             .await
             .expect("void credits");
 
@@ -3031,17 +3299,21 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: "owner-1".to_string(),
             api_key_id: None,
+            user_service_id: None,
             service_id: Some("service-1".to_string()),
             service_slug: Some("service-one".to_string()),
             metric: crate::models::service_billing::BillingMetric::Requests,
             lago_metric_code: "platform_svc_service-one".to_string(),
+            operation: None,
             credential_class: crate::models::usage_meter::CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,
-            reserved_credits: 1,
+            audio_tokens: None,
+            image_tokens: None,
+            reserved_credits: crate::models::credits::Credits::from_whole(1),
             funding: Some(crate::models::usage_meter::UsageFunding {
                 settled: true,
-                wallet_charge_credits: Some(1),
+                wallet_charge_credits: Some(crate::models::credits::Credits::from_whole(1)),
                 lago_billable_quantity_micros: Some(250_000),
                 settled_at: Some(now),
                 ..Default::default()
@@ -3049,6 +3321,8 @@ mod tests {
             quantity: Some(1),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            pool_attempt: None,
+            machine_usage: None,
             status: crate::models::usage_meter::UsageStatus::Finalized,
             forwarded: true,
             released: true,

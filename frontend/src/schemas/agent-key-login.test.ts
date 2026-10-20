@@ -3,10 +3,26 @@ import {
   agentKeyApproveSchema,
   agentKeyPreviewSchema,
   effectivePermissions,
+  loginKeyExpiry,
   newKeySelection,
 } from "./agent-key-login";
 
 describe("Agent Key login schemas", () => {
+  it("uses backend end-of-UTC-day expiry for date-only drafts and preserves exact timestamps", () => {
+    expect(loginKeyExpiry("2099-01-31")).toBe("2099-01-31T23:59:59.000Z");
+    expect(loginKeyExpiry("2099-01-31T12:34:56.000Z")).toBe(
+      "2099-01-31T12:34:56.000Z",
+    );
+    expect(loginKeyExpiry(null)).toBeNull();
+    expect(loginKeyExpiry("")).toBeNull();
+    expect(
+      newKeySelection({
+        name: "Dated",
+        scopes: ["read"],
+        expires_at: "2099-01-31",
+      }).data?.expires_at,
+    ).toBe("2099-01-31T23:59:59.000Z");
+  });
   it("normalizes codes and defaults new keys to explicit limited access", () => {
     const selection = newKeySelection({
       name: "CLI",

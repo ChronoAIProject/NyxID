@@ -2059,7 +2059,7 @@ pub async fn run_flow(
     // without a total timeout, a slow backend strands the browser with
     // disabled buttons and the only escape is tab-close (which then races
     // with the in-flight POST — see handle_cancel_unload + busy_flag below).
-    let upstream = reqwest::Client::builder()
+    let upstream = crate::tls::client_builder()?
         .user_agent(crate::api::CLI_USER_AGENT)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))

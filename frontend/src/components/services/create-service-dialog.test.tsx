@@ -7,6 +7,9 @@ const { create, navigate } = vi.hoisted(() => ({
   create: vi.fn(),
   navigate: vi.fn(),
 }));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useCreateService: () => ({ mutateAsync: create, isPending: false }),
 }));
@@ -18,6 +21,31 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 beforeEach(() => {
   create.mockReset().mockResolvedValue({ id: "new-service" });
+});
+
+it("offers a vendor scheme for bearer creation and sends the documented token", async () => {
+  const user = userEvent.setup();
+  render(<CreateServiceDialog open onOpenChange={vi.fn()} />);
+  await user.type(screen.getByLabelText("Service Name"), "Vendor mail");
+  await user.type(
+    screen.getByLabelText("Base URL"),
+    "https://mail.example.test",
+  );
+  expect(
+    screen.queryByLabelText("Authorization scheme"),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("combobox", { name: "Auth Type" }));
+  await user.click(screen.getByRole("option", { name: "Bearer Token" }));
+  await user.type(
+    screen.getByLabelText("Authorization scheme"),
+    "Zoho-oauthtoken",
+  );
+  await user.click(screen.getByRole("button", { name: "Create service" }));
+  await waitFor(() => expect(create).toHaveBeenCalledOnce());
+  expect(create.mock.calls[0]?.[0]).toMatchObject({
+    auth_type: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+  });
 });
 
 it("creates a provider-linked service with the shared configuration and disabled restricted defaults", async () => {

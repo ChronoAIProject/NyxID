@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { ServiceIcon } from "@/components/service-icon";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -86,6 +87,13 @@ export function ProviderDetailPage() {
       <PageHeader
         title={provider.name}
         description={provider.description ?? undefined}
+        leading={
+          <ServiceIcon
+            slug={provider.slug}
+            iconUrl={provider.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             <Button
@@ -166,8 +174,14 @@ export function ProviderDetailPage() {
               badge
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
+            {provider.provider_type === "oauth2" && (
+              <DetailRow
+                label="Authorization nonce required"
+                value={provider.authorization_nonce_required ? "Yes (hosted OAuth)" : "No"}
+              />
+            )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between px-4 py-2.5 text-[12px]">
+              <div className="flex items-start justify-between px-4 py-2.5 text-12">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
@@ -214,7 +228,7 @@ export function ProviderDetailPage() {
               />
             )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between px-4 py-2.5 text-[12px]">
+              <div className="flex items-start justify-between px-4 py-2.5 text-12">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
@@ -234,11 +248,11 @@ export function ProviderDetailPage() {
 
           <DetailSection title="API Key Configuration">
             {provider.api_key_instructions && (
-              <div className="px-4 py-2.5 text-[12px]">
+              <div className="px-4 py-2.5 text-12">
                 <span className="text-muted-foreground block mb-1">
                   Instructions
                 </span>
-                <p className="whitespace-pre-wrap text-[12px]">
+                <p className="whitespace-pre-wrap text-12">
                   {provider.api_key_instructions}
                 </p>
               </div>

@@ -845,7 +845,7 @@ describe("AddKeyDialog — IFTTT OAuth", () => {
 
 describe("AddKeyDialog — reconnect path", () => {
   it.each(["api-google-gmail", "api-google-workspace"])(
-    "adds required send permission when reconnecting %s with an old read-only grant",
+    "keeps send optional when reconnecting %s with a read-only grant",
     async (slug) => {
       const read = "https://www.googleapis.com/auth/gmail.readonly";
       const send = "https://www.googleapis.com/auth/gmail.send";
@@ -860,7 +860,7 @@ describe("AddKeyDialog — reconnect path", () => {
               scope: send,
               label: "Gmail (send)",
               description: "Send email.",
-              required: true,
+              required: false,
             },
           ],
         },
@@ -877,16 +877,14 @@ describe("AddKeyDialog — reconnect path", () => {
           })}
         />,
       );
-      expect(
-        screen.getByRole("button", { name: /Gmail \(send\)/ }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: /Gmail \(send\)/ })).toBeEnabled();
       await user.click(
         screen.getByRole("button", { name: /Connect with Google mail/ }),
       );
       await waitFor(() =>
         expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
           expect.objectContaining({
-            scopeOverride: ["openid", read, send],
+            scopeOverride: ["openid", read],
           }),
         ),
       );
@@ -2134,5 +2132,76 @@ describe("platform key connection choice", () => {
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect(screen.queryByRole("radio", { name: /Use NyxID's key/ })).not.toBeInTheDocument();
     expect(createKeyMutateAsync).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("AddKeyDialog — consolidated PostHog", () => {
+  function regionalEntry(region: "US" | "EU"): CatalogEntry {
+    return {
+      ...OAUTH_ENTRY,
+      slug: `api-posthog-${region.toLowerCase()}`,
+      name: `PostHog (${region})`,
+      base_url: `https://${region.toLowerCase()}.posthog.com`,
+      provider_config_id: `posthog-${region.toLowerCase()}-provider`,
+    };
+  }
+
+  it.each(["US", "EU"] as const)(
+    "shows one card and selects the original %s connection",
+    async (region) => {
+      const entry = regionalEntry(region);
+      catalog.entries = [regionalEntry("EU"), OPENAI_ENTRY, regionalEntry("US")];
+      const user = userEvent.setup();
+      render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+      expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(1);
+      await user.click(screen.getByRole("button", { name: /PostHog/ }));
+      expect(screen.getByRole("heading", { name: "Connect PostHog" })).toBeInTheDocument();
+      expect(createKeyMutateAsync).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", {
+        name: region === "US" ? /United States/ : /European Union/,
+      }));
+      expect(screen.getByRole("heading", {
+        name: `Configure routing for ${entry.name}`,
+      })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+      await user.click(screen.getByRole("button", { name: /Connect with PostHog/ }));
+      await waitFor(() => expect(createKeyMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ service_slug: entry.slug, endpoint_url: entry.base_url }),
+      ));
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
+        providerId: entry.provider_config_id,
+      }));
+    },
+  );
+
+  it("matches either regional slug and retains search when going back", async () => {
+    catalog.entries = [regionalEntry("EU"), OPENAI_ENTRY, regionalEntry("US")];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    await user.type(screen.getByPlaceholderText("Search services..."), "api-posthog-us");
+    await user.click(screen.getByRole("button", { name: /PostHog/ }));
+    await user.click(screen.getByRole("button", { name: "Back to catalog" }));
+    expect(screen.getByPlaceholderText("Search services...")).toHaveValue("api-posthog-us");
+    expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(1);
+  });
+
+  it("leaves a single regional entry directly selectable", async () => {
+    catalog.entries = [regionalEntry("EU")];
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /PostHog/ }));
+    expect(screen.getByRole("heading", {
+      name: "Configure routing for PostHog (EU)",
+    })).toBeInTheDocument();
+  });
+
+  it("keeps multiple configurations for the same region separate", () => {
+    catalog.entries = [regionalEntry("US"), regionalEntry("EU"), {
+      ...regionalEntry("US"), slug: "posthog-us-custom",
+    }];
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+    expect(screen.getAllByRole("button", { name: /PostHog/ })).toHaveLength(3);
   });
 });

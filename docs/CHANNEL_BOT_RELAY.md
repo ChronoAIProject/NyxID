@@ -8,9 +8,23 @@ NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
 
+[NyxBot service adapters](NYXBOT_SERVICE_ADAPTERS.md) add typed phone, SMS and
+external speech interfaces to the executable registry. Telnyx, Twilio and
+ElevenLabs use dedicated bindings and guest specialist sessions. The versioned
+`/api/v1/channel-adapters` catalog describes those interfaces alongside existing
+messaging adapters; `/api/v1/channel-platforms` retains the channel-bot contract
+documented here.
+
 ---
 
 For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
+
+Ordinary and native thread text replies accept one complete logical reply and
+split it only when required by the destination's limit. HTTP 200 confirms
+platform acceptance of every generated part; partial or uncertain delivery
+returns an error. A single reply token covers the whole request. See the
+[complete-reply contract](CHANNEL_COMPLETE_REPLIES.md) for the 2 MiB wire bound,
+64-part preflight, metadata-only tracking and coordinated CMAEG rollout.
 
 ## Telegram manager channels
 
@@ -18,7 +32,33 @@ A configured Telegram bot-creation manager can also be registered using its exis
 
 These callbacks deliberately omit `X-NyxID-User-Token` for every route: a public Telegram sender does not authorize access to the channel owner's services. The signed callback and message-bound reply token remain available, allowing the agent to send asynchronous replies as the manager. This exception does not change other channel bots' scoped owner-token behavior. The manager path retains its 32 concurrent deliveries per backend process, drop-on-full, transient delivery, and possible duplicates.
 
+## Staged thread-follow support
+
+The [thread-follow design](CHANNEL_THREAD_FOLLOW.md) is approved for staged
+implementation. The initial contract unit adds optional metadata-only
+`thread_context` to direct NyxBot callbacks behind the default-off
+`nyxbot:thread-follow` flag, resolved for the linked person even on organization
+bots. Other callbacks omit it. The adapter capability response adds
+`thread_reply`, `thread_follow` and `thread_history`; absent fields mean
+unsupported. Native bound replies are implemented for Slack, Telegram (including
+managed bots), Discord, Lark and Feishu. History is supported for Slack and
+Discord; Lark/Feishu offer explicitly partial known-message reads. Telegram uses
+metadata fallback. Provider failures never request additional scopes. All
+`thread_follow` capabilities remain false and channel-agent responses report
+`follow_readiness=unavailable`. This unit does not enable thread follow.
+
+T1 excludes X public-thread follow; existing addressed-post replies and X DMs
+keep their current behavior. Agent Event Gateway transports remain legacy until
+the external gateway implements and advertises the
+[versioned facts and bound-reply contract](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
+Native direct reply/history operations are dormant until the follow service
+supplies an explicit bound target; all legacy reply paths remain unchanged.
+Owner controls and email follow ship in later review units. History is ephemeral
+and limited to 20 messages / 32 KiB / eight seconds, with metadata fallback.
+
 ## X accounts: DMs, mentions and replies
+
+X also supports separately selected encrypted chat and own-post metadata notifications. See [Typed channel activity](CHANNEL_ACTIVITY.md) for activity counts, event selection, receiver capability declarations and the callback compatibility contract.
 
 X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to subscribe to selected unencrypted DMs, explicit @mentions and direct replies to the account's posts through the X Activity API and deliver the routed agent's asynchronous reply. Existing polling connections can switch through Verify or Reconnect after an admin configures the webhook credentials. With `BILLING_ENABLED=false`, connections without those credentials retain the existing polling path. Billing-enabled X channels require webhooks and never fall back to paid DM polling. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.
 
@@ -26,17 +66,17 @@ X is managed-only: users connect their own X account with OAuth and provide no d
 
 NyxID uses its shared X developer app and pays the app's API charges. Users authorize this app through the existing OAuth flow; they do not supply developer credentials or need their own developer account. This creates a NyxID channel for an existing X account, not a new X Chat bot identity.
 
-In **Admin > Platform Credentials > X (Twitter)**, configure the **App bearer token** and **API key secret** from the same app as the OAuth Client ID and Client Secret. The API key secret is distinct from the OAuth Client Secret. OAuth credentials remain in the shared `twitter` provider; these two additional secrets are encrypted in `platform_credentials`. Clearing an individual webhook credential does not clear OAuth credentials. Clearing the entire provider clears both backings.
+In **Admin > Platform Credentials > X (Twitter)**, configure the **App bearer token**, OAuth 2.0 **Client ID** and **Client Secret** from the same X app. The Client Secret verifies modern webhooks as well as OAuth. Keep the optional **API key secret** (OAuth 1.0 consumer secret) for legacy webhook signatures; it is distinct from the OAuth Client Secret. OAuth credentials remain in the shared `twitter` provider; the bearer token and legacy consumer secret are encrypted in `platform_credentials`. Clearing an individual webhook credential does not clear OAuth credentials. Clearing the entire provider clears both backings.
 
-NyxID registers or reuses `{BASE_URL}/api/v1/webhooks/channel/x/platform` using `POST /2/webhooks`, then creates one subscription for each selected event (`dm.received`, `post.mention.create`, `post.reply.create`) through `POST /2/activity/subscriptions` with the connected account's user-context token. Webhook management and subscription discovery/cleanup use the app bearer token. The callback must be publicly reachable HTTPS without an explicit port. X's GET CRC receives a JSON `response_token` computed using HMAC-SHA256 and the API key secret; POST signatures are verified against the exact body before routing. Webhook ingress shares the general global and per-IP limits. Size `RATE_LIMIT_PER_SECOND` and `RATE_LIMIT_BURST` for aggregate application traffic and X delivery bursts; X may share delivery IPs across subscriptions.
+NyxID registers or reuses `{BASE_URL}/api/v1/webhooks/channel/x/platform` using `POST /2/webhooks`, then creates one subscription for each selected event (`dm.received`, `chat.received`, `post.mention.create`, `post.reply.create`, `post.create`) through `POST /2/activity/subscriptions` with the connected account's user-context token. Webhook management and subscription discovery/cleanup use the app bearer token. The callback must be publicly reachable HTTPS without an explicit port. X's GET CRC receives a JSON `response_token` computed using HMAC-SHA256 and the OAuth 2.0 Client Secret, with consumer-secret fallback for legacy-only configuration. POST verifies `X-Twitter-Webhooks-Signature-OAuth2` using the Client Secret when that header is present; otherwise it verifies `X-Twitter-Webhooks-Signature` using the consumer secret. A malformed or invalid modern signature never downgrades to legacy verification. Both schemes authenticate the exact raw body before routing. The app bearer token is never a signing key. CRC rejects tokens that parse as JSON objects so its response cannot be reused as a valid event signature. Webhook ingress shares the general global and per-IP limits. Size `RATE_LIMIT_PER_SECOND` and `RATE_LIMIT_BURST` for aggregate application traffic and X delivery bursts; X may share delivery IPs across subscriptions.
 
-Each subscription is tagged with the NyxID channel UUID. Setup is serialized across replicas with a renewable platform lease and discovers existing subscriptions before creating one, allowing Verify to recover an interrupted setup without deliberately creating duplicate subscriptions. A successful setup sets `webhook_registered`, cancels the polling lease, and excludes the channel from polling. For DM-only channels with billing disabled, failed initial setup leaves polling available and a local error on the detail page. With billing enabled or public events selected, failed setup marks the channel failed, and a maintenance sweep retries cleanup of any partially installed subscription; select **Verify** to retry setup. Reconnect also rechecks setup. There is no automatic background webhook repair. Clearing webhook credentials does not switch registered channels back to polling; restore the credentials and select Verify. The platform catalog retains `ingestion.mode: "poll"` as the fallback and advertises webhook support through `registration.webhook_ingestion`; each channel's `webhook_registered` and `webhook_ingestion` report its effective delivery mode.
+Each subscription is tagged with the NyxID channel UUID. Setup is serialized across replicas with a renewable platform lease and discovers existing subscriptions before creating one, allowing Verify to recover an interrupted setup without deliberately creating duplicate subscriptions. A successful setup sets `webhook_registered`, cancels the polling lease, and excludes the channel from polling. For DM-only channels with billing disabled, a completed read-only initial setup failure leaves polling available and a local error on the detail page. A subscription mutation with an uncertain outcome leaves the channel failed and cleanup-eligible instead of silently polling. With billing enabled or public events selected, failed setup marks the channel failed, and a maintenance sweep retries cleanup of any partially installed subscription; select **Verify** to retry setup. Reconnect also rechecks setup. Setup lease contention preserves an unchanged channel for all event selections and billing modes. An already registered active channel also retains delivery after a read-only provider setup failure, once live credentials and billing admission have passed. Missing credentials, failed billing admission and uncertain subscription mutations still fail closed. Initial paid and non-DM setup retains its stricter requirements. Changing event selections on a registered channel records setup as incomplete before the update handler immediately reconciles the subscriptions, including a change back to DM-only. All inbound delivery, DMs included, pauses until that reconciliation succeeds; if interrupted, select Verify to retry. Events in that pause are not replayed. A failed or interrupted reconciliation remains eligible for cleanup. Unregistered channels retain their safe polling fallback. A temporary OAuth refresh failure during Verify preserves an existing active channel; revoked credentials still stop it. There is no automatic background webhook repair. Clearing webhook credentials does not switch registered channels back to polling; restore the credentials and select Verify. The platform catalog retains `ingestion.mode: "poll"` as the fallback and advertises webhook support through `registration.webhook_ingestion`; each channel's `webhook_registered` and `webhook_ingestion` report its effective delivery mode.
 
-Signed `data.filter.user_id` selects the registered account, and `data.tag` must match its NyxID channel UUID; each DM's recipient, public mention target or replied-to account must match that account. Only currently selected event types are admitted, and self-authored posts are ignored. Every delivery revalidates the live owner-bound OAuth connection before routing. Inbound message IDs use the existing channel deduplication and metadata-only relay. NyxID acknowledges promptly and forwards once; it does not queue bodies or retry agent callbacks. Deleting a channel disables its routes and best-effort deletes only subscriptions tagged to that channel. It preserves the shared webhook, other subscriptions, and the OAuth credential. A failed remote cleanup is recorded in the deletion audit as `managed_webhook_cleanup: "failed"` and retains a cleanup marker on the deleted channel. The maintenance sweep retries removal until it succeeds, including when customer billing or polling is disabled. The deleted channel never resumes delivery.
+Signed `data.filter.user_id` selects the registered account, and `data.tag` must match its NyxID channel UUID; each DM's recipient, public mention target or replied-to account must match that account. Only currently selected event types are admitted. Self-authored posts are ignored by mention/reply handling; explicitly selected `post.create` events are recorded as metadata notifications without reply authority. Every delivery revalidates the live owner-bound OAuth connection before routing. Inbound message IDs use the existing channel deduplication and metadata-only relay. NyxID acknowledges promptly and forwards once; it does not queue bodies or retry agent callbacks. Deleting a channel disables its routes and best-effort deletes only subscriptions tagged to that channel. It preserves the shared webhook, other subscriptions, and the OAuth credential. A failed remote cleanup is recorded in the deletion audit as `managed_webhook_cleanup: "failed"` and retains a cleanup marker on the deleted channel. The maintenance sweep retries removal until it succeeds, including when customer billing or polling is disabled. The deleted channel never resumes delivery.
 
-DM delivery consumes **`dm.received`**, not encrypted **`chat.received`**. X Chat requires separate private-key and encryption support. The documented legacy webhook payload addresses the recipient account; NyxID preserves an explicit conversation ID when supplied, otherwise derives the one-to-one conversation ID. **Webhook channels support recipient-addressed one-to-one DMs only; group-DM delivery is not supported.** Existing polling connections retain group-DM polling behavior only while billing is disabled and they have not switched to webhooks. There is no per-channel delivery-mode selector.
+Readable DM delivery consumes **`dm.received`**. Select **`chat.received`** separately to record encrypted X Chat activity and optionally notify a capable agent. These notifications contain metadata only; reading or replying to encrypted content requires a separate encryption integration. See [Channel activity](CHANNEL_ACTIVITY.md) for event selection and receiver opt-in. The documented legacy webhook payload addresses the recipient account; NyxID preserves an explicit conversation ID when supplied, otherwise derives the one-to-one conversation ID. **Webhook channels support recipient-addressed one-to-one DMs only; group-DM delivery is not supported.** Existing polling connections retain group-DM polling behavior only while billing is disabled and they have not switched to webhooks. There is no per-channel delivery-mode selector.
 
-Documentation checked 2026-09-18: [X Activity API](https://docs.x.com/x-api/activity/introduction), [webhook setup and verification](https://docs.x.com/x-api/webhooks/quickstart), and [event payloads](https://docs.x.com/x-api/activity/event-payloads). X Activity documents 1,500 self-serve event subscriptions. This is separate from the Chat bot allowance and from the older Account Activity API's Pay Per Use limit of three accounts. `dm.received` costs $0.010 per delivered event at the published rate; outbound operations are charged separately. X deduplicates billable resources within a 24-hour UTC window; provider usage reports and the Developer Console remain authoritative.
+Webhook signature and event documentation checked 2026-09-28: [X Activity API](https://docs.x.com/x-api/activity/introduction), [webhook setup and verification](https://docs.x.com/x-api/webhooks/quickstart), and [event payloads](https://docs.x.com/x-api/activity/event-payloads). X Activity documents 1,500 self-serve event subscriptions. This is separate from the Chat bot allowance and from the older Account Activity API's Pay Per Use limit of three accounts. `dm.received` costs $0.010 per delivered event at the published rate; outbound operations are charged separately. X deduplicates billable resources within a 24-hour UTC window; provider usage reports and the Developer Console remain authoritative.
 
 ### Platform setup and pricing
 
@@ -52,13 +92,24 @@ Configure a confidential Web App with OAuth 2.0 user authentication and PKCE in 
 
 With `BILLING_ENABLED=true`, X channel activity uses the active `api-twitter` catalog service and the existing BillingService, Lago rate cache, entitlement checks, reservations, allowances, grants, wallet settlement and billing ledger. Enable the billing feature flag for the channel owners who should be charged. Owners outside the rollout remain metered without charges, and `BILLING_ENABLED=false` preserves uncharged operation.
 
-Configure a **Requests** price in `billing.byok_pricing` and wait for it to become `synced`. Shared-app OAuth is classified as `NyxidPlatformOauthApp`, which uses the BYOK lane in the existing billing contract; it is not a `NyxidManagedMaster` platform key and does not use `platform_key_pricing` or a resale charge. Existing legacy platform request pricing is also supported when selected by the normal lane resolver. A missing selected billable lane, missing Lago provider/subscription, incompatible non-request metric, or unavailable rate fails closed for billing-enabled channels. An explicitly configured zero rate or a request allowance can make the customer operation free.
+Configure a **Requests** price on the **Your own key (BYOK)** lane in `billing.byok_pricing` and wait for it to become `synced`. Shared-app OAuth is classified as `NyxidPlatformOauthApp`, which uses the BYOK lane in the existing billing contract; it is not a `NyxidManagedMaster` platform key and does not use `platform_key_pricing` or a resale charge. A price on the **NyxID platform key** lane alone leaves X channels blocked. The setup error is: “The X service (api-twitter) has no synced price on the Your own key (BYOK) lane that shared-app X channels bill through; configure a Requests price on that lane”. Existing legacy platform request pricing is also supported when selected by the normal lane resolver. A missing selected billable lane, missing Lago provider/subscription, incompatible non-request metric, or unavailable rate fails closed for billing-enabled channels. An explicitly configured zero rate or a request allowance can make the customer operation free.
 
-One configured request rate applies to each received DM event, each actual outgoing DM POST, and each successful `/2/users/me` lookup during creation, Verify or Reconnect. Incoming and outgoing X costs differ; this is an admin-authored NyxID credit price, not automatic dollar-for-dollar resale. It also affects ordinary proxy usage of the same X service and lane. Long replies split into multiple DMs consume one unit per accepted chunk; media sends consume a unit for each DM carrying uploaded media. The adapter does not call the separately priced media-metadata API.
+Each X activity can carry its own price. In the admin service editor for `api-twitter`, open **Billing lanes → Your own key → Operation prices** and enter a price for each row below, or send `billing.byok_pricing.operations` (`[{ "operation": "channel_dm_received", "credits_per_unit": "…" }]`) with `PUT /api/v1/services/{id}`. A synced operation price replaces the base request rate; pending, failed and unpriced operations use the base rate. Explicit zero makes an operation free. Upgrade every replica before authoring these prices. No prices are seeded automatically; after deployment, administrators should check [X's current published rates](https://docs.x.com/x-api/getting-started/pricing) and author the NyxID credit prices.
 
-The persisted channel owner pays, including the organization wallet for an organization-owned channel. Replies keep the calling API-key attribution but do not transfer the charge to the agent's personal wallet. Funding follows the existing order: request allowance, eligible credit grants, then wallet credits. An incoming event is metered before route lookup, because X has delivered a billable event even when no agent route exists. Billing identities bind the channel UUID and X message ID, so duplicate deliveries do not reserve or charge again; no message body is stored in usage or ledger rows.
+| Channel activity | Operation key | Provider call or event |
+|---|---|---|
+| Account verification | `get_me` | `GET /2/users/me` |
+| Public post reply | `create_tweet` | `POST /2/tweets` |
+| Outgoing DM | `channel_dm_send` | `POST /2/dm_conversations/{id}/messages` |
+| Incoming DM | `channel_dm_received` | DM webhook event |
+| Incoming Chat | `channel_chat_received` | Chat webhook event |
+| Incoming post | `channel_post_received` | Post webhook event |
 
-Outgoing operations reserve before making the provider request. Successful responses persist settlement intent for the existing reconciliation worker; confirmed client rejections settle zero usage and release their reservation. Transport failures and server errors have unknown provider outcomes: their forwarded reservations remain held for operator reconciliation, and the integration does not automatically resend. X initiated-send idempotency claims remain pending after an error once a provider request has been attempted to prevent an automatic replay of earlier successful chunks; inspect the conversation before issuing a new send. An admission check before subscription setup reserves and releases one request without consuming it.
+The account and post keys share their catalog operations; channel DM send is separate from catalog `send_dm`. Long replies consume one unit per accepted chunk, and media sends consume one unit per DM carrying media. The adapter does not call the separately priced media-metadata API. Existing request allowances and funding precedence are unchanged.
+
+The persisted channel owner pays, including the organization wallet for an organization-owned channel. Replies keep the calling API-key attribution but do not transfer the charge to the agent's personal wallet. Grant- or allowance-funded paid channels still require a provisioned Lago wallet and subscription; grants do not bypass catalog pricing or provider configuration. Funding follows the existing order: request allowance, eligible credit grants, then wallet credits. An incoming event is metered before route lookup, because X has delivered a billable event even when no agent route exists. Billing identities bind the channel UUID and X message ID, so duplicate deliveries do not reserve or charge again; no message body is stored in usage or ledger rows.
+
+Outgoing operations reserve before making the provider request. Successful responses persist settlement intent for the existing reconciliation worker; confirmed client rejections settle zero usage and release their reservation. Transport failures and server errors have unknown provider outcomes: their forwarded reservations remain held for operator reconciliation, and the integration does not automatically resend. X initiated-send idempotency claims remain pending after an error once a provider request has been attempted to prevent an automatic replay of earlier successful chunks; inspect the conversation before issuing a new send. An admission check before subscription setup reserves one received direct message at the `channel_dm_received` price (or the base rate) and releases it without consuming it.
 
 Insufficient credits or a billing configuration/entitlement failure during inbound delivery, an initiated send, or an asynchronous reply marks the channel failed and removes its tagged X subscription. Cleanup failures retain a durable marker and retry on the channel maintenance sweep, which runs every 60 seconds when polling is disabled. Verify rechecks funding before reactivating the subscription; cleanup and recovery share the platform lease. Existing polling channels fail before their next paid DM read and need Verify after webhook credentials are configured. Creation and Reconnect do not initialize a DM polling cursor when billing is enabled.
 
@@ -104,7 +155,7 @@ Public conversations use `post:<conversation_id>`, separately from DM addresses,
 
 Agents acknowledge callbacks with HTTP 202 and use the existing asynchronous reply endpoint. The reply is **public** and targets the persisted incoming post, even if agent metadata supplies a different post/thread ID. Public callbacks omit the owner's `X-NyxID-User-Token`; the signed callback and message-bound reply token remain available. Public responses currently support text only, with X enforcing its account/post length and reply restrictions. Arbitrary initiated public posts, public media replies and edits are unsupported and are not advertised on public conversation capabilities. DM image/video replies retain their existing behavior.
 
-Public receives and successful post replies use the existing `api-twitter` request price and funding rules. The billing operation IDs are `x-post-received` and `x-post-reply`, separate from DM operations. As with other channel traffic, callback failures are not queued or retried, and immediate webhook acknowledgement does not guarantee delivery across process failure.
+Public receives and successful post replies use the `channel_post_received` and `create_tweet` operation prices when configured, otherwise the `api-twitter` base request price, with the usual funding rules. The billing operation IDs are `x-post-received` and `x-post-reply`, separate from DM operations. As with other channel traffic, callback failures are not queued or retried, and immediate webhook acknowledgement does not guarantee delivery across process failure.
 
 Contract checked 2026-09-22 against [X Activity event payloads](https://docs.x.com/x-api/activity/event-payloads) and [Create Post](https://docs.x.com/x-api/posts/create-post). Local regression tests exercise the real NyxID verification, routing, reply authorization and billing code with MongoDB and mocked X/agent HTTP endpoints. A deployed check with an independent account mentioning and replying to the connected account is still required to validate the app's live X access.
 
@@ -272,13 +323,15 @@ sequenceDiagram
 
 ### Editing a sent reply
 
-`POST /api/v1/channel-relay/reply/update` replaces a previously sent message using the `platform_message_id` returned by `/reply` or `/send`:
+`POST /api/v1/channel-relay/reply/update` replaces a previously sent message. `message_id` is the `platform_message_id` returned by `/reply` or `/send`, and `outbound_message_id` is the NyxID `message_id` from the same response:
 
 ```json
-{ "message_id": "<platform_message_id>", "reply": { "text": "Updated response", "metadata": null } }
+{ "message_id": "<platform_message_id>", "outbound_message_id": "<message_id>", "reply": { "text": "Updated response", "metadata": null } }
 ```
 
-An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
+NyxID looks for the target only among rows the caller may edit. An agent API key sees the rows it sent, and a reply token sees only the reply its key sent to its bound inbound message in its bound conversation. A platform message ID is not a global identifier: Telegram numbers messages per chat, so a key that serves several chats routinely has several rows with the same ID. When more than one row matches and `outbound_message_id` is absent, the edit returns `409 conflict` rather than choosing one. On Telegram and telegram-new (adapters whose `message_ids_are_chat_scoped()` is true), API-key edits must send `outbound_message_id` and otherwise return `400 validation_error`: even a unique match could be another chat's message once the intended row has expired or was never stored. Other platforms accept edits without it for compatibility, but clients should always send it. Reply-token edits are anchored to one chat and may omit it.
+
+An agent API key can edit anchored replies and agent-initiated messages it sent, while it remains the conversation's assigned agent (otherwise `403`). A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. Rows outside either scope return `404`. After the target row is resolved, every edit also passes the per-message rate limit, which is keyed on that row. Identical platform message IDs in other chats or tenants therefore never share a bucket. Discovery exposes native support as `capabilities.edit`.
 
 - **Telegram / telegram-new:** text messages use `editMessageText`; media captions use `editMessageCaption` after Telegram returns exactly `Bad Request: there is no text in the message to edit`. Both use the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
 - **Discord:** `PATCH` edits `content` on any bot message, including media messages. NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
@@ -421,11 +474,11 @@ sequenceDiagram
 graph TD
     MSG[Inbound Message] --> R{Routing Service}
 
-    R -->|Step 1| EC{Exact conversation<br/>match?}
-    EC -->|Yes| AGENT[Route to bound agent]
-    EC -->|No| SS{Step 2: Sender-specific<br/>match in group?}
-    SS -->|Yes| AGENT
-    SS -->|No| DA{Step 3: Default agent<br/>for this bot?}
+    R -->|Step 1| SS{Sender-specific match<br/>in this conversation?}
+    SS -->|Yes| AGENT[Route to bound agent]
+    SS -->|No| EC{Step 2: Exact conversation<br/>match without sender?}
+    EC -->|Yes| AGENT
+    EC -->|No| DA{Step 3: Default agent<br/>for this bot?}
     DA -->|Yes| AGENT
     DA -->|No| UNROUTED[Log as unrouted<br/>Optional: send 'not configured' reply]
 
@@ -853,7 +906,7 @@ The service materializes every source before dispatch. At the adapter boundary, 
 
 | Adapter | Native upload/send path |
 |---|---|
-| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. Text goes first. |
+| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. A photo-specific parsed 400 can fall back once to `sendDocument` (see below). Text goes first for mixed public requests. |
 | Discord | One multipart message with `files[n]` and `payload_json`; text/captions joined into message content. Deferred interaction follow-ups retain their existing routing. |
 | Slack | `files.getUploadURLExternal` → PUT bytes → `files.completeUploadExternal` with channel/thread and initial comment; `files.info` resolves the share timestamp. Text goes first. |
 | Lark / Feishu | `im/v1/images` or `im/v1/files`, then an image/file message. Audio/video use file upload (`file_type=stream`). Text/captions are preceding text messages. |
@@ -865,6 +918,158 @@ Editing a media send targets the returned media message ID. Telegram uses `editM
 The result is the last platform message ID; Slack may omit it if no share timestamp is available. Lark/Feishu need `im:resource`; Slack needs file read/write scopes; existing X OAuth connections need fresh consent to `media.write`. Platform size/type restrictions can be stricter than NyxID's cap.
 
 Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
+
+### Image outcomes and Telegram document fallback
+
+Media senders distinguish definite refusals from uncertain delivery. A completed
+HTTP non-2xx response, including **408 and 5xx**, or a parsed platform error is
+definite. A missing/unreadable response, malformed successful JSON or missing
+successful receipt is uncertain (`Media upload or delivery failed`). Definite
+failures are never automatically retried. NyxBot records failed images and may
+continue to the next image; an uncertain image stops the remaining batch and is
+never resent. Shared WhatsApp Graph calls retain their specific timeout,
+response-size, invalid-JSON and unknown-acceptance diagnostics. NyxBot's image
+path recognizes those exact locally authored errors as uncertain without
+changing text-send, verification or credential-check diagnostics. X limits
+media-specific refusal parsing to upload/status responses without usable data;
+partial `errors` alongside a successful `data` result remain usable.
+
+The only retry is Telegram/telegram-new's image fallback: a parsed `ok:false`,
+`error_code:400` photo response with HTTP 400 or 2xx and a photo-specific marker
+(`PHOTO_INVALID_DIMENSIONS`, `PHOTO_SAVE_FILE_INVALID`, `PHOTO_EXT_INVALID`,
+`PHOTO_CROP_SIZE_SMALL`, or `IMAGE_PROCESS_FAILED`) sends the same bytes
+once with `sendDocument`. The caption, chat, reply anchor and forum topic are
+preserved, and the document outcome is final. Chat/thread/reply-target and rights
+errors, 403, 429, 5xx and transport failures never trigger fallback. Deny markers
+take precedence when a description also contains a photo marker. NyxID always
+materializes URL sources and uploads multipart bytes, so file-ID/URL-source
+errors, padding errors and empty-file errors never trigger this fallback.
+
+`/channel-relay/reply`, `/thread-reply` and `/send` can return additive
+`delivered_as: ["file"]` for that substitution. The outbound row and audit record
+`file`; NyxBot's image claim records `sent` with `as_document`, without a failure
+line. Older adapters omit `delivered_as`.
+
+NyxBot uses the existing route-key reply, bound-thread and initiated-send paths
+to send tool images before text, one per message. It sends images itself on
+gateway channels; no CMA attachment-block renderer is required. Chat-delivered
+automations consume one initiate limiter token for their result text, with none
+for its bounded image batch; public `/send` still consumes one per request.
+Each X DM image is a separately billed request using the ordinary channel
+billing context. A billing refusal suspends the channel through the existing
+path and skips the remaining images; X public replies do not support images.
+
+### Per-image delivery claims, audiences and topics (P15)
+
+Property P15: **one send per source image and resolved audience, for the
+image's whole lifetime, across every NyxBot path** (automatic replies on
+direct and gateway transports, followed threads, event and duplicate-question
+chats, chat-delivered automations and explicit `nyxid__post_to_chat
+include_images` posts). Uncertain or in-progress sends are never retried and
+never reported as delivered.
+
+Release 0.71.0 includes #1889 and its v1 image claims. Before any v2 claim,
+new replicas read `nyxbot_image_deliveries` for the same owner, conversation,
+turn and NyxBot channel, across every destination alias (`inbound:`, `thread:`,
+`chat:`, `initiated:`). A sent item reports `previously_delivered`; sending,
+unknown, or a pending item in a sending batch reports `in_progress_or_unknown`.
+Failures and unrecognized skips retain their old outcome. Only a pending batch
+or a skip code v1 set before dispatch (`deadline`, `after_unknown`, `billing`)
+permits a new v2 attempt. No new code rewrites the v1 rows; their existing
+seven-day `expires_at` TTL stays. Existing conversation/user deletion still
+purges their metadata.
+
+This guard is deliberately conservative across all audiences of the same bot
+for that turn: it can suppress a second chat's image during the seven-day
+window. It covers old-replica sends completed before the new replica reads.
+An old 0.71.0 replica and a new replica can still race between the read and
+claim during rolling deployment; concurrent duplicates remain a rollout risk.
+There is no mixed-fleet guarantee and no data repair is needed. Rollback to
+0.71.0 restores its old behavior and ignores v2 claims, so it does not preserve
+the new delivery invariant. Remove the v1 read path and collection/index one
+release after this change ships, at least seven days after deployment; track
+that sunset in the PR description.
+
+**Claim (v2).** `nyxbot_image_deliveries_v2` holds one document per (source
+image, audience): `_id = sha256("v2\0{owner}\0{attachment_id}\0{audience_key}")`
+plus plain `user_id`, `conversation_id`, `attachment_id`, `audience_key`,
+`state`, `attempt`, `code` and `created_at`, with cleanup indexes on
+`attachment_id` and `(user_id, conversation_id)` and **no TTL**
+(`services/channel_image_delivery.rs`, `models/nyxbot_image_delivery.rs`).
+States move `pending` -> `sending{attempt}` -> `sent | failed{code} |
+skipped{code} | unknown` through compare-and-set on the attempt token. Only the
+winner of the `pending -> sending` race dispatches; success is reported only
+after an acknowledged matching completion write, an ambiguous write settles
+locally as `unknown`, and a claim found `sending` reports
+`in_progress_or_unknown`. A later caller reports an existing claim's durable
+state (`previously_delivered`, the same failure or skip code, in progress or
+unknown) without resending and without repeating another path's failure line.
+A definite refusal before any provider request (cancelled, deadline,
+after-unknown, billing preflight or another pre-dispatch error) releases its
+own `sending{attempt}` back to `pending` with an attempt-token CAS, clearing
+attempt and code. This call reports the skip or failure; a later post or
+automation may acquire the pending image. Unsupported audiences, missing
+anchors and unavailable sources remain permanent refusals. Once provider I/O
+begins, even a timeout or failed settlement retains the durable barrier and
+never releases it for retry.
+Claims live as long as their source image: they are deleted in the same
+transactions that delete `assistant_attachments` (retention, conversation and
+group deletion, user purge), a sender that finds its source gone after claiming
+deletes the claim and reports `unavailable`, and a bounded orphan sweep on the
+assistant upload-retention cadence removes only claims whose source attachment
+no longer exists. Claims hold identifiers, states and codes only.
+
+**Audience.** The audience is the outbound target actually sent to, resolved
+by `services/channel_image_audience.rs` after the adapter's own normalization
+and fallback, and serialized as
+`"{channel_bot_id}\u{1f}{platform_chat_id}\u{1f}{native_thread_or_empty}"`
+with the real `ChannelBot.id` (never a gateway partition or `NyxbotChannel`
+id). Per adapter:
+
+| Platform | Chat | Audience boundary | Not a boundary |
+| --- | --- | --- | --- |
+| Telegram, telegram-new | chat id | forum topic `message_thread_id` (normalized to a decimal string) | reply chains (`reply_to_message_id`) |
+| Slack | channel id | a root thread (`thread_ts`, else the replied-to message, as the adapter posts it) is distinct from the top-level channel | — |
+| Discord | channel id (threads are channels) | — | — |
+| Lark, Feishu | chat id | — | thread replies share the chat audience |
+| WhatsApp | normalized `wa_id` digits | — | — |
+| X | DM conversation id | — | public replies carry no images |
+| Aurinko, device, OpenClaw and other adapters | chat id or no image delivery, per the adapter's declared capability | — | — |
+
+The Telegram and Slack adapters build their outbound `message_thread_id` /
+`thread_ts` from the same `native_thread` function the audience uses, so the
+key and the provider payload cannot drift.
+
+Inbound Telegram thread keys and follow-scope classification remain unchanged.
+Native `message_thread_id` and gateway `conversation.thread_id` continue to
+select existing conversations, including reply chains. Separate additive
+`telegram_topic` evidence selects the outbound target and image audience:
+native messages require `is_topic_message: true`; gateway version 1 facts
+must declare a topic and positive decimal native ID. Explicit reply-chain
+evidence sends at chat level without changing its inbound partition. Legacy
+anchors without evidence retain their old outbound target. Old replicas ignore
+the additive field and reuse the same conversation keys; there is no migration.
+The image guarantee applies only after every replica is upgraded.
+
+**Topics.** Agent-initiated posts (`nyxid__post_to_chat` and chat-delivered
+automation results) keep the thread's native topic
+(the separate Telegram topic evidence, falling back to legacy
+`platform_thread_id`, or a Slack root thread) for text and images through the adapter's `reply_context`; a topic is
+therefore its own audience, and the parent chat is another.
+
+**Explicit posts and automations.** `include_images` (default false) sends the
+calling turn's own tool images (trusted `TurnAttachment` metadata of the exact
+live turn, `chat_tool_image` only, deduplicated, at most 8) before the text,
+each behind a turn-fence recheck and its claim; the text follows a final fence
+recheck and nothing further is sent after Stop or replacement. Multi-turn
+automation runs keep `TriggerRun.image_refs` (at most 16, oldest terminal
+evicted against the run's configured audience, else `image_refs_truncated`)
+and deliver first sends for refs whose claim is absent or `pending`, newest
+first and at most eight, reporting the other claim states without consuming
+that budget; an omitted-images line names the count. Unavailable image
+metadata never blocks the final text: the text is sent and the image counts as
+failed. The text/stream delivery barrier (`channel_turn_delivery.rs`) is
+separate and unchanged.
 
 ### ADR-013 metadata boundary
 
@@ -914,6 +1119,18 @@ Query prefilling uses the same declared field names. `field1` and `field2` are s
 Manual forms require a valid form and an explicit submit. Managed entry points use the catalog's flow discriminator: `meta_embedded_signup` for Meta, `oauth_connection` for OAuth, plus the dedicated Telegram creation component. Prefilled manual credentials reveal the manual form when managed onboarding is also available. A flow marked `managed_only` never falls back to a manual credential form. The backend still enforces provider configuration, ownership, organization admin access, and credential validity.
 
 The standalone completion screen keeps the user on the page until **Open channel bot** is selected. Callback URLs and returned instructions display independently of one-time secrets. A generated Verify Token is shown only when the create response includes one. Provider authorization windows remain separate steps; "one click" means opening the provider or submitting a completely prefilled credential form, not skipping consent or webhook configuration.
+
+### Returning to an assistant chat
+
+NyxBot setup links may carry one owner-scoped `return_to` identifier (`nyxa-…`
+or `nyxg-…`). The setup page preserves it through request URL updates and
+offers Back to chat on completion, cancellation, expiry and error. In-chat
+Telegram setup keeps the request in component state and resumes the current
+request on remount, retains its actor-scoped request ID, and polls that ID through
+completion while preserving the chat URL and composer. Rendered setup anchors
+preserve the same strictly validated raw target for new-tab navigation; modal
+setup ignores it. Duplicates, encoded targets and surrounding whitespace are
+refused. No arbitrary URL is accepted or assigned, and the assistant page performs its normal ownership check.
 
 ### Add or extend a form
 
@@ -975,6 +1192,12 @@ NyxID sends a normalized message to the agent's callback URL.
 
 The payload normalizes messages into a common format so agents can handle all platforms with one code path. For agents that need platform-specific features (Telegram inline keyboards, Discord embeds/components, Lark interactive cards), the full original webhook JSON is included in `raw_platform_data`. Most agents ignore it; advanced integrations read it directly.
 
+`conversation.platform_id` and `conversation.type` describe the actual inbound event after platform webhook verification and adapter parsing. They are independent of the selected route's configured conversation ID/type: a default route configured as `"*"` / `"private"` can receive a group message, whose callback must contain the actual chat ID and `"group"`. `conversation.id` continues to identify the selected NyxID routing rule for async replies. Consumers that previously classified groups using the route's configured type may observe a corrected conversation scope; downstream history partitioning should use the actual platform context.
+
+Native mention metadata passes through unchanged in the signed `raw_platform_data`: Lark/Feishu `event.message.mentions` (including native `id.open_id` and placeholder `key`) and Telegram `message.entities` / `message.caption_entities` (including native UTF-16 offsets). NyxID does not resolve these mentions into specialist routes or infer targets from display names. Consumers can interpret native mentions within their own trusted bot/group context. The relay contract adds no normalized mention field and preserves Lark placeholders in `content.text`; NyxID's direct NyxBot consumer renders bounded, unambiguous placeholders as names for input text.
+
+A sender needs no additional NyxID OAuth/channel binding merely to address a receiving bot. The receiving bot still needs platform registration, authenticated event delivery, and an agent callback route. Mentioning a bot or specialist does not establish the sender's NyxID identity, grant protected command/tool authority, prove another bot's group membership, or authorize another owner's credentials. External runtimes retain responsibility for specialist selection and execution authorization. For NyxID-hosted agents, the receiving NyxBot channel and its live chat override select the existing linked agent; native mention labels never select another owner's agent. Provider delivery rules apply before this relay; for example, Telegram documents specific [bot-to-bot communication settings and group delivery conditions](https://core.telegram.org/bots/features#bot-to-bot-communication). Raw mention passthrough cannot cause an undelivered provider event to reach NyxID.
+
 - **`agent.api_key_id`** is the primary agent identifier. Same `ApiKey._id` from agent isolation (PR #132). A shared callback endpoint dispatches based on this value. Use for routing/authorization.
 - **`agent.name`** is the human-readable label from key creation (e.g., `"claude-support-bot"`). For logging and display only -- never use for authorization.
 - **`sender.platform_id`** is the platform-native user ID. The agent is responsible for mapping this to its own users. If the agent uses NyxID OAuth, it already has `nyxid_user_id` in its user table from login time -- it can match `sender.platform_id` against platform identities it collected during onboarding. NyxID doesn't need to do this lookup because the agent already has the data.
@@ -990,9 +1213,9 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `platform` | string | No | Which messaging platform the message came from: `telegram`, `discord`, `lark`, or `feishu`. |
 | `agent.api_key_id` | UUID | No | The `ApiKey._id` assigned to this conversation route. This is the agent's identity from agent isolation. A shared callback endpoint dispatches based on this. |
 | `agent.name` | string | No | Human-readable name of the API key (e.g., `"claude-support-bot"`). For logging and display only. |
-| `conversation.id` | UUID | No | NyxID's internal ID for the conversation route (from `channel_conversations`). Stable across all messages in the same chat. |
-| `conversation.platform_id` | string | No | The platform's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`). |
-| `conversation.type` | string | No | Conversation kind: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). |
+| `conversation.id` | UUID | No | NyxID's internal ID for the selected conversation route (from `channel_conversations`). A default route can serve several platform chats. |
+| `conversation.platform_id` | string | No | The actual inbound event's native conversation identifier (Telegram `chat_id`, Discord `channel_id`, Lark `chat_id`), even when the selected route uses `"*"`. |
+| `conversation.type` | string | No | The actual inbound event's conversation kind after adapter parsing: `private` (1:1 DM), `group` (multi-user chat), or `channel` (broadcast). The route's configured type does not override it. HTTP Event Gateway callbacks use their separate `device` contract. |
 | `sender.platform_id` | string | No | The message author's ID on the platform. The agent maps this to its own users. |
 | `sender.display_name` | string | Yes | Display name from the platform (Telegram `first_name`, Discord `username`). `null` if not provided. |
 | `content.type` | string | No | Content kind: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, or `unknown`. |
@@ -1016,6 +1239,58 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `X-NyxID-Timestamp` | ISO 8601 timestamp (for replay protection) |
 | `X-NyxID-Platform` | Platform identifier (`telegram`, `discord`, `lark`, `feishu`) |
 | `X-NyxID-User-Token` | Short-lived access token for the bot owner (`JWT_RELAY_ACCESS_TTL_SECS`, default `300`s). The agent uses it as `Authorization: Bearer <token>` to call NyxID's **proxy / LLM gateway / MCP** (and approval *status* polling) on behalf of the user. It is a relay token: it is **rejected** on account, admin, key-management, session, channel-reply, and other non-proxy endpoints; it inherits the originating agent key's service/node allowlist; on MCP it is stateless (no session is minted, so it re-authenticates every call); and it stops working the moment that agent key is revoked/deactivated. To *reply* to a conversation, use the agent API key or the per-callback `reply_token`, not this token. Absent if token generation fails. |
+
+**NyxID-hosted native bot mentions.** A delivered Telegram/Lark/Feishu message
+that positively and exactly mentions the receiving native bot may start a guest
+turn for that bot's linked specialist or live chat override. The native group
+must already have owner-enabled settings: explicit `members:everyone`, or the
+ordinary default after the verified owner has talked there. Bot input never
+creates a settings row, proves owner presence, redeems owner link codes, decides
+cards or queues owner work. Private, self, unknown/system, reply-only, broadcast,
+plain-name and unaddressed bot input stays closed, including with
+`reply_mode:all`. A bot remains a guest if its ID overlaps a legacy owner ID.
+Guest service, privacy, approval and machine restrictions continue through late
+text/image delivery.
+
+Automated turns atomically spend an allowance on the existing group/topic row
+(`max_group_handoffs`, default six) and the owner's hourly
+`max_group_handoffs_per_hour` handoff window. Only an admitted authenticated
+human message resets the chat allowance; there is no timer refill. Replays and
+uncertain/busy attempts are never refunded, and exhausted bot budgets do not
+block human turns. Bots may use an existing active followed child but cannot
+open or renew following. The budget is metadata in MongoDB and is shared across
+replicas.
+
+A human message that receives a proven pre-execution busy response may retry
+after capacity returns. Its original request digest, deadline and reset claim
+are retained with encrypted event context until the existing event expiry;
+concurrent retries atomically claim one resumption and never refill bot hops
+again. Changed requests and failed, dispatched or uncertain attempts cannot
+use that retry path. Bot busy attempts remain consumed and silent.
+
+For these NyxID-hosted native group messages, the event claim uses the stored
+native message ID scoped to the receiving installation and actual chat. A
+provider redelivery with a new NyxID relay UUID therefore cannot start another
+bot turn or repeat a human turn/reset during the existing 24-hour event
+retention window. The source
+lookup checks the stored owner, receiving bot, route key, sender and chat;
+unrelated source rows cannot supply that identity. Native gateway events retain
+their existing provider event identity. The generic relay's human-message
+delivery semantics are unchanged.
+
+Gateway sources opt in through scoped `admission.bot_messages:native_mentions`
+and pinned receiving identity only after authenticated capability discovery
+advertises `native_bot_mentions_v1`. Existing connections reconcile through the
+normal management sweep without sender OAuth or manual reconnect. Old gateways
+keep their existing human-compatible source policy. Deploy CMA readers and
+upgrade every NyxID replica before enabling
+`CMAEG_NATIVE_BOT_MENTIONS_WRITES_ENABLED`; NyxID's sweep can then author
+opt-ins. This keeps execution and delayed delivery on replicas that retain bot
+guest identity and share the durable budget. Before an old-reader rollback,
+remove opt-ins with the current
+reader and clear gateway caches; disabling the write flag alone does not remove
+stored policy. No separate thread-follow gateway upgrade is required for basic
+mentions. Provider bot-to-bot delivery settings still apply before either server.
 
 #### Callback Authentication (JWT)
 
@@ -1163,7 +1438,8 @@ flowchart TD
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/channel-bots` | Register a new bot |
+| `POST` | `/api/v1/channel-bots` | Register a new bot. `label` is required except for `platform: "telegram"`, where a blank label uses the bot's Telegram `first_name`, then its username; a supplied label is stored unchanged. The response includes the saved `label`. |
+| `POST` | `/api/v1/channel-bots/telegram/profile` | `{bot_token}` → `{username, display_name, label}` via Telegram `getMe`, so setup forms can suggest a name. Human-only, 20 requests per user per minute; the token is never stored, logged, or echoed. |
 | `GET` | `/api/v1/channel-bots` | `?scope=user` lists personal bots; `?org_id=<id>` selects an administered org; `?scope=all` combines personal and administered-org bots |
 | `GET` | `/api/v1/channel-bots/{id}` | Get bot details |
 | `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |
@@ -1202,7 +1478,7 @@ for metadata reads; this does not grant bot-management access to Agent Keys.
 | `POST` | `/api/v1/channel-relay/reply` | API key **or** reply token | Agent sends async reply to a message. See [Reply Token](#reply-token). |
 | `POST` | `/api/v1/channel-relay/send` | Assigned API key or human owner | Initiate an opted-in target-addressed message; optional idempotency key. |
 | `GET` | `/api/v1/channel-relay/conversations` | API key | Paginated active assignments, addressability, opt-in, and outbound capabilities. |
-| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. |
+| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. Send `outbound_message_id` (required for API-key edits on Telegram); ambiguous unpinned edits return 409. |
 | `GET` | `/api/v1/channel-relay/messages/{message_id}/attachments/{index}` | Assigned API key **or** reply token | Download inbound media without consuming the reply token. |
 | `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | API key | Get conversation message history |
 | `GET` | `/api/v1/channel-relay/resolve-sender` | API key | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |
@@ -1706,3 +1982,230 @@ sequenceDiagram
 ## Aurinko email channel
 
 Aurinko is an account-token email adapter with a separate application signing secret. Signed subscription challenges work during pending setup; account/subscription-bound notifications fetch mail and deliver it inline under producer-owned retries. Durable metadata claims distinguish active work from completion, preserve callback UUIDs across retries, and fence uncertain message-bound replies. This adapter returns retryable HTTP failures rather than the legacy always-ACK behavior. See [Aurinko integration](./AURINKO_INTEGRATION.md) for setup, CLI/API contracts, filtering, routing, credential lifecycle, and deletion outcomes.
+
+## Tracked bot connection links
+
+Reference: [bot-link HTTP API](API.md#bot-connection-links), [existing service connection links](API.md#third-party-connector-integration), and [CLI commands](site/cli/reference/others.md#channel-bot-connect-link).
+
+Applications and agents can create a single-use setup request through
+`POST /api/v1/channel-connect-links`. This uses the separate
+`channel_connect_links` collection and `/connect/bot/{token}` page. Existing
+service connector links (`/connect-links`, `/connect/{token}`) keep their current
+request, response, storage, callback and webhook contracts. The reusable channel
+setup URLs also remain available.
+
+```json
+{
+  "platform": "discord",
+  "label": "Support bot",
+  "requested_by": "Support platform",
+  "callback_url": "https://app.example.com/setup/return?state=your-request-id",
+  "webhook_url": "https://app.example.com/events/nyxid",
+  "expires_in": 900
+}
+```
+
+The response contains `id`, `connect_url`, `expires_at`, and optional
+`webhook_signing_secret` / `webhook_signing_key_id`. Share `connect_url` with the
+human owner. `platform`, `label`, and the personal or organization owner
+(`target_org_id`) are fixed when the request is created. Only a signed-in human
+with write access to that owner can complete it; agent keys can create, inspect,
+and cancel requests. Merely opening the link does not create a bot.
+
+`callback_url` is an optional **browser return destination**. After setup, the
+user clicks Continue after saving any one-time platform verification secret.
+The return URL preserves caller query parameters and replaces `status`,
+`channel_connect_link_id`, and `bot_id` with the actual result. The browser return
+is useful for navigation; use the signed webhook as the trusted completion
+signal. No bot credential or platform verification secret appears in either
+callback.
+
+`webhook_url` is a **server-to-server completion destination** for session/CLI/agent
+callers. It must use HTTPS and resolve to public addresses. It is checked again
+at delivery, with DNS addresses pinned and redirects disabled. The signing
+secret is returned once and stored encrypted. OAuth app callers instead use
+their existing registered connection webhook and its signing key; they cannot
+supply `webhook_url`, and any browser callback must satisfy the app's registered
+OAuth redirect URI matching policy. Existing app connection webhooks receive the new event types only
+when that app creates bot connection requests.
+
+The CLI requires `--webhook-signing-secret-file <new-path>` together with
+`--webhook-url`. It saves the secret to that file (mode `0600` on Unix), refuses
+existing files and symlinks before creating a request, and prints only the file
+path and signing key ID. CLI JSON uses `webhook_signing_secret_file` instead of
+returning the raw secret. The direct HTTP API response above is unchanged.
+
+Terminal events are `channel_connect.completed`, `channel_connect.cancelled`,
+and `channel_connect.expired`. Example:
+
+```json
+{
+  "event_id": "stable-event-uuid",
+  "event_type": "channel_connect.completed",
+  "occurred_at": "2026-09-30T08:00:00Z",
+  "data": {
+    "user_id": "owner-uuid",
+    "channel_connect_link_id": "request-uuid",
+    "platform": "discord",
+    "status": "completed",
+    "bot_id": "bot-uuid",
+    "bot_status": "pending_webhook",
+    "webhook_registered": false,
+    "is_active": true,
+    "last_error": null,
+    "expires_at": "2026-09-30T08:15:00Z"
+  }
+}
+```
+
+Completion means the bot was saved successfully. Some platforms still need
+manual webhook configuration, so receivers must inspect `bot_status` and
+`webhook_registered` before assuming inbound messages are ready. Agent routing
+is configured separately. `user_id` is the bot owner, including an organization
+UUID for org-owned bots.
+
+Verify `X-NyxID-Signature` (`sha256=<hex digest>`) as HMAC-SHA256 over
+`X-NyxID-Timestamp + "." + raw_request_body` using the signing secret. The other
+headers are `X-NyxID-Event`, `X-NyxID-Delivery-Id`, and `X-NyxID-Key-ID`. Validate the
+timestamp within your allowed replay window, compare signatures in constant
+time, deduplicate by `event_id`, and respond with 2xx. The event ID, occurrence
+time, and result snapshot remain stable across delivery cycles. Delivery is
+at least once: a lost acknowledgement can cause a duplicate.
+
+Terminal state and the pending notification are stored in one atomic write.
+Retries use a five-minute delivery lease, up to five cycles of three bounded
+HTTP attempts each. A separate bot-link sweep recovers interrupted delivery,
+expired requests, and provider/Telegram completion without app polling. It uses
+`CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS`; setting that to `0` disables background
+recovery for both kinds of link. Bot notifications have a separate app rate
+window so they do not consume the existing connector webhook delivery quota.
+
+`GET /api/v1/channel-connect-links/{id}` exposes the result and `delivery_status`
+(`pending`, `delivered`, `abandoned`, or `none`) for diagnostics. It never returns
+the hosted token, webhook destination, or signing secret. A link defaults to 15
+minutes and accepts a lifetime of 60–3600 seconds. A pinned setup gets 30 minutes
+of recovery grace, including Telegram work in `ready` or `provisioning`. After
+that window, incomplete links expire and notify the app. A late Telegram worker
+can still finish the separately authorized bot, but it cannot change a terminal
+link or send a second terminal event. The Telegram approval request has its own
+15-minute lifetime; cancellation or expiry before bot creation ends this
+single-use link too. Create a fresh link to start another attempt. For org-owned
+Telegram setup, the administrator who started the approval must resume it;
+other administrators can view link progress without taking over that consent.
+Cancellation through
+`POST /api/v1/channel-connect-links/{id}/cancel` is available before provider
+setup starts. Once resources exist, resume the saved setup instead of creating
+another bot. Manual and managed operations continue if the browser disconnects;
+the hosted page offers recovery for saved bots and authorized OAuth connections.
+
+### Bot-link implementation and compatibility
+
+Bot links have their own collection and terminal state transitions. The existing service-link model, handlers, hosted page, and callback fields remain unchanged. The shared app lookup validates bot callbacks through the same OAuth redirect policy used by service links.
+
+| Responsibility | Implementation |
+|---|---|
+| Stored link, token hash, encrypted direct receiver, and terminal event | [`models/channel_connect_link.rs`](../backend/src/models/channel_connect_link.rs) |
+| Owner checks, renewable claims, atomic bot association, completion, recovery, and delivery | [`services/channel_connect_link_service.rs`](../backend/src/services/channel_connect_link_service.rs) |
+| Request validation, public preview, human setup, and managed progress streaming | [`handlers/channel_connect_links.rs`](../backend/src/handlers/channel_connect_links.rs) |
+| Bot creation with an optional link claim | [`services/channel_bot_service.rs`](../backend/src/services/channel_bot_service.rs) |
+| Telegram request creation and worker completion | [`services/telegram_new_service.rs`](../backend/src/services/telegram_new_service.rs), [`services/telegram_new_connect.rs`](../backend/src/services/telegram_new_connect.rs) |
+| Registered-app receiver and shared signature sender | [`services/developer_webhook_service.rs`](../backend/src/services/developer_webhook_service.rs), [`services/webhook_delivery_service.rs`](../backend/src/services/webhook_delivery_service.rs) |
+| Routes, API discovery, indexes, and independent sweep task | [`routes.rs`](../backend/src/routes.rs), [`api_docs.rs`](../backend/src/api_docs.rs), [`db.rs`](../backend/src/db.rs), [`main.rs`](../backend/src/main.rs) |
+| Hosted page and optional context for existing setup components | [`pages/channel-connect-link.tsx`](../frontend/src/pages/channel-connect-link.tsx), [`hooks/use-channel-connect-link.tsx`](../frontend/src/hooks/use-channel-connect-link.tsx) |
+| Create, status, and cancellation commands | [`commands/channel_bot.rs`](../cli/src/commands/channel_bot.rs) |
+
+Only one setup attempt can hold a link's renewable claim. Bot insertion and its link association commit together; Telegram request insertion and its link association also share a transaction. Completion checks the saved bot's readiness, then commits the terminal state and notification snapshot together. Delivery failure leaves the terminal result intact and schedules another attempt until the retry limit is reached.
+
+Existing bot creation entry points pass no link claim, and existing frontend callers use their original endpoints outside the hosted context. Existing service callbacks retain their HTTP client, signature contract, timestamp behavior, and `developer_webhook` rate bucket. Bot callbacks opt into public-address validation, DNS pinning, redirects disabled, and the separate `developer_channel_webhook` bucket. Their sweep runs in a separate task while sharing the [configured sweep interval](ENV.md#hosted-connect-links).
+
+Regression coverage lives beside the new service and handlers, in [`telegram_new_tests.rs`](../backend/src/services/telegram_new_tests.rs), and in the [hosted page tests](../frontend/src/pages/channel-connect-link.test.tsx). Existing `connect_link_service`, `connect_links`, `developer_webhook_service`, and CLI `commands::connect` tests cover the shared compatibility boundary.
+
+### X channel workflow, health and recovery
+
+**Supported workflow.** An X DM channel delivers through X Activity webhooks:
+
+1. X posts `dm.received` to `POST /api/v1/webhooks/channel/x/platform`.
+2. NyxID verifies the platform signature (`x-twitter-webhooks-signature[-oauth2]`) with the shared X app secret. It reads the target from `data.filter.user_id` and requires the subscription tag `nyxid:{bot_id}`.
+3. The bot is found by `platform: "x"` and its X user id. Inbound billing admission runs, and the route (`channel_conversations`) forwards the message.
+4. A bot linked to NyxBot over NyxID's direct relay calls back `/api/v1/nyxbot/relay/{channel_id}`. The owner's verified X user (`owner_sender_ids`, set with the link code) continues NyxBot's home thread. With private chats open to everyone, other X users get their own guest thread with no tools.
+5. NyxBot's reply leaves through `POST /api/v1/channel-relay/reply` (`async_reply`) and becomes `POST /2/dm_conversations/{id}/messages` on X.
+
+Polling remains a legacy DM-only fallback while `BILLING_ENABLED=false`. Paid deployments fail polling X bots with `webhook_required`. The Agent Event Gateway takes X only when `nyxbot:gateway-x` is on. Health then reports `recommended_action: "gateway"`, because delivery diagnostics live on the gateway.
+
+**Platform limitations.**
+- Mentions, replies and other public events need webhook credentials and `tweet.write`.
+- Public replies are text-only.
+- X rate limits are honoured: a poll backs off until the reset; a refused reply is not retried.
+- `402` means the shared X app has run out of its own X API credits. Only an administrator can restore them. This is separate from NyxID credits; NyxID billing suspension is `billing_suspended`.
+
+**Health endpoints.** All reads are metadata only:
+
+| Method | Route | Access |
+| --- | --- | --- |
+| GET | `/api/v1/channel-bots/{id}/health` | Owner or org member who can read the bot; `can_write` says whether the caller may act |
+| POST | `/api/v1/channel-bots/{id}/resubscribe` | Owner write access; X only. Re-runs subscription setup, then a live read-back. Audited as `channel_bot_resubscribed` |
+| GET | `/api/v1/admin/channel-bots?platform=x&status=failed&limit=&offset=` | Admin; ordered by id |
+| GET | `/api/v1/admin/channel-bots/{id}/health` | Admin |
+| GET | `/api/v1/admin/channel-bots/webhook-rejections` | Admin; per-platform counters of unauthenticated rejections |
+
+CLI: `nyxid channel-bot health <id>` prints the diagnostics and the recommended action, and `nyxid channel-bot show <id>` appends the same block.
+
+**Diagnostics.** Only authenticated deliveries write the bot row:
+- `last_inbound_at`/`last_inbound_source` and `last_webhook_at` are stamped after billing admission.
+- `last_outbound_at`/`last_outbound_error` are written by every send path: NyxBot and agent replies through `/channel-relay/reply`, thread replies, and `/channel-relay/send`. The error has the numeric `code` and the stable `reason`.
+- `last_webhook_error` and `failure_reason` hold stable codes, and `subscription_state` holds `{registered, checked_at, last_error}`.
+- A successful authenticated delivery clears webhook errors and delivery-shaped failure reasons.
+
+Forged or mis-targeted deliveries (`signature`, `target`, `platform_mismatch`) never touch a bot. They are counted per platform in `channel_webhook_rejections`, with at most one write per platform and reason every 30 seconds on each replica.
+
+Verify and Resubscribe finish with a live read-only check: NyxID's callback must be a valid webhook in `GET /2/webhooks`, and every selected event must be subscribed with the bot's tag in `GET /2/activity/subscriptions`. A missing subscription persists `registered: false` with `subscription_missing` or `webhook_missing`. Missing platform webhook credentials on Resubscribe persist `webhook_unconfigured`.
+
+**Failure codes and actions.** One recommendation function (`services/channel_bot_health.rs`) serves Health, the `channel_bot_failed` audit and the owner notice:
+
+| `failure_reason` / reply `reason` | Meaning | `recommended_action` |
+| --- | --- | --- |
+| `reconnect_required`, `auth_revoked` (401), `scopes_missing` (403 scope), `access_denied` (other 403) | The account connection cannot be used | `reconnect` |
+| `app_access_denied` (403 client-not-enrolled / code 453), `provider_credits` (402), `webhook_unconfigured` | The shared X app or platform credentials need an administrator | `contact_admin` |
+| `billing_suspended` | NyxID billing stopped the channel | `enable_billing` |
+| `webhook_required`, `webhook_setup_failed`, `webhook_missing`, `subscription_missing`, `unregistered` | The subscription is missing or incomplete | `resubscribe` |
+| `rate_limited` (429) | Poll backoff is active (compared with now) or the last reply was limited | `wait_rate_limit` |
+| `provider_unavailable` (5xx), `provider_error` | X failed; NyxID retries | `verify` |
+| `recipient_unreachable` | The last reply's recipient does not accept DMs | `none` |
+
+The first transition to `failed` sends one best-effort notice through the owner's Telegram and push channels. For an org-owned bot it goes to every org admin. A repeated failure sends nothing; a later failure after recovery, such as a billing suspension, sends one again. Notification failures never undo the status change.
+
+**Reproduce locally** (MongoDB replica set plus wiremock; no X credentials):
+- `handlers::nyxbot::tests::x_bus_tests::x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics` covers the full chain:
+  - a signed DM is relayed over HTTP to NyxBot;
+  - it lands in the home thread, and NyxBot's reply is posted to X;
+  - a guest DM gets its own thread with no tools;
+  - an X 403 and then a 429 on the reply are recorded with the Health action.
+- `handlers::channel_webhooks::diagnostics_tests` shows that only authenticated deliveries write diagnostics.
+- `services::channel_x_tests::webhooks::verify_live_check_persists_a_missing_subscription_and_resubscribe_restores_it` and `resubscribe_without_platform_webhook_credentials_asks_an_admin` cover the live check and Resubscribe.
+- `services::channel_bot_health` holds the recommendation table, failure codes, rejection counters and org-admin notices.
+
+**Staging verification** needs a staging X app with OAuth consent for the DM scopes, X API credits and Activity API access, and the platform webhook credentials (`app_bearer_token`, `consumer_secret`) in Admin > Platform Credentials.
+1. Connect an account, then run Verify. Health should show `subscription_state.registered: true` and `recommended_action: "none"`.
+2. Link the bot to NyxBot and send the link code from the owner's X account.
+3. DM the bot. Confirm the reply arrives and Health shows `last_inbound_at` and `last_outbound_at`.
+4. Delete the subscription in X, run Verify, and expect `resubscribe`.
+5. Run Resubscribe and expect `none`.
+
+Production credentials are never used in local tests.
+
+
+## Platform-managed onboarding installations
+
+Platform BotFather uses a dedicated native receiver rather than the gateway's
+personal provider handshake. A durable platform manager or installation marker
+closes ordinary conversation routes, NyxBot relinking, private/group defaults,
+thread following and alternate agent setters. Missing setup/profile authority,
+stale revisions and inactive installations fail closed; deleting or expiring setup
+records never enables personal fallback. Legacy channels without an explicit marker
+retain their existing behavior.
+
+Public child effects require current reviewed publication, owned specialist,
+manager/child identity, funding, quotas and activation. In-flight replies and
+creation workers carry exact revision/digest/generation fences. Previous gateway
+cleanup retains the captured remote version; admin recovery can preserve a changed
+binding without deleting it. See [Platform BotFather](PLATFORM_BOTFATHER.md).

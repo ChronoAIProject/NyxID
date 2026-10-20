@@ -36,6 +36,9 @@ pub struct UserService {
     /// Optional: populated when auto-provisioned from catalog
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
+    /// User-selected image URL, overriding the built-in catalog glyph in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
     /// Optional: route requests through this node agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -166,6 +169,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("svc-id".to_string()),
+            icon_url: Some("https://example.com/icon.svg".to_string()),
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
@@ -197,6 +201,7 @@ mod tests {
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.node_priority, restored.node_priority);
+        assert_eq!(svc.icon_url, restored.icon_url);
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.identity_propagation_mode, "headers");
         assert!(restored.identity_include_user_id);
@@ -220,6 +225,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "X-API-Key".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -275,6 +281,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -337,6 +344,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -389,6 +397,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),

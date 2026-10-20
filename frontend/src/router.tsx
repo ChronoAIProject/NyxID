@@ -1,9 +1,26 @@
+import "@/lib/platform-personal-handoff";
+import { PersonalLinkPage } from "@/pages/platform-personal-link";
+import { onboardingSearch } from "@/schemas/platform-onboarding";
+import { ToolsPage } from "@/pages/tools";
+import { AdminToolsPage } from "@/pages/admin-tools";
+import { parseAutomationSearch } from "@/lib/automation-search";
+import {
+  parseMachinesSearch,
+  parseMachineSetupSearch,
+  parseMachinePairSearch,
+  parseMachineDesktopSearch,
+} from "@/lib/machine-search";
+import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
-import { channelBotSetupRewrite, parseChannelBotSetupSearch, parseChannelBotSetupPageSearch } from "@/schemas/channel-bot-setup";
+import {
+  channelBotSetupRewrite,
+  parseChannelBotSetupPageSearch,
+  parseChannelBotSetupSearch,
+} from "@/schemas/channel-bot-setup";
 import {
   createRouter,
   createRoute,
@@ -18,16 +35,38 @@ import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
+import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
+import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, hasAdminRead } from "@/types/api";
+import {
+  canAdminWrite,
+  canManageCatalog,
+  canManageTools,
+  canReadAdminUsage,
+  canReadFeatureFlags,
+  hasAdminRead,
+} from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
+import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
+import {
+  ADMIN_BILLING_TABS,
+  ADMIN_CREDITS_TABS,
+  KEY_DETAIL_TABS,
+  isValidTab,
+} from "@/lib/url-tabs";
 
 import {
+  PlatformOnboardingPage,
+  PlatformBindingReviewPage,
+  PlatformSetupsPage,
+  PlatformSetupDetailPage,
+  AdminPlatformBotsPage,
   LandingPage,
   NyxbotOnboardingPage,
   AiSetupPage,
@@ -64,6 +103,7 @@ import {
   TriggersPage,
   IntegrationGuidePage,
   OAuthConsentPage,
+  OAuthConsentPreviewPage,
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
@@ -71,14 +111,17 @@ import {
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
+  MachineDesktopPage,
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
   AdminUsagePage,
   AdminFeatureFlagsPage,
+  AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminCreditsPage,
+  AdminBillingPage,
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
@@ -92,6 +135,7 @@ import {
   KeysPage,
   BillingPage,
   KeyDetailPage,
+  ServiceOverviewPage,
   ChannelBotsPage,
   ChannelBotSetupPage,
   ChannelBotSetupLinksPage,
@@ -119,6 +163,7 @@ const rootRoute = createRootRoute({
         <Outlet />
       </Suspense>
       <Toaster />
+      <CreditsDeniedHost />
     </TooltipProvider>
   ),
 });
@@ -132,8 +177,9 @@ const authLayout = createRoute({
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
-      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
-        window.location.assign(returnTo);
+      const trusted = resolveTrustedAuthReturnTo(returnTo ?? undefined);
+      if (trusted) {
+        window.location.assign(trusted);
         return;
       }
       throw redirect({ to: "/dashboard" });
@@ -202,6 +248,14 @@ const oauthConsentRoute = createRoute({
   },
   component: OAuthConsentPage,
 });
+
+const oauthConsentPreviewRoute = import.meta.env.DEV
+  ? createRoute({
+      path: "/oauth-consent-preview",
+      getParentRoute: () => rootRoute,
+      component: OAuthConsentPreviewPage,
+    })
+  : null;
 
 const oauthLaunchingRoute = createRoute({
   path: "/oauth-launching",
@@ -297,6 +351,13 @@ export const loginCodeRoute = createRoute({
   component: () => <LoginAgentKeyPage mint />,
 });
 
+const channelConnectLinkRoute = createRoute({
+  path: "/connect/bot/$token",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: ChannelConnectLinkPage,
+});
+
 const connectLinkRoute = createRoute({
   path: "/connect/$token",
   getParentRoute: () => rootRoute,
@@ -322,16 +383,15 @@ const sshTerminalRoute = createRoute({
   component: SshTerminalPage,
 });
 
-// Shared by every /assistant* route. Keep this auth mirror aligned with
-// dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
-// outside DashboardLayout.
+// Shared by authenticated pages outside DashboardLayout. Keep this auth
+// mirror aligned with dashboardLayout.beforeLoad below.
 //
 // The assistant surface is deliberately not flag-gated here: both a reactive
 // component guard and a server-verified beforeLoad gate raced the auth store
 // (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
 // permission had simply not loaded yet. Reachability is nav-level only (the
 // sidebar link honours the flag) and the backend authorizes every API call.
-const assistantBeforeLoad = async ({
+const standaloneAuthBeforeLoad = async ({
   location,
 }: {
   location: { pathname: string; searchStr: string };
@@ -362,21 +422,23 @@ const assistantRoute = createRoute({
   // `?draft` means; a param dropped here makes the optimistic "New chat"
   // navigation a silent no-op.
   validateSearch: parseAssistantSearch,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  validateSearch: withAccountPanelSearch(() => ({})),
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  validateSearch: withAccountPanelSearch(() => ({})),
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
 
@@ -451,13 +513,31 @@ const apiKeysRedirectRoute = createRoute({
 
 // -- Redirect old paths --
 
-const servicesRedirectRoute = createRoute({
-  path: "/services",
+const toolsRoute = createRoute({
+  path: "/tools",
+  getParentRoute: () => dashboardLayout,
+  component: ToolsPage,
+});
+export const adminToolsRoute = createRoute({
+  path: "/admin/tools",
   getParentRoute: () => dashboardLayout,
   beforeLoad: () => {
+    if (!canManageTools(useAuthStore.getState().user))
+      throw redirect({ to: "/tools" });
+  },
+  component: AdminToolsPage,
+});
+
+export const servicesRedirectRoute = createRoute({
+  path: "/services",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: async () => {
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the services management pages
+    if (
+      canManageCatalog(user) ||
+      canManageTools(user) ||
+      hasAdminRead(user)
+    ) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -492,7 +572,7 @@ const connectionsRedirectRoute = createRoute({
   component: () => null,
 });
 
-const providersRedirectRoute = createRoute({
+export const providersRedirectRoute = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
   beforeLoad: ({ location }) => {
@@ -504,8 +584,7 @@ const providersRedirectRoute = createRoute({
       return;
     }
     const { user } = useAuthStore.getState();
-    if (user?.is_admin) {
-      // Admin users can still access the providers management pages
+    if (canManageCatalog(user)) {
       return;
     }
     throw redirect({ to: "/keys", search: {} });
@@ -547,9 +626,7 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
-  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
-    ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
-  }),
+  validateSearch: validateSettingsSearch,
 });
 
 const devicesBindRoute = createRoute({
@@ -624,6 +701,36 @@ const developerAppDetailRoute = createRoute({
   component: DeveloperAppDetailPage,
 });
 
+const automationsRoute = createRoute({
+  path: "/automations",
+  getParentRoute: () => rootRoute,
+  validateSearch: parseAutomationSearch,
+  beforeLoad: async (context) => {
+    await standaloneAuthBeforeLoad(context);
+    throw redirect({
+      to: "/assistant/automations",
+      search: parseAutomationSearch(context.search),
+      replace: true,
+    });
+  },
+});
+
+const assistantAutomationsRoute = createRoute({
+  path: "/assistant/automations",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: withAccountPanelSearch(parseAutomationSearch),
+  component: () => <AssistantPage view="automations" />,
+});
+
+const assistantMachinesRoute = createRoute({
+  path: "/assistant/machines",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: withAccountPanelSearch(parseMachinesSearch),
+  component: () => <AssistantPage view="machines" />,
+});
+
 const triggersRoute = createRoute({
   path: "/triggers",
   getParentRoute: () => dashboardLayout,
@@ -681,6 +788,29 @@ const nodesRoute = createRoute({
   component: NodesPage,
 });
 
+const machineDesktopRoute = createRoute({
+  path: "/assistant/machines/$nodeId/desktop",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: MachineDesktopPage,
+  validateSearch: parseMachineDesktopSearch,
+});
+
+const machineSetupRoute = createRoute({
+  path: "/assistant/machines/new",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-setup" />,
+  validateSearch: withAccountPanelSearch(parseMachineSetupSearch),
+});
+const machinePairRoute = createRoute({
+  path: "/assistant/machines/pair",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-pair" />,
+  validateSearch: withAccountPanelSearch(parseMachinePairSearch),
+});
+
 const nodeDetailRoute = createRoute({
   path: "/nodes/$nodeId",
   getParentRoute: () => dashboardLayout,
@@ -702,7 +832,8 @@ const keysRoute = createRoute({
   // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string; service?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string; view?: string; pool?: string; org?: string } => ({
+    ...(import.meta.env.DEV && search.view === "routing" ? { view: "routing" } : {}),
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
@@ -711,6 +842,10 @@ const keysRoute = createRoute({
     ...(typeof search.service === "string" && search.service.length > 0
       ? { service: search.service }
       : {}),
+    ...(typeof search.pool === "string" && search.pool.length > 0 && search.pool.length <= 128
+      ? { pool: search.pool } : {}),
+    ...(typeof search.org === "string" && search.org.length > 0 && search.org.length <= 128
+      ? { org: search.org } : {}),
   }),
   component: KeysPage,
 });
@@ -718,6 +853,8 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
+  validateSearch: (search: Record<string, unknown>) =>
+    billingSearchSchema.parse(search),
   beforeLoad: () => {
     const { isLoading, user } = useAuthStore.getState();
     if (shouldRedirectFromBilling({ isLoading, user })) {
@@ -731,23 +868,59 @@ const billingRoute = createRoute({
   ),
 });
 
+const serviceOverviewRoute = createRoute({
+  path: "/keys/services/$groupId",
+  getParentRoute: () => dashboardLayout,
+  component: ServiceOverviewPage,
+});
+
 const keyDetailRoute = createRoute({
   path: "/keys/$keyId",
   getParentRoute: () => dashboardLayout,
   component: KeyDetailPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string; provider_status?: string; message?: string } => ({
+    ...(isValidTab(search.tab, KEY_DETAIL_TABS) ? { tab: search.tab } : {}),
+    ...(typeof search.provider_status === "string" ? { provider_status: search.provider_status } : {}),
+    ...(typeof search.message === "string" ? { message: search.message } : {}),
+  }),
 });
 
 const apiKeyDetailRoute = createRoute({
   path: "/keys/api-key/$keyId",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { grant_service?: string } => ({
+    grant_service:
+      typeof search.grant_service === "string"
+        ? search.grant_service
+        : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ApiKeyDetailPage,
 });
 
+export const platformOnboardingRoute = createRoute({path: "/onboarding", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformOnboardingPage});
+export const platformBindingReviewRoute = createRoute({path: "/onboarding/link", getParentRoute: () => rootRoute, validateSearch: onboardingSearch, component: PlatformBindingReviewPage});
+export const platformPersonalLinkRoute = createRoute({path: "/nyxbot/link", getParentRoute: () => rootRoute, validateSearch: () => ({}), component: PersonalLinkPage});
+export const platformSetupsRoute = createRoute({path: "/onboarding/setups", getParentRoute: () => dashboardLayout, validateSearch: onboardingSearch, component: PlatformSetupsPage});
+export const platformSetupDetailRoute = createRoute({path: "/onboarding/setups/$setupId", getParentRoute: () => dashboardLayout, component: PlatformSetupDetailPage});
+
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): {
+    connect?: ReturnType<typeof managedConnectPlatform>;
+    label?: string;
+    target_org_id?: string;
+    request_id?: string;
+    claim_entry?: boolean;
+  } => ({
     connect: managedConnectPlatform(search.connect),
-    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    claim_entry:
+      search.claim_entry === true || search.claim_entry === "true"
+        ? true
+        : undefined,
     ...parseChannelBotSetupSearch(search),
   }),
   getParentRoute: () => dashboardLayout,
@@ -762,17 +935,9 @@ const channelBotSetupLinksRoute = createRoute({
 
 export const channelBotSetupRoute = createRoute({
   path: "/channel-bots/connect/$platform",
-  validateSearch: parseChannelBotSetupPageSearch,
   getParentRoute: () => rootRoute,
-  beforeLoad: ({ location }) => {
-    const { isAuthenticated, isLoading } = useAuthStore.getState();
-    if (!isAuthenticated && !isLoading) {
-      throw redirect({
-        to: "/login",
-        search: { return_to: `${window.location.origin}${location.pathname}${location.searchStr}` },
-      });
-    }
-  },
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
 });
 
@@ -824,20 +989,33 @@ const orgJoinRoute = createRoute({
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
-  beforeLoad: () => {
+  beforeLoad: ({ location }) => {
     const { user, isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       throw redirect({ to: "/login" });
     }
-    // Admin layout is reachable by both `admin` (read+write) and `operator`
-    // (read-only). Per-action write controls inside admin pages are gated
-    // separately so operators see admin data but cannot mutate it.
-    if (!isLoading && !hasAdminRead(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
+    if (isLoading || hasAdminRead(user)) return;
+    const usagePath =
+      location.pathname === "/admin/usage" ||
+      location.pathname === "/admin/analytics";
+    const flagsPath = location.pathname === "/admin/feature-flags";
+    if (
+      (usagePath && canReadAdminUsage(user)) ||
+      (flagsPath && canReadFeatureFlags(user))
+    )
+      return;
+    if (canReadFeatureFlags(user))
+      throw redirect({ to: "/admin/feature-flags" });
+    if (canReadAdminUsage(user)) throw redirect({ to: "/admin/usage" });
+    throw redirect({ to: "/dashboard" });
   },
   component: () => <Outlet />,
 });
+
+export const adminPlatformBotsRoute = createRoute({path: "platform-bots", getParentRoute: () => adminLayout, beforeLoad: () => {
+  const {user, isLoading} = useAuthStore.getState();
+  if (!isLoading && !canAdminWrite(user)) throw redirect({to: "/dashboard"});
+}, component: AdminPlatformBotsPage});
 
 const adminUsersRoute = createRoute({
   path: "users",
@@ -913,11 +1091,68 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminAnalyticsRoute = createRoute({
+  path: "analytics",
+  getParentRoute: () => adminLayout,
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: "/admin/usage",
+      search: { ...search, tab: "dashboard" },
+      replace: true,
+    });
+  },
+  validateSearch: (search: Record<string, unknown>) => usagePageSearch(search),
+});
+
+function usagePageSearch(search: Record<string, unknown>): Partial<
+  Pick<
+    ReturnType<typeof normalizeAdminUsageSearch>,
+    "sort" | "metric" | "page" | "per_page"
+  >
+> & {
+  tab?: "dashboard" | "list" | "nyxbot";
+  sample?: "overview" | "operations" | "explorer";
+  mock?: string;
+} {
+  const { sort, metric, page, per_page } = normalizeAdminUsageSearch(search);
+  return {
+    sort,
+    metric,
+    page,
+    per_page,
+    tab: search.tab === "nyxbot"
+      ? ("nyxbot" as const)
+      : search.tab === "list" ? ("list" as const) : ("dashboard" as const),
+    sample:
+      import.meta.env.DEV &&
+      import.meta.env.MODE === "test" &&
+      ["overview", "operations", "explorer"].includes(String(search.sample))
+        ? (search.sample as "overview" | "operations" | "explorer")
+        : undefined,
+    mock: import.meta.env.DEV && search.mock ? String(search.mock) : undefined,
+  };
+}
 const adminUsageRoute = createRoute({
   path: "usage",
   getParentRoute: () => adminLayout,
   component: AdminUsagePage,
-  validateSearch: normalizeAdminUsageSearch,
+  validateSearch: usagePageSearch,
+  beforeLoad: ({ search, location }) => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && search.tab === "nyxbot" && !hasAdminRead(user)) {
+      throw redirect({ to: "/admin/usage", search: { ...search, tab: "dashboard" }, replace: true });
+    }
+    const params = new URLSearchParams(location.searchStr);
+    if (
+      ["period", "from", "to", "user", "service"].some((key) => params.has(key))
+    ) {
+      throw redirect({
+        to: "/admin/usage",
+        search: usagePageSearch(search),
+        replace: true,
+      });
+    }
+  },
 });
 
 const adminIntegrityRoute = createRoute({
@@ -930,6 +1165,18 @@ const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
   component: AdminCreditsPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_CREDITS_TABS) ? { tab: search.tab } : {}),
+  }),
+});
+
+const adminBillingRoute = createRoute({
+  path: "billing",
+  getParentRoute: () => adminLayout,
+  component: AdminBillingPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_BILLING_TABS) ? { tab: search.tab } : {}),
+  }),
 });
 
 const adminInviteCodesRoute = createRoute({
@@ -953,6 +1200,17 @@ const adminPlatformCredentialsRoute = createRoute({
   component: AdminPlatformCredentialsPage,
 });
 
+const adminUploadRetentionRoute = createRoute({
+  path: "upload-retention",
+  getParentRoute: () => adminLayout,
+  beforeLoad: () => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && !canAdminWrite(user))
+      throw redirect({ to: "/dashboard" });
+  },
+  component: AdminUploadRetentionPage,
+});
+
 const adminFeatureFlagsRoute = createRoute({
   path: "feature-flags",
   getParentRoute: () => adminLayout,
@@ -960,10 +1218,14 @@ const adminFeatureFlagsRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  platformOnboardingRoute,
+  platformBindingReviewRoute,
+  platformPersonalLinkRoute,
   landingRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
+  ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
   oauthErrorRoute,
@@ -981,14 +1243,23 @@ const routeTree = rootRoute.addChildren([
   loginAgentKeyRoute,
   channelBotSetupRoute,
   connectLinkRoute,
+  channelConnectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
+  machineDesktopRoute,
   assistantRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
+  assistantAutomationsRoute,
+  assistantMachinesRoute,
+  automationsRoute,
+  machineSetupRoute,
+  machinePairRoute,
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
+    toolsRoute,
+    adminToolsRoute,
     apiKeysRedirectRoute,
     servicesRedirectRoute.addChildren([
       servicesIndexRoute,
@@ -1020,10 +1291,13 @@ const routeTree = rootRoute.addChildren([
     approvalGrantsRoute,
     keysRoute,
     billingRoute,
+    serviceOverviewRoute,
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,
     nodeDetailRoute,
+    platformSetupsRoute,
+    platformSetupDetailRoute,
     channelBotsRoute,
     channelBotSetupLinksRoute,
     channelBotDetailRoute,
@@ -1047,10 +1321,14 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminUsageRoute,
+      adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
+      adminBillingRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
+      adminUploadRetentionRoute,
+      adminPlatformBotsRoute,
       adminPlatformCredentialsRoute,
     ]),
   ]),

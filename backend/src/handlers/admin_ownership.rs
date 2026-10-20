@@ -29,6 +29,8 @@ pub struct ResourceItem {
     pub id: String,
     pub name: String,
     pub owner_user_id: String,
+    pub owner_name: Option<String>,
+    pub owner_email: Option<String>,
     pub platform: Option<String>,
     pub slug: Option<String>,
 }
@@ -102,7 +104,7 @@ pub async fn list_resources(
     )
     .await?;
     let next_offset = (rows.len() > 50).then_some(query.offset + 50);
-    let items = rows
+    let mut items: Vec<ResourceItem> = rows
         .into_iter()
         .take(50)
         .map(|row| {
@@ -114,11 +116,26 @@ pub async fn list_resources(
                     .or_else(|| field("user_id"))
                     .or_else(|| field("created_by"))
                     .unwrap_or_default(),
+                owner_name: None,
+                owner_email: None,
                 platform: field("platform"),
                 slug: field("slug"),
             }
         })
         .collect();
+    if !items.is_empty() {
+        let owner_ids: Vec<&str> = items
+            .iter()
+            .map(|item| item.owner_user_id.as_str())
+            .collect();
+        let owners = transfers::owner_identities(&state.db, &owner_ids).await?;
+        for item in &mut items {
+            if let Some(owner) = owners.get(&item.owner_user_id) {
+                item.owner_name = owner.name.clone();
+                item.owner_email = owner.email.clone();
+            }
+        }
+    }
     Ok(Json(ResourceListResponse { items, next_offset }))
 }
 
@@ -137,6 +154,7 @@ pub async fn preview(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
         &body.new_owner_user_id,
@@ -196,6 +214,8 @@ pub async fn transfer(
         TransferCommand {
             actor: &actor,
             api_key_id: auth.api_key_id.as_deref(),
+            first_party_human: super::login_client_context::require_first_party_human(&auth)
+                .is_ok(),
             kind,
             resource_id: &id,
             destination: &body.new_owner_user_id,
@@ -247,6 +267,7 @@ pub async fn authorization(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
         kind,
         &id,
     )
@@ -260,10 +281,13 @@ pub async fn authorization(
                 .unwrap_or_default()
                 .into(),
             owner_user_id: owner,
+            owner_name: None,
+            owner_email: None,
             platform: row.get_str("platform").ok().map(str::to_owned),
             slug: row.get_str("slug").ok().map(str::to_owned),
         }),
-        Ok(_) | Err(AppError::Forbidden(_) | AppError::NotFound(_)) => None,
+        Ok(_) => None,
+        Err(error) if super::services_helpers::is_capability_denial(&error) => None,
         Err(error) => return Err(error),
     };
     Ok(Json(TransferAuthorization {
@@ -308,9 +332,15 @@ pub async fn destinations(
 ) -> AppResult<Json<DestinationList>> {
     auth.ensure_write_scope()?;
     let actor = auth.user_id.to_string();
-    let (owner, admin, _) =
-        access::require_resource_access(&state.db, &actor, auth.api_key_id.as_deref(), kind, &id)
-            .await?;
+    let (owner, admin, _) = access::require_resource_access(
+        &state.db,
+        &actor,
+        auth.api_key_id.as_deref(),
+        super::login_client_context::require_first_party_human(&auth).is_ok(),
+        kind,
+        &id,
+    )
+    .await?;
     let (rows, total) = access::destination_candidates(
         &state.db,
         &actor,

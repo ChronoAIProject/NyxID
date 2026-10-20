@@ -14,6 +14,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "message can't be edited",
 ];
 
+#[path = "telegram_thread.rs"]
+mod thread;
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
@@ -256,6 +259,50 @@ fn extract_message(update: &serde_json::Value) -> Option<&serde_json::Value> {
         .or_else(|| update.get("channel_post"))
 }
 
+/// The forum topic a native Telegram message belongs to, as its decimal
+/// `message_thread_id`, only when Telegram itself flags the message with
+/// `is_topic_message: true` (set on every topic message since Bot API 6.3).
+///
+/// Telegram also sets `message_thread_id` on replies in non-forum supergroups
+/// and inside a forum's General topic, where it is the reply-chain root, so
+/// neither the field alone nor `chat.is_forum` is evidence of a topic.
+pub(super) fn topic_of(native: &serde_json::Value) -> Option<String> {
+    (native.get("is_topic_message").and_then(|v| v.as_bool()) == Some(true))
+        .then(|| {
+            native
+                .get("message_thread_id")
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string())
+        })
+        .flatten()
+}
+
+/// Resolve only the outbound topic declared by a gateway Activity. Inbound
+/// partitioning keeps conversation.thread_id exactly as the gateway sent it.
+/// Telegram facts are the gateway's declaration, not NyxID-verified facts.
+pub fn gateway_topic_id(platform: &str, activity: &serde_json::Value) -> Option<String> {
+    let sent = activity["conversation"]["thread_id"]
+        .as_str()
+        .map(str::to_owned);
+    if !matches!(platform, "telegram" | "telegram-new") {
+        return sent;
+    }
+    let positive = |id: &String| id.parse::<i64>().is_ok_and(|id| id > 0);
+    let facts = &activity["thread"];
+    if facts["version"] == 1 {
+        return (facts["kind"] == "topic")
+            .then(|| {
+                facts["native_thread_id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .filter(positive)
+            })
+            .flatten();
+    }
+    sent.filter(positive)
+}
+
 /// Parse a single Telegram message value into an [`InboundMessage`].
 fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<InboundMessage> {
     let message_id = msg.get("message_id")?.as_i64()?;
@@ -329,20 +376,10 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
         body["reply_to_message_id"] = serde_json::json!(id);
     }
 
-    // Honor `message_thread_id` from reply metadata when the original
-    // inbound message came from a forum topic. Without this, replies
-    // would fall back to the root chat. Accepted as either an integer
-    // or a string that parses as i64 (handlers/channel_relay.rs
-    // forwards it as a JSON string).
-    if let Some(md) = reply.metadata.as_ref()
-        && let Some(thread_val) = md.get("message_thread_id")
+    if let Some(thread) = crate::services::channel_image_audience::native_thread("telegram", reply)
+        && let Ok(id) = thread.parse::<i64>()
     {
-        let parsed = thread_val
-            .as_i64()
-            .or_else(|| thread_val.as_str().and_then(|s| s.parse::<i64>().ok()));
-        if let Some(thread_id) = parsed {
-            body["message_thread_id"] = serde_json::json!(thread_id);
-        }
+        body["message_thread_id"] = serde_json::json!(id);
     }
 
     body
@@ -376,6 +413,43 @@ impl TelegramAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramAdapter {
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(self.resolve_native_thread(facts, ancestors))
+    }
+
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        _bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::telegram(inbound, bot)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Telegram bot token"
     }
@@ -394,6 +468,10 @@ impl PlatformAdapter for TelegramAdapter {
 
     fn platform_id(&self) -> &str {
         "telegram"
+    }
+
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        true
     }
 
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
@@ -477,6 +555,20 @@ impl PlatformAdapter for TelegramAdapter {
         }
     }
 
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        let response = media::response_json(
+            http.get(format!("{}{}/getChat", self.base_url, credentials.token))
+                .query(&[("chat_id", conversation_id)]),
+        )
+        .await?;
+        Ok(response["result"]["title"].as_str().map(str::to_owned))
+    }
+
     async fn fetch_attachment(
         &self,
         http: &reqwest::Client,
@@ -521,6 +613,66 @@ impl PlatformAdapter for TelegramAdapter {
         .await
     }
 
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        use crate::services::channel_platform::SendOutcome;
+        if reply.attachments.is_empty() {
+            return self
+                .send_reply(http, credentials, conversation_id, reply)
+                .await
+                .map(SendOutcome::legacy);
+        }
+        if reply.text.as_deref().is_some_and(|text| !text.is_empty()) {
+            let mut text = reply.clone();
+            text.attachments.clear();
+            self.send_reply(http, credentials, conversation_id, &text)
+                .await?;
+        }
+        let (sent, error) = self
+            .send_attachments(http, credentials, conversation_id, reply)
+            .await;
+        if sent.is_empty()
+            && let Some(error) = error
+        {
+            return Err(error);
+        }
+        Ok(SendOutcome {
+            final_id: sent.last().map(|(_, id)| id.clone()),
+            delivered_kinds: Some(sent.iter().map(|(kind, _)| *kind).collect()),
+            observation: None,
+            error,
+        })
+    }
+
+    async fn send_bound_reply_outcome(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+        thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if let Some(target) = thread_target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation_id)
+            {
+                return Err(crate::services::channel_thread_service::unavailable());
+            }
+            return self
+                .thread_reply_outcome(http, credentials, target, reply)
+                .await;
+        }
+        self.send_reply_outcome(http, credentials, conversation_id, reply)
+            .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -535,42 +687,13 @@ impl PlatformAdapter for TelegramAdapter {
                 self.send_reply(http, credentials, conversation_id, &text)
                     .await?;
             }
-            let context = build_message_body(conversation_id, reply);
-            let mut last = None;
-            for attachment in &reply.attachments {
-                let (method, field) = match attachment.kind {
-                    MediaKind::Image => ("sendPhoto", "photo"),
-                    MediaKind::File => ("sendDocument", "document"),
-                    MediaKind::Audio => ("sendAudio", "audio"),
-                    MediaKind::Video => ("sendVideo", "video"),
-                };
-                let mut form = reqwest::multipart::Form::new()
-                    .text("chat_id", conversation_id.to_string())
-                    .part(field, media::multipart_part(attachment)?);
-                if let Some(caption) = &attachment.caption {
-                    form = form.text("caption", caption.clone());
-                }
-                for key in ["reply_to_message_id", "message_thread_id"] {
-                    if let Some(value) = context.get(key) {
-                        form = form.text(key, value.to_string());
-                    }
-                }
-                let response = media::response_json(
-                    http.post(format!("{}{}/{}", self.base_url, credentials.token, method))
-                        .multipart(form),
-                )
-                .await?;
-                if response["ok"] != true {
-                    return Err(media::upload_failed());
-                }
-                last = Some(
-                    response["result"]["message_id"]
-                        .as_i64()
-                        .ok_or_else(media::upload_failed)?
-                        .to_string(),
-                );
+            let (sent, error) = self
+                .send_attachments(http, credentials, conversation_id, reply)
+                .await;
+            if let Some(error) = error {
+                return Err(error);
             }
-            return Ok(last);
+            return Ok(sent.last().map(|(_, id)| id.clone()));
         }
         let bot_token = credentials.token;
         let body = build_message_body(conversation_id, reply);
@@ -779,10 +902,17 @@ impl PlatformAdapter for TelegramAdapter {
             .get("username")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        let display_name = result
+            .get("first_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
 
         Ok(BotIdentity {
             platform_bot_id: bot_id.to_string(),
             platform_bot_username: username.to_string(),
+            display_name,
         })
     }
 
@@ -790,6 +920,155 @@ impl PlatformAdapter for TelegramAdapter {
         // Telegram does not use a webhook challenge mechanism.
         None
     }
+}
+
+impl TelegramAdapter {
+    pub(super) async fn thread_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if reply.attachments.is_empty() {
+            return self
+                .reply_in_thread(http, credentials, target, reply)
+                .await
+                .map(crate::services::channel_platform::SendOutcome::legacy);
+        }
+        let facts = self
+            .resolve_native_thread(target.facts(), &[])
+            .ok_or_else(crate::services::channel_thread_service::unavailable)?;
+        let mut reply = reply.clone();
+        reply.metadata = Some(serde_json::json!({"message_thread_id": facts.native_thread_id}));
+        reply.reply_to_platform_message_id = Some(facts.message_id);
+        self.send_reply_outcome(http, credentials, &facts.chat_id, &reply)
+            .await
+    }
+
+    async fn send_attachments(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> (Vec<(MediaKind, String)>, Option<AppError>) {
+        let context = build_message_body(conversation, reply);
+        let mut sent = Vec::new();
+        for attachment in &reply.attachments {
+            let result: AppResult<(MediaKind, String)> = async {
+                let (method, field) = match attachment.kind {
+                    MediaKind::Image => ("sendPhoto", "photo"),
+                    MediaKind::File => ("sendDocument", "document"),
+                    MediaKind::Audio => ("sendAudio", "audio"),
+                    MediaKind::Video => ("sendVideo", "video"),
+                };
+                let form = |field| -> AppResult<reqwest::multipart::Form> {
+                    let mut form = reqwest::multipart::Form::new()
+                        .text("chat_id", conversation.to_owned())
+                        .part(field, media::multipart_part(attachment)?);
+                    if let Some(caption) = &attachment.caption {
+                        form = form.text("caption", caption.clone());
+                    }
+                    for key in ["reply_to_message_id", "message_thread_id"] {
+                        if let Some(value) = context.get(key) {
+                            form = form.text(key, value.to_string());
+                        }
+                    }
+                    Ok(form)
+                };
+                let (status, response) = media::platform_json_value(
+                    http.post(format!("{}{}/{method}", self.base_url, credentials.token))
+                        .multipart(form(field)?),
+                )
+                .await?;
+                let fallback = attachment.kind == MediaKind::Image
+                    && (status.is_success() || status == reqwest::StatusCode::BAD_REQUEST)
+                    && response["ok"] == false
+                    && response["error_code"].as_i64() == Some(400)
+                    && photo_document_fallback(
+                        response["description"].as_str().unwrap_or_default(),
+                    );
+                let (kind, response) = if fallback {
+                    (
+                        MediaKind::File,
+                        media::platform_json(
+                            http.post(format!(
+                                "{}{}/sendDocument",
+                                self.base_url, credentials.token
+                            ))
+                            .multipart(form("document")?),
+                            "Telegram",
+                            UNREACHABLE_TARGET_MARKERS,
+                        )
+                        .await?,
+                    )
+                } else {
+                    (
+                        attachment.kind,
+                        media::platform_response(
+                            status,
+                            response,
+                            "Telegram",
+                            UNREACHABLE_TARGET_MARKERS,
+                        )?,
+                    )
+                };
+                match response["ok"].as_bool() {
+                    Some(false) => {
+                        return Err(
+                            crate::services::channel_platform::classify_upstream_refusal(
+                                "Telegram",
+                                response["description"]
+                                    .as_str()
+                                    .unwrap_or("provider refusal"),
+                                UNREACHABLE_TARGET_MARKERS,
+                            ),
+                        );
+                    }
+                    Some(true) => {}
+                    None => return Err(media::upload_failed()),
+                }
+                let id = response["result"]["message_id"]
+                    .as_i64()
+                    .ok_or_else(media::upload_failed)?;
+                Ok((kind, id.to_string()))
+            }
+            .await;
+            match result {
+                Ok(receipt) => sent.push(receipt),
+                Err(error) => return (sent, Some(error)),
+            }
+        }
+        (sent, None)
+    }
+}
+
+fn photo_document_fallback(description: &str) -> bool {
+    let text = description.to_ascii_lowercase();
+    if [
+        "chat not found",
+        "message thread not found",
+        "replied message not found",
+        "bot was blocked",
+        "topic_closed",
+        "not enough rights",
+        "have no rights to send photos",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return false;
+    }
+    [
+        "photo_invalid_dimensions",
+        "photo_save_file_invalid",
+        "photo_ext_invalid",
+        "photo_crop_size_small",
+        "image_process_failed",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1463,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn verify_bot_token_reports_display_name() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (first_name, expected) in [
+            (serde_json::json!(" Acme Support "), Some("Acme Support")),
+            (serde_json::json!("  "), None),
+            (serde_json::Value::Null, None),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/bottest-token/getMe"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true,
+                    "result": {"id": 42, "is_bot": true, "first_name": first_name, "username": "acme_bot"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = TelegramAdapter {
+                base_url: format!("{}/bot", server.uri()),
+                file_base_url: format!("{}/file/bot", server.uri()),
+            };
+            let identity = adapter
+                .verify_bot_token(
+                    &reqwest::Client::new(),
+                    &crate::services::channel_platform::BotCredentials {
+                        billing: None,
+                        token: "test-token",
+                        platform_bot_id: None,
+                        platform_secrets: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(identity.platform_bot_id, "42");
+            assert_eq!(identity.platform_bot_username, "acme_bot");
+            assert_eq!(identity.display_name.as_deref(), expected);
+        }
+    }
+
     // -- platform_id ---------------------------------------------------------
 
     #[test]
@@ -1235,6 +1557,7 @@ mod tests {
 
     fn make_test_bot(webhook_secret_hash: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1331,25 +1654,166 @@ mod tests {
 
     // -- thread_id -----------------------------------------------------------
 
-    #[tokio::test]
-    async fn parse_message_with_thread_id() {
-        let adapter = TelegramAdapter::new();
-        let body = serde_json::json!({
-            "update_id": 600,
-            "message": {
-                "message_id": 88,
-                "message_thread_id": 42,
-                "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+    async fn parse_one(
+        adapter: &TelegramAdapter,
+        key: &str,
+        message: serde_json::Value,
+    ) -> InboundMessage {
+        let mut update = serde_json::json!({ "update_id": 600 });
+        update[key] = message;
+        let raw = serde_json::to_vec(&update).unwrap();
+        let mut msgs = adapter.parse_inbound(&raw).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        msgs.remove(0)
+    }
+
+    fn supergroup_reply(message_id: i64, root: i64, topic: bool, forum: bool) -> serde_json::Value {
+        let mut chat = serde_json::json!({ "id": -100999, "type": "supergroup" });
+        if forum {
+            chat["is_forum"] = serde_json::json!(true);
+        }
+        let mut message = serde_json::json!({
+            "message_id": message_id,
+            "message_thread_id": root,
+            "from": { "id": 111, "is_bot": false, "first_name": "Thread" },
+            "chat": chat,
+            "date": 1700000050,
+            "text": "Reply",
+            "reply_to_message": {
+                "message_id": root,
+                "from": { "id": 222, "is_bot": false, "first_name": "Root" },
                 "chat": { "id": -100999, "type": "supergroup" },
-                "date": 1700000050,
-                "text": "Topic message"
+                "date": 1700000040,
+                "text": "Root message"
             }
         });
-        let raw = serde_json::to_vec(&body).unwrap();
-        let msgs = adapter.parse_inbound(&raw).await.unwrap();
+        if topic {
+            message["is_topic_message"] = serde_json::json!(true);
+        }
+        message
+    }
 
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].thread_id.as_deref(), Some("42"));
+    #[tokio::test]
+    async fn parse_thread_id_preserves_existing_reply_chain_partitions() {
+        let adapter = TelegramAdapter::new();
+        // A forum topic message: `is_topic_message` marks it, with or without
+        // a reply inside the topic, on messages and edits alike.
+        let topic = parse_one(&adapter, "message", supergroup_reply(88, 42, true, true)).await;
+        assert_eq!(topic.thread_id.as_deref(), Some("42"));
+        assert_eq!(topic.reply_to_platform_message_id.as_deref(), Some("42"));
+        let mut plain_topic = supergroup_reply(89, 42, true, true);
+        plain_topic
+            .as_object_mut()
+            .unwrap()
+            .remove("reply_to_message");
+        assert_eq!(
+            parse_one(&adapter, "message", plain_topic)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            parse_one(
+                &adapter,
+                "edited_message",
+                supergroup_reply(90, 42, true, true)
+            )
+            .await
+            .thread_id
+            .as_deref(),
+            Some("42")
+        );
+        // A reply in a plain supergroup carries the reply-chain root as
+        // `message_thread_id`: its inbound thread key stays intact while its
+        // outbound audience is chat-level.
+        let chain = parse_one(&adapter, "message", supergroup_reply(91, 16, false, false)).await;
+        assert_eq!(chain.thread_id.as_deref(), Some("16"));
+        assert_eq!(chain.reply_to_platform_message_id.as_deref(), Some("16"));
+        // Nor is a reply chain in a forum's General topic: the forum flag on
+        // the chat alone proves nothing about this message.
+        assert_eq!(
+            parse_one(&adapter, "message", supergroup_reply(92, 16, false, true))
+                .await
+                .thread_id
+                .as_deref(),
+            Some("16")
+        );
+        // The literal flag must be true; any other value is no evidence.
+        let mut falsy = supergroup_reply(93, 42, false, true);
+        falsy["is_topic_message"] = serde_json::json!(false);
+        assert_eq!(
+            parse_one(&adapter, "message", falsy)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+        let mut string_flag = supergroup_reply(94, 42, false, true);
+        string_flag["is_topic_message"] = serde_json::json!("true");
+        assert_eq!(
+            parse_one(&adapter, "message", string_flag)
+                .await
+                .thread_id
+                .as_deref(),
+            Some("42")
+        );
+    }
+
+    /// Replies and tool images use outbound topic evidence independently: a reply-chain
+    /// answer stays in the chat (no `message_thread_id`, one image audience
+    /// with the chat), a topic answer carries the topic and is its own
+    /// audience (#1884 P15).
+    #[tokio::test]
+    async fn reply_chain_answers_stay_in_the_chat_and_share_its_image_audience() {
+        use crate::services::channel_image_audience::resolve;
+        let adapter = TelegramAdapter::new();
+        let chain = parse_one(&adapter, "message", supergroup_reply(17, 16, false, false)).await;
+        let topic = parse_one(&adapter, "message", supergroup_reply(18, 7, true, true)).await;
+        let answer = |inbound: &InboundMessage| {
+            let mut reply = OutboundReply {
+                text: Some("hi".into()),
+                metadata: None,
+                attachments: vec![],
+                reply_to_platform_message_id: Some(inbound.platform_message_id.clone()),
+            };
+            adapter.reply_context(
+                topic_of(&inbound.raw_data["message"]).as_deref(),
+                chrono::Utc::now(),
+                &mut reply.metadata,
+            );
+            reply
+        };
+        let chain_reply = answer(&chain);
+        let body = build_message_body("-100999", &chain_reply);
+        assert_eq!(body["reply_to_message_id"], 17);
+        assert!(body.get("message_thread_id").is_none(), "{body}");
+        let topic_reply = answer(&topic);
+        let body = build_message_body("-100999", &topic_reply);
+        assert_eq!(body["reply_to_message_id"], 18);
+        assert_eq!(body["message_thread_id"], 7);
+        let chat_level = OutboundReply {
+            text: None,
+            metadata: None,
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+        };
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &chain_reply),
+            resolve("bot", "telegram", "-100999", &chat_level)
+        );
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &chain_reply),
+            "bot\u{1f}-100999\u{1f}"
+        );
+        assert_eq!(
+            resolve("bot", "telegram", "-100999", &topic_reply),
+            "bot\u{1f}-100999\u{1f}7"
+        );
+        assert_ne!(
+            resolve("bot", "telegram", "-100999", &topic_reply),
+            resolve("bot", "telegram", "-100999", &chat_level)
+        );
     }
     #[test]
     fn initiated_request_and_declared_reply_thread_capabilities() {
@@ -1398,5 +1862,163 @@ mod tests {
             assert!(matches!(error, AppError::ChannelPlatformError(detail)
                 if detail == format!("telegram send failed: {expected}")));
         }
+    }
+
+    #[test]
+    fn photo_document_fallback_accepts_only_photo_processing_markers() {
+        for marker in [
+            "PHOTO_INVALID_DIMENSIONS",
+            "PHOTO_SAVE_FILE_INVALID",
+            "PHOTO_EXT_INVALID",
+            "PHOTO_CROP_SIZE_SMALL",
+            "IMAGE_PROCESS_FAILED",
+        ] {
+            assert!(photo_document_fallback(marker), "{marker}");
+        }
+    }
+
+    #[test]
+    fn photo_document_fallback_rejects_non_photo_refusals() {
+        for marker in [
+            "wrong file identifier",
+            "wrong type of the web page content",
+            "failed to get HTTP URL content",
+            "file must be non-empty",
+            "wrong padding in the data",
+            "chat not found",
+            "message thread not found",
+            "replied message not found",
+            "bot was blocked by the user",
+            "TOPIC_CLOSED",
+            "not enough rights",
+            "have no rights to send photos",
+            "can't parse entities",
+            "PHOTO_INVALID_DIMENSIONS; chat not found",
+        ] {
+            assert!(!photo_document_fallback(marker), "{marker}");
+        }
+    }
+
+    /// Gateway Activities carry no native payload: version 1 thread facts
+    /// decide, otherwise the gateway's id is kept only as a positive integer
+    /// and never rewritten. Other platforms pass through exactly as sent.
+    #[test]
+    fn gateway_telegram_thread_ids_follow_version_1_thread_facts_and_stay_decimal() {
+        let activity = |thread_id: serde_json::Value, facts: serde_json::Value| {
+            serde_json::json!({
+                "conversation": {
+                    "id": "-100999",
+                    "kind": "group",
+                    "thread_id": thread_id,
+                },
+                "thread": facts,
+            })
+        };
+        let topic = serde_json::json!({ "version": 1, "kind": "topic", "chat_id": "-100999", "message_id": "18", "native_thread_id": "7", "root_id": "7" });
+        let chain = serde_json::json!({ "version": 1, "kind": "reply_chain", "chat_id": "-100999", "message_id": "17", "parent_message_id": "16" });
+        for platform in ["telegram", "telegram-new"] {
+            assert_eq!(
+                gateway_topic_id(platform, &activity(serde_json::json!("7"), topic.clone()))
+                    .as_deref(),
+                Some("7")
+            );
+            // A reply chain is chat-level even though the gateway sent an id.
+            assert_eq!(
+                gateway_topic_id(platform, &activity(serde_json::json!("16"), chain.clone())),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("16"),
+                        serde_json::json!({ "version": 1, "kind": "native" })
+                    )
+                ),
+                None
+            );
+            // A topic fact without a usable native id is not a topic either.
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("7"),
+                        serde_json::json!({ "version": 1, "kind": "topic", "native_thread_id": "topic-7" })
+                    )
+                ),
+                None
+            );
+            // Other versions or absent facts: positive integers survive as sent.
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("16"), serde_json::Value::Null)
+                )
+                .as_deref(),
+                Some("16")
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(
+                        serde_json::json!("0007"),
+                        serde_json::json!({ "version": 2, "kind": "reply_chain" })
+                    )
+                )
+                .as_deref(),
+                Some("0007")
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("0"), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!("omt_thread"), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::json!(""), serde_json::Value::Null)
+                ),
+                None
+            );
+            assert_eq!(
+                gateway_topic_id(
+                    platform,
+                    &activity(serde_json::Value::Null, serde_json::Value::Null)
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            gateway_topic_id("lark", &activity(serde_json::json!("omt_thread"), chain)).as_deref(),
+            Some("omt_thread")
+        );
+        assert_eq!(
+            gateway_topic_id(
+                "slack",
+                &activity(
+                    serde_json::json!("1700000000.000100"),
+                    serde_json::Value::Null
+                )
+            )
+            .as_deref(),
+            Some("1700000000.000100")
+        );
+        assert_eq!(
+            gateway_topic_id(
+                "lark",
+                &activity(serde_json::json!(""), serde_json::Value::Null)
+            )
+            .as_deref(),
+            Some("")
+        );
     }
 }

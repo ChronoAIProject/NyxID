@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "name": "Bounded Gemini request",
+  "provider": "google",
+  "resource": {
+    "type": "google_api",
+    "operations": [
+      {
+        "id": "gemini.generateContent",
+        "origin": "https://generativelanguage.googleapis.com",
+        "method": "POST",
+        "path": "/models/{model}:generateContent",
+        "path_parameters": {
+          "model": {
+            "type": "exact",
+            "value": "gemini-2.5-flash"
+          }
+        },
+        "query_parameters": {},
+        "body": {
+          "type": "object",
+          "required": [
+            "contents",
+            "generationConfig"
+          ],
+          "properties": {
+            "contents": {
+              "type": "array",
+              "max_items": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "role",
+                  "parts"
+                ],
+                "properties": {
+                  "role": {
+                    "type": "exact",
+                    "value": "user"
+                  },
+                  "parts": {
+                    "type": "array",
+                    "max_items": 1,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "text"
+                      ],
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "max_length": 4000
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "generationConfig": {
+              "type": "object",
+              "required": [
+                "maxOutputTokens"
+              ],
+              "properties": {
+                "maxOutputTokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 512
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "allowed_operations": [
+    "gemini.generateContent"
+  ],
+  "constraints": {},
+  "hooks": []
+}

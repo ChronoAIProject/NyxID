@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApiError, apiClient } from "@/lib/api-client";
+import { creditsAttemptNonce } from "@/lib/credits-denial";
 import {
   AEVATAR_ORIGIN,
   AevatarAuthError,
@@ -147,6 +148,11 @@ export async function registerNyxbotTelegram(
       },
       preserveSessionOn401: true,
       signal: AbortSignal.timeout(60_000),
+      // Foreground registration only; the status poll never opts in.
+      creditsDenial: {
+        key: `op:nyxbot-telegram-register:${identity.username}:${creditsAttemptNonce()}`,
+        payer: "unknown",
+      },
     });
     const registration = registrationSchema.parse(response);
     return {

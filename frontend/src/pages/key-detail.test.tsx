@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useSyncExternalStore } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +17,8 @@ const {
   mockToastSuccess,
   routerState,
 } = vi.hoisted(() => {
+  const listeners = new Set<() => void>();
+  let search: Record<string, unknown> = {};
   // The page-level fixtures/mocks are reassigned per-test in beforeEach.
   const hooks = {
     key: {
@@ -40,7 +43,18 @@ const {
     mockNavigate: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
-    routerState: { search: {} as Record<string, unknown>, keyId: "key-1" },
+    routerState: {
+      get search() { return search; },
+      set search(next: Record<string, unknown>) {
+        search = next;
+        listeners.forEach((listener) => listener());
+      },
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+      keyId: "key-1",
+    },
   };
 });
 
@@ -59,7 +73,7 @@ vi.mock("@tanstack/react-router", () => ({
   ),
   useNavigate: () => mockNavigate,
   useParams: () => ({ keyId: routerState.keyId }),
-  useSearch: () => routerState.search,
+  useSearch: () => useSyncExternalStore(routerState.subscribe, () => routerState.search),
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -219,6 +233,9 @@ beforeEach(() => {
   useAuthStore.setState({ user: { id: "owner-1" } as User });
   routerState.keyId = "key-1";
   vi.clearAllMocks();
+  mockNavigate.mockImplementation((options: { search?: Record<string, unknown> }) => {
+    if (options.search) routerState.search = options.search;
+  });
   routerState.search = {};
   hooks.key = {
     data: makeKey(),
@@ -229,6 +246,68 @@ beforeEach(() => {
   hooks.catalogEntry = undefined;
   hooks.nodes = [];
   mockCopyToClipboard.mockResolvedValue(undefined);
+});
+
+it("opens a linked credential subsection and updates the URL when switching tabs", async () => {
+  routerState.search = { tab: "advanced" };
+  render(<KeyDetailPage />);
+  expect(screen.getByRole("tab", { name: "Advanced" })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("tab", { name: "Overview" }));
+  expect(mockNavigate).toHaveBeenLastCalledWith({
+    to: "/keys/$keyId", params: { keyId: "key-1" }, search: { tab: "overview" }, replace: true,
+  });
+  expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+});
+
+describe("KeyDetailPage — Google permissions", () => {
+  it("shows the reported partial Workspace grant and refreshes saved evidence", async () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-workspace",
+      granted_scopes: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
+      last_authorized_at: "2026-09-30T09:00:00Z",
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Drive, Docs, Sheets, Slides").parentElement!).getByText("Not granted")).toBeVisible();
+    expect(within(screen.getByText("Calendar").parentElement!).getByText("Read only")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Not granted")).toBeVisible();
+    await userEvent.setup().click(screen.getByText("Reported OAuth scopes"));
+    expect(screen.getByText("https://www.googleapis.com/auth/calendar.readonly")).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Refresh saved permissions" }));
+    expect(hooks.key.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows unknown permissions when Google did not report scopes", () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-gmail",
+      granted_scopes: null,
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Gmail read").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(screen.queryByText("Reported OAuth scopes")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["api-google-calendar", "Calendar", "https://www.googleapis.com/auth/calendar.readonly", "Read only"],
+    ["api-google-drive", "Drive, Docs, Sheets, Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-docs", "Docs", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-sheets", "Sheets", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-slides", "Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+  ])("shows the relevant grant for %s", (slug, label, scope, access) => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: slug,
+      granted_scopes: [scope],
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText(label).parentElement!).getByText(access)).toBeVisible();
+    expect(screen.queryByText("Gmail send")).not.toBeInTheDocument();
+  });
 });
 
 describe("KeyDetailPage — load states", () => {
@@ -840,10 +919,26 @@ describe("KeyDetailPage — org read-only branch", () => {
     // Label heading still shown but with no inline edit pencil.
     const heading = screen.getByText("My OpenAI");
     expect(heading.parentElement?.querySelector("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Change service icon" })).not.toBeInTheDocument();
   });
 });
 
 describe("KeyDetailPage — auto-connected branch", () => {
+  it("lets the owner set an icon for an auto-connected service", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({ auto_connected: true, icon_url: null });
+    render(<KeyDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: "Change service icon" }));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/service.svg");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(hooks.updateKey).toHaveBeenCalledWith(
+      { keyId: "key-1", icon_url: "https://example.com/service.svg" },
+      expect.any(Object),
+    );
+  });
+
   it("renders the platform-managed service details card instead of editors", () => {
     hooks.key.data = makeKey({
       endpoint_url: "https://platform.internal.example/v1",
@@ -1103,6 +1198,7 @@ it("opens ownership review in Advanced using the catalog resource and owner", as
   render(<KeyDetailPage />);
   expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
   await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  mockNavigate.mockClear();
   expect(screen.getByText("Transfer the catalog definition for OpenAI to another person or organization.")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "Transfer ownership" }));
   const dialog = screen.getByRole("dialog", { name: "Transfer ownership" });

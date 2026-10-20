@@ -1,16 +1,22 @@
+mod machine_updater;
+use commands::update_attestation;
 mod api;
 mod auth;
 mod browser;
 mod cli;
 mod clipboard;
 mod commands;
+mod credential_guidance;
 mod error_format;
+mod net_diagnostics;
 pub mod node;
 pub mod org_resolver;
+mod output;
 mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod tls;
 mod update_check;
 mod wizard;
 
@@ -19,8 +25,26 @@ use clap::Parser;
 
 use crate::cli::{Cli, Commands};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // rustls-native-certs 0.8 treats empty SSL_CERT_FILE as a selected path.
+    // Normalize empty CA variables before Tokio or any other worker starts.
+    for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+        if std::env::var_os(name).is_some_and(|value| value.is_empty()) {
+            // SAFETY: this is the single-threaded process entry point, before
+            // runtime construction, tracing, TLS, or any other initialization.
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create CLI runtime")
+        .block_on(run_main());
+}
+
+async fn run_main() {
     // Pick a rustls CryptoProvider explicitly. With both `aws_lc_rs` and `ring`
     // enabled via feature unification (sigstore vs quinn/etc.), rustls cannot
     // auto-select and panics on first TLS use. See issue #696.
@@ -67,7 +91,8 @@ async fn main() {
         // consent — different concern).
         let mut consent =
             telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
-        let machine_login = matches!(&cli.command, Commands::Login(args)
+        let machine_login = matches!(&cli.command, Commands::Nyxbot { .. })
+            || matches!(&cli.command, Commands::Login(args)
             if args.no_wait || matches!(args.output, cli::OutputFormat::Json))
             || matches!(&cli.command, Commands::Update(args) if args.command.is_some());
         if !machine_login {
@@ -97,7 +122,13 @@ async fn main() {
             .track(telemetry::CliEvent::CommandInvoked {
                 command_group: group,
                 subcommand: sub,
-                exit_code: if result.is_ok() { 0 } else { 1 },
+                exit_code: match &result {
+                    Ok(()) => 0,
+                    Err(error) => error
+                        .downcast_ref::<commands::nyxbot::OutcomeExit>()
+                        .map(|outcome| outcome.0)
+                        .unwrap_or(1),
+                },
                 duration_ms: start.elapsed().as_millis() as u64,
                 profile: profile.clone(),
                 os: std::env::consts::OS,
@@ -111,6 +142,17 @@ async fn main() {
     }
 
     if let Err(e) = result {
+        if let Some(outcome) = e.downcast_ref::<commands::nyxbot::OutcomeExit>() {
+            std::process::exit(outcome.0);
+        }
+        if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginFailure>() {
+            if json_output_from_argv {
+                println!("{}", error.json());
+            } else {
+                eprintln!("{}", error.text());
+            }
+            std::process::exit(error.kind.exit_code());
+        }
         if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginError>() {
             if json_output_from_argv {
                 println!("{}", error.json());
@@ -118,6 +160,10 @@ async fn main() {
                 eprintln!("{error}");
             }
             std::process::exit(error.exit_code());
+        }
+        if let Some(readiness) = e.downcast_ref::<commands::admin_tools::PendingReadiness>() {
+            // The command already emitted the complete structured readiness report.
+            std::process::exit(readiness.exit_code);
         }
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         // 3: a human must log in again; 4: renewal outcome unknown, retry later.
@@ -148,17 +194,19 @@ fn install_rustls_crypto_provider() {
 fn extract_profile(command: &Commands) -> Option<String> {
     // `AuthArgs` (profile-bearing struct) is flattened into many
     // subcommands; rather than enumerate all of them we peek at the
-    // one path we care about — the login command is the primary place
-    // profile is user-supplied. This is best-effort; telemetry tags
+    // login and diagnostic paths where profile selection matters here.
+    // This is best-effort; telemetry tags
     // without profile are acceptable.
     match command {
         Commands::Login(args) => args.profile.clone(),
+        Commands::Doctor(args) => args.profile.clone(),
         _ => None,
     }
 }
 
 fn command_names(command: &Commands) -> (&'static str, &'static str) {
     match command {
+        Commands::Nyxbot { .. } => ("nyxbot", "subcommand"),
         Commands::Login(_) => ("auth", "login"),
         Commands::Logout(_) => ("auth", "logout"),
         Commands::Register(_) => ("auth", "register"),
@@ -173,6 +221,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Mfa { .. } => ("user", "mfa"),
         Commands::Session { .. } => ("user", "session"),
         Commands::Catalog { .. } => ("catalog", "subcommand"),
+        Commands::Tools { .. } => ("tools", "subcommand"),
         Commands::Keys(_) => ("service", "list"),
         Commands::Service { .. } => ("service", "subcommand"),
         Commands::Pool { .. } => ("pool", "subcommand"),
@@ -243,9 +292,11 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Session { command } => commands::session::run(command).await,
 
         Commands::Catalog { command } => commands::catalog::run(command).await,
+        Commands::Tools { command } => commands::catalog_tools::run_tools(command).await,
         Commands::Keys(auth) => commands::service::run(cli::ServiceCommands::List { auth }).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,
+        Commands::Nyxbot { command } => commands::nyxbot::run(command).await,
         Commands::Trigger { command } => commands::trigger::run(command).await,
         Commands::Billing { command } => commands::billing::run(command).await,
         Commands::Provider { command } => commands::provider::run(command).await,

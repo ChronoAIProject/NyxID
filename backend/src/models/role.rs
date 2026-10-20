@@ -6,6 +6,32 @@ pub const COLLECTION_NAME: &str = "roles";
 pub const PLATFORM_ADMIN_ROLE_SLUG: &str = "admin";
 pub const PLATFORM_OPERATOR_ROLE_SLUG: &str = "operator";
 pub const PLATFORM_USER_ROLE_SLUG: &str = "user";
+pub const FEATURE_FLAG_OPERATOR_ROLE_SLUG: &str = "feature-flag-operator";
+pub const FEATURE_FLAG_ADMIN_ROLE_SLUG: &str = "feature-flag-admin";
+pub const FEATURE_FLAGS_OWN_WRITE_PERMISSION: &str = "nyxid:feature_flags:own:write";
+pub const FEATURE_FLAGS_ADMIN_PERMISSION: &str = "nyxid:feature_flags:admin";
+pub const CREDITS_MANAGER_ROLE_SLUG: &str = "credits_manager";
+
+/// Lets an Operator issue and revoke one-off credit grants. Ignored for
+/// anyone who is not an Operator; Admins already hold every permission.
+pub const CREDIT_GRANTS_WRITE_PERMISSION: &str = "nyxid:billing:credit_grants:write";
+
+pub const TOOLS_MANAGER_ROLE_SLUG: &str = "tools_manager";
+pub const TOOLS_WRITE_PERMISSION: &str = "nyxid:catalog:tools:write";
+
+pub const CATALOG_MANAGER_ROLE_SLUG: &str = "catalog_manager";
+
+/// Lets an Operator create providers and catalog services, edit the rows they
+/// created, and set initial OAuth client credentials. Ignored for anyone who
+/// is not an Operator; Admins already hold every permission.
+pub const CATALOG_SERVICES_WRITE_PERMISSION: &str = "nyxid:catalog:services:write";
+/// Slug of the seeded system role that carries [`ADMIN_USAGE_READ_PERMISSION`].
+pub const USAGE_VIEWER_ROLE_SLUG: &str = "usage_viewer";
+
+/// Grants read-only access to platform-wide admin usage (`/admin/usage*` GETs)
+/// to any user holding it through a direct or group role. Admins and Operators
+/// already have this access.
+pub const ADMIN_USAGE_READ_PERMISSION: &str = "nyxid:admin:usage:read";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Role {

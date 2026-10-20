@@ -1,0 +1,190 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "tinyfish research import example",
+    "version": "0.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.search.tinyfish.ai"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "tinyfish_search",
+        "summary": "TinyFish Web Search",
+        "description": "Browser-rendered search over the live web — results are never cached, so pricing pages, earnings releases, and breaking news are current at query time. Set 'domain_type' to 'web' (default), 'news' (adds publisher and date), or 'research_paper' (adds authors, venue, year, cited_by_count, and pdf_url). Filters cover geo ('location') and 'language', domain allow/block lists ('include_domains' / 'exclude_domains'), a freshness window ('recency_minutes') or calendar bounds ('after_date' / 'before_date'), publication-year bounds for papers, and paging ('page', 0-10). Pass 'purpose' — a short statement of the task the results are for — to sharpen ranking. Returns position, title, url, site_name, and snippet per result. Snippets only: this endpoint does not return page content — pipe the result URLs into TinyFish /fetch, which is also free, when you need the full text.",
+        "x-monid-source-id": "tinyfish#search",
+        "x-nyxid-audit-status": "candidate_requires_live_validation",
+        "responses": {
+          "200": {
+            "description": "Upstream response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Search query. Accepts natural language and still honours site:/-site: operators, though include_domains / exclude_domains are preferred because they do not collide with other query syntax. Example: 'NVIDIA Q4 FY2025 revenue'."
+            }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "description": "Optional short statement of the task these results are for — the goal behind the request, not the request itself. TinyFish uses it as an extra ranking signal. Example: 'Compare pricing tiers across vendors for a procurement report'. Max 2000 characters."
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Country code for geo-targeted results. Example: US, GB, FR, DE. Auto-resolves from `language` when omitted; defaults to US if neither is set.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Language code for result language. Example: en, fr, de. Auto-resolves from `location` when omitted; defaults to en if neither is set.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "include_domains",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Comma-separated domains to restrict results to. Example: github.com,arxiv.org.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "exclude_domains",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Comma-separated domains to exclude from results. Example: pinterest.com,quora.com.",
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "recency_minutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Freshness window in minutes, relative to now. Example: 60 for the last hour. Cannot be combined with after_date or before_date, and is not supported for domain_type=research_paper.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5256000
+            }
+          },
+          {
+            "name": "after_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Lower calendar bound, YYYY-MM-DD (must be a real calendar date). Example: 2026-06-01. Cannot be combined with recency_minutes, and is not supported for domain_type=research_paper.",
+              "type": "string",
+              "format": "date",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+            }
+          },
+          {
+            "name": "before_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Upper calendar bound, YYYY-MM-DD (must be a real calendar date, on or after after_date). Example: 2026-06-18. Cannot be combined with recency_minutes, and is not supported for domain_type=research_paper.",
+              "type": "string",
+              "format": "date",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+            }
+          },
+          {
+            "name": "domain_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Corpus to search. 'web' (default) returns general results; 'news' adds publisher and date; 'research_paper' searches academic work and adds authors, venue, year, cited_by_count, and pdf_url.",
+              "type": "string",
+              "enum": [
+                "web",
+                "news",
+                "research_paper"
+              ]
+            }
+          },
+          {
+            "name": "pub_year_min",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Inclusive lower publication-year bound (must not exceed pub_year_max). Only supported for domain_type=research_paper. Example: 2017.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9999
+            }
+          },
+          {
+            "name": "pub_year_max",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Inclusive upper publication-year bound. Only supported for domain_type=research_paper. Example: 2024.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9999
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Zero-indexed result page. Example: 2 returns the third page. Maximum 10.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "providerCredential": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  },
+  "security": [
+    {
+      "providerCredential": []
+    }
+  ]
+}

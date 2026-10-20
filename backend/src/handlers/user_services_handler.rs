@@ -101,6 +101,10 @@ pub struct UserServiceResponse {
     /// catalog. Present in list responses; single-item responses omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
+    /// Catalog description for explaining service access in consent screens.
+    /// Present in list responses when the catalog entry has a description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_service_description: Option<String>,
     pub resource_uri: String,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +113,8 @@ pub struct UserServiceResponse {
     pub auth_key_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
@@ -168,6 +174,21 @@ pub enum CredentialSourceResponse {
         role: OrgRoleResponse,
         allowed: bool,
     },
+}
+
+impl CredentialSourceResponse {
+    /// Listing and detail resolvers have already applied the service scope.
+    pub fn can_edit_configuration(&self) -> bool {
+        matches!(
+            self,
+            Self::Personal
+                | Self::Org {
+                    role: OrgRoleResponse::Admin,
+                    allowed: true,
+                    ..
+                }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
@@ -280,34 +301,37 @@ pub async fn list_user_services(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let catalog_name_map: std::collections::HashMap<String, String> = if catalog_ids.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        let catalog_services: Vec<crate::models::downstream_service::DownstreamService> = state
-            .db
-            .collection(crate::models::downstream_service::COLLECTION_NAME)
-            .find(doc! { "_id": { "$in": &catalog_ids } })
-            .await?
-            .try_collect()
-            .await?;
-        catalog_services
-            .into_iter()
-            .map(|ds| (ds.id.clone(), ds.name))
-            .collect()
-    };
+    let catalog_display_map: std::collections::HashMap<String, (String, Option<String>)> =
+        if catalog_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let catalog_services: Vec<crate::models::downstream_service::DownstreamService> = state
+                .db
+                .collection(crate::models::downstream_service::COLLECTION_NAME)
+                .find(doc! { "_id": { "$in": &catalog_ids } })
+                .await?
+                .try_collect()
+                .await?;
+            catalog_services
+                .into_iter()
+                .map(|ds| (ds.id.clone(), (ds.name, ds.description)))
+                .collect()
+        };
 
     let items = services
         .into_iter()
         .map(|item| {
             let label = endpoint_label_map.get(&item.service.endpoint_id).cloned();
-            let catalog_service_name = item
+            let catalog_display = item
                 .service
                 .catalog_service_id
                 .as_deref()
-                .and_then(|cid| catalog_name_map.get(cid).cloned());
+                .and_then(|cid| catalog_display_map.get(cid));
             let mut response = user_service_with_source_response(&state.config, item);
             response.label = label;
-            response.catalog_service_name = catalog_service_name;
+            response.catalog_service_name = catalog_display.map(|(name, _)| name.clone());
+            response.catalog_service_description =
+                catalog_display.and_then(|(_, description)| description.clone());
             response
         })
         .collect();
@@ -585,12 +609,14 @@ fn user_service_with_source_response(
         slug: svc.slug,
         label: None,
         catalog_service_name: None,
+        catalog_service_description: None,
         resource_uri,
         endpoint_id: svc.endpoint_id,
         api_key_id: svc.api_key_id,
         auth_method: svc.auth_method,
         auth_key_name: svc.auth_key_name,
         catalog_service_id: svc.catalog_service_id,
+        icon_url: svc.icon_url,
         node_id: svc.node_id,
         node_priority: svc.node_priority,
         ssh_auth_mode: svc.ssh_auth_mode,
@@ -880,6 +906,7 @@ mod tests {
         // Fields with skip_serializing_if = "Option::is_none" should be absent
         assert!(json.get("api_key_id").is_none());
         assert!(json.get("catalog_service_id").is_none());
+        assert!(json.get("catalog_service_description").is_none());
         assert!(json.get("node_id").is_none());
         assert!(json.get("identity_jwt_audience").is_none());
         assert!(json.get("custom_user_agent").is_none());

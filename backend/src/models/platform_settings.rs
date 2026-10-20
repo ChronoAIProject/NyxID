@@ -9,8 +9,8 @@ fn default_platform_settings_id() -> String {
 
 /// Single-row platform settings document.
 ///
-/// `None` means the setting is not overridden in MongoDB and the process env
-/// default from `AppConfig` remains authoritative.
+/// Broker `None` values use the process defaults. Utility inference `None`
+/// retains legacy service selection; its admin marker makes clears durable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformSettings {
     #[serde(rename = "_id", default = "default_platform_settings_id")]
@@ -21,6 +21,29 @@ pub struct PlatformSettings {
     pub broker_require_admin_capability: Option<bool>,
     #[serde(default)]
     pub broker_policy_revision: i64,
+    #[serde(default)]
+    pub utility_inference: Option<UtilityInference>,
+    #[serde(default)]
+    pub utility_inference_admin_modified: bool,
+    #[serde(default)]
+    pub billing: Option<BillingSettings>,
+}
+
+/// Global billing defaults edited on the central admin billing page.
+/// Prices remain service-owned; see `services::billing::config`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingSettings {
+    /// Overdraft cap for newly provisioned wallets; `None` uses
+    /// `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`.
+    #[serde(default)]
+    pub default_overdraft_cap_credits: Option<i64>,
+}
+
+/// Server-owned metadata tasks share one atomic, admin-selected route.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UtilityInference {
+    pub service_slug: String,
+    pub model: String,
 }
 
 impl PlatformSettings {
@@ -30,6 +53,9 @@ impl PlatformSettings {
             broker_require_sender_constraint: None,
             broker_require_admin_capability: None,
             broker_policy_revision: 0,
+            utility_inference: None,
+            utility_inference_admin_modified: false,
+            billing: None,
         }
     }
 }
@@ -57,6 +83,7 @@ mod tests {
             broker_require_sender_constraint: Some(true),
             broker_require_admin_capability: Some(false),
             broker_policy_revision: 7,
+            ..PlatformSettings::empty()
         };
 
         let doc = bson::to_document(&settings).expect("serialize platform settings");

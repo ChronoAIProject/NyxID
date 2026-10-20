@@ -92,7 +92,7 @@ export function GrantDialog({
                             }
                           />
                         </FormControl>
-                        <FormDescription className="text-[11px]">
+                        <FormDescription className="text-11">
                           A credit is wallet currency, not a metered service
                           unit.
                         </FormDescription>
@@ -115,7 +115,7 @@ export function GrantDialog({
                   />
                 </div>
                 <RecipientTargetFields />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Recipients are captured when credits are issued.
                 </p>
                 <FormField
@@ -125,7 +125,7 @@ export function GrantDialog({
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
                         <FormLabel>All services</FormLabel>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-11 text-muted-foreground">
                           Allow this wallet balance to fund any service.
                         </p>
                       </div>
@@ -153,7 +153,7 @@ export function GrantDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-[11px]">
+                        <FormDescription className="text-11">
                           Metrics identify each service&apos;s usage unit; they
                           do not change this grant&apos;s credit amount.
                         </FormDescription>
@@ -171,7 +171,7 @@ export function GrantDialog({
                       <FormControl>
                         <textarea
                           rows={3}
-                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] outline-none focus:border-white/15"
+                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-12 outline-none focus:border-input-focus"
                           placeholder="Why these credits are being issued"
                           {...field}
                         />
@@ -285,7 +285,7 @@ export function AllowanceDialog({
                           }}
                         />
                       </FormControl>
-                      <FormDescription className="text-[11px]">
+                      <FormDescription className="text-11">
                         {editingAllowance
                           ? "To change the service, create a new allowance bundle."
                           : "Choose a service, then add its free billing units."}
@@ -414,7 +414,7 @@ export function AllowanceDialog({
                   >
                     Add unit
                   </Button>
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-11 text-muted-foreground">
                     {units
                       .map(
                         (unit) =>
@@ -427,7 +427,7 @@ export function AllowanceDialog({
                       .join(" · ")}
                   </p>
                   {editingAllowance && (
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       Removing a unit disables its allowance when you save.
                       Existing consumption is retained.{" "}
                       {editingAllowance.rows.some((row) => row.is_active)
@@ -437,7 +437,7 @@ export function AllowanceDialog({
                   )}
                 </div>
                 <RecipientTargetFields />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Organization and group allowances follow live membership.
                   People who leave stop receiving new free usage.
                 </p>

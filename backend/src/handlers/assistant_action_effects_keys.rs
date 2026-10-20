@@ -951,11 +951,15 @@ mod tests {
             is_active: true,
             created_at: now,
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(now),
             description: Some("assistant key fixture".to_string()),
             allowed_service_ids,
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,
@@ -971,6 +975,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),

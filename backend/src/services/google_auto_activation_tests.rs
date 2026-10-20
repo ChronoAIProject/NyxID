@@ -109,6 +109,7 @@ async fn google_concurrent_sync_inserts_editors_and_updates_old_contracts_once()
                 let db = db.clone();
                 tasks.spawn(async move {
                     provider_service::seed_default_services(&db, &test_encryption_keys()).await?;
+                    crate::test_utils::init_test_audit_chain_hmac_key();
                     catalog_spec_sync::sync_seeded_service_endpoints(&db).await
                 });
             }
@@ -248,6 +249,7 @@ async fn google_partial_custom_maps_sync_only_available_origins_and_keep_custom_
             provider_service::seed_default_services(&db, &test_encryption_keys())
                 .await
                 .unwrap();
+            crate::test_utils::init_test_audit_chain_hmac_key();
             catalog_spec_sync::sync_seeded_service_endpoints(&db)
                 .await
                 .unwrap();
@@ -355,6 +357,8 @@ async fn node_upload(
         "upload-node",
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            proxy_upload_v1: true,
+            http_cancellation: false,
             ..Default::default()
         },
     );
@@ -754,6 +758,7 @@ async fn google_service_disabled_403_passes_through_rest_and_mcp_distinct_from_a
 
 fn copy_upload_endpoint(endpoint: &mcp_service::McpToolEndpoint) -> mcp_service::McpToolEndpoint {
     mcp_service::McpToolEndpoint {
+        async_operation: None,
         name: endpoint.name.clone(),
         method: endpoint.method.clone(),
         path: endpoint.path.clone(),
@@ -870,6 +875,7 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         )
         .await
         .unwrap();
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -1085,6 +1091,7 @@ async fn google_generic_mcp_cannot_set_multipart_content_type() {
         .unwrap();
     service.is_generic_proxy = true;
     let endpoint = mcp_service::McpToolEndpoint {
+        async_operation: None,
         endpoint_id: mcp_service::GENERIC_PROXY_ENDPOINT_ID.into(),
         ..Default::default()
     };

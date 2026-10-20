@@ -32,7 +32,7 @@ pub(crate) async fn require_admin_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform admin".into(),
@@ -74,7 +74,7 @@ async fn require_admin_read_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform administration".into(),
@@ -126,6 +126,7 @@ pub struct ServiceAccountListQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceAccountRequest {
+    pub expected_access: Option<service_account_service::ExpectedAccessState>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub allowed_scopes: Option<String>,
@@ -155,6 +156,7 @@ pub struct CreateServiceAccountResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ServiceAccountItem {
+    pub catalog_scope_authorized: bool,
     pub purpose: crate::models::service_account::ServiceAccountPurpose,
     pub platform_protected: bool,
     pub credential_generation: i64,
@@ -234,6 +236,7 @@ pub struct RevokeTokensResponse {
 fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
     ServiceAccountItem {
         owner_id: sa.effective_owner_user_id().to_string(),
+        catalog_scope_authorized: sa.catalog_scope_authorized,
         purpose: sa.purpose,
         platform_protected: sa.platform_protected,
         credential_generation: sa.credential_generation,
@@ -313,33 +316,22 @@ pub(crate) async fn create_service_account_with_id(
         require_admin(&state, &auth_user).await?;
     }
 
-    let (sa, raw_secret) = match reserved_id {
-        Some(id) => {
-            service_account_service::create_service_account_with_id(
-                &state.db,
-                id,
-                &body.name,
-                body.description.as_deref(),
-                &body.allowed_scopes,
-                &role_ids,
-                body.rate_limit_override,
-                &effective_owner,
-            )
-            .await?
-        }
-        None => {
-            service_account_service::create_service_account(
-                &state.db,
-                &body.name,
-                body.description.as_deref(),
-                &body.allowed_scopes,
-                &role_ids,
-                body.rate_limit_override,
-                &effective_owner,
-            )
-            .await?
-        }
-    };
+    let platform_admin = require_admin(&state, &auth_user).await.is_ok();
+    let sa_id = reserved_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (sa, raw_secret) = service_account_service::create_service_account_with_authority(
+        &state.db,
+        &sa_id,
+        &body.name,
+        body.description.as_deref(),
+        &body.allowed_scopes,
+        &role_ids,
+        body.rate_limit_override,
+        &effective_owner,
+        platform_admin,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -483,6 +475,7 @@ pub async fn update_service_account(
         body.rate_limit_override,
         body.is_active,
         require_admin(&state, &auth_user).await.is_ok(),
+        body.expected_access.as_ref(),
     )
     .await?;
 
@@ -716,6 +709,7 @@ mod tests {
         let item = ServiceAccountItem {
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             platform_protected: false,
+            catalog_scope_authorized: false,
             credential_generation: 0,
             curation_grant: None,
             owner_id: "owner".into(),
@@ -928,6 +922,7 @@ mod tests {
         .expect("create");
 
         let update_body = UpdateServiceAccountRequest {
+            expected_access: None,
             name: Some("After Update".to_string()),
             description: Some("updated desc".to_string()),
             allowed_scopes: None,

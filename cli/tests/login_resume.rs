@@ -74,26 +74,82 @@ fn output_json(output: &Output) -> Value {
 
 #[tokio::test]
 async fn in_flight_account_request_never_retries_credentials_from_a_replaced_login() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     for same_instance in [false, true] {
-        let first = MockServer::start().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let logins = Arc::new(AtomicUsize::new(0));
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/auth/login-code/redeem",
+                axum::routing::post({
+                    let logins = logins.clone();
+                    move |axum::Json(body): axum::Json<Value>| async move {
+                        logins.fetch_add(1, Ordering::SeqCst);
+                        let token = match body["code"].as_str().unwrap() {
+                            "AAAA-BBBB" => "fixture-original-token",
+                            "CCCC-DDDD" => "fixture-replacement-token",
+                            _ => panic!("unexpected login code"),
+                        };
+                        axum::Json(json!({"auth_kind":"account_session",
+                            "access_token":token,"refresh_token":format!("{token}-refresh")}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/users/me",
+                axum::routing::get({
+                    let started = started.clone();
+                    let release = release.clone();
+                    let reads = reads.clone();
+                    move || async move {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        // Return the stale 401 only after the replacement login is durable.
+                        // A fixed delay races process startup and native CA loading.
+                        release.notified().await;
+                        axum::http::StatusCode::UNAUTHORIZED
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                axum::routing::post({
+                    let refreshes = refreshes.clone();
+                    move || async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::UNAUTHORIZED
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let other = MockServer::start().await;
-        let second = if same_instance { &first } else { &other };
-        let home = tempfile::tempdir().unwrap();
-        for (server, code, token) in [
-            (&first, "AAAA-BBBB", "fixture-original-token"),
-            (second, "CCCC-DDDD", "fixture-replacement-token"),
-        ] {
+        let second = if same_instance {
+            first.clone()
+        } else {
+            other.uri()
+        };
+        if !same_instance {
             Mock::given(method("POST"))
                 .and(path("/api/v1/auth/login-code/redeem"))
-                .and(body_partial_json(json!({"code":code})))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(json!({"auth_kind":"account_session",
-                    "access_token":token,"refresh_token":format!("{token}-refresh")})),
-                )
+                .and(body_partial_json(json!({"code":"CCCC-DDDD"})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "auth_kind":"account_session", "access_token":"fixture-replacement-token",
+                    "refresh_token":"fixture-replacement-token-refresh"
+                })))
                 .expect(1)
-                .mount(server)
+                .mount(&other)
                 .await;
         }
+        let home = tempfile::tempdir().unwrap();
         let login = run(
             home.path(),
             &[
@@ -101,39 +157,18 @@ async fn in_flight_account_request_never_retries_credentials_from_a_replaced_log
                 "--code",
                 "AAAA-BBBB",
                 "--base-url",
-                &first.uri(),
+                &first,
                 "--output",
                 "json",
             ],
         )
         .await;
         assert!(login.status.success());
-        Mock::given(method("GET"))
-            .and(path("/api/v1/users/me"))
-            .respond_with(
-                ResponseTemplate::new(401).set_delay(std::time::Duration::from_millis(750)),
-            )
-            .expect(1)
-            .mount(&first)
-            .await;
         let request = run(home.path(), &["whoami", "--output", "json"]);
         let replace = async {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                loop {
-                    if first
-                        .received_requests()
-                        .await
-                        .unwrap()
-                        .iter()
-                        .any(|request| request.url.path() == "/api/v1/users/me")
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+                .await
+                .unwrap();
             let login = run(
                 home.path(),
                 &[
@@ -141,33 +176,28 @@ async fn in_flight_account_request_never_retries_credentials_from_a_replaced_log
                     "--code",
                     "CCCC-DDDD",
                     "--base-url",
-                    &second.uri(),
+                    &second,
                     "--output",
                     "json",
                 ],
             )
             .await;
             assert!(login.status.success());
+            release.notify_one();
         };
         let (request, ()) = tokio::join!(request, replace);
         assert!(!request.status.success());
-        let requests = first.received_requests().await.unwrap();
-        assert!(
-            !requests
-                .iter()
-                .any(|r| r.url.path().ends_with("/auth/refresh"))
-        );
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(
-            requests
-                .iter()
-                .filter(|r| r.url.path() == "/api/v1/users/me")
-                .count(),
-            1
+            logins.load(Ordering::SeqCst),
+            if same_instance { 2 } else { 1 }
         );
         assert_eq!(
             std::fs::read_to_string(home.path().join(".nyxid/access_token")).unwrap(),
             "fixture-replacement-token"
         );
+        server.abort();
     }
 }
 
@@ -203,6 +233,10 @@ async fn begin(server: &MockServer, home: &Path, mode: &str) -> String {
     );
     let challenge = output_json(&out);
     assert_eq!(challenge["user_code"], "ABCD-EFGH");
+    assert_eq!(
+        challenge["verification_uri_complete"],
+        challenge["verification_uri"]
+    );
     assert!(
         !challenge["verification_uri"]
             .as_str()
@@ -767,4 +801,321 @@ async fn failed_destination_save_clears_partial_credentials_and_revokes_either_g
             assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
         }
     }
+}
+
+#[tokio::test]
+async fn all_cli_login_links_require_manual_code_entry() {
+    for mode in [None, Some("--device"), Some("--agent-key")] {
+        for json_output in [false, true] {
+            let server = MockServer::start().await;
+            let home = tempfile::tempdir().unwrap();
+            let flow = if mode == Some("--agent-key") {
+                "agent-key"
+            } else {
+                "device/v2"
+            };
+            let route = if mode == Some("--agent-key") {
+                "agent-key"
+            } else {
+                "device"
+            };
+            let bare = format!("{}/login/{route}", server.uri());
+            Mock::given(method("POST"))
+                .and(path(format!("/api/v1/auth/{flow}/request")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "device_code": POLL_SECRET, "user_code": "ABCD-EFGH",
+                    "verification_uri": format!("{bare}?user_code=ABCD-EFGH&device_code={POLL_SECRET}#ABCD-EFGH"),
+                    "verification_uri_complete": format!("{bare}?user_code=ABCD-EFGH"),
+                    "expires_in": 300, "interval": 5
+                })))
+                .expect(1).mount(&server).await;
+            let base = server.uri();
+            let mut args = vec!["login", "--base-url", &base, "--no-wait"];
+            if let Some(mode) = mode {
+                args.push(mode);
+            }
+            if json_output {
+                args.extend(["--output", "json"]);
+            }
+            let output = run(home.path(), &args).await;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json_output {
+                let result = output_json(&output);
+                assert_eq!(result["user_code"], "ABCD-EFGH");
+                assert_eq!(result["verification_uri"], bare);
+                assert_eq!(result["verification_uri_complete"], bare);
+            } else {
+                let printed = String::from_utf8_lossy(&output.stderr);
+                assert!(printed.contains("One-time code: ABCD-EFGH"));
+                assert!(printed.contains(&format!("Open {bare} and enter the code above")));
+                assert!(!printed.contains("user_code="));
+            }
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(POLL_SECRET));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(POLL_SECRET));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn login_scope_flags_return_code_free_approval_link_without_login_or_polling() {
+    for (mode, flow, approval_path) in [
+        ("--device", "device/v2", "/login/device"),
+        ("--agent-key", "agent-key", "/login/agent-key"),
+    ] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/auth/{flow}/request")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": POLL_SECRET, "user_code": "ABCD-EFGH",
+                "verification_uri": format!("{}{approval_path}?unknown=discard#fragment", server.uri()),
+                "expires_in": 300, "interval": 5
+            })))
+            .expect(1)
+            .mount(&server).await;
+        let output = run(
+            home.path(),
+            &[
+                "login",
+                mode,
+                "--base-url",
+                &server.uri(),
+                "--profile",
+                "mail-agent",
+                "--no-wait",
+                "--output",
+                "json",
+                "--scopes",
+                "read,proxy",
+                "--service",
+                "api-google-gmail",
+                "--service",
+                "api-github",
+                "--service-permission",
+                "api-google-gmail::https://www.googleapis.com/auth/gmail.readonly",
+                "--service-permission",
+                "api-github::repo",
+                "--key-source",
+                "new",
+                "--key-name",
+                "Mail + code & tools",
+                "--expiry-days",
+                "30",
+                "--platform",
+                "codex",
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = output_json(&output);
+        let complete =
+            url::Url::parse(result["verification_uri_complete"].as_str().unwrap()).unwrap();
+        let pairs: std::collections::HashMap<_, _> = complete.query_pairs().collect();
+        assert_eq!(complete.path(), approval_path);
+        assert!(complete.fragment().is_none());
+        assert!(!pairs.contains_key("user_code"));
+        assert!(!pairs.contains_key("device_code"));
+        assert!(!complete.as_str().contains("ABCD-EFGH"));
+        assert_eq!(result["user_code"], "ABCD-EFGH");
+        assert_eq!(pairs["login_type"], "agent");
+        assert_eq!(pairs["key_source"], "new");
+        assert_eq!(pairs["key_name"], "Mail + code & tools");
+        assert_eq!(pairs["permissions"], "read,proxy");
+        assert_eq!(pairs["services"], "api-google-gmail,api-github");
+        assert_eq!(
+            pairs["service_permissions"],
+            "api-google-gmail::https://www.googleapis.com/auth/gmail.readonly,api-github::repo"
+        );
+        assert_eq!(pairs["expiry_days"], "30");
+        assert_eq!(pairs["platform"], "codex");
+        assert!(!pairs.contains_key("unknown"));
+        assert!(!result["verification_uri"].as_str().unwrap().contains('?'));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(POLL_SECRET));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(POLL_SECRET));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(
+            !home
+                .path()
+                .join(".nyxid/profiles/mail-agent/access_token")
+                .exists()
+        );
+    }
+}
+
+#[tokio::test]
+async fn hinted_login_never_falls_back_to_account_callback_on_unsupported_backend() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/device/v2/request"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &[
+            "login",
+            "--device",
+            "--scopes",
+            "read,proxy",
+            "--base-url",
+            &server.uri(),
+        ],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn invalid_login_preferences_fail_before_request_creation() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    for extra in [
+        vec!["--scopes", "root"],
+        vec!["--service", "../users"],
+        vec!["--service-permission", "repo"],
+        vec!["--agent-key", "--login-type", "full"],
+        vec!["--callback", "--scopes", "read"],
+        vec![
+            "--scopes",
+            "read",
+            "resume",
+            "00000000-0000-0000-0000-000000000000",
+        ],
+    ] {
+        let uri = server.uri();
+        let mut args = vec!["login", "--base-url", &uri];
+        args.extend(extra);
+        let output = run(home.path(), &args).await;
+        assert!(!output.status.success());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!home.path().join(".nyxid/pending-logins").exists());
+}
+
+#[tokio::test]
+async fn public_catalog_discovery_never_sends_or_refreshes_saved_credentials() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    for (command, endpoint, body) in [
+        (
+            vec!["list", "--all"],
+            "/api/v1/catalog",
+            json!({"entries":[{"slug":"gmail", "scope_catalog":[{"scope":"mail.read", "label":"Read mail"}]}]}),
+        ),
+        (
+            vec!["show", "gmail"],
+            "/api/v1/catalog/gmail",
+            json!({"slug":"gmail", "scope_catalog":[{"scope":"mail.read", "label":"Read mail"}]}),
+        ),
+        (
+            vec!["endpoints", "gmail"],
+            "/api/v1/catalog/gmail/endpoints",
+            json!({"endpoints":[{"method":"GET", "path":"/messages"}]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(2)
+            .mount(&server)
+            .await;
+        for saved in [false, true] {
+            let dir = home.path().join(".nyxid");
+            if saved {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("access_token"), "private-saved-token").unwrap();
+                std::fs::write(dir.join("refresh_token"), "private-saved-refresh").unwrap();
+            }
+            let uri = server.uri();
+            let mut args = vec!["catalog"];
+            args.extend(command.clone());
+            args.extend(["--public", "--base-url", &uri, "--output", "json"]);
+            let output = run(home.path(), &args).await;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output_json(&output), body);
+            if saved {
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in requests {
+        assert!(request.headers.get("authorization").is_none());
+        assert!(request.headers.get("x-api-key").is_none());
+        assert!(request.headers.get("cookie").is_none());
+        if request.url.path() == "/api/v1/catalog" {
+            assert_eq!(request.url.query(), Some("include_all=true"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn mcp_discovery_uses_granted_profile_and_preserves_server_scope_and_schemas() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    let id = begin(&server, home.path(), "--agent-key").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/agent-key/poll"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(key_delivery()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &["login", "resume", &id, "--once", "--output", "json"],
+    )
+    .await;
+    assert!(output.status.success());
+    let catalog = json!({
+        "services": [{"service_id":"allowed", "service_slug":"gmail-personal", "service_name":"Mail", "recommended_skills":["gmail"], "endpoints":[{"endpoint_id":"read", "method":"GET", "path":"/messages", "parameters":{"query":{"type":"string"}}}]}],
+        "total_services":1, "total_endpoints":1,
+        "diagnostics":{"service_scope_restricted":true, "unavailable_services":0}
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/mcp/config"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {KEY_SECRET}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&catalog))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &["mcp", "discover", "--profile", "agent", "--output", "json"],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output_json(&output), catalog);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(KEY_SECRET));
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().contains("/refresh"))
+    );
 }

@@ -24,6 +24,26 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "stripe",
+        include_str!("../../specs/catalog/stripe.openapi.json"),
+    ),
+    (
+        "chrono-sandbox",
+        include_str!("../../specs/catalog/chrono-sandbox.openapi.json"),
+    ),
+    (
+        "cloudflare",
+        include_str!("../../specs/catalog/cloudflare.openapi.json"),
+    ),
+    (
+        "supabase-management",
+        include_str!("../../specs/catalog/supabase-management.openapi.json"),
+    ),
+    (
+        "railway",
+        include_str!("../../specs/catalog/railway.openapi.json"),
+    ),
+    (
         "ifttt-mcp",
         include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
     ),
@@ -116,6 +136,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/lark-bot.openapi.json"),
     ),
     (
+        "linkedin",
+        include_str!("../../specs/catalog/linkedin.openapi.json"),
+    ),
+    (
         "microsoft-graph",
         include_str!("../../specs/catalog/microsoft-graph.openapi.json"),
     ),
@@ -167,12 +191,17 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("chrono-sandbox", "chrono-sandbox"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
+    ("api-stripe", "stripe"),
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
+    ("api-cloudflare", "cloudflare"),
+    ("api-supabase-management", "supabase-management"),
+    ("api-railway", "railway"),
     ("api-elevenlabs", "elevenlabs"),
     ("api-facebook", "facebook"),
     ("api-feishu", "lark"),
@@ -190,6 +219,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-google-slides", "google-slides"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
+    ("api-linkedin", "linkedin"),
     ("api-microsoft", "microsoft-graph"),
     ("api-reddit", "reddit"),
     ("api-slack", "slack"),
@@ -264,6 +294,78 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
     },
 );
 
+/// What an overlay says about an operation's effect on existing data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationMarks {
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists, where its method says otherwise (a POST that
+    /// edits, a PUT that only acts). `None` leaves it to the method.
+    /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
+    /// than change it.
+    pub changes_existing: Option<bool>,
+}
+
+impl OperationMarks {
+    pub fn of(operation: &serde_json::Value) -> Self {
+        Self {
+            destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
+            changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+        }
+    }
+}
+
+/// The marks of each overlay's operations, by spec key, keyed by endpoint
+/// name (sanitized operation ID) and by `METHOD path` route.
+static OPERATION_MARKS: LazyLock<HashMap<&'static str, HashMap<String, OperationMarks>>> =
+    LazyLock::new(|| {
+        PARSED_SPECS
+            .iter()
+            .map(|(key, spec)| {
+                let mut operations = HashMap::new();
+                for (path, item) in spec["paths"].as_object().into_iter().flatten() {
+                    for (method, operation) in item.as_object().into_iter().flatten() {
+                        let marks = OperationMarks::of(operation);
+                        if marks == OperationMarks::default() {
+                            continue;
+                        }
+                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()), marks);
+                        if let Some(id) = operation["operationId"].as_str() {
+                            operations.insert(super::openapi_parser::sanitize_name(id), marks);
+                        }
+                    }
+                }
+                (*key, operations)
+            })
+            .collect()
+    });
+
+/// What the hosted overlay of a catalog service says about this operation,
+/// matched literally by name or route. Marks that narrow (destructive,
+/// changes existing) match either; "only acts" (`changes_existing: false`)
+/// needs the exact route, since it widens what guests may do.
+pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> OperationMarks {
+    let Some(operations) = spec_key_for_slug(slug).and_then(|key| OPERATION_MARKS.get(key)) else {
+        return OperationMarks::default();
+    };
+    let by_name = operations.get(name).copied().unwrap_or_default();
+    let by_route = operations
+        .get(&format!("{} {path}", method.to_ascii_uppercase()))
+        .copied()
+        .unwrap_or_default();
+    OperationMarks {
+        destructive: by_name.destructive || by_route.destructive,
+        changes_existing: if by_name.changes_existing == Some(true)
+            || by_route.changes_existing == Some(true)
+        {
+            Some(true)
+        } else {
+            by_route.changes_existing
+        },
+    }
+}
+
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
     PARSED_SPECS.get(spec_key).cloned()
@@ -314,6 +416,75 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 mod tests {
     use super::*;
 
+    /// Guests' default access follows what overlays say about an operation:
+    /// Aevatar's destructive marker and NyxID's own changes-existing marker,
+    /// matched by endpoint name or route.
+    #[test]
+    fn overlays_say_what_operations_do_to_existing_data() {
+        let marks = operation_marks;
+        assert!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/deleteMessage",
+                "delete_message"
+            )
+            .destructive
+        );
+        assert!(marks("api-telegram-bot", "post", "/deleteMessage", "renamed").destructive);
+        assert_eq!(
+            marks("api-telegram-bot", "POST", "/sendMessage", "send_message"),
+            OperationMarks::default()
+        );
+        assert!(
+            marks(
+                "api-google-sheets",
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+                "sheets_clear_values"
+            )
+            .destructive
+        );
+        // A POST that edits, and a PUT that only acts.
+        assert_eq!(
+            marks("api-slack", "POST", "/chat.update", "x").changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/editMessageText",
+                "edit_message_text"
+            )
+            .changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks("api-spotify", "PUT", "/me/player/play", "start_playback").changes_existing,
+            Some(false)
+        );
+        // "Only acts" widens, so it needs the exact route, not just a name.
+        assert_eq!(
+            marks("api-spotify", "PATCH", "/anything", "start_playback").changes_existing,
+            None
+        );
+        // "Edits" narrows, so a name is enough.
+        assert_eq!(
+            marks("api-slack", "POST", "/elsewhere", "chat_update").changes_existing,
+            Some(true)
+        );
+        // A PATCH update is left to its method; Aevatar's markers are as they were.
+        assert_eq!(
+            marks("api-google", "PATCH", "/nowhere", "calendar_update_event"),
+            OperationMarks::default()
+        );
+        assert_eq!(
+            marks("custom-service", "DELETE", "/x", "delete_x"),
+            OperationMarks::default()
+        );
+    }
+
     /// Frozen from 28fd2c44, including the original eight api-google operations.
     /// Six Drive contracts were deliberately corrected for automatic activation;
     /// every other historical operation retains its original pin.
@@ -325,7 +496,8 @@ mod tests {
         .unwrap();
         for slug in ["api-google-drive", "api-google-workspace"] {
             let spec = spec_for_slug(slug).unwrap();
-            let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let parsed =
+                crate::services::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
             assert_eq!(
                 parsed.len(),
                 if slug.ends_with("workspace") { 38 } else { 22 }
@@ -483,6 +655,56 @@ mod tests {
     use crate::services::openapi_parser;
 
     #[test]
+    fn lark_approval_forwarding_uses_user_routes_and_mutation_marks() {
+        for slug in ["api-lark", "api-feishu"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let endpoints = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            let list = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_tasks_query")
+                .unwrap();
+            assert_eq!(list.method, "GET");
+            assert_eq!(list.path, "/approval/v4/tasks");
+            assert_eq!(
+                list.risk,
+                Some(crate::models::service_endpoint::EndpointRisk::Read)
+            );
+            let forward = endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "approval_task_forward")
+                .unwrap();
+            assert_eq!(forward.method, "POST");
+            assert_eq!(forward.path, "/approval/v4/tasks/forward");
+            assert!(forward.request_body_required);
+            assert_eq!(
+                forward.request_content_type.as_deref(),
+                Some("application/json")
+            );
+            let schema = forward.request_body_schema.as_ref().unwrap();
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["instance_code", "task_id", "transfer_user_id"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+            let parameters = forward.parameters.as_ref().unwrap().as_array().unwrap();
+            assert_eq!(parameters[0]["name"], "user_id_type");
+            assert_eq!(parameters[0]["required"], true);
+            assert_eq!(
+                parameters[0]["schema"]["enum"],
+                serde_json::json!(["open_id", "union_id", "user_id", "user_key"])
+            );
+            assert!(forward.destructive);
+            assert_eq!(forward.changes_existing, Some(true));
+            assert_eq!(
+                operation_marks(slug, "POST", &forward.path, "renamed").changes_existing,
+                Some(true)
+            );
+            assert!(operation_marks(slug, "POST", &forward.path, "renamed").destructive);
+            assert!(spec["paths"].get("/approval/v4/tasks/transfer").is_none());
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
@@ -490,10 +712,68 @@ mod tests {
                 spec.get("openapi").is_some(),
                 "spec '{key}' missing openapi version"
             );
-            let endpoints = openapi_parser::parse_openapi_spec_value(&spec)
+            let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec)
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
         }
+    }
+
+    #[test]
+    fn firecrawl_overlay_exposes_render_cache_sitemap_and_provenance() {
+        let spec = spec_for_slug("api-firecrawl").unwrap();
+        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let scrape = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "scrape")
+            .unwrap();
+        let map = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "map_site")
+            .unwrap();
+        let scrape_request = scrape.request_body_schema.as_ref().unwrap();
+        let map_request = map.request_body_schema.as_ref().unwrap();
+        assert_eq!(scrape_request["additionalProperties"], true);
+        for control in ["formats", "waitFor", "timeout", "maxAge", "storeInCache"] {
+            assert!(
+                scrape_request["properties"].get(control).is_some(),
+                "scrape {control}"
+            );
+        }
+        for control in [
+            "sitemap",
+            "ignoreQueryParameters",
+            "ignoreCache",
+            "limit",
+            "timeout",
+        ] {
+            assert!(
+                map_request["properties"].get(control).is_some(),
+                "map {control}"
+            );
+        }
+        assert_eq!(
+            map_request["properties"]["sitemap"]["enum"],
+            serde_json::json!(["include", "only", "skip"])
+        );
+        let scrape_response = &spec["paths"]["/v2/scrape"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["data"];
+        assert_eq!(scrape_response["properties"]["markdown"]["type"], "string");
+        for field in ["sourceURL", "url", "statusCode", "provider"] {
+            assert!(
+                scrape_response["properties"]["metadata"]["properties"]
+                    .get(field)
+                    .is_some(),
+                "scrape metadata {field}"
+            );
+        }
+        assert_eq!(
+            scrape_response["properties"]["metadata"]["properties"]["provider"]["properties"]["id"]
+                ["type"],
+            "string"
+        );
+        let map_response = &spec["paths"]["/v2/map"]["post"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["links"];
+        assert_eq!(map_response["type"], "array");
     }
 
     #[test]
@@ -511,13 +791,13 @@ mod tests {
         );
         assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
         assert_eq!(
-            openapi_parser::parse_openapi_spec_value(&drive)
+            openapi_parser::parse_hosted_openapi_spec_value(&drive)
                 .unwrap()
                 .len(),
             22
         );
         assert_eq!(
-            crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
+            crate::services::openapi_parser::parse_hosted_openapi_spec_value(&workspace)
                 .unwrap()
                 .len(),
             38

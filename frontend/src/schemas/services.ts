@@ -1,3 +1,4 @@
+import { toolMetadataFields } from "./tools";
 import { BILLING_METRICS, unitPriceSchema } from "./billing-metrics";
 import {
   inferenceMetadataSchema,
@@ -209,6 +210,14 @@ export const proxyOperationPolicySchema = z.object({
 export type ProxyOperationPolicy = z.infer<typeof proxyOperationPolicySchema>;
 
 const sharedServiceFields = {
+  auth_scheme: z
+    .string()
+    .regex(
+      /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,64}$/,
+      "Use an authorization scheme of 1–64 token characters",
+    )
+    .optional()
+    .or(z.literal("")),
   inference: inferenceMetadataSchema.nullish(),
   platform_key: platformKeyConfigSchema.optional(),
   credential: z.string().optional(),
@@ -248,6 +257,17 @@ export const createServiceSchema = z
     default_request_headers: defaultRequestHeaderListSchema.optional(),
   })
   .superRefine((value, ctx) => {
+    if (
+      value.auth_scheme &&
+      (value.service_type !== "http" ||
+        !["bearer", "oauth2"].includes(value.auth_type ?? ""))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["auth_scheme"],
+        message: "An authorization scheme requires bearer auth",
+      });
+    }
     if (value.service_type === "http") {
       if (!value.base_url) {
         ctx.addIssue({
@@ -352,6 +372,7 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
+    ...toolMetadataFields,
     ...sharedServiceFields,
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),

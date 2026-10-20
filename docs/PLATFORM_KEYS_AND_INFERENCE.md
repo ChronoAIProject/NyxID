@@ -12,7 +12,9 @@ the credential used for execution.
 
 - `DownstreamService.inference` is optional. Its `wire_protocol` enum is
   `anthropic_messages`, `openai_responses`, or `openai_completions`; `model_list` and
-  `realtime` are defaulted booleans. Unknown protocol values fail validation.
+  `realtime` are defaulted booleans. The additive, defaulted `voice` block describes
+  voice protocol, catalog models/voices, usage source and billing units; its presence
+  makes the compatibility `realtime` response true. Unknown text protocols fail validation.
   The defaulted `inference_admin_modified` marker records explicit edits, including
   null clears, so startup never restores an admin-cleared block.
 - `DownstreamService.platform_key` is optional, with defaulted `enabled`, an
@@ -215,11 +217,57 @@ and additional components of each lane. Supported units are `tokens` (provider t
 accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 `schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
-| Final credential class | Lane |
-| --- | --- |
-| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK |
-| NyxidManagedMaster | Platform key |
-| NoAuth | None (meter only) |
+### Operation prices
+
+A lane whose primary metric is `requests` may also define `operations`, a list of
+`OperationPrice` objects (`operation`, `credits_per_unit`, plus server-owned
+`lago_metric_code`, `sync_status` and `sync_error`). A request that selects a synced
+operation price is charged that rate instead of the lane's primary request rate.
+Additive components are unchanged, and allowances, grants and wallet funding follow the
+usual order because operation rows remain `requests` usage of the same service.
+
+- **Keys.** An operation key is the `ServiceEndpoint.name` of an active endpoint of the
+  service (for hosted overlays, the `operationId`), or a channel operation the channel
+  billing layer declares for that service (`api-twitter`: `get_me`, `create_tweet`,
+  `channel_dm_send`, `channel_dm_received`, `channel_chat_received`,
+  `channel_post_received`). Create and update validate added keys; keys already priced
+  on the lane stay valid if their endpoint is later deactivated, and simply never match.
+  Keys are unique per lane, operation prices are rejected on non-`requests` lanes, and
+  validation errors use the ordinary validation error.
+- **Lago.** Each price has its own sum metric and standard charge,
+  `platform_svc_{slug}_{byok|pk}_op_{key}`, with the key lower-cased and every character
+  outside `[a-z0-9_]` replaced by `_`. Keys that normalize to the same code, or produce a
+  code longer than 255 characters, are rejected rather than truncated. Sync, plan charge
+  round-trips, cleanup markers (`component_cleanup_metric_codes`), reconciliation retry
+  and rate retirement reuse the component lifecycle; removing a price or its whole lane
+  removes the charge and retires the rate, which keeps pricing historical usage.
+- **Selection.** `BillingRouteContext::new` captures the synced operation prices of the
+  selected lane only when that lane's primary is synced; `with_operation` then replaces the
+  Lago code. Unpriced, pending and failed operations, and unmatched requests, keep the
+  primary rate; `"0"` makes an operation free. An unsynced primary keeps the existing
+  whole-lane legacy/free fallback and ignores operation prices.
+  `platform_charge_nyxid_credentials_only` still applies after selection.
+- **Matching.** Tools reuse the operation selected by the publication gate. Other catalog
+  HTTP requests on the proxy, pool attempts, the LLM provider and gateway routes and
+  NyxAgent one-shot inference read the service's active endpoints once, and only when
+  billing is enabled and the selected lane has synced operation prices, then apply the
+  same most-specific rule as the publication gate. Equally specific endpoints with
+  different names select no operation. MCP tool calls use the endpoint name directly;
+  generic MCP dispatch exists only for services without endpoint rows. SSH, voice and
+  public anonymous routes have no catalog operation and keep the lane's primary rate.
+- **Usage.** Meter rows store `operation` only when an operation price was selected.
+  `GET /billing/usage` rows and admin usage `by_service[].by_operation` report it; admin
+  usage derives it from the existing rollup `code` dimension, so rollup documents and
+  indexes are unchanged.
+
+Upgrade every replica before authoring operation prices: older binaries ignore the field
+and charge the lane's base rate.
+
+| Final credential class                                                | Lane              |
+| --------------------------------------------------------------------- | ----------------- |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |
+| NyxidManagedMaster                                                    | Platform key      |
+| NoAuth                                                                | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
 even if legacy platform billing is enabled. While the selected lane's primary is
@@ -233,11 +281,33 @@ charged only when explicitly configured.
 With no lanes, legacy behavior is unchanged. Resale remains independent. The
 `platform_charge_nyxid_credentials_only` restriction still applies after lane selection.
 
+Paid X channels consume `api-twitter` through the **Your own key (BYOK)** lane,
+using shared-app OAuth. Configure a synced **Requests** price there: a price on
+the **NyxID platform key** lane alone leaves channels blocked. The admin service
+response exposes channel consumers and their lane labels for the pricing form.
+Grant- and allowance-funded paid channels still require a provisioned Lago wallet
+and subscription.
+
+Paid-channel admission fails closed before funding with `BillingNotConfigured`
+(code unchanged). The generic billing guard names the service slug and selected lane. When the
+X channel preflight runs, it reports exactly: “The X service (api-twitter) has no
+synced price on the Your own key (BYOK) lane that shared-app X channels bill
+through; configure a Requests price on that lane”. With no lanes the generic
+guard states that no lane prices and legacy platform billing is disabled; it asks
+to enable legacy Requests billing or configure a synced Requests price on the
+selected lane. Provider absence separately reports “The billing provider (Lago) is not
+configured; configure Lago before enabling paid channels”. Missing wallet or
+subscription reports “A provisioned Lago billing wallet and subscription are
+required for paid channels, including grant or allowance funding”. Creation,
+Verify and Reconnect preflight the catalog price before owner resolution.
+
 Stable primary Lago codes remain `platform_svc_{slug}_byok` / `platform_svc_{slug}_pk`;
 additional components use `platform_svc_{slug}_{byok|pk}_{metric}`. Each price has its
 own rate-cache row and synchronization state. Removed components are recorded in
 server-owned `component_cleanup_metric_codes`, including when their entire lane is
-removed. The same pricing synchronizer, full Lago plan charge array with IDs, and
+removed. Completed removals mark the code's rate-cache row `retired_at` instead of
+deleting it: usage metered under the old code stays priced, while new reservations
+refuse retired rates until a re-authored price replaces the row. The same pricing synchronizer, full Lago plan charge array with IDs, and
 reconcile interval handle all charges. Price/metric/code fences prevent stale admin
 sync completions from activating obsolete prices; stale writes after removal restore
 cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.
@@ -286,23 +356,29 @@ dialog consumes it directly. Allowances fund only identical-metric usage rows.
 Omitted allowance metric defaults to BYOK primary, then platform-key primary,
 then legacy; `effective_platform_metric` remains this display default.
 Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
-grant expiry, ledger canonical fields/order/hash/dedupe keys and verification are unchanged.
+grant expiry and operation dedupe identities are unchanged. Exact accounting adds versioned ledger postings.
 
 Unit prices support `PRICE_FRACTIONAL_DIGITS = 12` and at most 1,000,000 credits/unit.
 The normalized exact decimal goes to Lago. Optional `credits_per_unit_pico` (10^-12
 credits) is preferred in cache/funding/reservations; legacy `credits_per_unit_micros`
 is still populated by truncation for rolling compatibility. Missing precise fields
-use the old micro rate exactly. All money multiplication uses saturating integer i128
-intermediates. Gross/funding display costs truncate **after** multiplying to micros;
-grant movements remain micros; the exact remaining wallet cost rounds **up** to whole
-credits per component, including sub-microcredit costs. Lago receives the wallet-funded quantity,
-rounded up to its existing micro-unit precision, capped at actual units. No floating
-point is used in rate or cost arithmetic. Ledger amount encoding remains unchanged.
+use the old micro rate exactly. Money uses checked i128 picocredit `Credits`,
+Decimal128 credits in MongoDB, and decimal strings in JSON. Funding calculates
+cost once and subtracts allowance and grants to obtain the exact wallet debit.
+Lago quantities floor cumulatively with durable owner/metric/rate carry; they do
+not round up per row. Balanced v2 ledger postings cover every balance movement;
+v1 canonical bytes remain unchanged. See [exact accounting](BILLING_EXACT_ACCOUNTING.md).
 
 **Rollout:** upgrade ALL replicas before authoring component prices, allowances
 using new metrics, or prices beyond six fractional digits. Old binaries cannot deserialize the new enum variants or charge
-additional components. Defaulted fields require no data migration; existing lanes and
-prices of up to six fractional digits keep their prior accounting.
+additional components. The 0.31 exact-accounting cutover requires draining old billing writers before
+starting the migration with `BILLING_EXACT_CUTOVER_DRAINED=true`; subsequent
+new-version replicas resume the recorded background migration. Pending cutover
+returns 503 for billed admission and pauses money sweeps; the server, nonbilling
+traffic and legacy-tolerant UI reads remain available. Malformed documents are
+isolated and reported through Integrity while other rows continue migrating.
+Old binaries fail to read migrated amounts and must not be restarted. See the
+exact-accounting deployment contract.
 
 ## Inference defaults and transports
 
@@ -310,13 +386,47 @@ Startup fills only absent/null inference blocks whose `inference_admin_modified`
 marker is absent/false, including admin-created Chrono rows. It never replaces an
 admin-authored block or an explicit null clear.
 
-| Catalog slug | Protocol | Model list | Realtime |
-| --- | --- | --- | --- |
-| llm-openai | openai_responses | true | true |
-| llm-anthropic | anthropic_messages | true | false |
-| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true | false |
-| chrono-llm, chrono-llm-public | openai_completions | true | false |
-| llm-xai | openai_completions | true | true |
+| Catalog slug                              | Protocol           | Model list | Realtime |
+| ----------------------------------------- | ------------------ | ---------- | -------- |
+| llm-openai                                | openai_responses   | true       | true     |
+| llm-anthropic                             | anthropic_messages | true       | false    |
+| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true       | false    |
+| chrono-llm, chrono-llm-public             | openai_completions | true       | false    |
+| llm-xai                                   | openai_completions | true       | true     |
+
+
+Voice capability is the additive, defaulted `inference.voice` block:
+`protocol` (`openai_live` or `xai_realtime`), `models: [{id,label,default?}]`,
+`voices: [{id,label}]`, `usage_source`, and `billing_metrics`. Startup seeds
+`gpt-live-1`/documented OpenAI voices with `provider_reported`, and
+`grok-voice-think-fast-2.0`/documented xAI voices with `server_measured`.
+OpenAI uses cumulative `session.usage.updated` seconds and final `session.closed`;
+xAI measures duration on the server and records `response.done` tokens separately.
+
+Existing inference blocks receive a separate null-guarded update of only
+`inference.voice`; every seed/backfill checks `inference_admin_modified`.
+Admin null clears survive restart. No unknown-field denial was added, so old
+replicas ignore voice metadata. The compatibility `realtime` response is true
+when voice exists. Response-only `supports_realtime_voice` uses the same voice
+presence and is never independently persisted. Unrecognized future voice
+protocols remain readable but cannot execute.
+
+Admins edit voice choices in the existing service Inference section. IDs and
+labels are bounded to 128 bytes (IDs allow letters, digits, `_`, `-`, `.` only),
+models to 32, voices to 64, metrics to six unique duration/token units, and at most
+one model is default. The first listed voice is the fallback. No endpoint or
+secret is accepted in this block. Model additions need no deployment; options
+intersect metadata with the adapters actually shipped and revalidate at start.
+
+No voice prices are seeded. Add `voice_seconds` beside token components in the
+existing BYOK/platform lanes, using the same admin/Lago synchronization, funding
+precedence and deterministic settlement IDs. The price editor suggests duration
+only for metadata advertising it; already-authored prices remain editable after
+a metadata clear. Call setup shows configured rates and the payer. GPT-Live
+reports duration only; its silent windows never estimate tokens. For the xAI
+adapter in Phase 4, response-ID-deduped tokens settle configured token components
+separately from cumulative duration, with zero seconds on token events. A replay
+must never debit either component twice. See [voice design](chat/11-voice.md).
 
 OpenAI, Anthropic, DeepSeek, Mistral and OpenRouter document `GET /models`.
 Anthropic's list uses the familiar `data` model array with its own pagination fields;
@@ -384,3 +494,56 @@ while retaining the primary. Prices accept up to 12 fractional digits. Catalog c
 ## Service-instance history
 
 Explicit platform/user credential-binding transitions and platform-instance settings are recorded in the service journal. Automatic provisioning and removal use verified system attribution; retained UUID history remains available after physical cleanup under current owner/admin scope. Re-provisioning starts a new instance history even when the slug is reused. Platform credential material is never included. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe details, archive discovery, and MongoDB transaction prerequisites.
+
+## Billing configuration
+
+The admin page `/admin/billing` (tabs `?tab=overview|rates|settings`) and the API under `/api/v1/admin/billing` are the central billing configuration surface. Reads accept admins and operators; every write is admin-only. Prices stay scoped to each catalog service; the page edits them in place through the same write path and `service_updated` audit as `PUT /api/v1/services/{id}`.
+
+### Routes
+
+- `GET /admin/billing/config` returns the read-only environment mirror, the effective global defaults and their sources. Each mirrored row carries `source: "env"`. `LAGO_API_KEY`, `LAGO_WEBHOOK_SECRET` and `BILLING_LEDGER_HMAC_KEY` are reported only as `secret_set` booleans; their values never leave the server.
+- `PUT /admin/billing/config` is a per-field patch. An absent field keeps the stored value, `null` clears it back to the environment default, and a number sets it. Unknown fields and an empty patch are rejected. The write and its `billing_config_updated` audit row (with `before`/`after`) commit in one MongoDB transaction.
+- `GET /admin/billing/rates` lists the Lago rate cache with the exact decimal `credits_per_unit`, `synced_at`, `stale_after` (`synced_at + BILLING_RATE_CACHE_TTL_SECS`), `stale` and `retired_at`.
+- `GET /admin/billing/overview` lists every catalog service with a billing block, sorted by slug, with its effective billing. `GET /admin/billing/services/{id}` returns one such row; the service editor shows it as "Effective billing".
+- `PUT /admin/billing/services/{id}` accepts only `{"billing": {...}}` (unknown fields are rejected) and delegates to the `PUT /services/{id}` handler.
+- `POST /admin/billing/services/{id}/resync` reruns the Lago price sync and returns `{synced, service}`. Its `billing_service_resynced` audit row is best-effort: once Lago has applied the change the request does not fail.
+
+The native CLI exposes these routes through `nyxid admin billing config show|set`,
+`overview`, `rates [--service <slug|uuid>] [--include-retired]` and
+`service show|update|set-managed|resync|verify <slug|uuid>`. File updates accept
+`--file billing.json --dry-run`; the typed `set-managed` command validates the
+Telnyx contract and exact token prices. `service verify --managed` exits 2 until
+configuration and fresh exact cached rates are ready. Its checks can pass before
+platform access is enabled. `nyxid admin usage` shows exact funding splits and
+`nyxid admin billing ledger verify --all` checks the journal. All require a human
+profile; see [CLI billing reference](../skills/nyxid/references/billing.md) and
+[Telnyx walkthrough](TELNYX_PLATFORM_BILLING.md#cli-walkthrough-after-verification).
+
+### Global defaults
+
+`PlatformSettings.billing` holds one value, `default_overdraft_cap_credits`. When it is set it wins over `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS`; otherwise the environment value applies. It is copied onto a wallet only when the wallet is first provisioned (first charge, top-up checkout or backfill). Existing wallets keep their cap. It accepts whole credits from 0 to 1,000,000,000,000.
+
+### Effective prices
+
+`services::billing::config::resolve_service_billing` builds the charge path's own `BillingRouteContext` for each credential class and explains the result. It never decides a charge, so the admin view cannot drift from billing. A unit test compares it with the charge path across every combination of lane, sync and legacy settings. Classes that resolve identically are grouped. For HTTP traffic each class reports `platform_charged`, a `source` and a stable `reason`:
+
+1. `billing_disabled` (`source: env`): `BILLING_ENABLED=false`, so nothing is charged.
+2. `nyxid_credentials_only` (`free`): the service sets `platform_charge_nyxid_credentials_only` and the class is neither the NyxID platform key nor the shared OAuth app.
+3. When either lane is configured, the class's lane decides. The NyxID platform key uses the platform-key lane; the shared OAuth app, own keys, agent overrides and node credentials use the BYOK lane. The outcomes are:
+   - `lane_synced` (`service`): the lane primary, its synced components and, on a Requests lane, its synced operation prices.
+   - `lane_unsynced_legacy` (`legacy`): the primary is pending or failed and `platform_billable` is on, so the legacy price applies to the whole lane.
+   - `lane_unsynced_free` (`free`): the primary is pending or failed and legacy billing is off.
+   - `lane_not_configured` (`free`): the class's lane is missing.
+   - `no_auth` (`free`): no-auth traffic, once any lane is configured.
+4. With no lanes: `legacy_platform_billable` (`legacy`) when `platform_billable` is on, else `not_billable` (`free`).
+
+Each charged value lists `metric`, optional `operation`, `lago_metric_code`, exact `credits_per_unit`, `source`, `origin`, `sync_status`/`sync_error` and the cached rate (`stale`, `retired`). The possible `origin` values are:
+
+- `lane_primary`, `lane_component` and `operation` (source `service`);
+- `service_price`, a synced legacy `platform_pricing` (source `legacy`);
+- `legacy_plan`, the Lago-authored plan price, priced from the rate cache (source `legacy`);
+- `resale_plan`.
+
+`pending` lists configured lane values that do not charge until they sync, all with source `free`. An unsynced primary lists its whole lane, because synced extras never revive it. Operation prices on a non-Requests lane are always pending.
+
+Resale applies only to NyxID platform-key traffic. It is reported with source `env` when `BILLING_RESALE_ENABLED` or `BILLING_ENABLED` turns it off. Per-owner billing rollout flags and wallet state are not part of this view.

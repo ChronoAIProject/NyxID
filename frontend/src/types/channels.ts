@@ -133,7 +133,7 @@ export interface UpdateChannelBotRequest {
   readonly app_secret?: string;
 }
 
-export type XChannelEvent = "dm" | "mentions" | "replies";
+export type XChannelEvent = "dm" | "chat" | "mentions" | "replies" | "posts";
 
 export interface CreateChannelBotResponse {
   readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";
@@ -148,10 +148,19 @@ export interface CreateChannelBotResponse {
   readonly setup_instructions?: readonly string[];
   readonly id: string;
   readonly platform: ChannelPlatform;
+  /** Saved label; for Telegram, the bot's name when the request left it blank. */
+  readonly label?: string;
   readonly platform_bot_username: string;
   readonly status: ChannelBotStatus;
   readonly permission_setup_url?: string | null;
   readonly permission_setup_scopes?: readonly string[] | null;
+}
+
+/** Public Telegram identity for a bot token, used to suggest a label. */
+export interface TelegramBotProfile {
+  readonly username: string;
+  readonly display_name: string | null;
+  readonly label: string | null;
 }
 
 export interface ManagedBotSetup {
@@ -164,6 +173,10 @@ export interface ManagedBotSetup {
 }
 
 export interface OutboundCapabilities {
+  /** Additive adapter declarations; absent on older servers means unsupported. */
+  readonly thread_reply?: boolean;
+  readonly thread_follow?: boolean;
+  readonly thread_history?: boolean;
   readonly media: MediaCapabilities;
   readonly initiated_send: boolean;
   readonly reply_to: boolean;
@@ -341,6 +354,7 @@ export interface ChannelRegistrationField {
   readonly platform_fallback: string | null;
 }
 export interface ChannelPlatformDescriptor {
+  readonly activities?: readonly ChannelActivityDescriptor[];
   readonly platform: ChannelPlatform;
   readonly display_name: string;
   readonly enabled: boolean;
@@ -365,3 +379,41 @@ export interface ChannelPlatformDescriptor {
   readonly webhook_path: string | null;
 }
 export interface ChannelPlatformsResponse { readonly platforms: readonly ChannelPlatformDescriptor[] }
+
+export interface ChannelActivityDescriptor {
+  readonly kind: string;
+  readonly label: string;
+  readonly subscription: string;
+  readonly subscription_label?: string;
+  readonly description: string;
+  readonly content_availability: string;
+  readonly reply_supported: boolean;
+}
+export interface ChannelActivityItem {
+  readonly id: string;
+  readonly conversation_id: string;
+  readonly platform_conversation_id: string | null;
+  readonly platform_event_id: string | null;
+  readonly sender_platform_id: string | null;
+  readonly kind: string;
+  readonly provider_event_type: string | null;
+  readonly content_availability: string;
+  readonly reply_supported: boolean | null;
+  readonly callback_status: string | null;
+  readonly received_at: string;
+  readonly occurred_at: string | null;
+}
+export interface ChannelActivityResponse {
+  readonly activities: readonly ChannelActivityItem[];
+  readonly total: number;
+  readonly retention_days: number;
+  readonly routes: readonly { readonly conversation_id: string; readonly count: number; readonly last_activity: ChannelActivityItem }[];
+  readonly page: number;
+  readonly per_page: number;
+}
+export interface ActivityCallbackSupport {
+  readonly declared: boolean;
+  readonly enabled: boolean;
+  readonly kinds: readonly string[];
+  readonly version: number | null;
+}

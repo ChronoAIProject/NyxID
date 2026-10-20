@@ -8,13 +8,12 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use mongodb::bson::{Bson, doc};
+use mongodb::bson::doc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
 use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
 use crate::services::channel_platform::InboundMessage;
 
@@ -27,6 +26,10 @@ type HmacSha256 = Hmac<Sha256>;
 /// Normalized message payload delivered to the agent's callback URL.
 #[derive(Clone, Serialize)]
 pub struct CallbackPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_context: Option<crate::models::channel_thread::ChannelThreadFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<super::channel_activity_service::CallbackActivity>,
     pub message_id: String,
     pub correlation_id: String,
     pub platform: String,
@@ -151,29 +154,6 @@ pub async fn inbound_platform_message_exists(
 /// held in memory for the duration of the callback forward and then
 /// discarded. Downstream agents keep any history they need.
 #[allow(clippy::too_many_arguments)]
-pub async fn store_inbound_message(
-    db: &mongodb::Database,
-    channel_bot_id: &str,
-    conversation_id: &str,
-    user_id: &str,
-    platform: &str,
-    inbound: &InboundMessage,
-    agent_api_key_id: &str,
-) -> AppResult<ChannelMessage> {
-    store_inbound_message_with_id(
-        db,
-        channel_bot_id,
-        conversation_id,
-        user_id,
-        platform,
-        inbound,
-        agent_api_key_id,
-        &uuid::Uuid::new_v4().to_string(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn store_inbound_message_with_id(
     db: &mongodb::Database,
     channel_bot_id: &str,
@@ -201,6 +181,28 @@ pub async fn store_inbound_message_with_id(
     Ok(message)
 }
 
+/// Extract the provider's authenticated update identity. The raw payload is
+/// only passed here after the platform adapter has verified and parsed the
+/// inbound webhook, so this value is persisted as an ingress fact rather than
+/// accepted from a callback retry. Telegram's update_id is deliberately kept
+/// separate from message_id: edits retain message_id but receive a new update.
+pub(crate) fn native_event_id(platform: &str, raw: &serde_json::Value) -> Option<String> {
+    let value = match platform {
+        "telegram" | "telegram-new" => raw
+            .get("update_id")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|id| *id >= 0)
+            .map(|id| id.to_string()),
+        "lark" | "feishu" => raw
+            .pointer("/header/event_id")
+            .or_else(|| raw.get("event_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }?;
+    (!value.is_empty() && value.len() <= 256).then_some(value)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn inbound_metadata(
     channel_bot_id: &str,
@@ -212,6 +214,8 @@ pub(crate) fn inbound_metadata(
     message_id: &str,
 ) -> ChannelMessage {
     ChannelMessage {
+        thread_context: None,
+        activity: None,
         platform_send: None,
         attachments: inbound
             .attachments
@@ -235,14 +239,17 @@ pub(crate) fn inbound_metadata(
         direction: "inbound".to_string(),
         platform: platform.to_string(),
         platform_message_id: Some(inbound.platform_message_id.clone()),
+        native_event_id: native_event_id(platform, &inbound.raw_data),
         sender_platform_id: Some(inbound.sender_platform_id.clone()),
         sender_display_name: inbound.sender_display_name.clone(),
         content_type: inbound.content_type.clone(),
         thread_id: inbound.thread_id.clone(),
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
         created_at: Utc::now(),
         updated_at: None,
     }
@@ -269,6 +276,8 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        thread_context: None,
+        activity: None,
         platform_send,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
@@ -279,14 +288,17 @@ pub async fn store_outbound_message(
         direction: "outbound".to_string(),
         platform: platform.to_string(),
         platform_message_id: platform_message_id.map(String::from),
+        native_event_id: None,
         sender_platform_id: None,
         sender_display_name: None,
         content_type: content_type.to_string(),
         thread_id: None,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
+        callback_http_status: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: now,
         updated_at: Some(now),
     };
@@ -333,6 +345,8 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        thread_context: None,
+        activity: None,
         platform_send: None,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
@@ -345,14 +359,17 @@ pub async fn store_device_event_message(
         // The client-supplied envelope event_id survives here purely as a
         // correlation handle — it is NOT used as the NyxID message_id.
         platform_message_id: Some(client_event_id.to_string()),
+        native_event_id: None,
         sender_platform_id: Some(source.to_string()),
         sender_display_name: None,
         content_type: event_type.to_string(),
         thread_id: inherited_thread_id,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: Utc::now(),
         updated_at: None,
     };
@@ -536,67 +553,64 @@ pub async fn get_message(db: &mongodb::Database, message_id: &str) -> AppResult<
         .ok_or_else(|| AppError::NotFound(format!("Message not found: {message_id}")))
 }
 
-/// Get a single outbound message by its upstream platform message ID.
-pub async fn get_outbound_message_by_platform_id(
-    db: &mongodb::Database,
-    platform: &str,
-    platform_message_id: &str,
-) -> AppResult<ChannelMessage> {
-    db.collection::<ChannelMessage>(COLLECTION_NAME)
-        .find_one(doc! {
-            "platform": platform,
-            "platform_message_id": platform_message_id,
-            "direction": "outbound",
-        })
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
-        })
-}
-
-/// Resolve a single outbound message editable by an assigned agent API key.
+/// Resolve the outbound row an agent API key may edit: rows the key sent.
+///
+/// Platform message IDs are not globally unique (Telegram numbers messages
+/// per chat), so `outbound_message_id` pins the exact row and an unpinned ID
+/// shared by several of the key's rows is a conflict, never a guess.
 pub async fn get_outbound_message_for_api_key(
     db: &mongodb::Database,
     api_key_id: &str,
     platform_message_id: &str,
+    outbound_message_id: Option<&str>,
 ) -> AppResult<ChannelMessage> {
-    let platforms = db
-        .collection::<mongodb::bson::Document>(CONVERSATIONS)
-        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
-        .await?;
+    find_unique_outbound_message(
+        db,
+        doc! { "agent_api_key_id": api_key_id },
+        platform_message_id,
+        outbound_message_id,
+    )
+    .await
+}
 
-    let mut found: Option<ChannelMessage> = None;
+/// Resolve the outbound row a reply token may edit: the reply its key sent
+/// to its bound inbound message in its bound conversation.
+pub async fn get_outbound_reply_for_inbound(
+    db: &mongodb::Database,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform_message_id: &str,
+    outbound_message_id: Option<&str>,
+) -> AppResult<ChannelMessage> {
+    find_unique_outbound_message(
+        db,
+        doc! {
+            "agent_api_key_id": api_key_id,
+            "conversation_id": conversation_id,
+            "reply_to_message_id": inbound_message_id,
+        },
+        platform_message_id,
+        outbound_message_id,
+    )
+    .await
+}
 
-    for platform in platforms {
-        let Bson::String(platform) = platform else {
-            continue;
-        };
-
-        match get_outbound_message_by_platform_id(db, &platform, platform_message_id).await {
-            Ok(message) => {
-                if found.is_some() {
-                    return Err(AppError::Conflict(format!(
-                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
-                    )));
-                }
-                found = Some(message);
-            }
-            Err(AppError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
+async fn find_unique_outbound_message(
+    db: &mongodb::Database,
+    mut filter: mongodb::bson::Document,
+    platform_message_id: &str,
+    outbound_message_id: Option<&str>,
+) -> AppResult<ChannelMessage> {
+    filter.insert("direction", "outbound");
+    filter.insert("platform_message_id", platform_message_id);
+    if let Some(outbound_message_id) = outbound_message_id {
+        filter.insert("_id", outbound_message_id);
     }
-
-    if let Some(message) = found {
-        return Ok(message);
-    }
-
     let matches: Vec<ChannelMessage> = db
         .collection::<ChannelMessage>(COLLECTION_NAME)
-        .find(doc! {
-            "direction": "outbound",
-            "agent_api_key_id": api_key_id,
-            "platform_message_id": platform_message_id,
-        })
+        .find(filter)
+        .limit(2)
         .await?
         .try_collect()
         .await?;
@@ -607,7 +621,8 @@ pub async fn get_outbound_message_for_api_key(
             "Outbound message not found: {platform_message_id}"
         ))),
         _ => Err(AppError::Conflict(format!(
-            "Multiple outbound messages found for platform message ID: {platform_message_id}"
+            "Multiple outbound messages found for platform message ID: {platform_message_id}; \
+             pass outbound_message_id (the message_id returned by /reply or /send)"
         ))),
     }
 }
@@ -711,6 +726,8 @@ pub fn build_callback_payload(
         .collect();
 
     CallbackPayload {
+        thread_context: message.thread_context.clone(),
+        activity: None,
         message_id: message.id.clone(),
         correlation_id: String::new(),
         platform: message.platform.clone(),
@@ -721,10 +738,17 @@ pub fn build_callback_payload(
         },
         conversation: CallbackConversation {
             id: conversation.id.clone(),
-            // Use the real platform chat ID from the inbound message, not the
-            // route's configured value (which may be "*" for default routes).
+            // Use the actual inbound chat context: a default route may have
+            // a wildcard ID and a configured type different from this chat.
             platform_id: inbound.conversation_id.clone(),
-            conversation_type: conversation.platform_conversation_type.clone(),
+            // Likewise the message's own chat type (`private`, `group`,
+            // `channel`): a default route answers every kind of chat, and its
+            // configured type says nothing about this one.
+            conversation_type: if inbound.conversation_type.is_empty() {
+                conversation.platform_conversation_type.clone()
+            } else {
+                inbound.conversation_type.clone()
+            },
         },
         sender: CallbackSender {
             platform_id: inbound.sender_platform_id.clone(),
@@ -746,6 +770,72 @@ pub fn build_callback_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
+
+    #[test]
+    fn native_event_id_uses_update_identity_and_rejects_invalid_telegram_ids() {
+        assert_eq!(
+            native_event_id("telegram", &serde_json::json!({"update_id": 101})),
+            Some("101".into())
+        );
+        assert_eq!(
+            native_event_id("telegram-new", &serde_json::json!({"update_id": 0})),
+            Some("0".into())
+        );
+        assert_eq!(
+            native_event_id("telegram", &serde_json::json!({"update_id": -1})),
+            None
+        );
+        assert_eq!(
+            native_event_id("telegram", &serde_json::json!({"update_id": "101"})),
+            None
+        );
+        assert_eq!(
+            native_event_id(
+                "lark",
+                &serde_json::json!({"header": {"event_id": "evt-1"}})
+            ),
+            Some("evt-1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_storage_persists_native_event_identity_atomically() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("channel_relay_native_identity")
+                .await;
+        let inbound = InboundMessage {
+            platform_message_id: "77".into(),
+            conversation_id: "-100".into(),
+            conversation_type: "group".into(),
+            sender_platform_id: "9009".into(),
+            sender_display_name: Some("Ada".into()),
+            content_type: "text".into(),
+            text: Some("@helper_bot".into()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({
+                "update_id": 501,
+                "message": {"message_id": 77, "chat": {"id": -100, "type": "supergroup"}}
+            }),
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let stored = store_inbound_message_with_id(
+            &db, "bot", "route", "owner", "telegram", &inbound, "agent", &id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.native_event_id.as_deref(), Some("501"));
+        let persisted = db
+            .collection::<ChannelMessage>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.native_event_id.as_deref(), Some("501"));
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn inbound_retry_lookup_is_scoped_to_bot_platform_and_direction() {
@@ -819,7 +909,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_message_for_api_key_fallback_returns_single_matching_outbound_message() {
+    async fn outbound_message_for_api_key_returns_single_matching_outbound_message() {
         let Some(db) =
             crate::test_utils::connect_test_database("channel_relay_outbound_api_key_single").await
         else {
@@ -831,6 +921,7 @@ mod tests {
         let agent_api_key_id = uuid::Uuid::new_v4().to_string();
         let platform_message_id = "platform-single-message";
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -871,9 +962,9 @@ mod tests {
         .expect("insert outbound message");
 
         let resolved =
-            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
+            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id, None)
                 .await
-                .expect("single fallback match should resolve");
+                .expect("single match should resolve");
         assert_eq!(resolved.id, inserted.id);
         assert_eq!(resolved.platform, "lark");
         assert_eq!(
@@ -889,7 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_message_for_api_key_fallback_conflicts_on_duplicate_matches() {
+    async fn outbound_message_for_api_key_conflicts_on_duplicate_matches() {
         let Some(db) =
             crate::test_utils::connect_test_database("channel_relay_outbound_api_key").await
         else {
@@ -902,6 +993,7 @@ mod tests {
         let other_agent_api_key_id = uuid::Uuid::new_v4().to_string();
         let platform_message_id = "platform-duplicate-message";
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -959,18 +1051,148 @@ mod tests {
         .await
         .expect("insert duplicate outbound message");
 
-        let err = get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
-            .await
-            .expect_err("duplicate fallback matches should conflict");
+        let err =
+            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id, None)
+                .await
+                .expect_err("duplicate matches should conflict");
         assert!(
             matches!(err, AppError::Conflict(msg) if msg.contains("Multiple outbound messages found"))
         );
 
-        let err =
-            get_outbound_message_for_api_key(&db, &other_agent_api_key_id, platform_message_id)
-                .await
-                .expect_err("fallback lookup should stay scoped to the requesting agent");
+        let err = get_outbound_message_for_api_key(
+            &db,
+            &other_agent_api_key_id,
+            platform_message_id,
+            None,
+        )
+        .await
+        .expect_err("lookup should stay scoped to the requesting agent");
         assert!(matches!(err, AppError::NotFound(_)));
+
+        db.drop().await.expect("drop test database");
+    }
+
+    async fn insert_telegram_conversation(
+        db: &mongodb::Database,
+        agent_api_key_id: &str,
+        platform_conversation_id: &str,
+        is_active: bool,
+    ) -> crate::models::channel_conversation::ChannelConversation {
+        let now = Utc::now();
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
+            platform: "telegram".to_string(),
+            platform_conversation_id: platform_conversation_id.to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: agent_api_key_id.to_string(),
+            default_agent: false,
+            allow_agent_initiated: false,
+            is_active,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<crate::models::channel_conversation::ChannelConversation>(CONVERSATIONS)
+            .insert_one(&conversation)
+            .await
+            .expect("insert conversation");
+        conversation
+    }
+
+    async fn store_telegram_reply(
+        db: &mongodb::Database,
+        conversation: &crate::models::channel_conversation::ChannelConversation,
+        platform_conversation_id: &str,
+        platform_message_id: &str,
+    ) -> ChannelMessage {
+        store_outbound_message(
+            db,
+            conversation
+                .channel_bot_id
+                .as_deref()
+                .expect("test conversation bot id"),
+            &conversation.id,
+            &conversation.user_id,
+            "telegram",
+            &conversation.agent_api_key_id,
+            None,
+            Some(platform_message_id),
+            Some(platform_conversation_id),
+            "text",
+            None,
+        )
+        .await
+        .expect("insert outbound message")
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_ignores_other_keys_colliding_rows() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_cross_key").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+        let own_key = uuid::Uuid::new_v4().to_string();
+        let other_key = uuid::Uuid::new_v4().to_string();
+        // Telegram numbers messages per chat, so another tenant's older reply
+        // in a now-inactive conversation carries the same message ID.
+        let other = insert_telegram_conversation(&db, &other_key, "chat-other", false).await;
+        store_telegram_reply(&db, &other, "chat-other", "57").await;
+        let own = insert_telegram_conversation(&db, &own_key, "chat-own", true).await;
+        let own_reply = store_telegram_reply(&db, &own, "chat-own", "57").await;
+
+        let resolved = get_outbound_message_for_api_key(&db, &own_key, "57", None)
+            .await
+            .expect("the caller's own reply should resolve");
+        assert_eq!(resolved.id, own_reply.id);
+
+        db.drop().await.expect("drop test database");
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_requires_pin_for_same_key_collisions() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_same_key").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+        let key = uuid::Uuid::new_v4().to_string();
+        // One wildcard route serves customers A and B, whose chats both
+        // number the bot's reply 57.
+        let route = insert_telegram_conversation(&db, &key, "*", true).await;
+        let customer_a = store_telegram_reply(&db, &route, "chat-a", "57").await;
+        let customer_b = store_telegram_reply(&db, &route, "chat-b", "57").await;
+
+        let err = get_outbound_message_for_api_key(&db, &key, "57", None)
+            .await
+            .expect_err("an ambiguous platform message ID must not pick a row");
+        assert!(matches!(err, AppError::Conflict(_)));
+
+        let resolved = get_outbound_message_for_api_key(&db, &key, "57", Some(&customer_b.id))
+            .await
+            .expect("a pinned outbound row should resolve");
+        assert_eq!(resolved.id, customer_b.id);
+        assert_eq!(resolved.platform_conversation_id.as_deref(), Some("chat-b"));
+
+        // A pin never widens the caller scope or detaches from the edited ID.
+        let other_key = uuid::Uuid::new_v4().to_string();
+        for (caller, platform_message_id) in [(other_key.as_str(), "57"), (key.as_str(), "58")] {
+            let err = get_outbound_message_for_api_key(
+                &db,
+                caller,
+                platform_message_id,
+                Some(&customer_a.id),
+            )
+            .await
+            .expect_err("an out-of-scope pin must not resolve");
+            assert!(matches!(err, AppError::NotFound(_)));
+        }
 
         db.drop().await.expect("drop test database");
     }
@@ -978,6 +1200,8 @@ mod tests {
     #[test]
     fn callback_payload_serializes_to_json() {
         let payload = CallbackPayload {
+            thread_context: None,
+            activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
             platform: "telegram".to_string(),
@@ -1007,6 +1231,11 @@ mod tests {
             raw_platform_data: None,
         };
 
+        // Captured legacy wire shape: no activity:null or content changes.
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"message_id":"msg-1","correlation_id":"","platform":"telegram","agent":{"api_key_id":"key-1","name":"test-agent"},"conversation":{"id":"conv-1","platform_id":"12345","type":"private"},"sender":{"platform_id":"user-1","display_name":"Alice"},"content":{"type":"text","text":"Hello"},"timestamp":"2026-01-01T00:00:00Z"}"#
+        );
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["message_id"], "msg-1");
         assert_eq!(json["correlation_id"], "");
@@ -1022,6 +1251,8 @@ mod tests {
     #[test]
     fn callback_payload_includes_reply_token_when_present() {
         let payload = CallbackPayload {
+            thread_context: None,
+            activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
             platform: "telegram".to_string(),
@@ -1091,10 +1322,15 @@ mod tests {
         assert_eq!(atts[0]["content_type"], "image");
     }
 
-    #[test]
-    fn build_callback_payload_preserves_provider_attachment_handles() {
+    fn attachment_callback_fixture() -> (
+        ChannelMessage,
+        crate::models::channel_conversation::ChannelConversation,
+        InboundMessage,
+    ) {
         let now = Utc::now();
         let message = ChannelMessage {
+            thread_context: None,
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: "msg-attachment".to_string(),
@@ -1105,18 +1341,22 @@ mod tests {
             direction: "inbound".to_string(),
             platform: "lark".to_string(),
             platform_message_id: Some("om_file_msg".to_string()),
+            native_event_id: None,
             sender_platform_id: Some("ou_file_user".to_string()),
             sender_display_name: None,
             content_type: "file".to_string(),
             thread_id: None,
             agent_api_key_id: Some("key-1".to_string()),
             callback_status: Some("pending".to_string()),
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: None,
         };
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: "conv-1".to_string(),
             user_id: "user-1".to_string(),
             channel_bot_id: Some("bot-1".to_string()),
@@ -1155,6 +1395,75 @@ mod tests {
             raw_data: serde_json::json!({ "event": "fixture" }),
         };
 
+        (message, conversation, inbound)
+    }
+
+    #[test]
+    fn build_callback_payload_uses_actual_inbound_conversation_context() {
+        for (platform, configured_type, actual_type, is_default) in [
+            ("lark", "private", "group", true),
+            ("telegram", "private", "group", true),
+            ("lark", "group", "private", false),
+            ("telegram", "channel", "private", false),
+            ("lark", "private", "channel", true),
+            ("telegram", "private", "private", false),
+        ] {
+            let (mut message, mut conversation, mut inbound) = attachment_callback_fixture();
+            message.platform = platform.to_string();
+            conversation.platform = platform.to_string();
+            conversation.platform_conversation_type = configured_type.to_string();
+            conversation.default_agent = is_default;
+            conversation.platform_conversation_id = if is_default { "*" } else { "oc_chat" }.into();
+            inbound.conversation_type = actual_type.to_string();
+            inbound.thread_id = Some("topic-42".into());
+            inbound.reply_to_platform_message_id = Some("parent-17".into());
+            inbound.raw_data = if platform == "lark" {
+                serde_json::json!({"event": {"message": {
+                    "mentions": [{"key": "@_user_1", "id": {"open_id": "ou_target"}, "name": "Helper"}]
+                }}})
+            } else {
+                serde_json::json!({"message": {
+                    "text": "😀 @HelperBot",
+                    "entities": [{"type": "mention", "offset": 3, "length": 10}],
+                    "message_thread_id": 42
+                }})
+            };
+
+            let payload = build_callback_payload(
+                &message,
+                &conversation,
+                "key-1",
+                "agent",
+                &inbound,
+                Some("reply-token".into()),
+                "https://nyxid.example",
+            );
+            assert_eq!(
+                payload.conversation.conversation_type, actual_type,
+                "{platform}: configured {configured_type}, actual {actual_type}"
+            );
+            assert_eq!(payload.conversation.platform_id, inbound.conversation_id);
+            assert_eq!(payload.conversation.id, conversation.id);
+            assert_eq!(payload.agent.api_key_id, "key-1");
+            assert_eq!(payload.sender.platform_id, inbound.sender_platform_id);
+            assert_eq!(payload.thread_id, inbound.thread_id);
+            assert_eq!(
+                payload.reply_to_platform_message_id,
+                inbound.reply_to_platform_message_id
+            );
+            assert_eq!(payload.reply_token.as_deref(), Some("reply-token"));
+            assert_eq!(payload.raw_platform_data.as_ref(), Some(&inbound.raw_data));
+            assert_eq!(
+                payload.content.attachments[0].file_key.as_deref(),
+                Some("file_v3_abcdef")
+            );
+        }
+    }
+
+    #[test]
+    fn build_callback_payload_preserves_provider_attachment_handles() {
+        let (message, conversation, inbound) = attachment_callback_fixture();
+
         let payload = build_callback_payload(
             &message,
             &conversation,
@@ -1181,6 +1490,122 @@ mod tests {
         assert_eq!(attachment["filename"], "invoice.pdf");
     }
 
+    #[test]
+    fn callback_payload_reports_the_messages_own_chat_type() {
+        let now = Utc::now();
+        let mut message = inbound_metadata(
+            "bot-1",
+            "route-1",
+            "user-1",
+            "lark",
+            &InboundMessage {
+                platform_message_id: "om_group".to_string(),
+                conversation_id: "oc_group".to_string(),
+                conversation_type: "group".to_string(),
+                sender_platform_id: "ou_bob".to_string(),
+                sender_display_name: None,
+                content_type: "text".to_string(),
+                text: Some("hi".to_string()),
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+                thread_id: None,
+                raw_data: serde_json::json!({}),
+            },
+            "key-1",
+            "msg-group",
+        );
+        // A default route created for private chats answers a group message.
+        let route = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
+            id: "route-1".to_string(),
+            user_id: "user-1".to_string(),
+            channel_bot_id: Some("bot-1".to_string()),
+            platform: "lark".to_string(),
+            platform_conversation_id: "*".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: "key-1".to_string(),
+            default_agent: true,
+            allow_agent_initiated: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let group = InboundMessage {
+            platform_message_id: "om_group".to_string(),
+            conversation_id: "oc_group".to_string(),
+            conversation_type: "group".to_string(),
+            sender_platform_id: "ou_bob".to_string(),
+            sender_display_name: None,
+            content_type: "text".to_string(),
+            text: Some("hi".to_string()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({}),
+        };
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &group,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.conversation.conversation_type, "group");
+        assert_eq!(payload.conversation.platform_id, "oc_group");
+        assert!(
+            serde_json::to_value(&payload)
+                .unwrap()
+                .get("thread_context")
+                .is_none(),
+            "legacy callbacks omit the additive metadata field"
+        );
+        let facts = crate::models::channel_thread::ChannelThreadFacts {
+            version: 1,
+            kind: crate::models::channel_thread::ThreadKind::Native,
+            chat_id: "oc_group".into(),
+            message_id: "om_group".into(),
+            root_id: Some("om_root".into()),
+            ..Default::default()
+        };
+        message.thread_context = Some(facts.clone());
+        let mut untrusted = group.clone();
+        untrusted.raw_data = serde_json::json!({"thread_context": {"root_id": "wrong-root"}});
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &untrusted,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.thread_context, Some(facts));
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["thread_context"]["root_id"],
+            "om_root",
+            "only stored normalized facts populate the signed callback field"
+        );
+        // An adapter that does not say keeps the route's type.
+        let unknown = InboundMessage {
+            conversation_type: String::new(),
+            ..group
+        };
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &unknown,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.conversation.conversation_type, "private");
+    }
+
     // ─── forward_to_agent HTTP behavior ───
     //
     // Per ADR-013 / NyxID#221: only 202 is a success, 200+body is tolerated
@@ -1188,6 +1613,8 @@ mod tests {
 
     fn test_payload() -> CallbackPayload {
         CallbackPayload {
+            thread_context: None,
+            activity: None,
             message_id: "msg-test".to_string(),
             correlation_id: String::new(),
             platform: "device".to_string(),
@@ -1222,6 +1649,7 @@ mod tests {
         // Only fields touched by forward_to_agent matter. The rest are
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
+            auth_device_eight_char_codes: false,
             port: 0,
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),
@@ -1268,6 +1696,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1278,6 +1707,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
@@ -1354,6 +1784,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -1365,7 +1796,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }

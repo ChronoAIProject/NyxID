@@ -192,6 +192,11 @@ async fn load_active_published_endpoint(
     };
     let now = Utc::now();
     Ok(Some(ServiceEndpoint {
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
+        async_operation: None,
         target_id: endpoint.target_id,
         id: endpoint.endpoint_id,
         service_id: user_service_id.to_string(),
@@ -1154,6 +1159,24 @@ pub async fn mark_pre_dispatch_rejected(
     reject_execution(db, &reservation.execution_id, detail).await;
 }
 
+/// Only for a sender's proven refusal before any operation dispatch. A transport
+/// error or cancellation after send must retain the uncertain-outcome contract.
+pub(crate) async fn mark_send_rejected(
+    db: &mongodb::Database,
+    reservation: &DurableExecutionReservation,
+) {
+    let now = bson::DateTime::now();
+    let _ = db
+        .collection::<DurableOperationExecution>(EXECUTIONS)
+        .update_one(
+            doc! {"_id": &reservation.execution_id, "status": {"$in": ["reserved", "dispatched"]}},
+            doc! {"$set": {"status": "rejected", "downstream_attempts": 0_i64,
+            "terminal_detail": "assistant authority changed before actual send",
+            "terminal_at": now, "updated_at": now}},
+        )
+        .await;
+}
+
 pub async fn mark_terminal(
     db: &mongodb::Database,
     reservation: &DurableExecutionReservation,
@@ -1535,6 +1558,11 @@ mod tests {
     fn endpoint() -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            data_scope: None,
+            cost_class: None,
+            execution: Default::default(),
+            publication: Default::default(),
+            async_operation: None,
             target_id: None,
             id: Uuid::new_v4().to_string(),
             service_id: Uuid::new_v4().to_string(),
@@ -1586,11 +1614,15 @@ mod tests {
             is_active: true,
             created_at: now,
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![user_service_id.to_string()],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,
@@ -1884,6 +1916,7 @@ mod tests {
         let user_service_id = Uuid::new_v4().to_string();
         let user_endpoint_id = Uuid::new_v4().to_string();
         let template = ServiceEndpoint {
+            async_operation: None,
             path: "/items/{item_id}:publish".to_string(),
             ..endpoint()
         };

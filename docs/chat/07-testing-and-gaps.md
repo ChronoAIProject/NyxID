@@ -27,7 +27,11 @@ The fixture serves the real browser endpoints:
 - `RUN_FINISHED`, `RUN_ERROR`, `RUN_STOPPED`, malformed frames, `[DONE]`, and
   mixed line endings.
 
-The app-wide `frontend/src/lib/mock-data.ts` remains separate and unchanged.
+The app-wide `frontend/src/lib/mock-data.ts` also delegates connector and channel
+setup requests to `mock-setup-journeys.ts`, so chat links use the real forms with
+local, stateful responses. Opening a form never completes the setup. Connector
+requests get fresh tokens; only explicit form submission connects the service
+or creates the bot. NyxBot resumes a waiting bot request after that submission.
 The developer mock-scenarios action now selects HTTP fixture responses and
 fixture-world state; it no longer intercepts a transport or emits synthetic
 turn events.
@@ -93,10 +97,30 @@ The browser specifications are:
 | `defects.spec.ts` | start/silent-turn escape, missing deep links, projection gaps, approval persistence and continuity |
 | `nav.spec.ts` | shared shell and sidebar navigation |
 | `wave2-service-actions.spec.ts` | full v4 service-action UI flows |
+| `assistant-link-modals.spec.ts` | both engines: pending connector and channel dialogs, idle/dismiss/reopen, explicit submit, decline, fresh requests, and no chat navigation or extra tab |
 
 The helpers use accessible names plus `[data-assistant-halo]`,
 `[data-streaming-dots]`, and `[data-empty-turn-error]`. Mutation-observer
 continuity probes catch one-render gaps that final-state assertions would miss.
+
+### Interactive local setup demo
+
+Start the frontend with `npm run dev -- --host 127.0.0.1 --port 43891 --strictPort`
+and open `http://127.0.0.1:43891/assistant?mock=1&nyxbot=1`. The optional `nyxbot=1`
+selects the NyxBot fixture for that browser tab, including reloads; `nyxbot=0`
+selects the older actor fixture. The plain `?mock=1` entry enables scenario
+matching automatically on the first fixture load.
+
+- Send `connect to my github`, then click **Connect GitHub**. The modal remains
+  pending until you enter `demo-github-token` and click **Approve & connect**.
+  **Decline** cancels this request; asking again creates a fresh request.
+- Send `set up a telegram bot`, then click **Telegram bot setup**. Enter
+  `demo-bot-token` and click **Add Bot**, then **Done**. Waiting or cancelling
+  the modal does not create the bot or resume the waiting chat.
+
+These are local API fixtures. They make no GitHub or Telegram calls, and do not
+test live OAuth or provider credentials. Both standalone setup routes continue
+to use the same reusable components.
 
 ## Producer contract
 
@@ -151,31 +175,48 @@ unless the URI explicitly selects a mode. This supports Docker's published 27019
 port when the replica set advertises its internal 27017 port; transaction tests
 still verify a writable replica set and do not skip tests.
 
-## Chat authority and access-mode coverage
+## Chat authority and NyxBot agent coverage
 
 `assistant_authority_tests.rs` exercises per-conversation admission rollback,
 service/account/action lifecycle, concurrent decisions, digest/tool/key/conversation
 binding, expiry, one-time use, denial retention until a new user message, rotation
-invalidation and bounded history. The complete 22-tool native inventory is exercised
-for authorization/refusal/audit and successful service-layer dispatch in both Ask
-and Full modes. Tests cover assistant-key self-widening and route-agent refusals,
-service lifecycle, scoped bindings, routes, nodes and approvals. Mode tests prove
-both key transitions, retained service allowlists, live-turn refusal, full draft
-provisioning and mode retention through rotation/replacement. Migration tests
-cover legacy Ask defaults and replacement of the unique owner credential index.
-Deletion tests prove child revocation, binding cleanup and after-commit audit;
-Full-mode tests also hide another owner's existing key and reject self-widening.
+invalidation and bounded history. Gate tests run through a specialist agent's
+thread (requests route to NyxBot, carry the requesting text, and grants persist
+on the agent); NyxBot tests prove Full authority on provision, rotation and
+replacement, no consent cards, and destructive action confirmation that the owner
+can turn off. The complete 22-tool native inventory is exercised for
+authorization/refusal/audit and successful service-layer dispatch; specialists
+reach only read-only tools. Migration tests adopt a legacy Ask row as a NyxBot
+thread with Full access, expire stale consent cards, and replace the unique owner
+credential index. Deletion tests prove child revocation, binding cleanup and
+after-commit audit; key tests hide another owner's existing key and reject
+self-widening.
 
-`mcp_chat_authority_tests.rs` verifies visible ungranted services and search tools,
-auto-connected access, native tool metadata, JSON-RPC success envelopes containing
-`isError` refusals, Allow followed by real upstream execution, Deny, and Full mode
-execution/audit without cards, including request audits for execution/mutation and suppression for read-only discovery.
-Platform-source tests verify the Ask-mode consent card, execution after Allow, and real
-Full-mode execution through both call paths. Node-route tests prove service consent
-alone permits dispatch. Defensive service decisions reject catalog, missing, disabled
-and other-owner IDs; assistant-key deletion is refused in both modes.
-Handler tests verify human/flag/owner gates, 409,
-secret-free acknowledgement and key DTOs, pending counts and decision/mode audits.
+`mcp_chat_authority_tests.rs` verifies visible ungranted services and search tools
+for specialists (auto-connected services need a grant too), native tool metadata,
+JSON-RPC success envelopes containing `isError` refusals, NyxBot's wake-up event
+for a new request, Allow followed by real upstream execution, Deny, and NyxBot
+execution/audit without cards, including request audits for execution/mutation
+and suppression for read-only discovery. Platform-source tests verify a
+specialist's request, execution after Allow, and NyxBot execution through both
+call paths. Node-route tests prove service consent alone permits dispatch.
+Handler tests verify human/flag/owner gates, 409, the retired mode route's 410,
+secret-free acknowledgement and key DTOs, and pending counts per thread.
+
+`handlers/assistant_team_tests.rs` runs real detached turns against a NyxAgent
+stand-in: NyxBot is one agent across threads with shared memory (and memory
+refuses credentials); specialist work runs in its home thread and reports to the
+NyxBot thread that assigned it; specialists keep memory but cannot use team
+tools; destroy revokes keys and leaves read-only threads, and purge deletes them;
+owner-created specialists, limits and grant resolution across threads;
+permission requests reaching NyxBot and a decision resuming the specialist;
+loop guards; direct chats that never wake NyxBot but appear in its next
+instructions. `handlers/nyxbot_tests.rs` covers the gateway provider (binding
+authentication and ownership, `conversation_not_found`, stranger refusal without
+a turn, link-code owner linking, an owner turn answered as a committed message
+item, busy-chat queueing, idempotent retries, verbatim event context,
+management test turns) and the direct relay's signed-callback verification and
+deduplication.
 
 Frontend tests cover acknowledgement parsing/positioning, explicit mutations,
 750 ms throttling, pending-card polling, no automatic message, compact decided

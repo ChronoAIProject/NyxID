@@ -4,6 +4,9 @@ pub type Result<T> = std::result::Result<T, self::Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error(transparent)]
+    Tls(#[from] crate::tls::TlsError),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

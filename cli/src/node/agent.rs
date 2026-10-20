@@ -91,6 +91,8 @@ pub async fn cmd_register(
 
 pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Result<()> {
     init_tracing(log_level);
+    // Invalid explicit trust configuration is permanent for this process.
+    crate::tls::shared_config()?;
 
     let config_dir = config::resolve_config_dir(config_path);
     let config_file = config_dir.join("config.toml");

@@ -1,3 +1,6 @@
+mod billing;
+pub use billing::*;
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -6,7 +9,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "nyxid",
     about = "NyxID CLI -- manage your NyxID account from the terminal",
-    version
+    version,
+    after_help = crate::tls::ENV_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -17,6 +21,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Control NyxBot with the owner's first-party session (API keys are rejected)
+    Nyxbot {
+        #[command(subcommand)]
+        command: crate::commands::nyxbot::NyxbotCommands,
+    },
     /// Log in to NyxID (opens browser by default)
     Login(LoginArgs),
     /// Log out and clear stored token
@@ -56,6 +65,11 @@ pub enum Commands {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommands,
+    },
+    /// Browse NyxID-provided tools
+    Tools {
+        #[command(subcommand)]
+        command: ToolsCommands,
     },
     /// List configured service keys and their credential binding
     Keys(AuthArgs),
@@ -219,6 +233,9 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Prefill the service URL in the hosted connection form
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
     /// Additional OAuth scopes to request on top of the provider's defaults
     /// (repeatable, comma- or space-separated). The upstream provider decides
     /// whether to grant them. Example: --scope "public_repo,read:org"
@@ -311,6 +328,18 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Configure billing, exact rates and ledger integrity
+    Billing {
+        #[command(subcommand)]
+        command: AdminBillingCommands,
+    },
+    /// Inspect platform usage in a bounded time window
+    Usage(AdminUsageArgs),
+    /// Manage credit benefits
+    Credits {
+        #[command(subcommand)]
+        command: AdminCreditsCommands,
+    },
     /// Manage NyxID-owned messaging platform credentials
     PlatformCredentials {
         #[command(subcommand)]
@@ -325,6 +354,231 @@ pub enum AdminCommands {
     User {
         #[command(subcommand)]
         command: AdminUserCommands,
+    },
+    /// Create and edit OAuth / API-key providers (Admin or Catalog Manager)
+    Provider {
+        #[command(subcommand)]
+        command: AdminProviderCommands,
+    },
+    /// Prepare Tools with a manifest or wizard (publication is Admin-only)
+    Tools {
+        #[command(subcommand)]
+        command: AdminToolsCommands,
+    },
+    /// Add, apply and validate catalog services from a manifest (Admin or Catalog Manager)
+    Catalog {
+        #[command(subcommand)]
+        command: AdminCatalogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminProviderCommands {
+    /// List active providers with their OAuth client status
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show one provider by ID or slug
+    Show {
+        /// Provider ID or slug
+        provider: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Create a provider; without --file, a wizard asks for each setting
+    Create {
+        /// Provider definition file (JSON or YAML, no secrets)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Read the client ID from this environment variable (managed providers need it at creation)
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a provider; without --file, a wizard offers the current values
+    Update {
+        /// Provider ID or slug
+        provider: String,
+        /// Fields to change (JSON or YAML, no secrets)
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Send the OAuth client with the change (prompts unless env vars are given). A Catalog
+        /// Manager changing URLs or token settings on a provider whose client someone else set
+        /// must re-enter that client; an Admin sending a different client replaces it
+        #[arg(long)]
+        with_client: bool,
+        /// Read the client ID from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long, requires = "with_client")]
+        client_secret_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set the NyxID-managed OAuth client ID and secret (prompts unless env vars are given)
+    SetCredentials {
+        /// Provider ID or slug
+        provider: String,
+        /// Read the client ID from this environment variable
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Link a catalog service to a provider
+    Link {
+        /// Provider ID or slug
+        provider: String,
+        /// Catalog service ID or slug
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Deactivate a provider and revoke its user tokens (Admin only)
+    Delete {
+        /// Provider ID or slug
+        provider: String,
+        /// Confirm the deletion
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct ManifestArgs {
+    /// Manifest file (JSON or YAML) with `providers` and `services` lists
+    #[arg(long)]
+    pub file: std::path::PathBuf,
+    /// Value for a manifest `${name}` variable, as name=value (repeatable)
+    #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
+    pub vars: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum AdminCatalogCommands {
+    /// Upload a static SVG and set the linked provider's catalog icon
+    Icon {
+        /// Provider ID or slug (all linked services inherit this icon)
+        provider: String,
+        /// Local SVG file (maximum 128 KiB)
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Interactive wizard: create a provider and service, set the OAuth client, then validate
+    Add {
+        /// Print the proposed changes without writing or reading credentials
+        #[arg(long)]
+        dry_run: bool,
+        /// Start from a manifest instead of answering every question
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        /// Start from a built-in manifest (zoho-mail or telnyx-platform)
+        #[arg(long)]
+        template: Option<String>,
+        /// Value for a manifest `${name}` variable, as name=value (repeatable)
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// Write the manifest built by the wizard to this path
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        /// Read the client ID from this environment variable (single-provider manifests)
+        #[arg(long)]
+        client_id_env: Option<String>,
+        /// Read the client secret from this environment variable (single-provider manifests)
+        #[arg(long)]
+        client_secret_env: Option<String>,
+        /// Do not set OAuth client credentials now
+        #[arg(long)]
+        skip_credentials: bool,
+        /// Apply without asking for confirmation
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Create or update every provider and service in a manifest; safe to rerun
+    Apply {
+        /// Allow disabling live platform access or clearing its owner allowlist
+        #[arg(long)]
+        allow_access_change: bool,
+        #[command(flatten)]
+        manifest: ManifestArgs,
+        /// Show the plan without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Check that each manifest service is linked, configured and ready to connect
+    Validate {
+        #[command(flatten)]
+        manifest: ManifestArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminToolsCommands {
+    /// Upload and attach an immutable static SVG to a provider-less Tool
+    Icon {
+        tool: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Onboard a twin or new HTTP API; save only secret-free metadata
+    Add {
+        #[arg(long, conflicts_with = "template")]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        skip_credentials: bool,
+        #[arg(long)]
+        credential_env: Option<String>,
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reconcile by slug, without rotating credentials; reruns are no-ops
+    Apply {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read-only readiness report (exit 0 ready, 2 pending, 1 failed)
+    Validate {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long = "set", alias = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
     },
 }
 
@@ -399,6 +653,31 @@ pub enum AdminUserCommands {
         id: String,
         /// New platform role
         #[arg(long, value_parser = ["admin", "operator", "user"])]
+        role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List a user's assigned roles and effective permissions
+    Roles {
+        /// User ID (UUID) or exact email
+        user: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Assign a role such as catalog_manager or credits_manager (Operators only gain its powers)
+    GrantRole {
+        /// User ID (UUID) or exact email
+        user: String,
+        /// Role slug (e.g. catalog_manager) or role ID
+        role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove a directly assigned role
+    RevokeRole {
+        /// User ID (UUID) or exact email
+        user: String,
+        /// Role slug or role ID
         role: String,
         #[command(flatten)]
         auth: AuthArgs,
@@ -496,6 +775,12 @@ impl BaseUrlArgs {
 
 #[derive(Args, Clone)]
 pub struct DoctorArgs {
+    /// NyxID API base URL to check (otherwise the selected profile's saved URL)
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// Saved CLI profile to inspect
+    #[arg(long)]
+    pub profile: Option<String>,
     /// Emit machine-readable JSON
     #[arg(long)]
     pub json: bool,
@@ -597,6 +882,10 @@ pub enum PublicCommands {
 // ---- Login ----
 
 #[derive(Args, Default)]
+#[command(
+    after_help = crate::tls::ENV_HELP,
+    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete and user_code separately with the human.\nThey must paste the code into the page and finish the browser review.\nNever append the code to the URL. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
+)]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
     #[arg(long, env = "NYXID_URL", global = true)]
@@ -622,7 +911,7 @@ pub struct LoginArgs {
     /// Agent profile name (isolates tokens)
     #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
-    /// Print the authorization challenge and exit without polling or opening a browser
+    /// Print a login URL and a separate code for manual entry, then exit without polling or opening a browser; combine with --output json for agents
     #[arg(long, conflicts_with_all = ["password", "code"])]
     pub no_wait: bool,
     /// Structured login events on stdout; credentials are never printed
@@ -631,6 +920,8 @@ pub struct LoginArgs {
     /// Redeem a one-time code created in the web console or mobile app; omit its value for a hidden prompt
     #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["password", "device", "agent_key"])]
     pub code: Option<String>,
+    #[command(flatten)]
+    pub hints: crate::auth::login_hints::LoginHintArgs,
     #[command(subcommand)]
     pub command: Option<LoginCommands>,
 }
@@ -822,11 +1113,44 @@ pub enum TelemetryCommands {
 
 #[derive(Subcommand)]
 pub enum CatalogCommands {
+    /// Manage catalog endpoint operations
+    Endpoint {
+        #[command(subcommand)]
+        command: CatalogEndpointCommands,
+    },
+    /// Discover operations from the configured OpenAPI URL
+    Discover {
+        /// Catalog service UUID or slug
+        service: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Change publication for named operations
+    Publish {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Operation name to transition (repeatable, at most 200)
+        #[arg(long = "operation", required = true)]
+        operations: Vec<String>,
+        /// Publication state to apply atomically to all selected operations
+        #[arg(long, default_value = "published", value_parser = ["published", "paused", "draft", "validated"])]
+        state: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List the controlled topic vocabulary
+    Topics {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List available services from the catalog
     List {
         /// Include all active services (including system services without auth)
         #[arg(long)]
         all: bool,
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -834,6 +1158,9 @@ pub enum CatalogCommands {
     Show {
         /// Service slug (e.g., llm-openai)
         slug: String,
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -841,6 +1168,9 @@ pub enum CatalogCommands {
     Endpoints {
         /// Service slug (e.g., llm-openai)
         slug: String,
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -852,6 +1182,24 @@ pub enum CatalogCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
+    /// Catalog category: provider, connection, or internal
+    #[arg(long, value_parser = ["provider", "connection", "internal"])]
+    pub service_category: Option<String>,
+    /// Catalog offering: AI service or Tool
+    #[arg(long, value_parser = ["ai_service", "tool"])]
+    pub offering_kind: Option<String>,
+    /// Controlled topic slug (repeatable; replaces the list on update)
+    #[arg(long = "topic", conflicts_with = "clear_topics")]
+    pub topics: Vec<String>,
+    /// Clear all catalog topics on update
+    #[arg(long)]
+    pub clear_topics: bool,
+    /// API operator name for the catalog offering
+    #[arg(long)]
+    pub supplier: Option<String>,
+    /// Clear the catalog supplier metadata (catalog updates only)
+    #[arg(long, conflicts_with = "supplier")]
+    pub clear_supplier: bool,
     /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
     #[arg(long)]
     pub catalog_admin: bool,
@@ -896,6 +1244,54 @@ pub struct CatalogServiceArgs {
     /// Remove all additional platform-key components, preserving the primary price
     #[arg(long, conflicts_with = "platform_key_free")]
     pub platform_key_clear_components: bool,
+    /// BYOK operation price, repeatable (<operation>=<price>); replaces the Requests
+    /// base price for that endpoint name or declared channel operation once synced
+    #[arg(long, value_parser = crate::commands::billing_units::operation, conflicts_with_all = ["byok_free", "byok_clear_operations"])]
+    pub byok_operation: Vec<String>,
+    /// Remove all BYOK operation prices, preserving the base price
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_clear_operations: bool,
+    /// Platform-key operation price, repeatable (<operation>=<price>)
+    #[arg(long, value_parser = crate::commands::billing_units::operation, conflicts_with_all = ["platform_key_free", "platform_key_clear_operations"])]
+    pub platform_key_operation: Vec<String>,
+    /// Remove all platform-key operation prices, preserving the base price
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_clear_operations: bool,
+}
+
+#[derive(Subcommand)]
+pub enum ServicePreferenceCommands {
+    /// Show the authorized saved order
+    Show {
+        #[arg(long)]
+        group: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set this catalog group's agent order; NyxBot enforces personal-first execution
+    Set {
+        #[arg(long)]
+        group: String,
+        #[arg(value_name = "ID_OR_SLUG", required = true)]
+        services: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reset this group's order to the server default
+    Reset {
+        #[arg(long)]
+        group: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Release orders for connections you can no longer access
+    ReleaseHidden {
+        /// Confirm removing unavailable orders; they must be reset if access returns
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -910,6 +1306,11 @@ pub struct CatalogServiceArgs {
 // not load-bearing — accept the lint here.
 #[allow(clippy::large_enum_variant)]
 pub enum ServiceCommands {
+    /// Set per-service agent order (enforced for NyxBot, advisory for other clients)
+    Preference {
+        #[command(subcommand)]
+        command: ServicePreferenceCommands,
+    },
     /// Add a service from catalog or custom endpoint
     Add {
         #[command(flatten)]
@@ -925,6 +1326,9 @@ pub enum ServiceCommands {
         /// Custom slug for this service (omit to auto-derive from the label/catalog slug; must be unique per user).
         #[arg(long = "slug", value_name = "SLUG")]
         custom_slug: Option<String>,
+        /// Clone a catalog service into a credential-free tool twin
+        #[arg(long, requires = "catalog_admin")]
+        twin_of: Option<String>,
         /// Use OAuth flow for authentication
         #[arg(long)]
         oauth: bool,
@@ -1281,6 +1685,7 @@ pub enum PoolStrategyArg {
     #[value(name = "round_robin", alias = "round-robin")]
     RoundRobin,
     Weighted,
+    Priority,
 }
 
 impl PoolStrategyArg {
@@ -1288,8 +1693,95 @@ impl PoolStrategyArg {
         match self {
             Self::RoundRobin => "round_robin",
             Self::Weighted => "weighted",
+            Self::Priority => "priority",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PoolRetryCauseArg {
+    #[value(name = "connect_error")]
+    ConnectError,
+    #[value(name = "node_offline")]
+    NodeOffline,
+    #[value(name = "transport_error")]
+    TransportError,
+    Timeout,
+    #[value(name = "http_401", alias = "401")]
+    Http401,
+    #[value(name = "http_403", alias = "403")]
+    Http403,
+    #[value(name = "http_408", alias = "408")]
+    Http408,
+    #[value(name = "http_429", alias = "429")]
+    Http429,
+    #[value(name = "http_500", alias = "500")]
+    Http500,
+    #[value(name = "http_502", alias = "502")]
+    Http502,
+    #[value(name = "http_503", alias = "503")]
+    Http503,
+    #[value(name = "http_504", alias = "504")]
+    Http504,
+    #[value(name = "http_529", alias = "529")]
+    Http529,
+    /// Expand to http_500,http_502,http_503,http_504,http_529 only.
+    #[value(name = "5xx")]
+    ServerErrors,
+    /// Clear all retry causes; cannot be combined with another cause.
+    None,
+}
+
+impl PoolRetryCauseArg {
+    pub fn causes(self) -> &'static [&'static str] {
+        match self {
+            Self::ConnectError => &["connect_error"],
+            Self::NodeOffline => &["node_offline"],
+            Self::TransportError => &["transport_error"],
+            Self::Timeout => &["timeout"],
+            Self::Http401 => &["http_401"],
+            Self::Http403 => &["http_403"],
+            Self::Http408 => &["http_408"],
+            Self::Http429 => &["http_429"],
+            Self::Http500 => &["http_500"],
+            Self::Http502 => &["http_502"],
+            Self::Http503 => &["http_503"],
+            Self::Http504 => &["http_504"],
+            Self::Http529 => &["http_529"],
+            Self::ServerErrors => &["http_500", "http_502", "http_503", "http_504", "http_529"],
+            Self::None => &[],
+        }
+    }
+}
+
+#[derive(Args, Default)]
+#[group(id = "inline_failover", multiple = true)]
+pub struct PoolFailoverArgs {
+    /// Retry causes, comma-separated or repeated. Numeric HTTP aliases are accepted.
+    /// 5xx expands to 500/502/503/504/529; none clears causes. Replay safety is unchanged.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "CAUSE,...")]
+    pub retry_on: Vec<PoolRetryCauseArg>,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+    pub max_attempts: Option<u8>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1_000..=300_000))]
+    pub per_attempt_timeout_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1_000..=600_000))]
+    pub overall_deadline_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_replay_body_bytes: Option<u32>,
+    /// Allow replay after ambiguous dispatch, including unsafe POSTs; may duplicate work/charges.
+    /// Use =false to turn it off. Omit to preserve the saved value.
+    #[arg(long, visible_alias = "retry-non-idempotent", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub retry_ambiguous_dispatch: Option<bool>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3_600_000))]
+    pub cooldown_base_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3_600_000))]
+    pub cooldown_max_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub cooldown_failures_to_open: Option<u32>,
+    /// Honor upstream Retry-After during cooldown; use =false to turn it off.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub honor_retry_after: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -1311,6 +1803,16 @@ pub enum PoolCommands {
         /// Service slug or ID to add as an initial member. Repeatable.
         #[arg(long = "member", value_name = "SERVICE_SLUG_OR_ID")]
         members: Vec<String>,
+        /// JSON array of member objects (model, priority, weight, compatibility).
+        #[arg(long, conflicts_with = "members")]
+        members_file: Option<std::path::PathBuf>,
+        #[arg(long, value_parser = ["same_api", "ai_chat"], default_value = "same_api")]
+        contract: String,
+        #[arg(long, value_parser = ["round_robin", "weighted"], default_value = "round_robin")]
+        tier_balance: String,
+        /// JSON failover policy. Omit to use server defaults for priority pools.
+        #[arg(long)]
+        failover_file: Option<std::path::PathBuf>,
         /// Create this pool under the given org (you must be an admin of that org).
         #[arg(
             long,
@@ -1337,17 +1839,28 @@ pub enum PoolCommands {
     Show {
         /// Pool slug or ID
         pool: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
+        /// Operation whose cooldowns to show. Omit path for the contract default.
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// Delete a service pool
     Delete {
-        /// Pool ID
+        /// Pool slug or ID
         pool_id: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Add a service member to a pool
+    /// Add or update a service member; omitted settings are preserved
     AddMember {
         /// Pool slug or ID
         pool: String,
@@ -1360,6 +1873,18 @@ pub enum PoolCommands {
         /// Enable or disable this member
         #[arg(long)]
         enabled: Option<bool>,
+        #[arg(long)]
+        priority: Option<u32>,
+        #[arg(long, conflicts_with = "clear_model")]
+        model: Option<String>,
+        #[arg(long)]
+        clear_model: bool,
+        /// Explicitly declare this custom/different catalog API compatible.
+        #[arg(long)]
+        same_api_compatible: Option<bool>,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1370,6 +1895,9 @@ pub enum PoolCommands {
         /// Service slug or ID
         #[arg(long)]
         service: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1380,6 +1908,89 @@ pub enum PoolCommands {
         /// Routing strategy
         #[arg(value_enum)]
         strategy: PoolStrategyArg,
+        /// Balancing within each priority tier.
+        #[arg(long, value_parser = ["round_robin", "weighted"])]
+        tier_balance: Option<String>,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Atomically edit configuration, including members. JSON null clears nullable fields.
+    Update {
+        pool: String,
+        /// JSON update object. A missing expected_revision is filled from the current pool.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Merge supplied policy flags, replace from JSON, restore defaults, or use one attempt.
+    SetFailover {
+        pool: String,
+        /// Replace the policy with a JSON object; omitted fields use server defaults. Null restores defaults.
+        #[arg(long, conflicts_with_all = ["disable", "defaults", "inline_failover"], required_unless_present_any = ["disable", "defaults", "inline_failover"])]
+        file: Option<std::path::PathBuf>,
+        /// Replace policy with max_attempts=1; other policy fields use server defaults.
+        #[arg(long, conflicts_with_all = ["defaults", "inline_failover"])]
+        disable: bool,
+        /// Clear the saved override (JSON null), restoring priority defaults.
+        #[arg(long, conflicts_with = "inline_failover")]
+        defaults: bool,
+        #[command(flatten)]
+        settings: PoolFailoverArgs,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Inspect candidate eligibility before creation or against an existing pool.
+    Candidates {
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long, value_parser = ["same_api", "ai_chat"])]
+        contract: Option<String>,
+        #[arg(long, value_enum)]
+        strategy: Option<PoolStrategyArg>,
+        /// Optional operation method. Omit method/path to browse inventory.
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
+        /// Pagination cursor from the previous response.
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Inspect cooldown for the effective member credentials and operation.
+    Health {
+        pool: String,
+        #[arg(long, default_value = "POST")]
+        method: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reset all member cooldowns, or only one member.
+    ResetHealth {
+        pool: String,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1526,12 +2137,17 @@ impl BillingUsagePeriodArg {
 
 #[derive(Subcommand)]
 pub enum BillingCommands {
+    /// Inspect self-scoped managed execution metadata
+    Executions {
+        #[command(subcommand)]
+        command: BillingExecutionCommands,
+    },
     /// Show or provision the billing wallet
     Wallet {
         /// Provision the wallet if it does not exist
         #[arg(long)]
         provision: bool,
-        /// Owner ID to manage, usually an org user ID (org admin access required)
+        /// Owner ID (org admin required); uses POST and provisions if missing
         #[arg(long)]
         owner_id: Option<String>,
         #[command(flatten)]
@@ -1689,6 +2305,33 @@ pub enum ApiKeyCommands {
         id: String,
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show or limit the operations a key may call within each service.
+    /// Without --service, lists every service's operations and selection.
+    Operations {
+        /// Key ID or name
+        id: String,
+        /// Service slug or UUID to change
+        #[arg(long)]
+        service: Option<String>,
+        /// Allow a catalog operation by its ID from the listing (repeatable)
+        #[arg(long = "allow-endpoint", requires = "service")]
+        allow_endpoints: Vec<String>,
+        /// Allow METHOD:/path on a service without catalog operations (repeatable)
+        #[arg(long = "allow", requires = "service")]
+        allow_rules: Vec<String>,
+        /// Remove the restriction so every operation is allowed
+        #[arg(long, requires = "service", conflicts_with_all = ["allow_endpoints", "allow_rules", "deny_all"])]
+        all: bool,
+        /// Block every operation on the service
+        #[arg(long = "deny-all", requires = "service", conflicts_with_all = ["allow_endpoints", "allow_rules"])]
+        deny_all: bool,
+        /// JSON file of value limits keyed by operation ID ({"<id>": {"path": …, "query": …, "body": …}}).
+        /// Without it, saved limits are kept for operations that stay selected.
+        #[arg(long, requires = "allow_endpoints")]
+        inputs: Option<std::path::PathBuf>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2041,6 +2684,46 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Prepare the protected recipient request for managed platform attestation.
+    #[command(hide = true)]
+    ManagedPrepare(crate::node::managed_runtime::Prepare),
+    /// Internal fixed-image bootstrap; credentials are delivered sealed to this
+    /// Pod's private key and never accepted from an ordinary registration token.
+    #[command(hide = true)]
+    ManagedStart(crate::node::managed_runtime::Start),
+    /// Register, enable machine access and start its daemon in one step.
+    Setup(crate::node::machine::setup::Setup),
+    #[command(hide = true)]
+    MachineBrowserInstall {
+        #[arg(long)]
+        port: u16,
+    },
+    /// Manage this node's opt-in machine capabilities.
+    Machine {
+        #[command(subcommand)]
+        command: crate::node::machine::commands::Commands,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    #[command(hide = true)]
+    MachineWorker,
+    #[command(hide = true)]
+    MachineBrowserRefresh {
+        profile: std::path::PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install or run the independent verified machine updater.
+    MachineUpdater {
+        #[command(subcommand)]
+        command: crate::commands::machine_native_update::Command,
+    },
+    #[command(hide = true)]
+    MachineTransferWorker,
+    #[command(hide = true)]
+    MachineNativeHost { origin: String },
     // --- User-side commands (API calls) ---
     /// List user's nodes
     List {
@@ -2436,6 +3119,9 @@ pub enum DeviceCommands {
 
 #[derive(Args, Clone)]
 pub struct NodeDockerArgs {
+    /// Use the machine image with a persistent isolated desktop and workspace.
+    #[arg(long)]
+    pub machine: bool,
     /// Agent profile name (each profile runs as a separate container)
     #[arg(long, env = "NYXID_PROFILE")]
     pub profile: Option<String>,
@@ -2443,8 +3129,11 @@ pub struct NodeDockerArgs {
 
 #[derive(Subcommand)]
 pub enum NodeDockerCommands {
-    /// Build the node agent Docker image
-    Build,
+    /// Build the node agent or machine Docker image
+    Build {
+        #[arg(long)]
+        machine: bool,
+    },
     /// Start a node agent container (mounts the profile's config directory)
     Start {
         #[command(flatten)]
@@ -4046,6 +4735,9 @@ pub enum ProxyCommands {
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
+        /// Wrap the nonstreaming response in JSON (requires --output json)
+        #[arg(long, conflicts_with = "stream")]
+        envelope: bool,
         /// Use service ID instead of slug
         #[arg(long)]
         by_id: bool,
@@ -4167,6 +4859,35 @@ pub enum OpenClawCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
+    /// List MCP tools and input schemas through Streamable HTTP
+    Tools {
+        /// Service slug; enumerate all operations from the authoritative catalog
+        #[arg(long)]
+        service: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Invoke an MCP tool once using a saved human session
+    Call {
+        /// Fully qualified MCP tool name
+        tool: String,
+        /// JSON object or @path to a JSON arguments file
+        #[arg(long)]
+        args: String,
+        /// Include the tool name and RFC3339 execution correlation bounds
+        #[arg(long)]
+        envelope: bool,
+        /// Total timeout in seconds; 0 waits indefinitely, like proxy request
+        #[arg(long, default_value_t = 0)]
+        timeout_secs: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Discover services and operations visible to the current credential, including input schemas
+    Discover {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Generate MCP configuration for AI tools
     Config {
         /// Target tool: cursor, claude-code, vscode, generic
@@ -4848,6 +5569,46 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Create a one-time hosted setup link, optionally with a completion webhook
+    ConnectLink {
+        /// Platform ID from channel-bot platforms
+        platform: String,
+        /// Fixed bot name for the connection request
+        #[arg(long)]
+        label: String,
+        /// Organization UUID, slug, or display name; omit for personal ownership
+        #[arg(long)]
+        org: Option<String>,
+        /// Browser return URL after the user acknowledges setup
+        #[arg(long)]
+        callback_url: Option<String>,
+        /// Public HTTPS endpoint for signed completion, cancellation, or expiry events
+        #[arg(long, requires = "webhook_signing_secret_file")]
+        webhook_url: Option<String>,
+        /// Save the one-time webhook signing secret to a new private file
+        #[arg(long, requires = "webhook_url")]
+        webhook_signing_secret_file: Option<std::path::PathBuf>,
+        /// Link lifetime in seconds (60–3600, default 900)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(60..=3600))]
+        expires_in: Option<i64>,
+        /// Name of the application requesting this connection
+        #[arg(long)]
+        requested_by: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel an unstarted bot setup request
+    CancelConnectLink {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read the current result and webhook delivery state of a bot setup link
+    ConnectLinkStatus {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Discover supported platforms, registration fields, and media capabilities
     Platforms {
         #[command(flatten)]
@@ -4916,8 +5677,8 @@ pub enum ChannelBotCommands {
     Update {
         /// Bot ID
         id: String,
-        /// X events to receive: dm, mentions, replies (replaces the selection)
-        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "mentions", "replies"])]
+        /// X events to receive: dm, chat, mentions, replies, posts (replaces the selection)
+        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "chat", "mentions", "replies", "posts"])]
         x_events: Vec<String>,
         /// New label
         #[arg(long)]
@@ -4949,6 +5710,7 @@ pub enum ChannelBotCommands {
         auth: AuthArgs,
     },
     /// List registered bots
+    #[command(after_help = crate::credential_guidance::CHANNEL_HELP)]
     List {
         /// List bots owned by the given org (admin-only). Omit for
         /// personal bots.
@@ -4963,6 +5725,13 @@ pub enum ChannelBotCommands {
     },
     /// Show bot details
     Show {
+        /// Bot ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show actionable health and recovery state
+    Health {
         /// Bot ID
         id: String,
         #[command(flatten)]
@@ -5178,6 +5947,7 @@ pub enum ChannelEventChannelCommands {
         auth: AuthArgs,
     },
     /// List device channels (platform = "device").
+    #[command(after_help = crate::credential_guidance::CHANNEL_HELP)]
     List {
         /// List channels owned by the given org (admin-only).
         #[arg(
@@ -5668,10 +6438,131 @@ pub enum OraclePoolCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Transfer pool ownership, preserving identity and history
+    Transfer {
+        pool: String,
+        /// Destination organization (UUID, slug or display name)
+        #[arg(
+            long,
+            required_unless_present = "personal",
+            conflicts_with = "personal"
+        )]
+        org: Option<String>,
+        /// Transfer to your own active personal account
+        #[arg(long)]
+        personal: bool,
+        /// Rotate the shared worker token and return its replacement once
+        #[arg(long)]
+        rotate_worker_token: bool,
+        /// Required when an org-visible pool moves to a person
+        #[arg(long, value_parser = ["private"])]
+        visibility: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete an idle pool, reserving its slug and retaining task/session history
+    Delete {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Rotate the worker token (invalidates all paired tabs)
     RotateToken {
         /// Pool slug or id
         pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ToolsCommands {
+    /// List visible published Tool offerings
+    List {
+        /// Filter by a controlled topic slug
+        #[arg(long)]
+        topic: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show a Tool offering and its published operations
+    Show {
+        /// Catalog Tool slug
+        slug: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args, Default)]
+pub struct CatalogEndpointArgs {
+    /// Unique operation name (required for add)
+    #[arg(long)]
+    pub name: Option<String>,
+    /// HTTP method (required for add)
+    #[arg(long, value_parser = ["GET", "POST", "PUT", "PATCH", "DELETE"])]
+    pub method: Option<String>,
+    /// Path template (required for add)
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Human-readable operation description
+    #[arg(long)]
+    pub description: Option<String>,
+    /// JSON parameter schema file
+    #[arg(long)]
+    pub parameters_file: Option<std::path::PathBuf>,
+    /// JSON request-body schema file
+    #[arg(long)]
+    pub body_schema_file: Option<std::path::PathBuf>,
+    /// Data accessible to the operation
+    #[arg(long, value_parser = ["public", "account", "owned_resource"])]
+    pub data_scope: Option<String>,
+    /// Operation cost classification
+    #[arg(long, value_parser = ["free", "metered", "resource_backed"])]
+    pub cost_class: Option<String>,
+    /// Operation execution kind
+    #[arg(long, value_parser = ["http_operation", "job_start", "job_poll"])]
+    pub execution: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum CatalogEndpointCommands {
+    /// List catalog operations and publication states
+    List {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Show only published operations
+        #[arg(long)]
+        published_only: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Add an operation (new Tool operations start as drafts)
+    Add {
+        /// Catalog service UUID or slug
+        service: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an operation contract
+    Update {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Endpoint UUID or operation name
+        endpoint_id: String,
+        #[command(flatten)]
+        endpoint: CatalogEndpointArgs,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Pause an operation
+    Disable {
+        /// Catalog service UUID or slug
+        service: String,
+        /// Endpoint UUID or operation name
+        endpoint_id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

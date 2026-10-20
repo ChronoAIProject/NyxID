@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -6,9 +7,13 @@ import { ArrowRight, Check, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { useOrgs } from "@/hooks/use-orgs";
-import { useCreateChannelBot } from "@/hooks/use-channel-bots";
+import {
+  useCreateChannelBot,
+  useTelegramBotProfile,
+} from "@/hooks/use-channel-bots";
 import {
   buildCreateChannelBotSchema,
+  labelIsOptional,
   type CreateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
@@ -42,6 +47,10 @@ import type {
 } from "@/types/channels";
 import { ChannelBotConnect } from "./channel-bot-connect";
 
+/** Shape of a complete BotFather token; partial input is not looked up. */
+const TELEGRAM_TOKEN = /^\d{5,}:[\w-]{30,}$/;
+const TELEGRAM_LOOKUP_DELAY_MS = 400;
+
 const EMPTY_BOT_CREDENTIALS = {
   bot_token: "",
   app_id: "",
@@ -60,8 +69,11 @@ export function ChannelBotSetup({
   defaultPlatform,
   defaultLabel = "",
   fullPage = false,
+  stayInPlace = false,
   prefill,
   onComplete,
+  onContinue,
+  returnTo,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -71,10 +83,15 @@ export function ChannelBotSetup({
   readonly defaultPlatform?: ChannelPlatform;
   readonly defaultLabel?: string;
   readonly fullPage?: boolean;
+  /** Keep the reusable dialog in place after connect/setup flows. */
+  readonly stayInPlace?: boolean;
   readonly prefill?: Readonly<Record<string, string>>;
   readonly onComplete?: () => void;
+  readonly onContinue?: () => void | Promise<void>;
+  readonly returnTo?: string;
 }) {
   const navigate = useNavigate();
+  const link = useChannelConnectLinkContext();
   const catalog = useChannelPlatformViews();
   const { getPlatform } = catalog;
   const createBot = useCreateChannelBot();
@@ -82,6 +99,7 @@ export function ChannelBotSetup({
   const [createdBot, setCreatedBot] = useState<CreateChannelBotResponse | null>(
     null,
   );
+  const [connectedBotLabel, setConnectedBotLabel] = useState<string>();
   const [connectedBotId, setConnectedBotId] = useState<string | null>(null);
   const completedId = createdBot?.id ?? connectedBotId;
   const dialogContentRef = useRef<HTMLDivElement>(null);
@@ -121,7 +139,39 @@ export function ChannelBotSetup({
     orgs.isError ||
     orgs.data?.some((org) => org.your_role === "admin");
   const label = useWatch({ control, name: "label" });
+  const botToken = useWatch({ control, name: "bot_token" }) ?? "";
   const previousPlatform = useRef(defaultPlatform);
+  const { mutate: lookupTelegramBot, isPending: lookingUpBot } =
+    useTelegramBotProfile();
+  const suggestedLabel = useRef<string | null>(null);
+  const labelOptional = !link && labelIsOptional(platform);
+
+  // Suggest the bot's Telegram name, but never replace a name the user or
+  // link supplied: only a blank field or our own earlier suggestion changes.
+  useEffect(() => {
+    if (link) return;
+    const token = botToken.trim();
+    if (platform !== "telegram" || !TELEGRAM_TOKEN.test(token)) return;
+    const timer = window.setTimeout(() => {
+      lookupTelegramBot(token, {
+        onSuccess: (profile) => {
+          const current = getValues("label").trim();
+          if (
+            !profile.label ||
+            getValues("bot_token")?.trim() !== token ||
+            (current && current !== suggestedLabel.current)
+          )
+            return;
+          suggestedLabel.current = profile.label;
+          setValue("label", profile.label, {
+            shouldDirty: false,
+            shouldTouch: false,
+          });
+        },
+      });
+    }, TELEGRAM_LOOKUP_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [platform, botToken, getValues, lookupTelegramBot, setValue, link]);
 
   useEffect(() => {
     for (const [name, value] of Object.entries(prefill ?? {})) {
@@ -162,15 +212,17 @@ export function ChannelBotSetup({
       },
       { keepDefaultValues: true },
     );
-    void navigate({
-      to: "/channel-bots",
-      search: {
-        connect: managedConnectPlatform(next),
-        label,
-        target_org_id: targetOrgId ?? undefined,
-      },
-      replace: true,
-    });
+    if (!stayInPlace) {
+      void navigate({
+        to: "/channel-bots",
+        search: {
+          connect: managedConnectPlatform(next),
+          label,
+          target_org_id: targetOrgId ?? undefined,
+        },
+        replace: true,
+      });
+    }
   }
 
   function onSubmit(data: CreateChannelBotFormData) {
@@ -182,7 +234,7 @@ export function ChannelBotSetup({
     const payload = channelBotRegistrationPayload(data, descriptor);
     createBot.mutate(payload, {
       onSuccess: (result) => {
-        if (result.webhook_secret || fullPage) {
+        if (result.webhook_secret || fullPage || stayInPlace) {
           setCreatedBot(result);
           if (fullPage) onComplete?.();
           if (!fullPage) reset();
@@ -217,7 +269,7 @@ export function ChannelBotSetup({
       setCreatedBot(null);
       createBot.reset();
       reset();
-      if (id)
+      if (id && !stayInPlace)
         void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
     }
   }
@@ -227,13 +279,15 @@ export function ChannelBotSetup({
       {!fullPage && (
         <DialogHeader>
           <DialogTitle>
-            {createdBot
-              ? `${getPlatform(createdBot.platform).label} Bot Created`
+            {completedId
+              ? `${getPlatform(createdBot?.platform ?? platform).label} Bot ${createdBot ? "Created" : "Connected"}`
               : "Add Channel Bot"}
           </DialogTitle>
           <DialogDescription>
-            {createdBot
-              ? "Store this verification secret now. It will not be shown again."
+            {completedId
+              ? createdBot?.webhook_secret
+                ? "Store this verification secret now. It will not be shown again."
+                : "Your bot has been added to NyxID."
               : "Connect a messaging platform bot to your AI agents."}
           </DialogDescription>
         </DialogHeader>
@@ -254,7 +308,7 @@ export function ChannelBotSetup({
       )}
       {completedId ? (
         <div className="space-y-4">
-          {fullPage && (
+          {(fullPage || stayInPlace) && (
             <div
               role="status"
               className="flex items-start gap-3 rounded-lg border border-success/20 bg-success/5 p-4"
@@ -264,11 +318,13 @@ export function ChannelBotSetup({
                 aria-hidden="true"
               />
               <div className="space-y-1">
-                <p className="text-[13px] font-medium">
-                  {label || "Channel bot created"}
+                <p className="text-13 font-medium">
+                  {createdBot?.label || label || "Channel bot created"}
                 </p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  {createdBot?.webhook_secret
+                  {stayInPlace && connectedBotId
+                    ? `${connectedBotLabel || label || "Your bot"} is connected. NyxBot will continue in this chat.`
+                    : createdBot?.webhook_secret
                     ? "Save the verification secret below. It will not be shown again."
                     : "Your bot has been added to NyxID. Open it to review setup and assign an agent."}
                 </p>
@@ -295,19 +351,25 @@ export function ChannelBotSetup({
               ))}
             </ol>
           )}
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-2">
+            {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>Open channel bot</Link></Button> : null}
             <Button
               variant="primary"
               className={fullPage ? "w-full" : undefined}
               onClick={() => {
+                if (onContinue) { void onContinue(); return; }
                 if (!fullPage) onOpenChange(false);
-                void navigate({
-                  to: "/channel-bots/$botId",
-                  params: { botId: completedId },
-                });
+                if (!stayInPlace) {
+                  void navigate({
+                    to: "/channel-bots/$botId",
+                    params: { botId: completedId },
+                  });
+                }
               }}
             >
-              {fullPage ? "Open channel bot" : "Done"}
+              {stayInPlace && connectedBotId
+                ? "Back to chat"
+                : onContinue ? (returnTo ? "Back to chat" : "Continue") : fullPage ? "Open channel bot" : "Done"}
               {fullPage && <ArrowRight aria-hidden="true" />}
             </Button>
           </div>
@@ -320,11 +382,15 @@ export function ChannelBotSetup({
             orgId={targetOrgId}
             form={form}
             fullPage={fullPage}
+            stayInPlace={stayInPlace}
+            returnTo={returnTo}
             preferManual={Boolean(prefill && Object.keys(prefill).length)}
-            onConnected={(id, replace) => {
-              if (fullPage) {
+            onConnected={(id, replace, result, botLabel) => {
+              setConnectedBotLabel(botLabel ?? result?.label);
+              if (fullPage || stayInPlace) {
+                if (link && result) setCreatedBot(result);
                 setConnectedBotId(id);
-                onComplete?.();
+                if (fullPage) onComplete?.();
                 return;
               }
               if (!fullPage) onOpenChange(false);
@@ -345,7 +411,7 @@ export function ChannelBotSetup({
                       id="scope"
                       aria-describedby="scope-description"
                       value={targetOrgId}
-                      disabled={disabled}
+                      disabled={disabled || Boolean(link)}
                       onChange={(next) =>
                         setValue("target_org_id", next ?? undefined)
                       }
@@ -357,7 +423,7 @@ export function ChannelBotSetup({
                     >
                       {scopeDescription ??
                         (fullPage
-                          ? "Choose your personal account or an organization."
+                          ? link ? "The requesting app selected this account." : "Choose your personal account or an organization."
                           : "Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys.")}
                     </p>
                   </div>
@@ -390,7 +456,7 @@ export function ChannelBotSetup({
                         {errors.platform.message}
                       </p>
                     )}
-                    {getPlatform(platform).enabled && (
+                    {getPlatform(platform).enabled && !stayInPlace && (
                       <Link
                         to="/channel-bots/connect/$platform"
                         params={{ platform }}
@@ -413,10 +479,22 @@ export function ChannelBotSetup({
                   </Label>
                   <Input
                     id="label"
-                    disabled={disabled}
-                    placeholder={`My ${getPlatform(platform).label} Bot`}
+                    disabled={disabled || Boolean(link)}
+                    placeholder={
+                      labelOptional
+                        ? "Your bot's Telegram name"
+                        : `My ${getPlatform(platform).label} Bot`
+                    }
+                    aria-describedby={labelOptional ? "label-hint" : undefined}
                     {...register("label")}
                   />
+                  {labelOptional && (
+                    <p id="label-hint" className="text-xs text-muted-foreground">
+                      {lookingUpBot
+                        ? "Looking up your bot's name..."
+                        : "Optional. Leave blank to use the name from your bot token."}
+                    </p>
+                  )}
                   {errors.label && (
                     <p className="text-xs text-destructive">
                       {errors.label.message}
@@ -439,7 +517,7 @@ export function ChannelBotSetup({
                 className="rounded-lg border border-border/70 bg-muted/30 p-3"
                 open={!fullPage}
               >
-                <summary className="cursor-pointer text-[12px] font-medium">
+                <summary className="cursor-pointer text-12 font-medium">
                   {setupNote.title}
                 </summary>
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
@@ -491,7 +569,11 @@ export function ChannelBotSetup({
                 isLoading={createBot.isPending}
                 disabled={!catalog.data || !isDirty || !isValid}
               >
-                {fullPage ? "Create channel bot" : "Add Bot"}
+                {fullPage
+                  ? platform === "telegram"
+                    ? "Connect bot"
+                    : "Create channel bot"
+                  : "Add Bot"}
                 {fullPage && <ArrowRight aria-hidden="true" />}
               </Button>
             </div>
@@ -512,7 +594,7 @@ export function ChannelBotSetup({
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent
         ref={dialogContentRef}
-        className="max-h-[90dvh] overflow-y-auto md:max-w-md"
+        className="channel-connect-dialog max-h-[90dvh] overflow-y-auto md:max-w-md"
       >
         {content}
       </DialogContent>

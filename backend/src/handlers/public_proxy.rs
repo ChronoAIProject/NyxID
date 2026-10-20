@@ -74,6 +74,19 @@ async fn execute_public_proxy(
     )
     .await?;
 
+    if matched.service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+            &normalized_path,
+        )?;
+        crate::services::tool_publication_service::gate(
+            &state.db,
+            &matched.service,
+            &method_str,
+            &canonical,
+        )
+        .await?;
+    }
+
     let quota_used = anonymous_endpoint_service::increment_daily_usage(
         &state.db,
         &matched.service.id,
@@ -279,6 +292,10 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -295,6 +312,7 @@ mod tests {
             credential_encrypted: vec![1, 2, 3],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -304,6 +322,10 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "headers".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,
@@ -318,6 +340,8 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -417,6 +441,10 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                offering_kind: Default::default(),
+                topics: Vec::new(),
+                supplier: None,
+                import_source: None,
                 destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
@@ -433,6 +461,7 @@ mod tests {
                 credential_encrypted: vec![],
                 platform_key: None,
                 auth_type: None,
+                auth_scheme: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
                 streaming_supported: false,
@@ -442,6 +471,10 @@ mod tests {
                 requires_user_credential: false,
                 is_active: true,
                 created_by: "admin".to_string(),
+                catalog_manager_created: false,
+                tools_manager_created: false,
+                icon_url: None,
+                tools_credential_frozen: false,
                 identity_propagation_mode: "none".to_string(),
                 identity_include_user_id: false,
                 identity_include_email: false,
@@ -456,6 +489,8 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -484,6 +519,7 @@ mod tests {
 
         struct MockDownstream {
             base_url: String,
+            requests: Arc<AtomicUsize>,
             saw_authorization: Arc<AtomicUsize>,
             saw_cookie: Arc<AtomicUsize>,
             _task: tokio::task::JoinHandle<()>,
@@ -495,6 +531,8 @@ mod tests {
         /// session) that the public proxy must strip before returning to the
         /// caller.
         async fn spawn_mock_downstream() -> MockDownstream {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let request_count = requests.clone();
             let saw_authorization = Arc::new(AtomicUsize::new(0));
             let saw_cookie = Arc::new(AtomicUsize::new(0));
             let auth_flag = saw_authorization.clone();
@@ -505,7 +543,9 @@ mod tests {
                 get(move |headers: axum::http::HeaderMap| {
                     let auth_flag = auth_flag.clone();
                     let cookie_flag = cookie_flag.clone();
+                    let request_count = request_count.clone();
                     async move {
+                        request_count.fetch_add(1, Ordering::SeqCst);
                         if headers.contains_key(axum::http::header::AUTHORIZATION) {
                             auth_flag.fetch_add(1, Ordering::SeqCst);
                         }
@@ -532,6 +572,7 @@ mod tests {
             });
 
             MockDownstream {
+                requests,
                 base_url: format!("http://{addr}"),
                 saw_authorization,
                 saw_cookie,
@@ -617,6 +658,73 @@ mod tests {
 
             let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(&body[..], br#"{"ok":true}"#);
+        }
+
+        #[tokio::test]
+        async fn tool_publication_gates_anonymous_forwarding() {
+            let Some(db) = connect_test_database("pproxy_tool_publication").await else {
+                return;
+            };
+            let downstream = spawn_mock_downstream().await;
+            let mut service = public_service("pub", &downstream.base_url, 100);
+            service.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            let endpoint_id = Uuid::new_v4().to_string();
+            let endpoints = db.collection::<mongodb::bson::Document>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            );
+            endpoints
+                .insert_one(mongodb::bson::doc! {
+                    "_id": &endpoint_id, "service_id": &service.id, "name": "echo",
+                    "method": "GET", "path": "/public/echo", "publication": "draft",
+                    "is_active": false, "created_at": mongodb::bson::DateTime::now(),
+                    "updated_at": mongodb::bson::DateTime::now()
+                })
+                .await
+                .unwrap();
+            let state = test_app_state(db.clone());
+            for publication in ["draft", "paused"] {
+                endpoints
+                    .update_one(
+                        mongodb::bson::doc! {"_id": &endpoint_id},
+                        mongodb::bson::doc! {"$set":{"publication":publication}},
+                    )
+                    .await
+                    .unwrap();
+                let error = execute_public_proxy(
+                    state.clone(),
+                    Some(peer()),
+                    "pub".into(),
+                    "public/echo".into(),
+                    proxy_request_with_credentials(),
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(error, AppError::ToolOperationNotPublished));
+                assert_eq!(downstream.requests.load(Ordering::SeqCst), 0);
+            }
+            endpoints
+                .update_one(
+                    mongodb::bson::doc! {"_id": &endpoint_id},
+                    mongodb::bson::doc! {"$set":{"publication":"published","is_active":true}},
+                )
+                .await
+                .unwrap();
+            let response = execute_public_proxy(
+                state,
+                Some(peer()),
+                "pub".into(),
+                "public/echo".into(),
+                proxy_request_with_credentials(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(downstream.requests.load(Ordering::SeqCst), 1);
+            db.drop().await.unwrap();
         }
 
         /// When the daily quota is exhausted, the next request MUST be denied
@@ -776,6 +884,7 @@ mod tests {
             };
             let mut service = public_service("pub", "https://example.test", 100);
             service.billing = Some(ServiceBilling {
+                managed_execution: None,
                 platform_billable: false,
                 platform_charge_nyxid_credentials_only: false,
                 platform_metric: None,

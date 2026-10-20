@@ -1,6 +1,7 @@
 import { useParams } from "@tanstack/react-router";
 import { DeveloperAppDetail } from "@/components/developer-apps/developer-app-detail";
 import { useOrg } from "@/hooks/use-orgs";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 
 export function OrgDeveloperAppDetailPage() {
   const { orgId, clientId } = useParams({
@@ -9,11 +10,12 @@ export function OrgDeveloperAppDetailPage() {
   const { data: org } = useOrg(orgId);
   const orgLabel = org?.display_name ?? "Organization";
   const orgPath = `/orgs/${orgId}`;
+  useBreadcrumbLabel(org?.display_name, orgPath);
 
   return (
     <DeveloperAppDetail
       clientId={clientId}
-      backTo={{ to: orgPath, label: orgLabel }}
+      backTo={{ to: orgPath, label: orgLabel, search: { tab: "developer-apps" } }}
     />
   );
 }

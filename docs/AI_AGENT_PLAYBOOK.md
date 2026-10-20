@@ -1,10 +1,10 @@
 # NyxID AI Agent Playbook
 
-This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.) to help users configure services, credentials, providers, nodes, and integrations on a running NyxID deployment. It uses placeholder URLs that the server replaces with real values when served via `/llms-full.txt`.
+This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.) to help users configure services, credentials, providers, nodes, and integrations on a running NyxID deployment. It uses placeholder URLs that the server replaces with real values when served via either `/llms.txt` or `/llms-full.txt`. Both endpoints serve the same playbook without authentication.
 
 **Audience:** AI coding assistants helping developers use NyxID.
 
-**Server URLs (replaced dynamically when served via /llms-full.txt):**
+**Server URLs (replaced dynamically when served via /llms.txt or /llms-full.txt):**
 - Backend API: `http://localhost:3001`
 - Frontend Dashboard: `http://localhost:3000`
 
@@ -104,7 +104,7 @@ nyxid --help
 > 1. **You, the human.** You authenticate **once** with `nyxid login`, which writes your session to `~/.nyxid/`. Selectable device-code v2 is the desktop and headless default: the human reviews requester attribution and chooses full account access or a restricted Agent Key. `--callback` opts into legacy browser SSO with full account access and no requester review; `--clipboard` copies the device code for pasting.
 > 2. **Your agent.** A separate identity, represented by a scoped API key (`nyxid_ag_…`) you mint **from your authenticated session**. The agent reads it from `NYXID_API_KEY` and uses it for every proxy call.
 >
-> **Agents must never run `nyxid login` themselves.** Device-code requires a human to approve a code in a browser; an autonomous agent has nothing to "approve" on its own. If an agent attempts `nyxid login` in CI it short-circuits with an api-key hint; in an interactive shell it would block forever. The correct agent action is to read the pre-issued `NYXID_API_KEY` from its environment.
+> **Agents should use an existing scoped credential when available.** If the user requests a new login, an agent may start `nyxid login --agent-key --no-wait`, share the approval link with the human, then resume the request after approval. The human makes the authorization decision; an agent must not approve its own request. See [Human-approved agent login links](#human-approved-agent-login-links). Bare interactive login waits for approval and is unsuitable for unattended automation.
 
 Step 1 — **you** authenticate:
 
@@ -136,6 +136,116 @@ export NYXID_API_KEY=nyxid_ag_...
 ```
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
+
+### Human-approved agent login links
+
+Before login, call the public discovery endpoints without an `Authorization`
+header. They describe deployment metadata, anonymous operations or static APIs:
+
+| Endpoint | What it provides |
+|---|---|
+| `GET /api/v1/public/config` | Configured social providers, email/password availability and registration gates. |
+| `POST /public/mcp` with `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | Only operations covered by enabled anonymous endpoint rules; possibly none. This surface does not execute tools. |
+| `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json` | A registered static provider overlay, without proving deployment enablement or user access. |
+
+With an existing authorized profile, discover visible service templates and
+provider permission metadata:
+
+```bash
+nyxid catalog list --all --profile mail-agent --output json
+nyxid catalog show api-google-gmail --profile mail-agent --output json
+nyxid catalog endpoints api-google-gmail --profile mail-agent --output json
+```
+
+The catalog requires authentication. `catalog --public` only suppresses saved
+credentials and returns 401 on current servers. Use actual catalog slugs and
+`scope_catalog[].scope` values when available. Templates do not prove that a
+human connected an account or that an agent can execute it. `GET /api/v1/keys`
+lists connections visible to the current credential, including disabled rows;
+require `is_active=true` before checking credential health.
+
+For an agent without a profile or access preferences, mint a login URL directly:
+
+```bash
+nyxid login --base-url http://localhost:3001 --agent-key --no-wait --output json --profile mail-agent
+```
+
+Request a human-approved Agent Key with preferences directly in the CLI command:
+
+```bash
+nyxid login --base-url http://localhost:3001 --agent-key --no-wait --output json \
+  --profile mail-agent --key-source new --key-name "Mail assistant" \
+  --scopes read,proxy \
+  --service-permission 'api-google-gmail::https://www.googleapis.com/auth/gmail.readonly' \
+  --expiry-days 30 --platform codex
+```
+
+Share **`verification_uri_complete`** and **`user_code` separately** from the JSON
+result. The human must copy/paste the code into the approval page. Never append it
+to the link. The CLI constructs a URL with approval preferences only; the field
+name is retained for compatibility. It also returns the bare `verification_uri`,
+local `request_id`, expiry and poll interval.
+The polling secret stays local; `--no-wait` neither opens a browser nor polls.
+
+`--scopes` requests NyxID permissions. `--service` requests catalog slugs;
+`--service-permission` requests `catalog-slug::provider-scope`. These accept repeated
+or CSV values. Key source, name, expiry and platform are editable preferences, as
+are the requested permissions. They do not downscope an existing connection.
+
+Use `--device` instead of `--agent-key` only when full account access is also an
+acceptable result. `--login-type agent` is a suggestion on a selectable request;
+`--agent-key` enforces restricted delivery. Preferences default the suggested login
+type to `agent`, cannot limit a `full` grant, and cannot accompany `--password`,
+`--callback`, `--code` or `login resume`.
+
+A signed-out human verifies identity on the original request with hints preserved.
+**Only for this request** creates a browser proof accepted exclusively by the
+dedicated approval endpoints, without an account session. **Keep me signed in**
+also creates a normal browser session. Both offer configured social providers,
+the NyxID app and enabled email/password. Password sign-in retains configured
+NyxID MFA; social providers handle their own challenges and the app uses its
+existing human session. Identity verification **does not approve the requester**.
+The human must explicitly review and approve afterward. An expired proof or
+changed approving identity clears the earlier selection and returns to verification.
+An Agent Key or third-party OAuth credential cannot approve or elevate another login.
+Missing connection or organization rights require an eligible alternative or help
+from the owner, never a silent switch to full access.
+
+The verified human's available choices come from
+`POST /api/v1/auth/device/options` or `/api/v1/auth/agent-key/options`, with
+`{"user_code":"<server-issued user_code>"}` and first-party human authentication.
+`POST /api/v1/auth/login-code/options` takes no body and lists choices for minting
+one-time codes. A request-only browser proof uses
+`GET /api/v1/auth/approval/{id}/inventory`, which returns `options` and `catalog`.
+Agents cannot call these human-only endpoints with their keys or self-approve.
+
+After explicit human approval, resume using the local `request_id`, not `user_code`:
+
+```bash
+nyxid login resume <request_id> --once --output json
+nyxid whoami --profile mail-agent --output json
+nyxid mcp discover --profile mail-agent --output json
+```
+
+`--once` returns `login_pending` when still waiting; respect the poll interval before
+retrying. Without `--once`, resume waits. The saved request retains its profile.
+Inspect the delivered `auth_kind` and grant; denial or expiry needs a new request
+and human approval.
+
+`mcp discover` returns the server's current services and operations filtered by
+that credential's service/node scope, including operation IDs, input schemas,
+recommended skills and diagnostics. Use these to choose calls; live execution
+still applies provider permissions, approval policy and availability checks.
+`mcp config` separately generates client connection configuration.
+
+For parameter bounds, direct API construction and consent semantics, see the
+[device login protocol](https://github.com/ChronoAIProject/NyxID/blob/main/docs/DEVICE_LOGIN_PROTOCOL.md)
+and the NyxID skill's `references/device-login.md`. These commands require the
+updated CLI and approval frontend. Eight-character v2 issuance is the default;
+older backend replicas require the staged rollout in ADR-015. Upgrade every
+backend replica before exposing request-bound app verification in the frontend.
+Normal `/login` remains account-only. The
+`/devices/code/*` hardware-provisioning protocol is separate.
 
 **Updating the CLI:**
 
@@ -3124,6 +3234,24 @@ See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integ
 
 NyxID acts as a multi-platform messaging gateway. Users register their own bots (Telegram, Discord, Lark, Feishu), and NyxID receives messages via platform webhooks, routes each message to the correct AI agent's callback URL, and relays the agent's asynchronous reply back to the chat.
 
+### Request bot setup with a completion webhook
+
+To have the human connect a bot and resume your agent when setup finishes, create a tracked link:
+
+```bash
+nyxid channel-bot connect-link discord --label "Support bot" \
+	--webhook-url https://agent.example.com/setup-events \
+	--webhook-signing-secret-file ./nyxid-webhook.key \
+	--callback-url https://app.example.com/setup/return \
+	--output json
+```
+
+Configure your receiver with the one-time signing secret saved in `nyxid-webhook.key` and share `connect_url` with the human owner. The CLI requires a new file, restricts it to mode `0600` on Unix, and omits the secret from JSON and terminal output. Direct HTTP API callers still receive the secret once. Verify the signed `channel_connect.completed`, `channel_connect.cancelled`, or `channel_connect.expired` notification before resuming work. The command returns immediately; app polling is unnecessary. OAuth app callers use their registered connection webhook instead of supplying `webhook_url`.
+
+On completion, inspect `data.bot_status` and `data.webhook_registered`, then configure the bot's conversation route. Manual platform webhook steps may still be required. The setup `webhook_url` receives setup outcomes; the Agent Key callback in the relay setup below receives chat messages.
+
+Use `nyxid channel-bot connect-link-status <id>` for diagnostics or `nyxid channel-bot cancel-connect-link <id>` to cancel before setup starts. See the [bot-link API](API.md#bot-connection-links) and [webhook signature and recovery contract](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links). Existing service onboarding continues through [`nyxid connect`](site/cli/reference/others.md#connect).
+
 ### Architecture
 
 ```
@@ -3295,3 +3423,19 @@ Send media using `reply.attachments` on `/channel-relay/reply` or `message.attac
 A source can instead be `{"type":"url","url":"https://public.example/report.pdf"}`. Check declared outbound kinds, use at most ten attachments, and stay within `CHANNEL_MEDIA_MAX_BYTES` (default 20 MiB per attachment; the aggregate JSON body also has a base64-sized limit). Attachment-only messages are supported. `/reply/update` rejects attachments. X supports images/video with OAuth `media.write`; older connections require re-consent. OpenClaw declares no media.
 
 History contains only routing metadata plus inbound attachment descriptors/download URLs. ADR-013 still forbids persisted bytes, message bodies, outbound captions/filenames, or raw webhook content. Download URLs expire with retained rows/provider resources and are not archival storage. `/send` fingerprints media descriptors/content hashes; changing media under the same idempotency key returns 409. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#media) for transport details and SSRF protections.
+
+### Oracle pool lifecycle (unreleased)
+
+Oracle consumer operations live under `/api/v1/oracle`. Pool managers transfer via
+`POST /pools/{pool}/transfer` with `owner_user_id` (person/org UUID) and optional
+`rotate_worker_token`; the shared token is preserved by default. Source and
+destination management are both required; personal destination is your own active
+person account. Org-visible → personal requires `visibility:"private"`. The
+response contains the full updated `pool` and optional one-time `worker_token`.
+`DELETE /pools/{pool}` returns `{id,slug,status:"deleted",cleanup:"asynchronous",deleted_at}` and is
+idempotent for authorized retries; physical cleanup resumes in bounded background
+transactions. Settle queued/dispatched tasks and
+queued/delivered commands first (`oracle_pool_active_work`, 409). Deleted pools
+reserve their slug, revoke workers, and retain terminal-task TTL/history. These
+routes require the first tagged release containing #1527/#1542 and a fully
+upgraded/drained backend fleet. Full contract: `docs/ORACLE_RELAY.md`.

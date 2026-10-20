@@ -321,6 +321,10 @@ async fn list_catalog_endpoints_allows_org_shared_custom_services() {
 
 fn minimal_catalog_entry() -> crate::services::catalog_service::CatalogEntry {
     crate::services::catalog_service::CatalogEntry {
+        offering_kind: Default::default(),
+        topics: Vec::new(),
+        supplier: None,
+        import_source: None,
         recommended_skill_refs: None,
         skills_revision: 0,
         skills_manifest_digest: String::new(),
@@ -531,15 +535,20 @@ fn catalog_entry_response_maps_rich_metadata() {
     entry.required_permissions = Some(vec!["models:read".to_string()]);
     entry.examples_url = Some("https://docs.openai.com/examples".to_string());
     entry.recommended_skills = Some(vec!["chat".to_string()]);
-    entry.capabilities = Some(ServiceCapabilities {
-        supports_proxy_read: true,
-        supports_proxy_write: true,
-        supports_proxy_binary_upload: false,
-        supports_direct_downstream_auth: false,
-        supports_authoring_via_nyx: false,
-        supports_websocket: false,
-        supports_streaming: true,
-    });
+    entry.capabilities = Some(
+        crate::services::inference_service::ServiceCapabilitiesView {
+            supports_realtime_voice: false,
+            transport: ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: true,
+            },
+        },
+    );
 
     let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
     assert_eq!(resp.homepage_url.as_deref(), Some("https://openai.com"));
@@ -560,9 +569,9 @@ fn catalog_entry_response_maps_rich_metadata() {
         Some(vec!["models:read".to_string()])
     );
     let caps = resp.capabilities.expect("capabilities present");
-    assert!(caps.supports_proxy_read);
-    assert!(caps.supports_streaming);
-    assert!(!caps.supports_websocket);
+    assert!(caps.transport.supports_proxy_read);
+    assert!(caps.transport.supports_streaming);
+    assert!(!caps.transport.supports_websocket);
 }
 
 #[test]
@@ -597,6 +606,8 @@ fn parsed_endpoint_to_response_maps_all_fields() {
         request_body_required: false,
         response: Default::default(),
         risk: None,
+        destructive: false,
+        changes_existing: None,
         supports_idempotency_key: false,
     };
     let resp = super::parsed_endpoint_to_response(parsed);
@@ -627,6 +638,8 @@ fn parsed_endpoint_to_response_with_request_body() {
         request_body_required: true,
         response: Default::default(),
         risk: None,
+        destructive: false,
+        changes_existing: None,
         supports_idempotency_key: false,
     };
     let resp = super::parsed_endpoint_to_response(parsed);

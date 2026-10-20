@@ -1,19 +1,57 @@
 use serde_json::{Value, json};
 
+/// Retry identity, context message and guidance supplied by the caller.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct RetryContext {
+    pub(crate) request_id: String,
+    pub(crate) message: String,
+    pub(crate) guidance: String,
+}
+
 /// Render an `anyhow::Error` for stderr.
 ///
 /// When `json` is true, return a single-line JSON object with one of:
 ///   { "error": "http_error", "status": <int>, "path": "<string>", "body": <json|string> }
 ///   { "error": "cli_error", "message": "<string>" }
+/// Errors with retry context also include their request ID and retry guidance.
 ///
 /// When `json` is false, fall back to the legacy `Error: {e:#}` shape so
-/// non-JSON callers see no behavior change. The caller prints the returned
+/// network errors add safe stage/hint details while other errors are unchanged. The caller prints the returned
 /// string with `eprintln!`, which supplies the trailing newline on stderr.
 pub fn render_error(err: &anyhow::Error, json: bool) -> String {
-    let message = format!("{err:#}");
+    let retry_context = err.downcast_ref::<RetryContext>();
+    let guidance = err
+        .downcast_ref::<crate::api::ApiError>()
+        .and_then(crate::credential_guidance::for_error);
+    let diagnostic = crate::net_diagnostics::Diagnostic::from_anyhow(err);
+    let message = if retry_context.is_some()
+        && let Some(error) = err.downcast_ref::<crate::api::ApiError>()
+    {
+        error.to_string()
+    } else if diagnostic.is_some() {
+        err.chain()
+            .map(crate::net_diagnostics::error_text)
+            .collect::<Vec<_>>()
+            .join(": ")
+    } else {
+        format!("{err:#}")
+    };
 
     if !json {
-        return format!("Error: {message}");
+        let mut rendered = match diagnostic {
+            Some(diagnostic) => format!("Error: {message}\n{}", diagnostic.text()),
+            None => format!("Error: {message}"),
+        };
+        if let Some(text) = guidance.as_ref().and_then(crate::credential_guidance::text) {
+            rendered.push('\n');
+            rendered.push_str(&text);
+        }
+        if let Some(retry) = retry_context {
+            rendered.push('\n');
+            rendered.push_str(&retry.guidance);
+        }
+        return rendered;
     }
 
     if let Some(reauth) = err.downcast_ref::<crate::auth::ReauthRequired>() {
@@ -44,7 +82,7 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
         });
     }
 
-    let payload = if let Some(http_error) = parse_http_error(&message) {
+    let mut payload = if let Some(http_error) = parse_http_error(&message) {
         let body = serde_json::from_str::<Value>(http_error.body)
             .unwrap_or_else(|_| Value::String(http_error.body.to_owned()));
 
@@ -61,6 +99,16 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
         })
     };
 
+    if let Some(diagnostic) = diagnostic {
+        payload["diagnostic"] = serde_json::to_value(diagnostic).expect("diagnostic serializes");
+    }
+    if let Some(guidance) = guidance {
+        payload["guidance"] = guidance;
+    }
+    if let Some(retry) = retry_context {
+        payload["request_id"] = json!(retry.request_id);
+        payload["retry_guidance"] = json!(retry.guidance);
+    }
     serde_json::to_string(&payload).unwrap_or_else(|_| {
         "{\"error\":\"cli_error\",\"message\":\"failed to render error\"}".to_owned()
     })
@@ -114,6 +162,7 @@ fn parse_http_error(message: &str) -> Option<HttpError<'_>> {
 }
 
 fn parse_request_path(request: &str) -> Option<&str> {
+    let request = request.strip_prefix("Proxy request ").unwrap_or(request);
     let mut parts = request.split_whitespace();
     let first = parts.next()?;
     let second = parts.next();
@@ -156,6 +205,55 @@ mod tests {
             value["message"].as_str(),
             Some("Provide a catalog slug or use --custom for a custom endpoint")
         );
+    }
+
+    #[test]
+    fn renders_shared_retry_context_with_caller_supplied_message_and_guidance() {
+        for http in [false, true] {
+            let error = if http {
+                crate::api::ApiError::new(
+                    "/jobs",
+                    reqwest::StatusCode::CONFLICT,
+                    "different settings".into(),
+                )
+                .into()
+            } else {
+                anyhow::anyhow!("response lost")
+            };
+            let error = error.context(RetryContext {
+                request_id: "job-request".into(),
+                message: "Job submission".into(),
+                guidance: "Retry this job with its original request ID.".into(),
+            });
+            let expected = if http {
+                json!({
+                    "error": "http_error",
+                    "status": 409,
+                    "path": "/jobs",
+                    "body": "different settings",
+                    "request_id": "job-request",
+                    "retry_guidance": "Retry this job with its original request ID."
+                })
+            } else {
+                json!({
+                    "error": "cli_error",
+                    "message": "Job submission: response lost",
+                    "request_id": "job-request",
+                    "retry_guidance": "Retry this job with its original request ID."
+                })
+            };
+            let rendered: Value = serde_json::from_str(&render_error(&error, true)).unwrap();
+            assert_eq!(rendered, expected);
+            let message = if http {
+                "/jobs failed (HTTP 409 Conflict): different settings"
+            } else {
+                "Job submission: response lost"
+            };
+            assert_eq!(
+                render_error(&error, false),
+                format!("Error: {message}\nRetry this job with its original request ID.")
+            );
+        }
     }
 
     #[test]

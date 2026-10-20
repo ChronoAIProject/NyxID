@@ -236,7 +236,7 @@ export function UpstreamScopePicker({
                   toggle(p.scope);
                 }}
                 className={
-                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-[12px] transition-colors " +
+                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-12 transition-colors " +
                   (gated
                     ? "cursor-not-allowed border-dashed border-border/60 bg-transparent text-muted-foreground/50"
                     : p.locked || isRequired
@@ -261,19 +261,19 @@ export function UpstreamScopePicker({
                 ) : null}
                 <span className="truncate">{p.label}</span>
                 {gated ? (
-                  <span className="shrink-0 text-[11px] italic text-muted-foreground/70">
+                  <span className="shrink-0 text-11 italic text-text-tertiary">
                     own app
                   </span>
                 ) : isRequired ? (
-                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                  <span className="shrink-0 text-11 text-muted-foreground">
                     required
                   </span>
                 ) : p.locked ? (
-                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                  <span className="shrink-0 text-11 text-muted-foreground">
                     granted
                   </span>
                 ) : p.isDefault ? (
-                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                  <span className="shrink-0 text-11 text-muted-foreground">
                     default
                   </span>
                 ) : null}
@@ -287,7 +287,7 @@ export function UpstreamScopePicker({
       ) : null}
 
       {pills.some((p) => p.sensitive) ? (
-        <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
           <span
             aria-hidden="true"
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
@@ -297,7 +297,7 @@ export function UpstreamScopePicker({
       ) : null}
 
       {allowset !== null && pills.some((p) => isGated(p.scope, p.locked)) ? (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Scopes marked “own app” aren’t offered on NyxID’s shared{" "}
           {providerName ?? "provider"} app. Connect with your own OAuth app to
           request them.
@@ -320,7 +320,7 @@ export function UpstreamScopePicker({
           placeholder={customPlaceholder}
           autoComplete="off"
           spellCheck={false}
-          className="h-9 text-[12px]"
+          className="h-9 text-12"
         />
         <Button
           type="button"
@@ -334,11 +334,11 @@ export function UpstreamScopePicker({
         </Button>
       </div>
       {customError ? (
-        <p className="text-[11px] text-destructive">{customError}</p>
+        <p className="text-11 text-destructive">{customError}</p>
       ) : null}
       {grantedSet && hasChanges ? (
-        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[12px]">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-12">
+          <span className="text-11 font-medium uppercase tracking-wide text-muted-foreground">
             Changes
           </span>
           {added.length > 0 ? (
@@ -353,7 +353,7 @@ export function UpstreamScopePicker({
                 <span className="text-destructive">− Removing:</span>{" "}
                 {removed.map(labelFor).join(", ")}
               </p>
-              <p className="text-[11px] text-warning">
+              <p className="text-11 text-warning">
                 Removing a permission re-authorizes this connection and will
                 stop any app that relies on it. NyxID will use only the
                 remaining permissions; the old access at{" "}

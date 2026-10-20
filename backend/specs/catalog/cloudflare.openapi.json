@@ -1,0 +1,143 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cloudflare",
+    "version": "v1-nyxid-overlay",
+    "description": "Cloudflare account, zone, and DNS discovery with an OAuth bearer token. Permissions and account access are configured on the OAuth client and chosen during consent. Other Cloudflare operations are accessible through the generic proxy."
+  },
+  "servers": [
+    {
+      "url": "https://api.cloudflare.com/client/v4"
+    }
+  ],
+  "externalDocs": {
+    "url": "https://developers.cloudflare.com/api/"
+  },
+  "paths": {
+    "/accounts": {
+      "get": {
+        "operationId": "list_accounts",
+        "summary": "List Cloudflare accounts",
+        "description": "List accounts accessible to the connected Cloudflare OAuth user.",
+        "x-aevatar-tool": {
+          "name": "list_accounts",
+          "description": "List accounts accessible to the connected Cloudflare OAuth user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Page number, starting at 1."
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Results per page, subject to Cloudflare limits."
+          }
+        ]
+      }
+    },
+    "/zones": {
+      "get": {
+        "operationId": "list_zones",
+        "summary": "List Cloudflare zones",
+        "description": "List zones accessible to the connected OAuth user. Requires zone read permission.",
+        "x-aevatar-tool": {
+          "name": "list_zones",
+          "description": "List zones accessible to the connected OAuth user. Requires zone read permission.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Page number, starting at 1."
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Results per page, subject to Cloudflare limits."
+          }
+        ]
+      }
+    },
+    "/zones/{zone_id}/dns_records": {
+      "get": {
+        "operationId": "list_dns_records",
+        "summary": "List DNS records",
+        "description": "List DNS records for an accessible zone. Requires DNS read permission.",
+        "x-aevatar-tool": {
+          "name": "list_dns_records",
+          "description": "List DNS records for an accessible zone. Requires DNS read permission.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Upstream API response."
+          }
+        },
+        "parameters": [
+          {
+            "name": "zone_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Page number, starting at 1."
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Results per page, subject to Cloudflare limits."
+          }
+        ]
+      }
+    }
+  }
+}

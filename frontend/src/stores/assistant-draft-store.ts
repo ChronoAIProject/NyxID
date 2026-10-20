@@ -10,8 +10,6 @@ export interface AssistantDraft {
 }
 
 interface AssistantDraftState {
-  readonly nyxAgentAccessMode: "ask" | "full";
-  readonly setNyxAgentAccessMode: (userId: string, mode: "ask" | "full") => void;
   readonly ownerUserId: string | null;
   readonly drafts: Record<string, AssistantDraft>;
   readonly saveDraft: (userId: string, key: string, text: string) => void;
@@ -25,7 +23,6 @@ interface AssistantDraftState {
 
 const EMPTY_DRAFTS = {
   ownerUserId: null,
-  nyxAgentAccessMode: "ask",
   drafts: {},
 } as const;
 
@@ -52,11 +49,6 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
   persist(
     (set, get) => ({
       ...EMPTY_DRAFTS,
-      setNyxAgentAccessMode: (userId, mode) => set((state) => ({
-        ownerUserId: userId,
-        drafts: state.ownerUserId === userId ? state.drafts : {},
-        nyxAgentAccessMode: mode,
-      })),
       saveDraft: (userId, key, text) => {
         set((state) => {
           const ownedDrafts: Record<string, AssistantDraft> =
@@ -69,7 +61,6 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
           }
           return {
             ownerUserId: userId,
-            nyxAgentAccessMode: state.ownerUserId === userId ? state.nyxAgentAccessMode : "ask",
             drafts: newestDrafts(drafts, key),
           };
         });
@@ -80,11 +71,7 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
           const drafts =
             state.ownerUserId === userId ? { ...state.drafts } : {};
           delete drafts[key];
-          return {
-            ownerUserId: userId,
-            drafts,
-            nyxAgentAccessMode: state.ownerUserId === userId ? state.nyxAgentAccessMode : "ask",
-          };
+          return { ownerUserId: userId, drafts };
         });
       },
       pruneConversationDrafts: (existingConversationIds) => {
@@ -108,9 +95,9 @@ export const useAssistantDraftStore = create<AssistantDraftState>()(
     {
       name: STORAGE_KEY,
       version: 1,
-      partialize: ({ ownerUserId, drafts, nyxAgentAccessMode }) => ({
-        ownerUserId, drafts, nyxAgentAccessMode,
-      }),
+      // Payloads written while the retired Ask/Full draft preference existed
+      // still carry `nyxAgentAccessMode`; it is ignored and dropped on the next write.
+      partialize: ({ ownerUserId, drafts }) => ({ ownerUserId, drafts }),
     },
   ),
 );

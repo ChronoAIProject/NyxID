@@ -125,6 +125,7 @@ pub struct AuthDevicePreviewBody {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthDevicePreviewResponse {
+    pub supports_grant_choice: bool,
     pub requested_profile: Option<String>,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
@@ -212,8 +213,13 @@ async fn request_device(
 
     let context = capture_client_context(&headers, addr, &state, body)?;
     let initiated = if supports_grant_choice {
-        auth_device_service::initiate_v2(&state.db, state.auth_device_hmac_key.as_slice(), context)
-            .await?
+        auth_device_service::initiate_v2(
+            &state.db,
+            state.auth_device_hmac_key.as_slice(),
+            context,
+            state.config.auth_device_eight_char_codes,
+        )
+        .await?
     } else {
         auth_device_service::initiate(&state.db, state.auth_device_hmac_key.as_slice(), context)
             .await?
@@ -837,6 +843,7 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
 
 pub(super) fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
     AuthDevicePreviewResponse {
+        supports_grant_choice: preview.supports_grant_choice,
         requested_profile: preview.requested_profile,
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
@@ -1098,6 +1105,7 @@ mod tests {
     fn preview_response_maps_verbose_fields_additively() {
         let now = chrono::Utc::now();
         let response = preview_response(PreviewOutput {
+            supports_grant_choice: true,
             requested_profile: None,
             client_label: Some("workstation".to_string()),
             client_user_agent: Some("nyxid-cli/1.4.2 (macos; aarch64)".to_string()),
@@ -1729,6 +1737,73 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn staged_codes_keep_cli_and_browser_verification_urls_and_installed_account_approval() {
+        for enabled in [false, true] {
+            let db = crate::test_utils::connect_transaction_test_database("device_gate_http").await;
+            crate::db::ensure_indexes(&db).await.unwrap();
+            let mut config = test_app_config();
+            config.frontend_url = "https://nyxid.dev".into();
+            config.auth_device_eight_char_codes = enabled;
+            let state = crate::test_utils::test_app_state_with_config(db, config);
+            let actor = Uuid::new_v4().to_string();
+            insert_user(&state, &actor).await;
+            let token = access_token(&state, &actor);
+            let server = spawn_test_server(state.clone()).await;
+            for (kind, ua) in [("cli", "nyxid-cli/0.20.0"), ("browser", "Mozilla/5.0")] {
+                let (status, request) = post_json(
+                    &server,
+                    "/api/v1/auth/device/v2/request",
+                    None,
+                    serde_json::json!({"client_kind":kind, "client_user_agent":ua}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                let code = request["user_code"].as_str().unwrap();
+                assert_eq!(
+                    auth_device_service::normalize_user_code(code)
+                        .unwrap()
+                        .len(),
+                    if enabled { 8 } else { 9 }
+                );
+                assert_eq!(
+                    request["verification_uri"],
+                    "https://nyxid.dev/login/device"
+                );
+                let url = url::Url::parse(request["verification_uri_complete"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(url.origin().ascii_serialization(), "https://nyxid.dev");
+                assert_eq!(url.path(), "/login/device");
+                assert_eq!(
+                    url.query_pairs().collect::<Vec<_>>(),
+                    vec![("user_code".into(), code.into())]
+                );
+                // Installed app sends only the public code to the original route.
+                let (status, decision) = post_json(
+                    &server,
+                    "/api/v1/auth/device/approve",
+                    Some(&token),
+                    serde_json::json!({"user_code":code}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(decision, serde_json::json!({"ok":true}));
+                let (status, delivery) = post_json(
+                    &server,
+                    "/api/v1/auth/device/v2/poll",
+                    None,
+                    serde_json::json!({"device_code":request["device_code"]}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(delivery["auth_kind"], "account_session");
+                assert!(delivery["access_token"].as_str().is_some());
+                assert!(delivery["refresh_token"].as_str().is_some());
+            }
+            state.db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -74,7 +74,7 @@ pub struct UpdateOraclePoolRequest {
     pub is_active: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct OraclePoolInfo {
     pub id: String,
     pub slug: String,
@@ -195,8 +195,9 @@ pub async fn create_pool(
         .as_deref()
         .map(parse_visibility)
         .transpose()?;
-    let (pool, worker_token) = oracle_pool_service::create_pool(
+    let (pool, worker_token) = oracle_pool_service::create_pool_for_manager(
         &state.db,
+        &actor,
         &owner,
         oracle_pool_service::CreatePoolInput {
             slug: body.slug,
@@ -371,6 +372,109 @@ pub async fn rotate_token(
     }))
 }
 
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferOraclePoolRequest {
+    pub owner_user_id: String,
+    #[serde(default)]
+    pub rotate_worker_token: bool,
+    pub visibility: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferOraclePoolResponse {
+    pub pool: OraclePoolInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_token: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct DeleteOraclePoolResponse {
+    pub id: String,
+    pub slug: String,
+    pub status: &'static str,
+    pub cleanup: &'static str,
+    pub deleted_at: String,
+}
+
+/// Transfer an Oracle pool between owners without replacing its identity.
+/// Available in the first tagged release containing #1527/#1542. The body is
+/// limited to 4096 bytes; every response uses Cache-Control: no-store.
+#[utoipa::path(post, path = "/api/v1/oracle/pools/{id_or_slug}/transfer",
+    params(("id_or_slug" = String, Path)), request_body = TransferOraclePoolRequest,
+    responses((status = 200, body = TransferOraclePoolResponse, description = "Updated pool and optional one-time replacement worker token; Cache-Control: no-store"),
+        (status = 400, description = "Invalid owner UUID or incompatible visibility"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Active source and destination management required"),
+        (status = 404, description = "Pool not found"),
+        (status = 409, description = "Destination pool limit reached"),
+        (status = 413, description = "Body exceeds 4096 bytes")),
+    security(("bearer_auth" = [])), tag = "Oracle")]
+pub async fn transfer_pool(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(pool): Path<String>,
+    Json(body): Json<TransferOraclePoolRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let visibility = body
+        .visibility
+        .as_deref()
+        .map(parse_visibility)
+        .transpose()?;
+    let outcome = oracle_pool_service::transfer_pool(
+        &state.db,
+        &actor,
+        &pool,
+        oracle_pool_service::TransferPoolInput {
+            owner_user_id: body.owner_user_id,
+            rotate_worker_token: body.rotate_worker_token,
+            visibility,
+        },
+    )
+    .await?;
+    let info = pool_info(
+        &outcome.pool,
+        true,
+        outcome.can_enroll,
+        outcome.online_workers,
+    );
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(TransferOraclePoolResponse {
+            pool: info,
+            worker_token: outcome.worker_token.map(|value| value.to_string()),
+        }),
+    ))
+}
+
+/// Logically delete an idle pool and schedule durable bounded physical cleanup.
+/// Authorized retries return the same acknowledgement; cleanup: asynchronous
+/// describes the policy and does not assert that physical cleanup has finished.
+#[utoipa::path(delete, path = "/api/v1/oracle/pools/{id_or_slug}",
+    params(("id_or_slug" = String, Path)),
+    responses((status = 200, body = DeleteOraclePoolResponse),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Active pool management required"),
+        (status = 404, description = "Pool not found"),
+        (status = 409, description = "oracle_pool_active_work: queued/dispatched tasks or queued/delivered commands")),
+    security(("bearer_auth" = [])), tag = "Oracle")]
+pub async fn delete_pool(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(pool): Path<String>,
+) -> AppResult<Json<DeleteOraclePoolResponse>> {
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let result = oracle_pool_service::delete_pool(&state.db, &actor, &pool).await?;
+    Ok(Json(DeleteOraclePoolResponse {
+        id: result.id,
+        slug: result.slug,
+        status: "deleted",
+        cleanup: "asynchronous",
+        deleted_at: result.deleted_at.to_rfc3339(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +504,10 @@ mod tests {
         // rotate response.
         let now = chrono::Utc::now();
         let pool = OraclePool {
+            deleted_at: None,
+            lifecycle_version: 0,
+            installation_epoch: 0,
+            deletion_cleanup_pending: false,
             require_model_match: true,
             id: "p1".to_string(),
             user_id: "u1".to_string(),

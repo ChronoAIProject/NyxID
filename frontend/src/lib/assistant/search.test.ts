@@ -23,6 +23,28 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ mock: "true" })).toEqual({});
   });
 
+  it("keeps an agent and a group", () => {
+    expect(parseAssistantSearch({ agent: "a1", g: "nyxg-1" })).toEqual({
+      agent: "a1",
+      g: "nyxg-1",
+    });
+    expect(parseAssistantSearch({ g: "" })).toEqual({});
+  });
+
+  it("keeps a linked agent details section only for the two sheet sections", () => {
+    expect(parseAssistantSearch({ agent: "a1", details: "grants" })).toEqual({
+      agent: "a1",
+      details: "grants",
+    });
+    expect(parseAssistantSearch({ c: "conv-1", details: "skills" })).toEqual({
+      c: "conv-1",
+      details: "skills",
+    });
+    for (const invalid of ["", "memory", "GRANTS", 1, true, ["grants"]]) {
+      expect(parseAssistantSearch({ agent: "a1", details: invalid })).toEqual({ agent: "a1" });
+    }
+  });
+
   it("drops junk rather than letting it reach the page", () => {
     expect(parseAssistantSearch({ c: 42, draft: "yes", other: "x" })).toEqual(
       {},
@@ -88,6 +110,31 @@ describe("/assistant search round-trip through a real router", () => {
     expect(search.draft).toBeUndefined();
   });
 
+  it("round-trips a server agent-details link and drops the section on close", async () => {
+    // The exact path `AssistantPage::AgentDetails { agent, tab }` builds.
+    const router = buildAssistantRouter("/assistant?agent=a1&details=grants");
+    await router.load();
+    expect(
+      parseAssistantSearch(router.state.location.search as Record<string, unknown>),
+    ).toEqual({ agent: "a1", details: "grants" });
+
+    await router.navigate({ to: "/assistant", search: { c: "conv-1", agent: "a1" } });
+    await router.invalidate();
+    const closed = parseAssistantSearch(router.state.location.search as Record<string, unknown>);
+    expect(closed).toEqual({ c: "conv-1", agent: "a1" });
+    expect(closed.details).toBeUndefined();
+  });
+
+  it("round-trips a group id", async () => {
+    const router = buildAssistantRouter("/assistant");
+    await router.load();
+    await router.navigate({ to: "/assistant", search: { g: "nyxg-abc123" } });
+    await router.invalidate();
+    expect(
+      parseAssistantSearch(router.state.location.search as Record<string, unknown>),
+    ).toEqual({ g: "nyxg-abc123" });
+  });
+
   it("round-trips the numeric mock marker without quoting it", async () => {
     const router = buildAssistantRouter("/assistant?mock=1");
     await router.load();
@@ -107,4 +154,13 @@ describe("/assistant search round-trip through a real router", () => {
       ),
     ).toEqual({ c: "nyxid-chat-mock-1", mock: 1 });
   });
+});
+
+it("accepts UUID card links while preserving the other search fields", () => {
+  const card = "12345678-1234-4123-8123-123456789012";
+  expect(parseAssistantSearch({ c: "nyxa-hidden", card, panel: "settings", panelTab: "profile" }))
+    .toEqual({ c: "nyxa-hidden", card, panel: "settings", panelTab: "profile" });
+  for (const invalid of ["", "bad", "<script>", 1, `${card}/extra`]) {
+    expect(parseAssistantSearch({ card: invalid })).toEqual({});
+  }
 });

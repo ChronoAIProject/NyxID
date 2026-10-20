@@ -101,8 +101,22 @@ export function AdminOwnershipPage() {
                       {resource.slug || resource.platform}
                     </p>
                   </TableCell>
-                  <TableCell className="break-all font-mono text-xs">
-                    {resource.owner_user_id}
+                  <TableCell>
+                    <p className="break-words font-medium">
+                      {resource.owner_name ||
+                        resource.owner_email ||
+                        resource.owner_user_id}
+                    </p>
+                    {resource.owner_name && resource.owner_email && (
+                      <p className="break-all text-xs text-muted-foreground">
+                        {resource.owner_email}
+                      </p>
+                    )}
+                    {(resource.owner_name || resource.owner_email) && (
+                      <p className="break-all font-mono text-xs text-muted-foreground">
+                        {resource.owner_user_id}
+                      </p>
+                    )}
                   </TableCell>
                   <TableCell className="text-right">
                     <Button

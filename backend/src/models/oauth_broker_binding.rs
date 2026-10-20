@@ -55,6 +55,10 @@ pub struct OauthBrokerBinding {
     #[serde(default)]
     pub rotation_version: u32,
 
+    /// Changes only when the binding's approved grant is replaced.
+    #[serde(default)]
+    pub grant_version: u32,
+
     #[serde(default)]
     pub revoked: bool,
 
@@ -159,6 +163,7 @@ mod tests {
                 x5t_s256: None,
             }),
             rotation_version: 2,
+            grant_version: 1,
             revoked: false,
             last_used_at: Some(now),
             revoked_at: None,
@@ -172,6 +177,7 @@ mod tests {
         assert_eq!(binding.external_subject, restored.external_subject);
         assert_eq!(binding.cnf, restored.cnf);
         assert_eq!(binding.rotation_version, restored.rotation_version);
+        assert_eq!(binding.grant_version, restored.grant_version);
         assert_eq!(
             binding.refresh_token_encrypted,
             restored.refresh_token_encrypted

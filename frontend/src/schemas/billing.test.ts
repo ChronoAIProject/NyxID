@@ -8,9 +8,70 @@ import {
   topUpBillingResponseSchema,
   billingUsageResponseSchema,
   billingUsageRowSchema,
+  BILLING_SERVICE_FILTER_LIMIT,
+  normalizeBillingSearch,
 } from "./billing";
 
 describe("billing schemas", () => {
+  it("preserves the actual optional Machine gateway attribution without creating a second charge", () => {
+    const row = billingUsageRowSchema.parse({
+      metric: "requests",
+      lago_metric_code: "service_requests",
+      layer: "platform",
+      quantity: 1,
+      requests: 1,
+      bytes: 0,
+      events: 1,
+      lago_acked: true,
+      estimated_credits: "0.000040",
+      machine_usage: {
+        node_id: "machine",
+        job_id: "job",
+        runtime_id: "runtime",
+        runtime_generation: null,
+        grant_id: null,
+        principal_kind: "assistant",
+        command: "must not survive safe parsing",
+      },
+    });
+    expect(row.machine_usage).toEqual({
+      node_id: "machine",
+      job_id: "job",
+      runtime_id: "runtime",
+      runtime_generation: null,
+      grant_id: null,
+      principal_kind: "assistant",
+    });
+    expect(row.estimated_credits).toBe("0.000040");
+    expect(row.quantity).toBe(1);
+  });
+
+  it("rejects malformed supplied Machine attribution while allowing legacy unattributed rows", () => {
+    const row = {
+      metric: "requests",
+      lago_metric_code: "service_requests",
+      layer: "platform",
+      quantity: 1,
+      requests: 1,
+      bytes: 0,
+      events: 1,
+      lago_acked: true,
+    };
+    expect(billingUsageRowSchema.safeParse(row).success).toBe(true);
+    expect(
+      billingUsageRowSchema.safeParse({
+        ...row,
+        machine_usage: {
+          node_id: "machine",
+          job_id: "job",
+          runtime_id: "runtime",
+          runtime_generation: -1,
+          grant_id: null,
+          principal_kind: "api_key",
+        },
+      }).success,
+    ).toBe(false);
+  });
   it("accepts the read-only usage response shape returned by `/billing/usage`", () => {
     const result = billingUsageResponseSchema.safeParse({
       owner_id: "owner-1",
@@ -181,5 +242,33 @@ describe("billing funding", () => {
         grant_credits_micros: -1,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("normalizeBillingSearch service filter", () => {
+  it("migrates the legacy single-service param", () => {
+    expect(normalizeBillingSearch({ service: "all" }).services).toEqual([]);
+    expect(normalizeBillingSearch({ service: "svc" }).services).toEqual([
+      "svc",
+    ]);
+    expect(
+      normalizeBillingSearch({ service: "old", services: ["new"] }).services,
+    ).toEqual(["new"]);
+  });
+
+  it("dedupes, drops invalid entries and bounds the list", () => {
+    expect(
+      normalizeBillingSearch({ services: ["a", "a", " ", 7, "b"] }).services,
+    ).toEqual(["a", "b"]);
+    const many = Array.from({ length: 80 }, (_, index) => `s${index}`);
+    expect(normalizeBillingSearch({ services: many }).services).toHaveLength(
+      BILLING_SERVICE_FILTER_LIMIT,
+    );
+    expect(normalizeBillingSearch({ services: "nope" }).services).toEqual([]);
+  });
+
+  it("accepts only the topup action", () => {
+    expect(normalizeBillingSearch({ action: "topup" }).action).toBe("topup");
+    expect(normalizeBillingSearch({ action: "refund" }).action).toBeUndefined();
   });
 });

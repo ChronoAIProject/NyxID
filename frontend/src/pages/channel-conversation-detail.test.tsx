@@ -70,7 +70,7 @@ beforeEach(() => {
 
 describe("agent-initiated messaging controls", () => {
   it("requires an explicit saved opt-in before test-send", async () => {
-    render(<InitiatedMessageSettings conversation={conversation} />);
+    render(<InitiatedMessageSettings conversation={conversation} botOwnerId="owner" />);
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "Send test message" }),
@@ -95,6 +95,7 @@ describe("agent-initiated messaging controls", () => {
   it("explains unsupported transports and disables the toggle", () => {
     render(
       <InitiatedMessageSettings
+        botOwnerId="owner"
         conversation={{
           ...conversation,
           capabilities: { ...conversation.capabilities, initiated_send: false },
@@ -115,6 +116,7 @@ describe("agent-initiated messaging controls", () => {
   it("disables wildcard routes even if the adapter supports sends", () => {
     render(
       <InitiatedMessageSettings
+        botOwnerId="owner"
         conversation={{ ...conversation, platform_conversation_id: "*" }}
       />,
     );
@@ -122,9 +124,58 @@ describe("agent-initiated messaging controls", () => {
     expect(screen.getByText(/no specific chat address/)).toBeInTheDocument();
   });
 
+  it("keeps sending disabled while the bot owner who pays is loading", async () => {
+    render(
+      <InitiatedMessageSettings
+        botOwnerId={undefined}
+        conversation={{ ...conversation, allow_agent_initiated: true }}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Send test message"), {
+      target: { value: "hello" },
+    });
+    expect(screen.getByLabelText("Send test message")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Send test message" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Sending is available once this bot's details load."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.submit(screen.getByLabelText("Send test message").closest("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("shows a retryable error instead of a loading hint when the bot failed to load", async () => {
+    const retry = vi.fn();
+    render(
+      <InitiatedMessageSettings
+        botOwnerId={undefined}
+        botOwnerError
+        onRetryBotOwner={retry}
+        conversation={{ ...conversation, allow_agent_initiated: true }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "This bot's details could not be loaded, so test messages can't be sent.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Sending is available once this bot's details load."),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Send test message" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
   it("submits an opted-in test message with a delivery key", async () => {
     render(
       <InitiatedMessageSettings
+        botOwnerId="owner"
         conversation={{ ...conversation, allow_agent_initiated: true }}
       />,
     );

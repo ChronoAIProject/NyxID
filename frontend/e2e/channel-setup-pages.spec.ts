@@ -82,7 +82,7 @@ for (const platform of [...channelPlatforms, futurePlatform].filter(
     });
     await page.goto(`/channel-bots/connect/${platform.platform}?${search}`);
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
-      "Create your",
+      platform.platform === "telegram" ? "Connect your Telegram bot" : "Create your",
     );
     for (const field of platform.registration.fields) {
       const input = page.getByLabel(
@@ -101,7 +101,7 @@ for (const platform of [...channelPlatforms, futurePlatform].filter(
     }
     expect(writes).toEqual([]);
     const submit = page.getByRole("button", {
-      name: "Create channel bot",
+      name: platform.platform === "telegram" ? "Connect bot" : "Create channel bot",
       exact: true,
     });
     await expect(submit).toBeEnabled();
@@ -114,7 +114,7 @@ for (const platform of [...channelPlatforms, futurePlatform].filter(
     await requiredInput.fill(values[required.name]!);
     await submit.click();
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
-      "is created",
+      platform.platform === "telegram" ? "is connected" : "is created",
     );
     expect(writes).toEqual([
       { platform: platform.platform, label: "Support", ...values },
@@ -519,9 +519,7 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole("button")).toHaveCount(1);
     await expect(page.getByRole("list")).toHaveCount(0);
     await expect(
-      page
-        .getByRole("banner")
-        .getByRole("link", { name: "Channel setup guide" }),
+      page.getByRole("link", { name: "Channel setup guide" }),
     ).toBeVisible();
     await page.screenshot({
       path: `/tmp/nyxid-channel-one-click-${width}.png`,

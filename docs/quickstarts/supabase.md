@@ -1,5 +1,8 @@
 # Use Supabase as an AI Agent Database
 
+For OAuth access to Supabase organization and project management, use the
+separate [Supabase Management connector](../CLOUD_PLATFORM_OAUTH.md#supabase-management).
+
 Connect a Supabase project's PostgREST Data API to NyxID, then let an AI agent
 read and write project tables without receiving the Supabase API key.
 

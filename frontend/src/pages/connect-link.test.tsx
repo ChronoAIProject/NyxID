@@ -7,7 +7,11 @@ import {
   connectLinkProviderError,
 } from "@/lib/connect-link-page";
 import type { ConnectLinkPreview } from "@/schemas/connect-links";
-import { ConnectLinkDetailRow, RequestDetails, TerminalPanel } from "@/pages/connect-link";
+import {
+  ConnectLinkDetailRow,
+  RequestDetails,
+  TerminalPanel,
+} from "@/pages/connect-link";
 
 function preview(
   overrides: Partial<ConnectLinkPreview> = {},
@@ -36,10 +40,19 @@ describe("connect link page error handling", () => {
   it.each(["oauth", "device_code"] as const)(
     "shows creator-selected permissions for %s without an editable scope input",
     (connect_method) => {
-      render(<RequestDetails preview={preview({ connect_method, scopes: ["public_repo", "read:org"] })} />);
+      render(
+        <RequestDetails
+          preview={preview({
+            connect_method,
+            scopes: ["public_repo", "read:org"],
+          })}
+        />,
+      );
       expect(screen.getByText("Requested permissions")).toBeInTheDocument();
       expect(screen.getByText("public_repo, read:org")).toBeInTheDocument();
-      expect(screen.getByText(/on top of the provider defaults/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/on top of the provider defaults/),
+      ).toBeInTheDocument();
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     },
   );
@@ -47,7 +60,9 @@ describe("connect link page error handling", () => {
   it("omits additional permissions when none were requested", () => {
     render(<RequestDetails preview={preview()} />);
     expect(screen.queryByText("Requested permissions")).not.toBeInTheDocument();
-    expect(screen.queryByText(/on top of the provider defaults/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/on top of the provider defaults/),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces safe Error messages and uses a stable fallback", () => {
@@ -65,6 +80,11 @@ describe("connect link page error handling", () => {
     ).toBe(true);
     expect(
       connectLinkNeedsSetupForm(preview({ requires_gateway_url: true })),
+    ).toBe(true);
+    expect(
+      connectLinkNeedsSetupForm(
+        preview({ endpoint_url: "https://gateway.example.test" }),
+      ),
     ).toBe(true);
     expect(
       connectLinkNeedsOAuthCredentials(
@@ -111,7 +131,9 @@ describe("connect link page error handling", () => {
       <TerminalPanel status="cancelled" callbackUrl="desktop-app://return" />,
     );
     expect(screen.getByText("Connection cancelled")).toBeInTheDocument();
-    expect(screen.getByText(/Returning to the requesting application/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Returning to the requesting application/),
+    ).toBeInTheDocument();
 
     rerender(<TerminalPanel status="expired" callbackUrl={null} />);
     expect(screen.getByText("Connection request expired")).toBeInTheDocument();

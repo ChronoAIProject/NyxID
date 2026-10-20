@@ -62,7 +62,7 @@ These skills drive the [Aevatar](https://aevatar.ai) control plane over REST, au
 | `aevatar-triage` | Triage a failure across Aevatar / NyxID / Ornn and file a code-grounded issue or give usage guidance. | [`aevatar-triage/`](aevatar-triage/) |
 | `fallback-to-calling-agent` | Safety net: hand the original task back to the calling agent when Aevatar can't finish it server-side. | [`fallback-to-calling-agent/`](fallback-to-calling-agent/) |
 
-A plugin install (`/plugin install nyxid@nyxid`) bundles every skill above automatically across the Claude Code / Codex / Cursor manifests. For manual installs, copy each skill directory you want from `skills/`. This manifest will list more as they ship.
+In Claude Code, the CLI-edition plugin (`claude plugin install nyxid-cli@nyxid` after `claude plugin marketplace add ChronoAIProject/NyxID`) bundles every skill above. The marketplace's `nyxid` plugin is the hosted-MCP edition with a single MCP-first skill. For manual installs, copy each skill directory you want from `skills/`. This manifest will list more as they ship.
 
 ---
 

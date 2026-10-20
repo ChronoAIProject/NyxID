@@ -7,7 +7,7 @@ use super::ownership_transfer_service::{catalog_owner, catalog_owner_filter};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 #[cfg(test)]
 use crate::models::org_membership::OrgMembership;
@@ -22,6 +22,11 @@ use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
+    pub topics: Vec<String>,
+    pub supplier: Option<String>,
+    pub import_source: Option<crate::models::downstream_service::CatalogImportSource>,
+
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
@@ -89,7 +94,7 @@ pub struct CatalogEntry {
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
-    pub capabilities: Option<ServiceCapabilities>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     pub billing: Option<ServiceBilling>,
     pub inference: Option<super::inference_service::InferenceView>,
     pub platform_key: super::inference_service::PlatformKeyView,
@@ -145,14 +150,12 @@ fn build_catalog_entry(
     if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
         let allowed = product.allowed_scopes();
         catalog.retain(|entry| allowed.contains(&entry.scope));
-        for entry in catalog {
-            entry.required = product.required_scopes().contains(&entry.scope.as_str());
-        }
     }
     let platform_available = super::platform_key_service::has_platform_key(&svc)
         && svc.platform_key.as_ref().is_none_or(|p| {
             p.audience == crate::models::downstream_service::PlatformKeyAudience::Public
         });
+    let capabilities = super::inference_service::capabilities(&svc);
     let inference =
         super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), platform_available);
     let platform_key = super::inference_service::PlatformKeyView {
@@ -168,7 +171,13 @@ fn build_catalog_entry(
         .as_ref()
         .and_then(|b| b.byok_pricing.as_ref())
         .map(Into::into);
+    // Computed before the literal moves fields out of `svc`.
+    let icon_url = catalog_icon_url(&svc, provider);
     CatalogEntry {
+        offering_kind: svc.offering_kind,
+        topics: svc.topics.clone(),
+        supplier: svc.supplier.clone(),
+        import_source: svc.import_source.clone(),
         inference,
         platform_key,
         byok_pricing,
@@ -210,7 +219,7 @@ fn build_catalog_entry(
         requires_gateway_url: provider.is_some_and(|p| p.requires_gateway_url),
         api_key_instructions: provider.and_then(|p| p.api_key_instructions.clone()),
         api_key_url: provider.and_then(|p| p.api_key_url.clone()),
-        icon_url: provider.and_then(|p| p.icon_url.clone()),
+        icon_url,
         documentation_url: provider.and_then(|p| p.documentation_url.clone()),
         credential_mode: provider.map(|p| p.credential_mode.clone()),
         // OAuth config
@@ -269,7 +278,7 @@ fn build_catalog_entry(
         homepage_url: svc.homepage_url,
         repository_url: svc.repository_url,
         issues_url: svc.issues_url,
-        capabilities: svc.capabilities,
+        capabilities,
         billing: svc.billing,
         auth_notes: svc.auth_notes,
         known_limitations: svc.known_limitations,
@@ -281,6 +290,20 @@ fn build_catalog_entry(
         skills_manifest_digest,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
         default_request_headers: svc.default_request_headers,
+    }
+}
+
+/// The icon a catalog service displays: a Tool offering's own icon, otherwise
+/// its provider's icon. Connection views reuse it as the fallback below a
+/// per-connection override.
+pub(crate) fn catalog_icon_url(
+    svc: &DownstreamService,
+    provider: Option<&ProviderConfig>,
+) -> Option<String> {
+    if svc.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+        svc.icon_url.clone()
+    } else {
+        provider.and_then(|p| p.icon_url.clone())
     }
 }
 
@@ -898,6 +921,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -1011,6 +1035,10 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -1024,6 +1052,10 @@ mod tests {
             requires_user_credential: true,
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             ..dummy_service()
         }
     }
@@ -1423,5 +1455,51 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].slug, "internal-svc");
+    }
+}
+
+#[cfg(test)]
+mod catalog_icon_tests {
+    use super::catalog_icon_url;
+    use crate::models::downstream_service::OfferingKind;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::models::provider_config::ProviderConfig;
+    use mongodb::bson::{self, doc};
+
+    fn provider_with_icon(icon_url: &str) -> ProviderConfig {
+        bson::from_document(doc! {
+            "_id": "provider-1",
+            "slug": "zoho-mail",
+            "name": "Zoho Mail",
+            "provider_type": "oauth2",
+            "is_active": true,
+            "credential_mode": "admin",
+            "created_by": "system",
+            "icon_url": icon_url,
+            "created_at": bson::DateTime::now(),
+            "updated_at": bson::DateTime::now(),
+        })
+        .expect("provider document")
+    }
+
+    #[test]
+    fn services_show_their_provider_icon_and_tools_their_own() {
+        let provider = provider_with_icon("https://nyx.example/catalog-icons/zoho");
+        let mut service = dummy_service();
+        service.icon_url = Some("https://nyx.example/catalog-icons/tool".to_string());
+
+        assert_eq!(
+            catalog_icon_url(&service, Some(&provider)).as_deref(),
+            Some("https://nyx.example/catalog-icons/zoho"),
+            "AI services inherit the provider icon"
+        );
+        assert_eq!(catalog_icon_url(&service, None), None);
+
+        service.offering_kind = OfferingKind::Tool;
+        assert_eq!(
+            catalog_icon_url(&service, Some(&provider)).as_deref(),
+            Some("https://nyx.example/catalog-icons/tool"),
+            "Tool offerings keep their own icon"
+        );
     }
 }

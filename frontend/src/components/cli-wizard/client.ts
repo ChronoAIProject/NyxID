@@ -56,15 +56,32 @@ export interface WizardBootstrap {
 
 let installed = false
 let currentBootstrap: WizardBootstrap | null = null
+let installedFetch: typeof window.fetch | null = null
+let authorityGeneration = 0
+
+/** Cache identity for the CLI-held session, available only while its shim is installed. */
+export function modeAQueryIdentity(): string | undefined {
+  return installedFetch && window.fetch === installedFetch
+    ? `mode-a:${String(authorityGeneration)}`
+    : undefined
+}
 
 export function installModeAFetchShim(bootstrap: WizardBootstrap): void {
+  if (
+    !currentBootstrap ||
+    currentBootstrap.csrf !== bootstrap.csrf ||
+    currentBootstrap.baseUrl !== bootstrap.baseUrl ||
+    currentBootstrap.flow !== bootstrap.flow
+  ) {
+    authorityGeneration++
+  }
   currentBootstrap = bootstrap
   if (installed) return
   installed = true
 
   const originalFetch = window.fetch.bind(window)
 
-  window.fetch = async (
+  installedFetch = window.fetch = async (
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> => {

@@ -135,8 +135,8 @@ pub fn chat_attempt_nonce_from_state(state: &str) -> Option<&str> {
     }
 }
 
-/// Maximum number of user-supplied additional scopes per OAuth initiate request.
-const MAX_ADDITIONAL_SCOPES: usize = 32;
+/// Maximum size of a caller-supplied scope list before parsing and allocation.
+const MAX_SCOPE_INPUT_BYTES: usize = 16 * 1024;
 /// Maximum length of a single scope string.
 const MAX_SCOPE_LENGTH: usize = 256;
 
@@ -148,7 +148,7 @@ const MAX_SCOPE_LENGTH: usize = 256;
 /// to `provider.default_scopes`.
 ///
 /// Validation:
-/// - At most [`MAX_ADDITIONAL_SCOPES`] entries.
+/// - The raw scope list is at most [`MAX_SCOPE_INPUT_BYTES`] bytes.
 /// - Each scope is at most [`MAX_SCOPE_LENGTH`] characters.
 /// - Each scope must match `[A-Za-z0-9._:/~+*=-]+` (RFC 6749 §3.3 permits
 ///   a broader set, but this covers every known OAuth scope format including
@@ -158,6 +158,11 @@ pub fn parse_additional_scopes(raw: Option<&str>) -> AppResult<Vec<String>> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
+    if raw.len() > MAX_SCOPE_INPUT_BYTES {
+        return Err(AppError::ValidationError(format!(
+            "OAuth scope list exceeds {MAX_SCOPE_INPUT_BYTES} bytes"
+        )));
+    }
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(Vec::new());
@@ -169,12 +174,6 @@ pub fn parse_additional_scopes(raw: Option<&str>) -> AppResult<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-
-    if scopes.len() > MAX_ADDITIONAL_SCOPES {
-        return Err(AppError::ValidationError(format!(
-            "Too many additional scopes (max {MAX_ADDITIONAL_SCOPES})"
-        )));
-    }
 
     for scope in &scopes {
         if scope.len() > MAX_SCOPE_LENGTH {
@@ -731,6 +730,12 @@ pub async fn initiate_oauth_connect(
         ));
     }
 
+    oauth_flow::validate_authorization_nonce_config(
+        provider.authorization_nonce_required,
+        provider.authorization_url.as_deref(),
+        provider.client_id_param_name.as_deref(),
+    )?;
+
     let provider =
         super::ifttt_oauth_service::ensure_registered(db, encryption_keys, base_url, provider)
             .await?;
@@ -899,6 +904,14 @@ pub async fn initiate_oauth_connect(
         None => None,
     };
 
+    let authorization_nonce = provider.authorization_nonce_required.then(|| {
+        use base64::Engine;
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    });
+
     let oauth_state = OAuthState {
         history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
@@ -908,6 +921,7 @@ pub async fn initiate_oauth_connect(
         device_code_encrypted: None,
         user_code_encrypted: None,
         poll_interval: None,
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
@@ -915,6 +929,7 @@ pub async fn initiate_oauth_connect(
         attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
         connect_link_id: connect_link_id.map(String::from),
+        authorization_nonce: authorization_nonce.clone(),
         consumed: false,
         expires_at,
         created_at: now,
@@ -945,14 +960,30 @@ pub async fn initiate_oauth_connect(
     );
 
     let cid_param = oauth_flow::client_id_param_name(&provider);
+    // Keep the historic unconditional '?' byte construction when disabled.
+    // Enabled URLs have already been checked for nonce conflicts and fragments.
+    let separator = if provider.authorization_nonce_required && authorization_url.contains('?') {
+        if authorization_url.ends_with(['?', '&']) {
+            ""
+        } else {
+            "&"
+        }
+    } else {
+        "?"
+    };
     let mut auth_url = format!(
-        "{}?{}={}&redirect_uri={}&response_type=code&state={}",
+        "{}{}{}={}&redirect_uri={}&response_type=code&state={}",
         authorization_url,
+        separator,
         urlencoding::encode(cid_param),
         urlencoding::encode(&client_id),
         urlencoding::encode(&callback_url),
         urlencoding::encode(&state_id),
     );
+
+    if oauth_flow::is_stripe_apps(&provider) {
+        auth_url = auth_url.replace("&response_type=code", "");
+    }
 
     // Scope resolution (NyxID#917) — see `resolve_scope_param`. `None` means
     // omit `scope` entirely; a `Some("")` is only produced for an admin-seeded
@@ -1004,6 +1035,10 @@ pub async fn initiate_oauth_connect(
             "&resource={}",
             urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
         ));
+    }
+
+    if let Some(nonce) = authorization_nonce {
+        auth_url.push_str(&format!("&nonce={nonce}"));
     }
 
     tracing::info!(
@@ -1227,6 +1262,7 @@ pub async fn request_device_code(
         device_code_encrypted: Some(device_code_encrypted),
         user_code_encrypted: Some(user_code_encrypted),
         poll_interval: Some(interval),
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
@@ -1234,6 +1270,7 @@ pub async fn request_device_code(
         attempt_nonce: None,
         connection_id: connection_id.map(String::from),
         connect_link_id: None,
+        authorization_nonce: None,
         consumed: false,
         expires_at,
         created_at: now,
@@ -1299,6 +1336,29 @@ pub async fn poll_device_code(
         return Err(AppError::BadRequest(
             "Device code state user mismatch".to_string(),
         ));
+    }
+
+    let interval_secs = i64::from(oauth_state.poll_interval.unwrap_or(5).max(1));
+    let poll_cutoff = now - Duration::seconds(interval_secs);
+    let claimed = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .find_one_and_update(
+            doc! {
+                "_id": state,
+                "$or": [
+                    { "last_polled_at": null },
+                    { "last_polled_at": { "$lte": bson::DateTime::from_chrono(poll_cutoff) } },
+                ],
+            },
+            doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    if claimed.is_none() {
+        return Ok(DeviceCodePollResult {
+            status: "pending".to_string(),
+            interval: oauth_state.poll_interval,
+            effective_user_id: None,
+        });
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
@@ -1542,6 +1602,7 @@ pub async fn poll_device_code(
             oauth_state.connection_id.as_deref(),
             &token_data,
             now,
+            resolved.app_source,
         )
         .await;
     }
@@ -1557,6 +1618,7 @@ pub async fn poll_device_code(
         oauth_state.connection_id.as_deref(),
         &resp_data,
         now,
+        resolved.app_source,
     )
     .await
 }
@@ -1579,6 +1641,7 @@ async fn store_device_code_tokens(
     connection_id: Option<&str>,
     token_data: &serde_json::Value,
     now: chrono::DateTime<Utc>,
+    app_source: super::oauth_app_source::OAuthAppSource,
 ) -> AppResult<DeviceCodePollResult> {
     let access_token = token_data["access_token"]
         .as_str()
@@ -1605,6 +1668,7 @@ async fn store_device_code_tokens(
             refresh_token,
             scope,
             token_expires_at,
+            Some(app_source),
         )
         .await
         .inspect_err(|e| {
@@ -1883,12 +1947,17 @@ pub async fn handle_oauth_callback(
     // SEC-H2: Use no-redirect client for token exchange
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = request.basic_auth(&resolved.client_id, resolved.client_secret.as_deref());
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
+            &provider,
+            &resolved.client_id,
+            resolved.client_secret.as_deref(),
+        )?;
+        request = request.basic_auth(username, password);
     }
     let token_response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("OAuth token exchange failed: {e}")))?;
+        .map_err(|_| AppError::Internal("OAuth token exchange failed".into()))?;
 
     let status = token_response.status();
     // Read the body once as text so we can both (a) parse provider-shaped
@@ -1943,15 +2012,8 @@ pub async fn handle_oauth_callback(
     };
 
     let refresh_token = token_payload["refresh_token"].as_str();
-    let expires_in = token_payload["expires_in"].as_i64();
+    let expires_in = oauth_flow::token_expires_in(&provider, token_payload);
     let scope = token_payload["scope"].as_str();
-
-    if let Some(product) =
-        google_product_for_connection(db, user_id, &provider, oauth_state.connection_id.as_deref())
-            .await?
-    {
-        product.validate_required_scopes(scope)?;
-    }
 
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -1985,6 +2047,7 @@ pub async fn handle_oauth_callback(
                 refresh_token,
                 scope,
                 token_expires_at,
+                Some(resolved.app_source),
             )
             .await?;
             if !wrote {
@@ -2001,6 +2064,7 @@ pub async fn handle_oauth_callback(
                 refresh_token,
                 scope,
                 token_expires_at,
+                Some(resolved.app_source),
             )
             .await
             .inspect_err(|e| {
@@ -2543,13 +2607,18 @@ async fn refresh_user_api_key_under_lease(
 
     let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
-        request = request.basic_auth(&client_id, client_secret.as_deref());
+        let (username, password) = oauth_flow::token_basic_auth_credentials(
+            &provider,
+            &client_id,
+            client_secret.as_deref(),
+        )?;
+        request = request.basic_auth(username, password);
     }
 
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
+        .map_err(|_| AppError::Internal("Token refresh request failed".into()))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -2676,11 +2745,16 @@ async fn refresh_user_api_key_under_lease(
         AppError::Internal("Missing access_token in refresh response".to_string())
     })?;
     let new_refresh_token = payload["refresh_token"].as_str();
-    let expires_in = payload["expires_in"].as_i64();
+    let expires_in = oauth_flow::token_expires_in(&provider, payload);
     let new_scope = payload["scope"].as_str();
     let now = Utc::now();
 
     let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
+    let observed_source = if api_key.user_oauth_client_id_encrypted.is_some() {
+        super::oauth_app_source::OAuthAppSource::Byo
+    } else {
+        super::oauth_app_source::OAuthAppSource::Platform
+    };
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
@@ -2690,6 +2764,11 @@ async fn refresh_user_api_key_under_lease(
         "error_message": bson::Bson::Null,
         "last_used_at": bson::DateTime::from_chrono(now),
         "updated_at": bson::DateTime::from_chrono(now),
+        "oauth_app_observation": {
+            "source": observed_source.as_str(),
+            "credential_epoch": api_key.credential_epoch,
+            "observed_at": bson::DateTime::from_chrono(now),
+        },
     };
     if let Some(exp) = expires_in {
         let new_expires = now + Duration::seconds(exp);
@@ -3242,10 +3321,11 @@ mod tests {
         build_user_token_summary, chat_attempt_nonce_from_state, classify_device_poll_failure,
         ensure_additional_scopes_supported, merge_scopes, normalize_telegram_bot_api_key,
         oauth_token_payload, parse_additional_scopes, parse_token_exchange_response,
-        resolve_scope_param, token_exchange_provider_error,
+        poll_device_code, resolve_scope_param, token_exchange_provider_error,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
+    use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use crate::services::oauth_flow;
@@ -3255,6 +3335,65 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn device_poll_respects_provider_interval_before_upstream_work() {
+        let Some(db) = connect_test_database("device_poll_interval_guard").await else {
+            return;
+        };
+        let now = Utc::now();
+        let state_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(OAuthState {
+                id: state_id.clone(),
+                user_id: user_id.clone(),
+                history_context: None,
+                provider_config_id: provider_id.clone(),
+                code_verifier: None,
+                device_code_encrypted: None,
+                user_code_encrypted: None,
+                poll_interval: Some(10),
+                last_polled_at: Some(now),
+                target_user_id: None,
+                credential_user_id: None,
+                connection_id: None,
+                connect_link_id: None,
+                redirect_path: None,
+                flow_kind: None,
+                attempt_nonce: None,
+                authorization_nonce: None,
+                consumed: false,
+                expires_at: now + Duration::minutes(5),
+                created_at: now,
+            })
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let early = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id)
+            .await
+            .unwrap();
+        assert_eq!(early.status, "pending");
+        assert_eq!(early.interval, Some(10));
+
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .update_one(
+                doc! { "_id": &state_id },
+                doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now - Duration::seconds(11)) } },
+            )
+            .await
+            .unwrap();
+        let due = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id).await;
+        assert!(matches!(due, Err(AppError::Internal(_))));
+        let stored = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .find_one(doc! { "_id": &state_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.last_polled_at.unwrap() > now - Duration::seconds(10));
+    }
 
     #[test]
     fn chat_state_discriminator_requires_canonical_uuid_v4() {
@@ -3303,6 +3442,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("NyxIdBot".to_string()),
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -3608,12 +3748,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_additional_scopes_rejects_too_many() {
+    fn parse_additional_scopes_accepts_large_scope_sets() {
         let many = (0..100)
             .map(|i| format!("scope{i}"))
             .collect::<Vec<_>>()
             .join(",");
-        assert!(parse_additional_scopes(Some(&many)).is_err());
+        let scopes = parse_additional_scopes(Some(&many)).unwrap();
+        assert_eq!(scopes.len(), 100);
+        assert_eq!(scopes.first().unwrap(), "scope0");
+        assert_eq!(scopes.last().unwrap(), "scope99");
+        assert_eq!(
+            resolve_scope_param(None, &[], Some(&scopes)),
+            Some(scopes.join(" "))
+        );
+        assert_eq!(
+            resolve_scope_param(None, &scopes, None),
+            Some(scopes.join(" "))
+        );
+        assert!(parse_additional_scopes(Some(&format!("{many},bad<scope>"))).is_err());
+        assert!(parse_additional_scopes(Some(&format!("{many},{}", "a".repeat(257)))).is_err());
+    }
+
+    #[test]
+    fn parse_additional_scopes_bounds_raw_input_size() {
+        let at_limit = "a ".repeat(super::MAX_SCOPE_INPUT_BYTES / 2);
+        assert!(parse_additional_scopes(Some(&at_limit)).is_ok());
+        let oversized = format!("{at_limit}a");
+        let err = parse_additional_scopes(Some(&oversized)).unwrap_err();
+        assert!(
+            matches!(err, AppError::ValidationError(message) if message.contains("scope list exceeds"))
+        );
+        let padding = " ".repeat(super::MAX_SCOPE_INPUT_BYTES + 1);
+        assert!(parse_additional_scopes(Some(&padding)).is_err());
     }
 
     #[test]
@@ -3962,6 +4128,10 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     assert_eq!(saved.status, "active");
+                    let observation = saved.oauth_app_observation.as_ref().unwrap();
+                    assert_eq!(observation.source, "platform");
+                    assert_eq!(observation.credential_epoch, saved.credential_epoch);
+                    assert_eq!(Some(observation.observed_at), saved.last_authorized_at);
                     (
                         saved.access_token_encrypted,
                         saved.refresh_token_encrypted,
@@ -4026,6 +4196,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloud_oauth_connect_and_refresh_use_seeded_protocols() {
+        use crate::services::provider_service;
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let db = connect_test_database("cloud_oauth_protocols")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+
+        for slug in ["cloudflare", "supabase-management", "railway", "stripe"] {
+            server.reset().await;
+            let mut provider = provider_service::get_provider_by_slug(&db, slug)
+                .await
+                .unwrap();
+            provider.token_url = Some(format!("{}/token", server.uri()));
+            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
+            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .replace_one(doc! { "_id": &provider.id }, &provider)
+                .await
+                .unwrap();
+
+            for byo in [false, true] {
+                server.reset().await;
+                let key = insert_pending_user_api_key(
+                    &db,
+                    &enc,
+                    &provider.id,
+                    byo.then_some("byo-client"),
+                    byo.then_some("byo-secret"),
+                )
+                .await;
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    key.connection_id.as_deref(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = reqwest::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert_eq!(
+                    query["client_id"],
+                    if byo { "byo-client" } else { "client-id" }
+                );
+                assert_eq!(
+                    query["redirect_uri"],
+                    "https://nyxid.example/api/v1/providers/callback"
+                );
+                if slug == "stripe" {
+                    assert!(!query.contains_key("code_challenge"));
+                    assert!(!query.contains_key("response_type"));
+                } else {
+                    assert_eq!(query["code_challenge_method"], "S256");
+                }
+                if matches!(slug, "supabase-management" | "stripe") {
+                    assert!(!query.contains_key("scope"));
+                    assert!(
+                        super::ensure_additional_scopes_supported(&provider, &["all".into()])
+                            .is_err()
+                    );
+                } else {
+                    assert!(
+                        query["scope"]
+                            .split_whitespace()
+                            .any(|s| s == "offline_access")
+                    );
+                }
+                if slug == "railway" {
+                    assert_eq!(query["prompt"], "consent");
+                    assert!(
+                        query["scope"]
+                            .split_whitespace()
+                            .any(|s| s == "project:viewer")
+                    );
+                    assert!(
+                        !query["scope"]
+                            .split_whitespace()
+                            .any(|s| s.ends_with(":member") || s.ends_with(":admin"))
+                    );
+                }
+
+                let basic = if slug == "stripe" {
+                    if byo {
+                        "Basic YnlvLXNlY3JldDo="
+                    } else {
+                        "Basic Y2xpZW50LXNlY3JldDo="
+                    }
+                } else if byo {
+                    "Basic YnlvLWNsaWVudDpieW8tc2VjcmV0"
+                } else {
+                    "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                };
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(header("authorization", basic))
+                    .and(header("content-type", "application/x-www-form-urlencoded"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "connected-access", "refresh_token": "connected-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                super::handle_oauth_callback(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &provider.id,
+                    "cloud-code",
+                    &query["state"],
+                )
+                .await
+                .unwrap();
+                let request = &server.received_requests().await.unwrap()[0];
+                let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["grant_type"], "authorization_code");
+                assert_eq!(form["code"], "cloud-code");
+                if slug == "stripe" {
+                    assert!(!form.contains_key("redirect_uri"));
+                    assert!(!form.contains_key("code_verifier"));
+                    assert!(!form.contains_key("client_id"));
+                } else {
+                    assert_eq!(form["redirect_uri"], query["redirect_uri"]);
+                    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(Sha256::digest(form["code_verifier"].as_bytes()));
+                    assert_eq!(challenge, query["code_challenge"]);
+                }
+                assert!(!form.contains_key("client_secret"));
+
+                let connected = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(connected.status, "active");
+                assert!(connected.expires_at.is_some());
+                assert_eq!(
+                    enc.decrypt(connected.access_token_encrypted.as_ref().unwrap())
+                        .await
+                        .unwrap(),
+                    b"connected-access"
+                );
+                server.reset().await;
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .and(header("authorization", basic))
+                    .and(header("content-type", "application/x-www-form-urlencoded"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json({
+                        let mut payload = serde_json::json!({"access_token": "refreshed-access", "refresh_token": "rotated-refresh"});
+                        if slug != "stripe" { payload["expires_in"] = serde_json::json!(3600); }
+                        payload
+                    }))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let refreshed = super::refresh_user_api_key_in_place(&db, &enc, &connected, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    enc.decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+                        .await
+                        .unwrap(),
+                    b"rotated-refresh"
+                );
+                assert_eq!(refreshed.credential_epoch, connected.credential_epoch);
+                assert!(refreshed.expires_at.is_some());
+                let request = &server.received_requests().await.unwrap()[0];
+                let form: HashMap<_, _> = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+                assert_eq!(form["grant_type"], "refresh_token");
+                assert_eq!(form["refresh_token"], "connected-refresh");
+                assert!(!form.contains_key("client_secret"));
+                if slug == "railway" {
+                    let admin = super::initiate_oauth_connect(
+                        &db,
+                        &enc,
+                        "https://nyxid.example",
+                        &key.user_id,
+                        &provider.id,
+                        None,
+                        None,
+                        &["workspace:admin".into()],
+                        None,
+                        key.connection_id.as_deref(),
+                        None,
+                        None,
+                    )
+                    .await;
+                    if byo {
+                        let url = reqwest::Url::parse(&admin.unwrap().authorization_url).unwrap();
+                        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                        assert!(
+                            query["scope"]
+                                .split_whitespace()
+                                .any(|s| s == "workspace:admin")
+                        );
+                    } else {
+                        assert!(matches!(admin, Err(AppError::ValidationError(_))));
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn oauth_refresh_contracts_cover_both_stores_and_legacy_encodings() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4036,6 +4433,7 @@ mod tests {
         let server = MockServer::start().await;
         for (slug, encoding, basic) in [
             ("notion", "json", true),
+            ("stripe", "form", true),
             ("lark", "json", false),
             ("feishu", "json", false),
             ("ordinary", "form", false),
@@ -4049,6 +4447,11 @@ mod tests {
                 Some(enc.encrypt(b"client-secret").await.unwrap()),
             );
             provider.slug = slug.into();
+            provider.authorization_nonce_required = true;
+            if slug == "stripe" {
+                provider.authorization_url =
+                    Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+            }
             if basic {
                 provider.token_endpoint_auth_method = "client_secret_basic".into();
             }
@@ -4106,7 +4509,7 @@ mod tests {
                     .unwrap(),
                 b"rotated-refresh"
             );
-            assert!(refreshed.expires_at.is_none());
+            assert_eq!(refreshed.expires_at.is_some(), slug == "stripe");
             assert_eq!(refreshed.credential_epoch, key.credential_epoch);
 
             let mut legacy = make_oauth_token(
@@ -4139,7 +4542,7 @@ mod tests {
                     .unwrap(),
                 b"rotated-refresh"
             );
-            assert!(saved.expires_at.is_none());
+            assert_eq!(saved.expires_at.is_some(), slug == "stripe");
 
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 2);
@@ -4153,7 +4556,11 @@ mod tests {
                 if basic {
                     assert_eq!(
                         request.headers["authorization"],
-                        "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                        if slug == "stripe" {
+                            "Basic Y2xpZW50LXNlY3JldDo="
+                        } else {
+                            "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                        }
                     );
                 } else {
                     assert!(!request.headers.contains_key("authorization"));
@@ -4387,6 +4794,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.service_slug == "my-notion")
         );
+        crate::test_utils::init_test_audit_chain_hmac_key();
         catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
@@ -4441,6 +4849,7 @@ mod tests {
                 assert_eq!(ids, current);
             }
             ids = current;
+            crate::test_utils::init_test_audit_chain_hmac_key();
             catalog_spec_sync::sync_seeded_service_endpoints(&db)
                 .await
                 .unwrap();
@@ -4510,6 +4919,465 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn authorization_nonce_is_unique_persisted_and_independent_for_hosted_attempts() {
+        use base64::Engine;
+        let db = connect_test_database("auth_nonce_attempts")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            "https://example.com/token",
+            Some(enc.encrypt(b"client-id").await.unwrap()),
+            Some(enc.encrypt(b"client-secret").await.unwrap()),
+        );
+        provider.authorization_nonce_required = true;
+        provider.authorization_url = Some("https://example.com/authorize?audience=api".into());
+        provider.default_scopes = Some(vec!["hubstaff:read".into()]);
+        provider.extra_auth_params = Some(HashMap::from([
+            ("nonce".into(), "static-override".into()),
+            ("state".into(), "state-override".into()),
+            ("code_challenge".into(), "pkce-override".into()),
+            ("client_id".into(), "client-override".into()),
+        ]));
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+        let link = Uuid::new_v4().to_string();
+        let mut nonces = std::collections::HashSet::new();
+        for chat in [false, true, true] {
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &key.user_id,
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                key.connection_id.as_deref(),
+                Some(&link),
+                chat.then_some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+            )
+            .await
+            .unwrap();
+            let url = url::Url::parse(&result.authorization_url).unwrap();
+            let pairs: Vec<_> = url.query_pairs().into_owned().collect();
+            let query: HashMap<_, _> = pairs.iter().cloned().collect();
+            assert_eq!(pairs.iter().filter(|(key, _)| key == "nonce").count(), 1);
+            let nonce = &query["nonce"];
+            assert_eq!(nonce.len(), 43);
+            assert_eq!(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(nonce)
+                    .unwrap()
+                    .len(),
+                32
+            );
+            assert!(
+                nonces.insert(nonce.clone()),
+                "each attempt must have a fresh nonce"
+            );
+            let saved = db
+                .collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &query["state"] })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.authorization_nonce.as_ref(), Some(nonce));
+            assert_eq!(saved.connection_id, key.connection_id);
+            assert_eq!(saved.connect_link_id.as_deref(), Some(link.as_str()));
+            assert_eq!(saved.attempt_nonce, result.attempt_nonce);
+            assert_ne!(nonce, &saved.id);
+            assert_ne!(Some(nonce), saved.attempt_nonce.as_ref());
+            let verifier = String::from_utf8(
+                enc.decrypt(&hex::decode(saved.code_verifier.unwrap()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_ne!(nonce, &verifier);
+            assert_eq!(
+                query["code_challenge"],
+                oauth_flow::generate_code_challenge(&verifier)
+            );
+            assert_eq!(query["client_id"], "client-id");
+            assert_eq!(query["scope"], "hubstaff:read");
+            assert_eq!(query["audience"], "api");
+            if chat {
+                let current = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(current.oauth_attempt_nonce, saved.attempt_nonce);
+                assert_eq!(saved.id, format!("1cc_{}", saved.attempt_nonce.unwrap()));
+                assert_eq!(current.status, "active");
+            } else {
+                assert!(result.attempt_nonce.is_none());
+                assert!(Uuid::parse_str(&saved.id).is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_disabled_preserves_legacy_url_bytes_and_provider_parameters() {
+        let db = connect_test_database("auth_nonce_disabled")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for slug in ["google", "lark", "feishu", "stripe", "ifttt-mcp"] {
+            for missing in [false, true] {
+                let mut provider = make_test_provider(
+                    &Uuid::new_v4().to_string(),
+                    "https://example.com/token",
+                    Some(enc.encrypt(b"client-id").await.unwrap()),
+                    Some(enc.encrypt(b"client-secret").await.unwrap()),
+                );
+                provider.slug = slug.into();
+                provider.supports_pkce = slug != "stripe";
+                provider.supports_oauth_scopes = slug != "stripe";
+                provider.default_scopes = Some(vec![
+                    if slug == "ifttt-mcp" { "mcp" } else { "email" }.into(),
+                ]);
+                if slug == "stripe" {
+                    provider.authorization_url =
+                        Some("https://marketplace.stripe.com/oauth/v2/authorize".into());
+                }
+                if matches!(slug, "lark" | "feishu") {
+                    provider.client_id_param_name = Some("app_id".into());
+                }
+                let extra = if slug == "google" {
+                    ("access_type", "offline")
+                } else {
+                    ("prompt", "consent")
+                };
+                provider.extra_auth_params = Some(HashMap::from([
+                    (extra.0.into(), extra.1.into()),
+                    ("nonce".into(), "blocked".into()),
+                ]));
+                if slug == "ifttt-mcp" {
+                    provider
+                        .extra_auth_params
+                        .as_mut()
+                        .unwrap()
+                        .insert("resource".into(), "https://attacker.example".into());
+                }
+                let mut document = bson::to_document(&provider).unwrap();
+                if missing {
+                    document.remove("authorization_nonce_required");
+                }
+                db.collection::<bson::Document>(PROVIDER_CONFIGS)
+                    .insert_one(document)
+                    .await
+                    .unwrap();
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    "actor",
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = url::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert!(!query.contains_key("nonce"));
+                let saved = db
+                    .collection::<OAuthState>(OAUTH_STATES)
+                    .find_one(doc! { "_id": &query["state"] })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(saved.authorization_nonce.is_none());
+                let mut expected = format!(
+                    "{}?{}=client-id&redirect_uri=https%3A%2F%2Fnyxid.example%2Fapi%2Fv1%2Fproviders%2Fcallback{}&state={}",
+                    provider.authorization_url.as_deref().unwrap(),
+                    oauth_flow::client_id_param_name(&provider),
+                    if slug == "stripe" {
+                        ""
+                    } else {
+                        "&response_type=code"
+                    },
+                    saved.id
+                );
+                if slug != "stripe" {
+                    expected.push_str(if slug == "ifttt-mcp" {
+                        "&scope=mcp"
+                    } else {
+                        "&scope=email"
+                    });
+                }
+                if let Some(encrypted) = saved.code_verifier {
+                    let verifier = String::from_utf8(
+                        enc.decrypt(&hex::decode(encrypted).unwrap()).await.unwrap(),
+                    )
+                    .unwrap();
+                    expected.push_str(&format!(
+                        "&code_challenge={}&code_challenge_method=S256",
+                        oauth_flow::generate_code_challenge(&verifier)
+                    ));
+                }
+                for (key, value) in provider.extra_auth_params.as_ref().unwrap() {
+                    if key == "nonce" || (slug == "ifttt-mcp" && key == "resource") {
+                        continue;
+                    }
+                    expected.push_str(&format!(
+                        "&{}={}",
+                        urlencoding::encode(key),
+                        urlencoding::encode(value)
+                    ));
+                }
+                if slug == "ifttt-mcp" {
+                    expected.push_str(&format!(
+                        "&resource={}",
+                        urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
+                    ));
+                }
+                assert_eq!(
+                    result.authorization_url, expected,
+                    "{slug}: missing={missing}"
+                );
+            }
+        }
+        // Keep the legacy builder's unconditional '?' even for pre-existing queries/fragments.
+        for endpoint in [
+            "https://example.com/authorize?nonce=legacy",
+            "https://example.com/authorize#legacy",
+        ] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                "https://example.com/token",
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_url = Some(endpoint.into());
+            provider.client_id_param_name = Some("nonce".into());
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                "actor",
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                result
+                    .authorization_url
+                    .starts_with(&format!("{endpoint}?nonce=client-id&redirect_uri="))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_conflicts_fail_before_state_or_chat_mutation() {
+        let db = connect_test_database("auth_nonce_conflict")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        for (endpoint, param) in [
+            ("https://example.com/authorize?nonce=static", None),
+            ("https://example.com/authorize?%6e%6fnce=static", None),
+            ("https://example.com/authorize#fragment", None),
+            ("https://example.com/authorize", Some(" nonce ")),
+        ] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                "https://example.com/token",
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_nonce_required = true;
+            provider.authorization_url = Some(endpoint.into());
+            provider.client_id_param_name = param.map(str::to_string);
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let before = db
+                .collection::<bson::Document>(USER_API_KEYS)
+                .find_one(doc! { "_id": &key.id })
+                .await
+                .unwrap()
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &key.user_id,
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                key.connection_id.as_deref(),
+                None,
+                Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::ValidationError(_))));
+            assert_eq!(
+                db.collection::<OAuthState>(OAUTH_STATES)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &key.id })
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_nonce_legacy_callback_after_toggle_and_token_contract() {
+        use wiremock::matchers::{body_string, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("auth_nonce_callback")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let server = MockServer::start().await;
+        for legacy in [true, false] {
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                &format!("{}/token", server.uri()),
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.authorization_nonce_required = !legacy;
+            db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let result = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                "actor",
+                &provider.id,
+                None,
+                None,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let url = url::Url::parse(&result.authorization_url).unwrap();
+            let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            if legacy {
+                db.collection::<bson::Document>(OAUTH_STATES)
+                    .update_one(
+                        doc! { "_id": &query["state"] },
+                        doc! { "$unset": { "authorization_nonce": "" } },
+                    )
+                    .await
+                    .unwrap();
+                crate::services::provider_service::update_provider(
+                    &db,
+                    &enc,
+                    &provider.id,
+                    crate::services::provider_service::ProviderUpdateInput {
+                        authorization_nonce_required: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let saved = db
+                .collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &query["state"] })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.authorization_nonce.is_none(), legacy);
+            let verifier = String::from_utf8(
+                enc.decrypt(&hex::decode(saved.code_verifier.unwrap()).unwrap())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let expected = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("grant_type", "authorization_code"),
+                    ("code", "code"),
+                    (
+                        "redirect_uri",
+                        "https://nyxid.example/api/v1/providers/callback",
+                    ),
+                    ("client_id", "client-id"),
+                    ("client_secret", "client-secret"),
+                    ("code_verifier", &verifier),
+                ])
+                .finish();
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string(expected))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"access_token":"access", "refresh_token":"refresh"}),
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            super::handle_oauth_callback(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &provider.id,
+                "code",
+                &query["state"],
+            )
+            .await
+            .unwrap();
+            let replay = super::handle_oauth_callback(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                &provider.id,
+                "code",
+                &query["state"],
+            )
+            .await;
+            assert!(replay.is_err());
+            server.verify().await;
+            server.reset().await;
+        }
+    }
+
     fn make_test_provider(
         id: &str,
         token_url: &str,
@@ -4547,6 +5415,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -4579,6 +5448,7 @@ mod tests {
         };
         let now = Utc::now();
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: key_id,
             user_id: Uuid::new_v4().to_string(),
@@ -5255,7 +6125,7 @@ mod tests {
             }
             if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
                 for scopes in [vec![], vec![GMAIL_READONLY.to_string()]] {
-                    let error = super::initiate_oauth_connect(
+                    let result = super::initiate_oauth_connect(
                         &db,
                         &enc,
                         "http://localhost:3001",
@@ -5270,9 +6140,13 @@ mod tests {
                         None,
                     )
                     .await
-                    .unwrap_err();
-                    assert!(matches!(error, AppError::ValidationError(_)));
-                    assert!(error.to_string().contains("Gmail send permission"));
+                    .unwrap();
+                    let url = url::Url::parse(&result.authorization_url).unwrap();
+                    let requested = url
+                        .query_pairs()
+                        .find(|(name, _)| name == "scope")
+                        .map(|(_, value)| value.into_owned());
+                    assert_eq!(requested, (!scopes.is_empty()).then(|| scopes.join(" ")));
                 }
             }
             let forbidden = match product {
@@ -5318,7 +6192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn google_mail_callback_requires_send_grant_before_storing_tokens() {
+    async fn google_mail_callback_accepts_partial_grants() {
         use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
         use crate::services::google_workspace::{GMAIL_READONLY, GMAIL_SEND};
@@ -5366,7 +6240,12 @@ mod tests {
                 .await
                 .unwrap();
             let granted = format!("openid {GMAIL_READONLY} {GMAIL_SEND}");
-            for scope in [None, Some(GMAIL_READONLY), Some(granted.as_str())] {
+            for scope in [
+                None,
+                Some("openid email"),
+                Some(GMAIL_READONLY),
+                Some(granted.as_str()),
+            ] {
                 server.reset().await;
                 let mut response = serde_json::json!({"access_token": "google-access", "refresh_token": "google-refresh", "expires_in": 3600});
                 if let Some(scope) = scope {
@@ -5415,16 +6294,13 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                if scope == Some(granted.as_str()) {
-                    result.unwrap();
-                    assert_eq!(saved.status, "active");
-                    assert_eq!(saved.token_scopes.as_deref(), scope);
-                } else {
-                    assert!(matches!(result, Err(AppError::ValidationError(_))));
-                    assert_eq!(saved.status, key.status);
-                    assert_eq!(saved.access_token_encrypted, key.access_token_encrypted);
-                    assert_eq!(saved.token_scopes, key.token_scopes);
-                }
+                result.unwrap();
+                assert_eq!(saved.status, "active");
+                assert!(saved.access_token_encrypted.is_some());
+                assert_eq!(
+                    saved.token_scopes.as_deref(),
+                    scope.or(key.token_scopes.as_deref())
+                );
             }
         }
     }
@@ -5615,6 +6491,19 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "fresh-access-token");
         assert_eq!(refreshed.token_scopes.as_deref(), Some("openid profile"));
+        assert_eq!(
+            refreshed.oauth_app_observation.as_ref().unwrap().source,
+            "platform"
+        );
+        assert_eq!(
+            refreshed
+                .oauth_app_observation
+                .as_ref()
+                .unwrap()
+                .credential_epoch,
+            key.credential_epoch
+        );
+        assert_eq!(refreshed.credential_source, key.credential_source);
         // expires_at advanced past now.
         assert!(refreshed.expires_at.unwrap() > Utc::now());
     }
@@ -5664,6 +6553,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "byo-access-token");
+        assert_eq!(
+            refreshed.oauth_app_observation.as_ref().unwrap().source,
+            "byo"
+        );
+        assert_eq!(
+            refreshed
+                .oauth_app_observation
+                .as_ref()
+                .unwrap()
+                .credential_epoch,
+            key.credential_epoch
+        );
+        assert_eq!(refreshed.credential_source, key.credential_source);
     }
 
     #[tokio::test]
@@ -5908,6 +6810,7 @@ mod tests {
 
         let now = Utc::now();
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
@@ -6940,6 +7843,7 @@ mod tests {
             None
         };
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),

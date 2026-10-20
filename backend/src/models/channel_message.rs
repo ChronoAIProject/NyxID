@@ -35,6 +35,11 @@ impl std::fmt::Debug for StoredAttachment {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Optional normalized thread facts, never an interaction credential.
+    #[serde(default)]
+    pub thread_context: Option<super::channel_thread::ChannelThreadFacts>,
+    #[serde(default)]
+    pub activity: Option<super::channel_activity::ActivityMetadata>,
     #[serde(default)]
     pub platform_send: Option<super::channel_delivery::PlatformSendRecord>,
     #[serde(rename = "_id")]
@@ -57,6 +62,11 @@ pub struct ChannelMessage {
     /// Platform-assigned message identifier
     #[serde(default)]
     pub platform_message_id: Option<String>,
+    /// Authenticated provider update/event identity used for relay redelivery
+    /// fencing. Telegram's update ID is distinct from its message ID because
+    /// edited messages retain the latter. This is routing metadata only.
+    #[serde(default)]
+    pub native_event_id: Option<String>,
     /// Platform-native sender identifier
     #[serde(default)]
     pub sender_platform_id: Option<String>,
@@ -82,12 +92,20 @@ pub struct ChannelMessage {
     /// Callback delivery status: "pending", "delivered", "failed", "timeout"
     #[serde(default)]
     pub callback_status: Option<String>,
+    /// HTTP status the callback URL answered with when delivery failed, if
+    /// it answered at all. A status code only, never the response body.
+    #[serde(default)]
+    pub callback_http_status: Option<u16>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
     /// Platform message ID of the sent reply (set after outbound delivery)
     #[serde(default)]
     pub platform_reply_message_id: Option<String>,
+    /// Inbound only: the platform message ID this message replies to, when
+    /// it is a reply (routing metadata, e.g. to tell replies to the bot).
+    #[serde(default)]
+    pub reply_to_platform_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
@@ -114,6 +132,8 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            thread_context: None,
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: uuid::Uuid::new_v4().to_string(),
@@ -124,14 +144,17 @@ mod tests {
             direction: "inbound".to_string(),
             platform: "telegram".to_string(),
             platform_message_id: Some("msg_123".to_string()),
+            native_event_id: Some("telegram-update-123".to_string()),
             sender_platform_id: Some("user_456".to_string()),
             sender_display_name: Some("Alice".to_string()),
             content_type: "text".to_string(),
             thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: Utc::now(),
             updated_at: None,
         }

@@ -1,3 +1,6 @@
+import { useAuthStore } from "@/stores/auth-store";
+import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
+import { canWriteTool } from "@/types/api";
 import {
   changedFields,
   describeChanges,
@@ -48,7 +51,7 @@ import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { RoutingSection } from "@/components/dashboard/routing-section";
-import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useMyProviderTokens, useProvider } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -116,9 +119,13 @@ const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
 };
 
 export function ServiceDetailPage() {
+  const user = useAuthStore((state) => state.user);
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  const { data: provider } = useProvider(
+    service?.offering_kind !== "tool" ? (service?.provider_config_id ?? "") : "",
+  );
   const deleteMutation = useDeleteService();
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
@@ -191,12 +198,36 @@ export function ServiceDetailPage() {
     sshAuthMode !== "proxy_only" &&
     service.ssh_config.allowed_principals.length > 0;
 
+  if (service.offering_kind === "tool" && !user?.is_admin) {
+    return canWriteTool(user, service) ? (
+      <ToolManagerEditor service={service} />
+    ) : (
+      <div className="space-y-6">
+        <PageHeader
+          title={service.name}
+          description={service.description ?? undefined}
+        />
+        <EndpointList
+          serviceId={service.id}
+          service={service}
+          canWrite={false}
+          hasApiSpecUrl={!!service.openapi_spec_url}
+        />
+      </div>
+    );
+  }
   return (
     <div className="space-y-8">
       <PageHeader
         title={service.name}
         description={service.description ?? undefined}
-        leading={<ServiceIcon slug={service.slug} size="md" />}
+        leading={
+          <ServiceIcon
+            slug={service.slug}
+            iconUrl={service.icon_url || provider?.icon_url}
+            size="md"
+          />
+        }
         actions={
           <>
             {terminalSupported && (
@@ -279,7 +310,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Developer App Scoping
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -407,7 +438,7 @@ export function ServiceDetailPage() {
                 )}
               </>
             ) : (
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 SSH configuration is missing for this service.
               </p>
             )}
@@ -445,6 +476,7 @@ export function ServiceDetailPage() {
               <Separator />
               <DetailSection title="API Endpoints">
                 <EndpointList
+                  service={service}
                   serviceId={service.id}
                   hasApiSpecUrl={
                     (service.openapi_spec_url ?? service.api_spec_url) !==
@@ -609,7 +641,7 @@ export function ServiceDetailPage() {
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       Capabilities
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -653,7 +685,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
                 No default headers configured for this service.
               </div>
             )}
@@ -773,7 +805,7 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Create pending metadata for the node, then encrypt the secret in the
             browser on the accept page.
           </p>
@@ -816,7 +848,9 @@ function ServiceCredentialPushSection({
                       <SelectItem value="header">Header</SelectItem>
                       <SelectItem value="query-param">Query param</SelectItem>
                       <SelectItem value="path-prefix">Path prefix</SelectItem>
-                      <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
+                      <SelectItem value="ifttt-webhook">
+                        IFTTT Webhooks
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -830,7 +864,12 @@ function ServiceCredentialPushSection({
                 <FormItem>
                   <FormLabel>Field name</FormLabel>
                   <FormControl>
-                    <Input readOnly={form.watch("injection_method") === "ifttt-webhook"} {...field} />
+                    <Input
+                      readOnly={
+                        form.watch("injection_method") === "ifttt-webhook"
+                      }
+                      {...field}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -966,8 +1005,8 @@ function AnonymousEndpointsSection({
     <DetailSection title="Anonymous endpoints">
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
-          <Globe2 className="h-4 w-4 text-primary" />
-          <span className="text-[13px] font-medium">Public proxy rules</span>
+          <Globe2 className="h-4 w-4 text-primary-text" />
+          <span className="text-13 font-medium">Public proxy rules</span>
         </div>
 
         <Form {...form}>
@@ -1058,7 +1097,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
               No anonymous endpoints configured.
             </div>
           )}
@@ -1097,7 +1136,7 @@ const PUBLIC_METHODS = [
  */
 function WideOpenAnonymousWarning() {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-[12px] text-warning">
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
@@ -1196,7 +1235,7 @@ function AnonymousEndpointRow({
           }}
         />
       )}
-      <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
+      <div className="grid gap-3 rounded-lg border border-hairline bg-overlay p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
         <div className="flex items-center gap-2">
           <Switch
             checked={enabled}
@@ -1341,8 +1380,8 @@ function YourRoutingSection({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Router className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Your Routing</CardTitle>
+            <Router className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">Your Routing</CardTitle>
           </div>
           <Button
             variant="outline"

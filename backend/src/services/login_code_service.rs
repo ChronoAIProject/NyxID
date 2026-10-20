@@ -82,7 +82,7 @@ pub async fn mint(
     expiry: Option<DateTime<Utc>>,
 ) -> AppResult<MintedCode> {
     limit(db, "login-code-mint-owner", actor, 5).await?;
-    if let Some(Selection::Existing { api_key_id }) = &selection {
+    if let Some(Selection::Existing { api_key_id, .. }) = &selection {
         let parent = agent::eligible_key(db, actor, api_key_id).await?;
         credentials::credential_expiry(parent.expires_at, expiry)?;
     }
@@ -286,7 +286,7 @@ pub async fn redeem(
         None
     };
     let key_id = match &row.selection {
-        Some(Selection::Existing { api_key_id }) => api_key_id.clone(),
+        Some(Selection::Existing { api_key_id, .. }) => api_key_id.clone(),
         _ => Uuid::new_v4().to_string(),
     };
     let child_id = Uuid::new_v4().to_string();

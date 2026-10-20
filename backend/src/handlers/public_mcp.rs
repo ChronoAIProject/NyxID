@@ -205,6 +205,10 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -221,6 +225,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -230,6 +235,10 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "admin".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -244,6 +253,8 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -354,6 +365,7 @@ mod tests {
         billable_svc.id = Uuid::new_v4().to_string();
         billable_svc.slug = "billable-service".to_string();
         billable_svc.billing = Some(ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

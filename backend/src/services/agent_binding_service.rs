@@ -145,6 +145,22 @@ async fn create_binding_with_scope_authorization_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
+                super::key_service::require_ordinary_purpose(api_key.purpose)?;
+                if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+                    return Err(AppError::Forbidden(
+                        "Permission-bound credentials cannot be overridden".into(),
+                    ));
+                }
+
+                if api_key
+                    .assistant_agent_owner_id
+                    .as_deref()
+                    .is_some_and(|owner| owner != user_id)
+                {
+                    return Err(AppError::Forbidden(
+                        "Organization agent threads cannot bind personal credentials".into(),
+                    ));
+                }
                 let authorization = ScopeAuthorization::for_actor(actor_id.as_deref());
                 api_key_scope_service::validate_owner_service_write_with_session(
                     &db,
@@ -268,7 +284,7 @@ pub async fn list_bindings(
     // Verify key ownership
     let _key = db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": api_key_id, "user_id": user_id, "is_active": true })
+        .find_one(doc! { "_id": api_key_id, "user_id": user_id, "is_active": true, "purpose": {"$ne": "public_nyxbot"} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -291,6 +307,7 @@ pub async fn get_binding(
     api_key_id: &str,
     binding_id: &str,
 ) -> AppResult<AgentServiceBinding> {
+    super::key_service::get_api_key(db, user_id, api_key_id).await?;
     db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
         .find_one(doc! {
             "_id": binding_id,
@@ -310,6 +327,7 @@ pub async fn get_binding_by_service(
     api_key_id: &str,
     user_service_id: &str,
 ) -> AppResult<AgentServiceBinding> {
+    super::key_service::get_api_key(db, user_id, api_key_id).await?;
     db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
         .find_one(doc! {
             "api_key_id": api_key_id,
@@ -401,6 +419,7 @@ async fn delete_binding_with_scope_authorization_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                super::key_service::require_ordinary_purpose(api_key.purpose)?;
                 let binding = db
                     .collection::<AgentServiceBinding>(AGENT_BINDINGS)
                     .find_one(doc! {
@@ -648,11 +667,15 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: allow_all,
             allow_auto_connected_services: false,
@@ -679,6 +702,7 @@ mod tests {
 
     fn make_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),

@@ -32,6 +32,7 @@ const TYPE_FIELDS: Record<ProviderType, ReadonlySet<string>> = {
     "client_id",
     "client_secret",
     "supports_pkce",
+    "authorization_nonce_required",
     "credential_mode",
     "token_endpoint_auth_method",
     "extra_auth_params",
@@ -96,6 +97,7 @@ type ResettableField = keyof Pick<
   | "client_id"
   | "client_secret"
   | "supports_pkce"
+  | "authorization_nonce_required"
   | "device_code_url"
   | "device_token_url"
   | "device_verification_url"
@@ -113,6 +115,7 @@ const RESETTABLE_DEFAULTS: Record<ResettableField, string | boolean | undefined>
   client_id: "",
   client_secret: "",
   supports_pkce: false,
+  authorization_nonce_required: false,
   device_code_url: "",
   device_token_url: "",
   device_verification_url: "",

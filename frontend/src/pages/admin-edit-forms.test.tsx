@@ -1,3 +1,6 @@
+vi.mock("@/hooks/use-tools", () => ({
+  useToolTopics: () => ({ data: [] }),
+}));
 import {
   providerFormPayload,
   providerFormValues,
@@ -56,12 +59,35 @@ vi.mock("@/components/providers/provider-services", () => ({
     </div>
   ),
 }));
+vi.mock("@/hooks/use-service-concurrency", () => ({
+  useServiceConcurrency: () => ({
+    data: { policy: null },
+    isPending: false,
+    isError: false,
+  }),
+  useUpdateServiceConcurrency: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => mock.service,
   useUpdateService: () => ({
     mutateAsync: mock.updateService,
     isPending: false,
   }),
+}));
+// The service editor's server-resolved billing panel is covered in
+// platform-service-fields.test.tsx; it renders nothing here.
+vi.mock("@/hooks/use-admin-billing", () => ({
+  useAdminBillingService: () => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  }),
+}));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({

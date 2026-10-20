@@ -6,7 +6,7 @@ import {
 
 export function AgentKeyPermissions({ apiKey }: { apiKey: AgentKeySummary }) {
   return (
-    <div className="space-y-2 text-[12px]">
+    <div className="space-y-2 text-12">
       <div className="flex flex-wrap items-center gap-2">
         <strong className="break-words">{apiKey.name}</strong>
         <Badge variant={apiKey.owner_type === "org" ? "info" : "secondary"}>
@@ -82,7 +82,7 @@ export function AgentKeyPermissions({ apiKey }: { apiKey: AgentKeySummary }) {
 
 export function AgentKeyIssuanceNotice({ existing }: { existing: boolean }) {
   return (
-    <p className="border-l-2 border-info pl-3 text-[12px] text-muted-foreground">
+    <p className="border-l-2 border-info pl-3 text-12 text-muted-foreground">
       A new login credential will be issued for this key.{" "}
       {existing
         ? "The key's existing secret and other consumers are unaffected. "

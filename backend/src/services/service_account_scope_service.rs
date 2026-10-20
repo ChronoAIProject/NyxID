@@ -10,7 +10,7 @@ use crate::models::service_account::COLLECTION_NAME;
 use crate::mw::auth::{LLM_PROXY_SCOPE, PROXY_SCOPE, WIDE_PROXY_SCOPE};
 use crate::services::curation_grant_service::{READ_SCOPE, WRITE_SCOPE};
 
-pub const DEFINITION_VERSION: &str = "service-account-suggestions-v4";
+pub const DEFINITION_VERSION: &str = "service-account-suggestions-v6";
 pub const MAX_OWNER_ACCOUNTS: i64 = 1_000;
 pub const MAX_CONFIGURED_SCOPES: usize = 10_000;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -40,17 +40,17 @@ pub const DEFINITIONS: &[ScopeDefinition] = &[
     ScopeDefinition {
         value: READ_SCOPE,
         label: "Read catalog skills",
-        description: "Read skill recommendations and history for services permitted by a platform-admin-issued curation grant. This scope alone grants no service access.",
+        description: "When saved by a platform administrator, read metadata and skills for every catalog service, including GET /keys and /keys/{id}. Legacy account grants remain supported.",
     },
     ScopeDefinition {
         value: super::service_account_key_read_service::READ_SCOPE,
-        label: "Read connection metadata",
-        description: "Read nonsecret metadata and effective skill recommendations for exact user-service IDs in a platform-admin-issued key read grant. Does not grant listing, credentials, writes, or execution.",
+        label: "Read key metadata",
+        description: "Read private connection metadata through a key read grant, or support legacy role-authorized catalog editors. Direct catalog:skills:read authority does not require this scope. Never delivers credentials.",
     },
     ScopeDefinition {
         value: WRITE_SCOPE,
         label: "Manage catalog skills",
-        description: "Assign, replace, remove, and restore skill recommendations for services permitted by a platform-admin-issued curation grant. This does not grant package editing or service execution.",
+        description: "When saved by a platform administrator, assign, replace, remove, and restore skills for every catalog service. Does not grant Ornn package editing or service execution.",
     },
     ScopeDefinition {
         value: WIDE_PROXY_SCOPE,
@@ -121,6 +121,21 @@ mod tests {
             DEFINITIONS[1].value
         ));
         assert_eq!(DEFINITIONS[2].value, "roles");
+    }
+
+    #[test]
+    fn editor_suggestions_explain_admin_scope_authority() {
+        for scope in [READ_SCOPE, WRITE_SCOPE] {
+            let entry = DEFINITIONS
+                .iter()
+                .find(|entry| entry.value == scope)
+                .unwrap();
+            assert!(
+                entry
+                    .description
+                    .contains("saved by a platform administrator")
+            );
+        }
     }
 
     #[tokio::test]

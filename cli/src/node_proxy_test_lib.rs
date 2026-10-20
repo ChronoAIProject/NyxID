@@ -11,14 +11,23 @@ pub mod encryption;
 pub mod error;
 #[path = "node/keychain.rs"]
 mod keychain;
+#[path = "node/machine/runtime.rs"]
+pub mod machine;
+#[path = "node/managed_config.rs"]
+pub mod managed_config;
+#[path = "node/managed_deadline.rs"]
+pub mod managed_deadline;
 #[path = "node/metrics.rs"]
 mod metrics;
 #[path = "node/proxy_executor.rs"]
 pub mod proxy_executor;
+#[path = "node/proxy_upload.rs"]
+pub mod proxy_upload;
 #[path = "node/secret_backend.rs"]
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+pub mod tls;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
@@ -74,8 +83,11 @@ fn test_credentials(
             id: "test-node".to_string(),
             auth_token_encrypted: String::new(),
         },
+        managed_runtime: None,
+        managed_capabilities: None,
         signing: config::SigningConfig::default(),
         ssh: config::SshConfig::default(),
+        machine: Default::default(),
         storage_backend: "file".to_string(),
         credentials,
         ssh_keys: Vec::new(),
@@ -92,7 +104,6 @@ mod test_support {
     }
 }
 
-#[cfg(test)]
-mod node {
-    pub use crate::config;
+pub mod node {
+    pub use crate::{config, machine, managed_config, managed_deadline, proxy_upload, ws_client};
 }

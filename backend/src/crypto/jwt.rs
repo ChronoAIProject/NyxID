@@ -44,6 +44,9 @@ pub struct Claims {
     /// Registered OAuth client that received this access token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Exact consent version approved for Machine access; never inferred by readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
     /// User's roles (present when "roles" scope is requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
@@ -130,7 +133,6 @@ pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
 const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
 pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
 pub const RELAY_CALLBACK_TOKEN_TYPE: &str = "relay_callback";
-#[cfg(test)]
 const RELAY_CALLBACK_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Dedicated claims for `/api/v1/channel-relay/reply`.
@@ -342,17 +344,38 @@ impl TokenRestrictionClaims {
     }
 
     pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
-        let catalog_authority = auth_user.has_scope(crate::mw::auth::MCP_CATALOG_READ_SCOPE);
+        Self::from_authenticated_scope(
+            &auth_user.scope,
+            auth_user.resource_uris.as_deref(),
+            auth_user.allow_all_services,
+            &auth_user.allowed_service_ids,
+            auth_user.allow_all_nodes,
+            &auth_user.allowed_node_ids,
+        )
+    }
+
+    /// Shared projection for REST AuthUser and the manually authenticated MCP
+    /// transport. Inputs must come from authentication, never tool arguments.
+    pub fn from_authenticated_scope(
+        scope: &str,
+        resources: Option<&[String]>,
+        allow_all_services: bool,
+        allowed_service_ids: &[String],
+        allow_all_nodes: bool,
+        allowed_node_ids: &[String],
+    ) -> Self {
+        let catalog_authority = scope
+            .split_whitespace()
+            .any(|scope| scope == crate::mw::auth::MCP_CATALOG_READ_SCOPE);
         Self {
-            resources: auth_user
-                .resource_uris
-                .clone()
+            resources: resources
+                .map(<[String]>::to_vec)
                 .or_else(|| catalog_authority.then(Vec::new)),
-            allowed_service_ids: (catalog_authority || !auth_user.allow_all_services)
-                .then(|| auth_user.allowed_service_ids.clone()),
-            allow_all_services: Some(auth_user.allow_all_services),
-            allowed_node_ids: Some(auth_user.allowed_node_ids.clone()),
-            allow_all_nodes: Some(auth_user.allow_all_nodes),
+            allowed_service_ids: (catalog_authority || !allow_all_services)
+                .then(|| allowed_service_ids.to_vec()),
+            allow_all_services: Some(allow_all_services),
+            allowed_node_ids: Some(allowed_node_ids.to_vec()),
+            allow_all_nodes: Some(allow_all_nodes),
         }
     }
 }
@@ -383,12 +406,14 @@ pub fn generate_access_token(
         mtls_x5t_s256,
         restrictions,
         None,
+        None,
     )
 }
 
 /// Generate an access token bound to the registered OAuth client that
 /// completed the authorization-code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn generate_oauth_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -412,6 +437,36 @@ pub fn generate_oauth_access_token(
         mtls_x5t_s256,
         restrictions,
         Some(client_id),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_oauth_access_token_with_consent(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
+    client_id: &str,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> Result<String, AppError> {
+    generate_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        ttl_override_secs,
+        dpop_jkt,
+        mtls_x5t_s256,
+        restrictions,
+        Some(client_id),
+        protected_consent,
     )
 }
 
@@ -427,6 +482,7 @@ fn generate_access_token_for_client(
     mtls_x5t_s256: Option<&str>,
     restrictions: Option<AccessTokenRestrictions<'_>>,
     client_id: Option<&str>,
+    protected_consent: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
@@ -483,6 +539,7 @@ fn generate_access_token_for_client(
             .as_ref()
             .map(|restriction| restriction.allow_all_nodes)
             .or_else(|| client_id.map(|_| true)),
+        protected_consent: protected_consent.cloned(),
         assistant_forward: None,
     };
 
@@ -554,6 +611,7 @@ pub fn generate_assistant_forward_access_token(
         allow_all_services: Some(false),
         allowed_node_ids: Some(Vec::new()),
         allow_all_nodes: Some(false),
+        protected_consent: None,
         assistant_forward: Some(true),
     };
 
@@ -624,6 +682,7 @@ pub fn generate_relay_access_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -737,6 +796,7 @@ pub fn generate_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -792,6 +852,7 @@ pub fn reissue_refresh_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -889,6 +950,7 @@ pub fn generate_delegated_access_token_for_client(
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
         allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
         allow_all_nodes: restrictions.and_then(|r| r.allow_all_nodes),
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -1037,6 +1099,7 @@ pub fn generate_service_account_token(
         allow_all_services: None,
         allowed_node_ids: None,
         allow_all_nodes: None,
+        protected_consent: None,
         assistant_forward: None,
     };
 
@@ -1127,10 +1190,9 @@ pub fn validate_relay_reply_token(
 
 /// Verify and decode a relay callback token.
 ///
-/// NyxID itself never validates these tokens in production — downstream
-/// consumers (e.g. Aevatar) do so via the public JWKS. This helper exists
-/// for round-trip tests, so it is compiled only under `cfg(test)`.
-#[cfg(test)]
+/// Downstream consumers (e.g. Aevatar, the Agent Event Gateway) verify these
+/// via the public JWKS. NyxID verifies them itself only where it is the
+/// callback receiver: NyxBot's direct channel relay endpoint.
 pub fn validate_relay_callback_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -1256,6 +1318,7 @@ mod tests {
 
         let config = AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -1299,6 +1362,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1309,6 +1373,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
@@ -1387,6 +1452,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -1398,7 +1464,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         };
@@ -1688,6 +1753,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
 
@@ -1807,6 +1873,7 @@ mod tests {
             allow_all_services: None,
             allowed_node_ids: None,
             allow_all_nodes: None,
+            protected_consent: None,
             assistant_forward: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
@@ -1907,6 +1974,12 @@ mod tests {
         ]);
         let allowed_service_ids = vec!["svc-1".to_string()];
         let auth_user = crate::mw::auth::AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "llm:proxy".to_string(),

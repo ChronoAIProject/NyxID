@@ -1,8 +1,15 @@
 import { z } from "zod";
+import {
+  scheduleSchema,
+  deliverToSchema,
+  runSchema,
+  type ScheduleSpec,
+} from "./automations";
 
 export const triggerStatusSchema = z.enum(["active", "disabled"]);
 
 export const triggerVerificationSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("schedule") }),
   z.object({
     mode: z.literal("token"),
     location: z.enum(["bearer", "query"]),
@@ -14,12 +21,27 @@ export const triggerVerificationSchema = z.discriminatedUnion("mode", [
 ]);
 
 export const triggerDeliverySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("assistant"),
+    confirmation_policy: z.enum(["changes", "destructive"]).optional(),
+    agent_id: z.string(),
+    thread_policy: z.enum(["home", "dedicated", "new"]).nullable().optional(),
+    instruction: z.string(),
+    deliver_to: deliverToSchema,
+  }),
   z.object({ type: z.literal("webhook"), url: z.string().url() }),
   z.object({ type: z.literal("agent"), conversation_id: z.string().min(1) }),
   z.object({ type: z.literal("notification") }),
 ]);
 
 export const triggerResponseSchema = z.object({
+  source: z.enum(["webhook", "schedule"]).optional(),
+  last_run: runSchema.nullable().optional(),
+  schedule: scheduleSchema.nullable().optional(),
+  overlap: z.enum(["skip", "queue"]).optional(),
+  next_runs: z.array(z.string()).optional(),
+  next_run_at: z.string().nullable().optional(),
+  pause_reason: z.string().nullable().optional(),
   id: z.string().uuid(),
   user_id: z.string().min(1),
   label: z.string().min(1),
@@ -27,14 +49,14 @@ export const triggerResponseSchema = z.object({
   status: triggerStatusSchema,
   verification: triggerVerificationSchema,
   delivery: triggerDeliverySchema,
-  inbound_url: z.string().url(),
+  inbound_url: z.string().url().nullable(),
   created_at: z.string().datetime({ offset: true }),
   updated_at: z.string().datetime({ offset: true }),
 });
 
 export const createTriggerResponseSchema = z.object({
   trigger: triggerResponseSchema,
-  secret: z.string().min(1),
+  secret: z.string().min(1).nullable(),
   delivery_signing_secret: z.string().nullable(),
 });
 
@@ -123,6 +145,10 @@ export type DeleteTriggerResponse = z.infer<typeof deleteTriggerResponseSchema>;
 export type TriggerForm = z.infer<typeof triggerFormSchema>;
 
 export interface CreateTriggerRequest {
+  readonly source?: "webhook" | "schedule";
+  readonly schedule?: ScheduleSpec;
+  readonly overlap?: "skip" | "queue";
+  readonly watch_id?: string;
   readonly label: string;
   readonly user_service_id?: string;
   readonly verification: TriggerVerification;
@@ -131,6 +157,8 @@ export interface CreateTriggerRequest {
 }
 
 export interface UpdateTriggerRequest {
+  readonly schedule?: ScheduleSpec;
+  readonly overlap?: "skip" | "queue";
   readonly label?: string;
   readonly status?: TriggerStatus;
   readonly delivery?: TriggerDelivery;

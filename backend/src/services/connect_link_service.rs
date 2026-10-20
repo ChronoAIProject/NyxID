@@ -43,6 +43,7 @@ pub struct CreateInput {
     pub use_platform_key: Option<bool>,
     pub scopes: Vec<String>,
     pub label: Option<String>,
+    pub endpoint_url: Option<String>,
     pub requested_by: Option<String>,
     pub callback_url: Option<String>,
     pub ttl_secs: Option<i64>,
@@ -170,6 +171,23 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         ));
     }
     let label = normalize_optional(input.label, MAX_LABEL_LEN, "label")?;
+    let endpoint_url = normalize_optional(input.endpoint_url, 2048, "endpoint_url")?;
+    if let Some(url) = endpoint_url.as_deref() {
+        let parsed = url::Url::parse(url).map_err(|_| {
+            AppError::ValidationError("endpoint_url must be an absolute HTTP(S) URL".to_string())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AppError::ValidationError(
+                "endpoint_url must be an absolute HTTP(S) URL without credentials or a fragment"
+                    .to_string(),
+            ));
+        }
+    }
     let supplied_requested_by =
         normalize_optional(input.requested_by, MAX_REQUESTED_BY_LEN, "requested_by")?;
     let (callback_url, requesting_app) = resolve_requesting_app(
@@ -197,6 +215,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         service_id: service.service_id.clone(),
         scopes,
         label,
+        endpoint_url,
         requested_by,
         requesting_app_id: requesting_app.as_ref().map(|client| client.id.clone()),
         requesting_app_name: requesting_app
@@ -228,7 +247,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
 }
 
 fn normalize_scopes(scopes: &[String]) -> AppResult<Vec<String>> {
-    // Parse the whole request together so the shared count limit applies across entries.
+    // Parse the whole request together so the shared byte bound applies across entries.
     let mut scopes = user_token_service::parse_additional_scopes(Some(&scopes.join(" ")))?;
     let mut seen = std::collections::HashSet::new();
     scopes.retain(|scope| seen.insert(scope.clone()));
@@ -1359,7 +1378,7 @@ fn normalize_optional(
     Ok(Some(value.to_string()))
 }
 
-async fn resolve_requesting_app(
+pub(crate) async fn resolve_requesting_app(
     db: &mongodb::Database,
     oauth_client_id: Option<&str>,
     callback_url: Option<&str>,
@@ -1548,6 +1567,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -1616,6 +1636,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "test".to_string(),
             revocation_seed_version: 0,
@@ -1635,6 +1656,7 @@ mod tests {
             callback_url: None,
             ttl_secs: None,
             oauth_client_id: None,
+            endpoint_url: None,
         }
     }
 
@@ -1672,17 +1694,25 @@ mod tests {
     }
 
     #[test]
-    fn scopes_reuse_shared_character_length_and_total_count_limits() {
+    fn scopes_reuse_shared_character_length_and_total_byte_limits() {
         for raw in [
             vec!["bad<scope>".to_string()],
             vec!["x".repeat(257)],
-            (0..101).map(|i| format!("scope{i}")).collect(),
+            vec!["x".repeat(256); 64],
         ] {
             assert!(matches!(
                 normalize_scopes(&raw),
                 Err(AppError::ValidationError(_))
             ));
         }
+    }
+
+    #[test]
+    fn scopes_accept_large_selections_and_dedupe_in_order() {
+        let expected: Vec<String> = (0..101).map(|i| format!("scope{i}")).collect();
+        let mut raw = expected.clone();
+        raw.push("scope0,scope100".to_string());
+        assert_eq!(normalize_scopes(&raw).unwrap(), expected);
     }
 
     #[tokio::test]
@@ -1832,6 +1862,7 @@ mod tests {
                     use_platform_key: None,
                     scopes: vec!["read:org, public_repo".to_string()],
                     label: None,
+                    endpoint_url: None,
                     requested_by: None,
                     callback_url: None,
                     expires_in: None,
@@ -1883,7 +1914,8 @@ mod tests {
                 };
                 let Json(completed) = context::scope(
                     context,
-                    handlers::complete_connect_link(
+                    // Keep the endpoint future off the smaller test-harness stack.
+                    Box::pin(handlers::complete_connect_link(
                         State(state.clone()),
                         test_auth_user(&actor),
                         ConnectInfo("127.0.0.1:43210".parse().unwrap()),
@@ -1897,7 +1929,7 @@ mod tests {
                             oauth_client_secret: None,
                             device_state: None,
                         }),
-                    ),
+                    )),
                 )
                 .await
                 .unwrap();
@@ -1924,7 +1956,7 @@ mod tests {
                     assert_eq!(history.actor.app_id.as_deref(), Some(app_id.as_str()));
                     assert_eq!(history.actor.person_id.as_deref(), Some(actor.as_str()));
                     if attempt == 0 {
-                        let redirect = user_tokens::generic_oauth_callback(
+                        let redirect = Box::pin(user_tokens::generic_oauth_callback(
                             State(state.clone()),
                             crate::mw::auth::OptionalAuthUser(None),
                             Query(user_tokens::GenericOAuthCallbackQuery {
@@ -1933,7 +1965,7 @@ mod tests {
                                 error: Some("access_denied".to_string()),
                                 error_description: None,
                             }),
-                        )
+                        ))
                         .await;
                         use axum::response::IntoResponse;
                         let redirect = redirect.into_response();
@@ -1999,6 +2031,7 @@ mod tests {
                 callback_url: Some(callback.to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id.clone()),
+                endpoint_url: None,
             },
         )
         .await
@@ -2036,6 +2069,7 @@ mod tests {
                 callback_url: Some(callback.to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id),
+                endpoint_url: None,
             },
         )
         .await
@@ -2067,6 +2101,7 @@ mod tests {
                 callback_url: Some("https://other.example.test/return".to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id),
+                endpoint_url: None,
             },
         )
         .await;
@@ -2734,6 +2769,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2776,6 +2812,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2820,6 +2857,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2861,6 +2899,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await

@@ -1,5 +1,6 @@
 //! Platform-wide, read-only meter reporting. MongoDB owns every reduction,
 //! including legacy pricing, ranking order, and pagination.
+use crate::services::billing::amounts::{credit_expr, legacy_credit_expr};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
@@ -13,19 +14,21 @@ use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME;
 
+pub mod analytics;
+pub mod identities;
+
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_FIELDS: &[&str] = &[
     "prompt_tokens",
     "completion_tokens",
     "cached_tokens",
     "cache_creation_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
 ];
-const COST_FIELDS: &[&str] = &[
-    "gross_cost_micros",
-    "wallet_cost_micros",
-    "grant_cost_micros",
-    "allowance_cost_micros",
-];
+const COST_FIELDS: &[&str] = &["gross_cost", "wallet_cost", "grant_cost", "allowance_cost"];
 const COUNT_FIELDS: &[&str] = &[
     "requests",
     "events",
@@ -44,10 +47,15 @@ pub struct AdminUsageQuery {
     pub to: Option<String>,
     pub user: Option<String>,
     pub service: Option<String>,
+    /// Comma-separated service, acting-user, and billing-account filters.
+    pub services: Option<String>,
+    pub actors: Option<String>,
+    pub owners: Option<String>,
     /// Ranking quantity unit; defaults to tokens. Never adds unlike units.
     pub metric: Option<String>,
     /// quantity, requests, cost, total_tokens, prompt_tokens, completion_tokens,
-    /// cached_tokens, or cache_creation_tokens (descending).
+    /// cached_tokens, cache_creation_tokens, audio_input_tokens, or
+    /// audio_output_tokens, image_input_tokens, or image_output_tokens (descending).
     pub sort: Option<String>,
     pub page: Option<u64>,
     pub per_page: Option<u64>,
@@ -69,13 +77,32 @@ pub struct UsageStats {
     pub completion_tokens: i64,
     pub cached_tokens: i64,
     pub cache_creation_tokens: i64,
+    /// Provider-reported audio subsets of prompt/completion (realtime voice
+    /// and audio chat). Already included in prompt/completion counts.
+    #[serde(default)]
+    pub audio_input_tokens: i64,
+    #[serde(default)]
+    pub audio_output_tokens: i64,
+    /// Provider-reported image subsets, already included in input/output.
+    #[serde(default)]
+    pub image_input_tokens: i64,
+    #[serde(default)]
+    pub image_output_tokens: i64,
     /// Prompt + completion, following provider accounting. Cache counts may
     /// overlap prompt counts and must not be added to this total.
     pub total_tokens: i64,
     pub gross_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub gross_cost: Option<crate::models::credits::Credits>,
     pub wallet_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub wallet_cost: Option<crate::models::credits::Credits>,
     pub grant_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub grant_cost: Option<crate::models::credits::Credits>,
     pub allowance_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub allowance_cost: Option<crate::models::credits::Credits>,
     pub exact_cost_events: i64,
     pub legacy_cost_events: i64,
     /// Billable legacy events whose current cached rate is unavailable.
@@ -106,6 +133,14 @@ pub struct UsageCredentialClass {
     pub usage: UsageStats,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UsageOperation {
+    /// Operation price key that replaced the service's base request rate.
+    pub operation: String,
+    #[serde(flatten)]
+    pub usage: UsageStats,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageService {
     #[serde(flatten)]
@@ -113,6 +148,9 @@ pub struct UsageService {
     #[serde(flatten)]
     pub usage: UsageStats,
     pub by_credential_class: Vec<UsageCredentialClass>,
+    /// Usage charged at operation prices; base-rate usage is not listed.
+    #[serde(default)]
+    pub by_operation: Vec<UsageOperation>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -152,7 +190,25 @@ pub struct AdminUsageResponse {
     pub selected_user: Option<UsageIdentity>,
 }
 
+impl AdminUsageResponse {
+    /// For readers limited to usage data: keep the `user` filter's identity
+    /// details only when that identity is in this report or is the caller, so
+    /// probing arbitrary ids reveals nothing beyond what the report shows.
+    pub fn limit_selected_user_to_report(&mut self, caller_id: &str) {
+        if let Some(user) = &mut self.selected_user
+            && self.ranking_total == 0
+            && user.id != caller_id
+        {
+            user.display_name = "Unknown user".into();
+            user.email = None;
+            user.user_type = "unknown".into();
+        }
+    }
+}
+
 pub struct UsageParams {
+    pub analytics: Option<analytics::AnalyticsOptions>,
+    pub selection: analytics::UsageSelection,
     pub window: UsageWindow,
     pub user: Option<String>,
     pub service: Option<String>,
@@ -244,6 +300,12 @@ impl AdminUsageQuery {
             .and_then(|offset| i64::try_from(offset).ok())
             .ok_or_else(|| invalid("page is too large"))?;
         Ok(UsageParams {
+            analytics: None,
+            selection: analytics::UsageSelection {
+                services: analytics::filter_values(self.services, false)?,
+                actors: analytics::filter_values(self.actors, true)?,
+                owners: analytics::filter_values(self.owners, true)?,
+            },
             window,
             user,
             service,
@@ -267,8 +329,17 @@ fn meter_filter(params: &UsageParams, include_service: bool) -> Document {
     if let Some(user) = &params.user {
         clauses.push(doc! { "$or": [{ "actor_user_id": user }, { "billing_owner_id": user }] });
     }
+    params
+        .selection
+        .filter(&mut filter, "actor_user_id", "billing_owner_id");
     if include_service && let Some(service) = &params.service {
         clauses.push(doc! { "$or": [{ "service_slug": service }, { "service_id": service }] });
+    }
+    if include_service && !params.selection.services.is_empty() {
+        clauses.push(doc! { "$or": [
+            { "service_slug": { "$in": &params.selection.services } },
+            { "service_id": { "$in": &params.selection.services } },
+        ] });
     }
     if !clauses.is_empty() {
         filter.insert("$and", clauses);
@@ -276,17 +347,9 @@ fn meter_filter(params: &UsageParams, include_service: bool) -> Document {
     filter
 }
 
-// Decimal128 avoids floating-point money arithmetic. Persisted quantities/rates
-// are int64. Products below the int64 microcredit saturation limit need at most
-// 25 significant digits and fit Decimal128 exactly; larger results clamp like
-// billing::amounts::cost_micros.
+// Exact historical estimates use current cached rates, preserving null semantics.
 fn legacy_cost(quantity: &str) -> Bson {
-    doc! { "$convert": {
-        "input": { "$min": [i64::MAX, { "$trunc": [{ "$divide": [
-            { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico" ] }, 1_000_000,
-        ] }, 0] }] }, "to": "long", "onNull": 0,
-    } }
-    .into()
+    doc! { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico", crate::models::credits::Credits::from_pico(1).expect("one pico")] }.into()
 }
 
 pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
@@ -306,20 +369,23 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
         "legacy_cost_events": { "$sum": { "$cond": ["$exact", 0, 1] } },
         "legacy_quantity": { "$sum": { "$cond": ["$exact", 0, "$quantity"] } },
         "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact", 0, { "$sum": "$funding.allowance_consumptions.quantity" }] } },
-        "legacy_grant": { "$sum": { "$cond": ["$exact", 0, { "$sum": "$funding.grant_consumptions.amount_micros" }] } },
+        "legacy_grant_cost": { "$sum": { "$cond": ["$exact", 0, { "$sum": { "$map": { "input": { "$ifNull": ["$funding.grant_consumptions", []] }, "as": "allocation", "in": credit_expr("$$allocation.amount") } } }] } },
     };
     for field in TOKEN_FIELDS {
-        group.insert(*field, doc! { "$sum": { "$cond": ["$primary", { "$ifNull": [format!("$token_breakdown.{field}"), 0] }, 0] } });
+        group.insert(
+            *field,
+            doc! { "$sum": { "$cond": ["$primary", { "$ifNull": [token_source(field), 0] }, 0] } },
+        );
     }
     for (field, source) in COST_FIELDS.iter().zip([
-        "total_charge_micros",
-        "wallet_funded_micros",
-        "grant_funded_micros",
-        "allowance_funded_micros",
+        "total_charge",
+        "wallet_funded",
+        "grant_funded",
+        "allowance_funded",
     ]) {
         group.insert(
             *field,
-            doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("$funding.{source}"), 0] } } },
+            doc! { "$sum": credit_expr(format!("$funding.{source}")) },
         );
     }
     if !legacy_dimensions {
@@ -330,10 +396,21 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
     group
 }
 
+/// Meter-row source path for a token measure.
+fn token_source(field: &str) -> String {
+    match field {
+        "audio_input_tokens" => "$audio_tokens.input_tokens".into(),
+        "audio_output_tokens" => "$audio_tokens.output_tokens".into(),
+        "image_input_tokens" => "$image_tokens.input_tokens".into(),
+        "image_output_tokens" => "$image_tokens.output_tokens".into(),
+        _ => format!("$token_breakdown.{field}"),
+    }
+}
+
 pub(crate) fn meter_flags() -> Document {
     doc! { "$set": {
         "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
-        "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+        "exact": crate::services::billing::amounts::funding_cost_present(),
     } }
 }
 
@@ -344,11 +421,11 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut costs = Document::new();
     for (field, legacy) in COST_FIELDS.iter().zip([
         Bson::String("$legacy_gross".into()),
-        doc! { "$max": [0, { "$subtract": [{ "$subtract": ["$legacy_gross", "$legacy_allowance"] }, "$legacy_grant"] }] }.into(),
-        Bson::String("$legacy_grant".into()), Bson::String("$legacy_allowance".into()),
+        doc! { "$max": [0, { "$subtract": [{ "$subtract": ["$legacy_gross", "$legacy_allowance"] }, "$legacy_grant_cost"] }] }.into(),
+        Bson::String("$legacy_grant_cost".into()), Bson::String("$legacy_allowance".into()),
     ]) {
         let sum: Bson = doc! { "$add": [format!("${field}"), legacy] }.into();
-        let billable: Bson = if *field == "grant_cost_micros" { sum } else {
+        let billable: Bson = if *field == "grant_cost" { sum } else {
             doc! { "$cond": ["$unknown", null, sum] }.into()
         };
         costs.insert(*field, doc! { "$cond": ["$_id.billable", billable, 0] });
@@ -361,7 +438,7 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
         doc! { "$match": meter_filter(params, true) },
         doc! { "$set": {
             "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
-            "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+            "exact": crate::services::billing::amounts::funding_cost_present(),
         } },
         doc! { "$group": group },
         // _id equality lookups choose model-specific before generic. Only
@@ -390,9 +467,12 @@ fn sum_fields(group: &mut Document, source_prefix: &str) {
         group.insert(*field, doc! { "$sum": format!("{source_prefix}{field}") });
     }
     for field in COST_FIELDS {
-        // Decimal accumulation preserves integer micros even when a platform
-        // total exceeds int64; clamp only at the response boundary.
-        group.insert(*field, doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("{source_prefix}{field}"), 0] } } });
+        // Decimal accumulation preserves exact credits even when a platform
+        // total exceeds int64; clamp only the legacy response projection.
+        group.insert(
+            *field,
+            doc! { "$sum": { "$ifNull": [format!("{source_prefix}{field}"), 0] } },
+        );
         group.insert(format!("{field}_known"), doc! { "$sum": { "$cond": [{ "$ne": [{ "$ifNull": [format!("{source_prefix}{field}"), null] }, null] }, 1, 0] } });
     }
 }
@@ -433,7 +513,10 @@ fn rollup(dimensions: &[&str]) -> Vec<Document> {
         project.insert(*field, 1);
     }
     for field in COST_FIELDS {
-        project.insert(*field, doc! { "$cond": [{ "$gt": [format!("${field}_known"), 0] }, { "$toLong": { "$min": [i64::MAX, format!("${field}")] } }, null] });
+        // Decimal128 remains native through the response document. Converting
+        // every grouped amount to a string here adds a BSON allocation and
+        // reparsing step on the hot admin path.
+        project.insert(*field, doc! { "$cond": [{ "$gt": [format!("${field}_known"), 0] }, format!("${field}"), null] });
     }
     for field in ["users", "services"] {
         project.insert(format!("unique_{field}"), doc! { "$size": { "$reduce": {
@@ -463,19 +546,24 @@ fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
 fn ranking_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.extend(rollup(&["actor", "owner", "service_id", "service_slug"]));
-    let sort = match params.sort.as_str() {
-        "quantity" => format!("quantities.{}", params.metric),
-        "cost" => "gross_cost_micros".into(),
-        value => value.into(),
-    };
     pipeline.push(doc! { "$facet": {
-        "ranking": [
-            { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } },
-            { "$skip": params.offset }, { "$limit": params.per_page as i64 },
-        ],
+        "ranking": ranking_stages(params),
         "total": [{ "$count": "count" }],
     } });
     pipeline
+}
+
+fn ranking_stages(params: &UsageParams) -> Vec<Document> {
+    let sort = match params.sort.as_str() {
+        "quantity" => format!("quantities.{}", params.metric),
+        "cost" => "gross_cost".into(),
+        value => value.into(),
+    };
+    vec![
+        doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } },
+        doc! { "$skip": params.offset },
+        doc! { "$limit": params.per_page as i64 },
+    ]
 }
 
 fn query_error(error: mongodb::error::Error) -> AppError {
@@ -515,7 +603,20 @@ fn documents(document: &Document, key: &str) -> AppResult<Vec<Document>> {
 }
 
 fn stats(document: &Document) -> AppResult<UsageStats> {
-    bson::from_document(document.clone()).map_err(|error| AppError::Internal(error.to_string()))
+    let mut document = document.clone();
+    for field in COST_FIELDS {
+        if let Some(value) = document.get(*field).cloned()
+            && matches!(value, Bson::Decimal128(_) | Bson::Int32(_) | Bson::Int64(_))
+        {
+            let credits = crate::models::credits::Credits::from_bson(value, 1)?;
+            document.insert(*field, credits.to_string());
+            // Legacy display projections are derived once, after the exact
+            // aggregation, instead of multiplying every grouped BSON value in
+            // MongoDB's hot reduction.
+            document.insert(format!("{field}_micros"), credits.display_micros());
+        }
+    }
+    bson::from_document(document).map_err(|error| AppError::Internal(error.to_string()))
 }
 fn id(document: &Document) -> AppResult<&Document> {
     document
@@ -579,17 +680,8 @@ async fn get_usage_inner(
             service_slugs.insert(slug);
         }
     }
-    // Exactly one batched, projected user lookup, including selected filter and
-    // org owners. No full User/model is serialized into the API.
-    let users = async {
-        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-            .find(doc! { "_id": { "$in": user_ids.into_iter().collect::<Vec<_>>() } })
-            .projection(doc! { "display_name": 1, "email": 1, "user_type": 1 })
-            .max_time(QUERY_TIMEOUT)
-            .await?
-            .try_collect::<Vec<Document>>()
-            .await
-    };
+    let user_ids: Vec<_> = user_ids.into_iter().collect();
+    let users = crate::services::reporting_identity_service::resolve(db, &user_ids, QUERY_TIMEOUT);
     let services = async {
         db.collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
             .find(doc! { "$or": [{ "_id": { "$in": service_ids.into_iter().collect::<Vec<_>>() } }, { "slug": { "$in": service_slugs.into_iter().collect::<Vec<_>>() } }] })
@@ -597,30 +689,15 @@ async fn get_usage_inner(
             .await?.try_collect::<Vec<Document>>().await
     };
     let (users, services) = tokio::try_join!(users, services).map_err(query_error)?;
-    let users: HashMap<_, _> = users
-        .into_iter()
-        .filter_map(|user| Some((user.get_str("_id").ok()?.to_string(), user)))
-        .collect();
     let identity = |uid: &str| {
         let user = users.get(uid);
         UsageIdentity {
             id: uid.into(),
-            display_name: user
-                .and_then(|u| u.get_str("display_name").ok())
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| user.and_then(|u| u.get_str("email").ok()))
-                .unwrap_or(if user.is_some() {
-                    "Unnamed user"
-                } else {
-                    "Unknown user"
-                })
-                .into(),
-            email: user
-                .and_then(|u| u.get_str("email").ok())
-                .map(str::to_string),
+            display_name: user.map(|u| u.label()).unwrap_or("Unknown user").into(),
+            email: user.and_then(|u| u.email.clone()),
             user_type: user
-                .and_then(|u| u.get_str("user_type").ok())
-                .unwrap_or(if user.is_some() { "person" } else { "unknown" })
+                .map(|u| u.user_type.as_str())
+                .unwrap_or("unknown")
                 .into(),
         }
     };
@@ -669,14 +746,30 @@ async fn get_usage_inner(
             .or_default()
             .push(class_row(&row)?);
     }
+    let mut service_operations: HashMap<_, Vec<_>> = HashMap::new();
+    for row in documents(summary, "service_operations")? {
+        let key = id(&row)?;
+        let Ok(operation) = key.get_str("operation") else {
+            continue;
+        };
+        service_operations
+            .entry(service_key(key))
+            .or_default()
+            .push(UsageOperation {
+                operation: operation.to_owned(),
+                usage: stats(&row)?,
+            });
+    }
     let mut by_service = Vec::new();
     for row in service_rows {
+        let key = service_key(id(&row)?);
+        let mut by_operation = service_operations.remove(&key).unwrap_or_default();
+        by_operation.sort_by(|a, b| a.operation.cmp(&b.operation));
         by_service.push(UsageService {
             service: service_identity(id(&row)?),
             usage: stats(&row)?,
-            by_credential_class: service_classes
-                .remove(&service_key(id(&row)?))
-                .unwrap_or_default(),
+            by_credential_class: service_classes.remove(&key).unwrap_or_default(),
+            by_operation,
         });
     }
     by_service.sort_by(|a, b| {
@@ -743,14 +836,68 @@ fn source_filter(
     if let Some(user) = &params.user {
         filter.insert("$or", vec![doc! { "actor": user }, doc! { "owner": user }]);
     }
+    params.selection.filter(&mut filter, "actor", "owner");
     filter
+}
+
+fn exact_or_legacy_credit_expr(exact: Bson, legacy: Bson) -> Bson {
+    doc! {
+        "$cond": [
+            { "$ne": [{ "$type": exact.clone() }, "missing"] },
+            exact,
+            legacy_credit_expr(doc! { "$convert": {
+                "input": legacy, "to": "decimal", "onError": Bson::Null, "onNull": Bson::Null,
+            } }.into()),
+        ]
+    }
+    .into()
+}
+
+/// Before the rollup marker exists, read both released legacy mirrors and the
+/// exact keys. Once the marker is durable, the covering index can use the
+/// plain exact path without per-document type inspection.
+fn rollup_credit_expr(field: &str, normalized: bool) -> Bson {
+    if normalized {
+        return format!("$query_{field}").into();
+    }
+    let legacy = if field == "legacy_grant_cost" {
+        "legacy_grant".to_owned()
+    } else {
+        format!("{field}_micros")
+    };
+    let exact = format!("$query_costs.{field}");
+    let old = format!("$query_costs.{legacy}");
+    doc! { "$cond": [
+        { "$ne": [{ "$type": &exact }, "missing"] }, &exact,
+        { "$cond": [
+            { "$ne": [{ "$type": &old }, "missing"] },
+            exact_or_legacy_credit_expr(Bson::String(exact), Bson::String(old)),
+            exact_or_legacy_credit_expr(format!("${field}").into(), format!("${legacy}").into()),
+        ] },
+    ] }
+    .into()
+}
+
+fn partition_credit_expr(field: &str, normalized: bool) -> Bson {
+    let exact = format!("$part.{field}");
+    if normalized {
+        return exact.into();
+    }
+    let legacy = if field == "legacy_grant_cost" {
+        "legacy_grant".to_owned()
+    } else {
+        format!("{field}_micros")
+    };
+    exact_or_legacy_credit_expr(exact.into(), format!("$part.{legacy}").into())
 }
 
 fn fast_pipeline(
     params: &UsageParams,
     rates: Document,
+    operations: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
+    rollup_normalized: bool,
 ) -> Vec<Document> {
     use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, day, hour};
     let from_hour = hour(params.window.from);
@@ -775,8 +922,14 @@ fn fast_pipeline(
         "tail_rows",
         doc! { "$sum": { "$cond": [{ "$eq": ["$rollup_pending", false] }, 0_i64, 1_i64] } },
     );
+    if let Some(options) = &params.analytics {
+        raw_group
+            .get_document_mut("_id")
+            .expect("group key")
+            .insert("bucket", options.bucket("$created_at"));
+    }
     // BSON object key order is significant to grouping. Rebuild one canonical
-    // key for both raw groups and unfolded summaries before legacy rounding.
+    // key for both raw groups and unfolded summaries before exact reduction.
     let canonical_key: Document = raw_group
         .get_document("_id")
         .expect("literal group key")
@@ -789,34 +942,36 @@ fn fast_pipeline(
     }
     let mut initial_group = regroup.clone();
     initial_group.insert("_id", "$single_display_key");
+    if let Some(options) = &params.analytics {
+        initial_group.insert("_id", doc! { "$mergeObjects": ["$single_display_key", { "bucket": options.bucket(doc! { "$ifNull": ["$hour", "$day"] }) }] });
+    }
     initial_group.remove("rows_folded");
     initial_group.insert("tail_rows", doc! { "$sum": 0_i64 });
     let mut partition_group = regroup.clone();
     partition_group.insert("_id", canonical_key);
-    for field in COST_FIELDS {
-        initial_group.insert(*field, doc! { "$sum": format!("${field}") });
-        partition_group.insert(
+    for field in COST_FIELDS.iter().chain([&"legacy_grant_cost"]) {
+        initial_group.insert(
             *field,
-            doc! { "$sum": { "$toDecimal": format!("${field}") } },
+            doc! { "$sum": rollup_credit_expr(field, rollup_normalized) },
         );
+        partition_group.insert(*field, doc! { "$sum": format!("${field}") });
     }
-    // Persisted funding costs are nonnegative int64 (billing::amounts).
-    // Sum integers exactly until overflow; Mongo promotes an overflowing sum
-    // to double, which is necessarily >= i64::MAX and saturates here. Convert
-    // only the reduced groups to Decimal128 for the shared legacy price path.
-    // This avoids decoding/adding a Decimal128 for every hourly source value.
-    let bounded_costs: Document = COST_FIELDS
-        .iter()
-        .map(|field| {
-            (
-                (*field).to_owned(),
-                Bson::Document(doc! { "$toDecimal": { "$min": [i64::MAX, format!("${field}")] } }),
-            )
-        })
-        .collect();
     let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
+    if let Some(options) = &params.analytics {
+        unfold
+            .get_document_mut("_id")
+            .expect("unfold key")
+            .get_array_mut("$mergeObjects")
+            .expect("merge objects")
+            .push(doc! { "bucket": options.bucket(doc! { "$ifNull": ["$hour", "$day"] }) }.into());
+    }
     for field in MEASURES {
-        unfold.insert(*field, format!("$part.{field}"));
+        let value = if COST_FIELDS.contains(field) || *field == "legacy_grant_cost" {
+            partition_credit_expr(field, rollup_normalized)
+        } else {
+            format!("$part.{field}").into()
+        };
+        unfold.insert(*field, value);
     }
     let partition_pipeline = vec![
         doc! { "$set": { "part": { "$cond": [
@@ -855,7 +1010,13 @@ fn fast_pipeline(
     let last_day = day(params.window.to).min(day(end));
     let hourly = crate::models::usage_rollup_hourly::COLLECTION_NAME;
     let daily = crate::models::usage_rollup_daily::COLLECTION_NAME;
-    let ranges = if daily_ready && first_day < last_day {
+    let ranges = if daily_ready
+        && first_day < last_day
+        && params
+            .analytics
+            .as_ref()
+            .is_none_or(|options| options.granularity != "hour")
+    {
         vec![
             (hourly, "hour", start, first_day),
             (daily, "day", first_day, last_day),
@@ -876,7 +1037,7 @@ fn fast_pipeline(
         partitions.extend(partition_pipeline.clone());
         pipeline.extend([
             doc! { "$unionWith": { "coll": collection, "pipeline": [
-                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() }, doc! { "$set": bounded_costs.clone() },
+                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() },
             ] } },
             doc! { "$unionWith": { "coll": collection, "pipeline": partitions } },
         ]);
@@ -902,31 +1063,95 @@ fn fast_pipeline(
     price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
     pipeline.extend(price);
     let selected = || -> Vec<Document> {
-        params.service.as_ref().map(|s| vec![doc! { "$match": { "$or": [{ "_id.service_id": s }, { "_id.service_slug": s }] } }]).unwrap_or_default()
+        let mut stages = Vec::new();
+        if let Some(service) = &params.service {
+            stages.push(doc! { "$match": { "$or": [{ "_id.service_id": service }, { "_id.service_slug": service }] } });
+        }
+        if !params.selection.services.is_empty() {
+            stages.push(doc! { "$match": { "$or": [
+                { "_id.service_id": { "$in": &params.selection.services } },
+                { "_id.service_slug": { "$in": &params.selection.services } },
+            ] } });
+        }
+        stages
     };
     let reduced = |dimensions: &[&str]| {
         let mut stages = selected();
         stages.extend(rollup(dimensions));
         stages
     };
-    let sort = match params.sort.as_str() {
-        "quantity" => format!("quantities.{}", params.metric),
-        "cost" => "gross_cost_micros".into(),
-        value => value.into(),
-    };
+    if let Some(options) = &params.analytics {
+        pipeline.push(doc! { "$facet": options.facets(&reduced) });
+        return pipeline;
+    }
     let mut ranking = reduced(&["actor", "owner", "service_id", "service_slug"]);
-    ranking.extend([doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } }, doc! { "$skip": params.offset }, doc! { "$limit": params.per_page as i64 }]);
+    ranking.extend(ranking_stages(params));
     let mut total = reduced(&["actor", "owner", "service_id", "service_slug"]);
     total.push(doc! { "$count": "count" });
     let mut freshness = selected();
     freshness.push(doc! { "$group": { "_id": null, "tail_rows": { "$sum": "$tail_rows" } } });
+    // Each operation price has its own Lago metric code, so the existing code
+    // dimension identifies operation usage without another rollup field.
+    let mut service_operations = selected();
+    service_operations.extend([
+        doc! { "$match": { "_id.code": { "$regex": OPERATION_CODE_PATTERN } } },
+        doc! { "$set": { "_id.operation": { "$ifNull": [
+            { "$getField": { "field": "$_id.code", "input": { "$literal": operations } } },
+            { "$arrayElemAt": [{ "$getField": { "field": "captures", "input": {
+                "$regexFind": { "input": "$_id.code", "regex": OPERATION_CODE_PATTERN },
+            } } }, 0] },
+        ] } } },
+    ]);
+    service_operations.extend(rollup(&["service_id", "service_slug", "operation"]));
     pipeline.push(doc! { "$facet": {
         "totals": reduced(&[]), "services": reduced(&["service_id", "service_slug"]),
         "classes": reduced(&["class"]), "service_classes": reduced(&["service_id", "service_slug", "class"]),
+        "service_operations": service_operations,
         "ranking": ranking, "total": total, "freshness": freshness,
         "options": [ { "$group": { "_id": { "service_id": "$_id.service_id", "service_slug": "$_id.service_slug" } } }, { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } } ],
     } });
     pipeline
+}
+
+/// Operation price codes, `platform_svc_{slug}_{byok|pk}_op_{key}`; the
+/// capture is the normalized key of a price that is no longer configured.
+const OPERATION_CODE_PATTERN: &str = "^platform_svc_.+?_(?:byok|pk)_op_(.+)$";
+
+/// Configured operation keys by Lago metric code. Codes are normalized keys,
+/// so this map restores the exact key that `/billing/usage` reports.
+async fn operation_keys(db: &mongodb::Database) -> AppResult<Document> {
+    const LANES: [&str; 2] = ["byok_pricing", "platform_key_pricing"];
+    let services: Vec<Document> = db
+        .collection::<Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! { "$or": LANES.map(|lane| doc! { format!("billing.{lane}.operations.0"): { "$exists": true } }).to_vec() })
+        .projection(LANES.into_iter().map(|lane| (format!("billing.{lane}.operations"), Bson::Int32(1))).collect::<Document>())
+        .max_time(QUERY_TIMEOUT)
+        .await
+        .map_err(query_error)?
+        .try_collect()
+        .await
+        .map_err(query_error)?;
+    let mut keys = Document::new();
+    for service in &services {
+        for lane in LANES {
+            let Ok(prices) = service
+                .get_document("billing")
+                .and_then(|billing| billing.get_document(lane))
+                .and_then(|lane| lane.get_array("operations"))
+            else {
+                continue;
+            };
+            for price in prices.iter().filter_map(Bson::as_document) {
+                if let (Ok(code), Ok(key)) = (
+                    price.get_str("lago_metric_code"),
+                    price.get_str("operation"),
+                ) {
+                    keys.insert(code, key);
+                }
+            }
+        }
+    }
+    Ok(keys)
 }
 
 async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
@@ -963,6 +1188,7 @@ async fn fast_aggregate_with_mode(
 ) -> AppResult<(Document, UsageFreshness)> {
     use crate::services::billing::usage_rollup;
     let rates = cached_rates(db).await?;
+    let operations = operation_keys(db).await?;
     let mut last_completed = None;
     for attempt in 0..MAX_READ_ATTEMPTS {
         let before = usage_rollup::state(db).await?;
@@ -977,8 +1203,18 @@ async fn fast_aggregate_with_mode(
         let use_snapshot = snapshot && active;
         let bound = before.as_ref().and_then(|s| s.folded_before);
         let daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
-        let result =
-            run_fast_pipeline(db, params, rates.clone(), bound, daily_ready, use_snapshot).await;
+        let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
+        let result = run_fast_pipeline(
+            db,
+            params,
+            rates.clone(),
+            operations.clone(),
+            bound,
+            daily_ready,
+            rollup_normalized,
+            use_snapshot,
+        )
+        .await;
         let result = match result {
             Err(AppError::DatabaseError(error))
                 if use_snapshot
@@ -1017,21 +1253,42 @@ async fn fast_aggregate_with_mode(
     // read with conservative raw boundary hours guarantees a completed result.
     // Standalone concurrent writes can skew it by an in-flight bounded batch;
     // freshness explicitly reports that validation was not obtained.
-    let result = run_fast_pipeline(db, params, rates, None, false, false).await?;
+    let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
+    let result = run_fast_pipeline(
+        db,
+        params,
+        rates,
+        operations,
+        None,
+        false,
+        rollup_normalized,
+        false,
+    )
+    .await?;
     with_freshness(result, usage_rollup::state(db).await?, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_fast_pipeline(
     db: &mongodb::Database,
     params: &UsageParams,
     rates: Document,
+    operations: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
+    rollup_normalized: bool,
     snapshot: bool,
 ) -> AppResult<Document> {
     let collection = db.collection::<Document>(COLLECTION_NAME);
     let mut action = collection
-        .aggregate(fast_pipeline(params, rates, folded_before, daily_ready))
+        .aggregate(fast_pipeline(
+            params,
+            rates,
+            operations,
+            folded_before,
+            daily_ready,
+            rollup_normalized,
+        ))
         .hint(mongodb::options::Hint::Name(
             crate::services::billing::usage_rollup::PENDING_INDEX.to_owned(),
         ))

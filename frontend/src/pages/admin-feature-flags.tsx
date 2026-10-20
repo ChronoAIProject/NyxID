@@ -24,10 +24,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn, formatRelativeTime } from "@/lib/utils";
-import { useAdminUsers } from "@/hooks/use-admin";
-import type { AdminUser } from "@/types/admin";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
+import type { FeatureFlagTarget } from "@/schemas/admin-feature-flags";
+import { createFeatureFlagRequestSchema } from "@/schemas/admin-feature-flags";
+import { useAppForm } from "@/components/ui/form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Switch } from "@/components/ui/switch";
 import {
   useAdminFeatureFlags,
+  useCreateFeatureFlag,
+  useFeatureFlagTargets,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
   useUpdateAdminFeatureFlagMetadata,
@@ -37,7 +43,8 @@ import {
   MAX_FEATURE_FLAG_OWNER_LENGTH,
 } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite } from "@/types/api";
+import { canAdminWrite, canCreateFeatureFlags } from "@/types/api";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 
 type ScopeState = "inherit" | "enabled" | "disabled";
 type FlagKind = "experiment" | "entitlement" | "ops";
@@ -61,6 +68,7 @@ interface FlagRow {
   readonly metadataUpdatedAt: string | null;
   readonly kind: FlagKind;
   readonly defaultEnabled: boolean;
+  readonly canEdit: boolean;
   global: ScopeState;
   orgs: Assignment[];
   users: Assignment[];
@@ -74,10 +82,8 @@ export function AdminFeatureFlagsPage() {
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
-  // Operators get read access to this page but their writes 403 — render
-  // them a read-only view instead of controls that fail on Apply.
   const currentUser = useAuthStore((s) => s.user);
-  const canWrite = canAdminWrite(currentUser);
+  const canWrite = canCreateFeatureFlags(currentUser);
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
   const draftVersions = useRef<Record<string, number>>({});
   const draftBaselines = useRef<Record<string, ScopeState>>({});
@@ -93,6 +99,7 @@ export function AdminFeatureFlagsPage() {
     metadataUpdatedAt: flag.metadata_updated_at ?? null,
     kind: flag.key.startsWith("experimental:") ? "experiment" : "ops",
     defaultEnabled: flag.default_enabled,
+    canEdit: flag.can_edit ?? canAdminWrite(currentUser),
     global:
       flag.global_override == null
         ? "inherit"
@@ -262,9 +269,11 @@ export function AdminFeatureFlagsPage() {
         description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
       />
 
+      {canWrite && <CreateFlagForm />}
+
       {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
-          <span className="text-[12px] font-medium">
+          <span className="text-12 font-medium">
             {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
           </span>
           <div className="flex items-center gap-2">
@@ -313,7 +322,7 @@ export function AdminFeatureFlagsPage() {
       ) : flags.length === 0 ? (
         <FlagsEmptyState
           title="No feature flags"
-          subtitle="Flags are declared in code. None have been defined yet."
+          subtitle="No feature flags are available to your account. Create a flag to get started."
         />
       ) : (
         <div className="space-y-2">
@@ -335,13 +344,116 @@ export function AdminFeatureFlagsPage() {
                 stage={(type, id, s) => stage(flag.key, type, id, s)}
                 stagedUsers={stagedIds(drafts, flag.key, "user")}
                 stagedOrgs={stagedIds(drafts, flag.key, "org")}
-                canWrite={canWrite}
+                canWrite={flag.canEdit}
               />
             </div>
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function CreateFlagForm() {
+  const create = useCreateFeatureFlag();
+  const [open, setOpen] = useState(false);
+  const form = useAppForm({
+    resolver: zodResolver(createFeatureFlagRequestSchema),
+    defaultValues: { key: "", description: "", default_enabled: false },
+  });
+  if (!open)
+    return (
+      <AddCtaButton
+        label="Create feature flag"
+        variant="subtle"
+        onClick={() => setOpen(true)}
+      />
+    );
+  return (
+    <Card className="space-y-3 p-4">
+      <form
+        className="space-y-3"
+        onSubmit={form.handleSubmit(async (body) => {
+          try {
+            await create.mutateAsync(body);
+            toast.success("Feature flag created");
+            form.reset();
+            setOpen(false);
+          } catch (error) {
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : "Failed to create feature flag",
+            );
+          }
+        })}
+      >
+        <div>
+          <Label htmlFor="new-flag-key">Flag key</Label>
+          <Input
+            id="new-flag-key"
+            {...form.register("key")}
+            placeholder="my-team:new-feature"
+            disabled={create.isPending}
+          />
+          {form.formState.errors.key && (
+            <p role="alert" className="text-12 text-destructive">
+              {form.formState.errors.key.message}
+            </p>
+          )}
+        </div>
+        <div>
+          <Label htmlFor="new-flag-description">Description</Label>
+          <Input
+            id="new-flag-description"
+            {...form.register("description")}
+            maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
+            disabled={create.isPending}
+          />
+          {form.formState.errors.description && (
+            <p role="alert" className="text-12 text-destructive">
+              {form.formState.errors.description.message}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="new-flag-default"
+            checked={form.watch("default_enabled")}
+            onCheckedChange={(checked) =>
+              form.setValue("default_enabled", checked)
+            }
+            disabled={create.isPending}
+          />
+          <Label htmlFor="new-flag-default">
+            Enabled by default for everyone
+          </Label>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            type="submit"
+            variant="primary"
+            isLoading={create.isPending}
+            disabled={
+              create.isPending ||
+              !form.formState.isDirty ||
+              !form.watch("key").trim() ||
+              !form.watch("description").trim()
+            }
+          >
+            Create flag
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={create.isPending}
+            onClick={() => setOpen(false)}
+          >
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </Card>
   );
 }
 
@@ -427,16 +539,16 @@ function FlagCard({
       >
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <span className="text-[13px] font-semibold text-foreground">
+            <span className="text-13 font-semibold text-foreground">
               {flag.key}
             </span>
-            <Badge variant={kindVariant(flag.kind)} className="text-[11px]">
+            <Badge variant={kindVariant(flag.kind)} className="text-11">
               {flag.kind}
             </Badge>
             {flag.owner && (
               <Badge
                 variant="secondary"
-                className="max-w-[200px] gap-1 text-[11px] font-normal"
+                className="max-w-[200px] gap-1 text-11 font-normal"
                 title={`Owner: ${flag.owner}`}
               >
                 <User className="h-3 w-3 shrink-0" aria-hidden />
@@ -455,7 +567,7 @@ function FlagCard({
               {extraPills > 0 && (
                 <Badge
                   variant="secondary"
-                  className="text-[11px] font-normal text-muted-foreground"
+                  className="text-11 font-normal text-muted-foreground"
                 >
                   +{extraPills} more
                 </Badge>
@@ -464,7 +576,7 @@ function FlagCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <Badge variant="secondary" className="text-[11px]">
+          <Badge variant="secondary" className="text-11">
             Default: {flag.defaultEnabled ? "Enabled" : "Disabled"}
           </Badge>
           <ChevronDown
@@ -495,72 +607,78 @@ function FlagCard({
             />
           </Group>
 
-          <Group label="By organization">
-            {canWrite && (
-              <AccountSearchPicker
-                kind="org"
-                excludedIds={orgIds}
-                onPick={(org) => {
-                  setStagedOrgLabels((labels) => ({
-                    ...labels,
-                    [org.id]: org.label,
-                  }));
-                  stage("org", org.id, "enabled");
-                }}
-              />
-            )}
-            {orgIds.map((id) => {
-              const assignment = flag.orgs.find((org) => org.id === id);
-              return (
-                <div
-                  key={id}
-                  title={assignment?.missingAccount ? id : undefined}
-                >
-                  <ScopeRow
-                    label={labelFor("org", id)}
-                    state={stateFor("org", id)}
-                    pending={isPending("org", id)}
-                    disabled={!canWrite}
-                    onChange={(s) => stage("org", id, s)}
-                  />
-                </div>
-              );
-            })}
-          </Group>
+          {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+            <Group label="By organization">
+              {canWrite && (
+                <AccountSearchPicker
+                  flagKey={flag.key}
+                  kind="org"
+                  excludedIds={orgIds}
+                  onPick={(org) => {
+                    setStagedOrgLabels((labels) => ({
+                      ...labels,
+                      [org.id]: org.label,
+                    }));
+                    stage("org", org.id, "enabled");
+                  }}
+                />
+              )}
+              {orgIds.map((id) => {
+                const assignment = flag.orgs.find((org) => org.id === id);
+                return (
+                  <div
+                    key={id}
+                    title={assignment?.missingAccount ? id : undefined}
+                  >
+                    <ScopeRow
+                      label={labelFor("org", id)}
+                      state={stateFor("org", id)}
+                      pending={isPending("org", id)}
+                      disabled={!canWrite}
+                      onChange={(s) => stage("org", id, s)}
+                    />
+                  </div>
+                );
+              })}
+            </Group>
+          )}
 
-          <Group label="By user">
-            {canWrite && (
-              <AccountSearchPicker
-                kind="person"
-                excludedIds={userIds}
-                onPick={(user) => {
-                  setStagedUserLabels((labels) => ({
-                    ...labels,
-                    [user.id]: user.label,
-                  }));
-                  stage("user", user.id, "enabled");
-                }}
-              />
-            )}
-            {userIds.map((id) => {
-              const assignment = flag.users.find((user) => user.id === id);
-              const label = labelFor("user", id);
-              return (
-                <div
-                  key={id}
-                  title={assignment?.missingAccount ? id : undefined}
-                >
-                  <ScopeRow
-                    label={label}
-                    state={stateFor("user", id)}
-                    pending={isPending("user", id)}
-                    disabled={!canWrite}
-                    onChange={(state) => stage("user", id, state)}
-                  />
-                </div>
-              );
-            })}
-          </Group>
+          {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+            <Group label="By user">
+              {canWrite && (
+                <AccountSearchPicker
+                  flagKey={flag.key}
+                  kind="person"
+                  excludedIds={userIds}
+                  onPick={(user) => {
+                    setStagedUserLabels((labels) => ({
+                      ...labels,
+                      [user.id]: user.label,
+                    }));
+                    stage("user", user.id, "enabled");
+                  }}
+                />
+              )}
+              {userIds.map((id) => {
+                const assignment = flag.users.find((user) => user.id === id);
+                const label = labelFor("user", id);
+                return (
+                  <div
+                    key={id}
+                    title={assignment?.missingAccount ? id : undefined}
+                  >
+                    <ScopeRow
+                      label={label}
+                      state={stateFor("user", id)}
+                      pending={isPending("user", id)}
+                      disabled={!canWrite}
+                      onChange={(state) => stage("user", id, state)}
+                    />
+                  </div>
+                );
+              })}
+            </Group>
+          )}
         </div>
       }
     </Card>
@@ -651,13 +769,13 @@ function FlagMetadataEditor({
 
   if (!canWrite) {
     return (
-      <dl className="space-y-2 px-3 py-2.5 text-[12px]">
+      <dl className="space-y-2 px-3 py-2.5 text-12">
         <div className="space-y-0.5">
-          <dt className="text-[11px] text-muted-foreground">Description</dt>
+          <dt className="text-11 text-muted-foreground">Description</dt>
           <dd className="text-foreground">{flag.description}</dd>
         </div>
         <div className="space-y-0.5">
-          <dt className="text-[11px] text-muted-foreground">Owner</dt>
+          <dt className="text-11 text-muted-foreground">Owner</dt>
           <dd className={cn(!flag.owner && "text-muted-foreground")}>
             {flag.owner ?? "Unassigned"}
           </dd>
@@ -683,7 +801,7 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-          className="text-[11px] font-normal"
+          className="text-11 font-normal"
         >
           Description — what this flag controls
         </Label>
@@ -694,13 +812,13 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
           onChange={(event) => setDescription(event.target.value)}
           placeholder={flag.codeDescription}
-          className="h-8 text-[12px]"
+          className="h-8 text-12"
         />
       </div>
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-          className="text-[11px] font-normal"
+          className="text-11 font-normal"
         >
           Owner — who to ask about it
         </Label>
@@ -711,13 +829,13 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
           placeholder="Unassigned — e.g. Platform team"
-          className="h-8 text-[12px]"
+          className="h-8 text-12"
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {flag.customDescription == null
-            ? "Using the description declared in code."
+            ? "Using the original description."
             : flag.metadataUpdatedAt
               ? `Edited ${formatRelativeTime(flag.metadataUpdatedAt)}.`
               : "Edited by an admin."}
@@ -730,7 +848,7 @@ function FlagMetadataEditor({
               onClick={() => setDescription("")}
               disabled={update.isPending}
             >
-              Use code default
+              Use default description
             </Button>
           )}
           <Button
@@ -758,7 +876,7 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
     <Badge
       variant={pill.state === "enabled" ? "success" : "secondary"}
       className={cn(
-        "flex max-w-[180px] gap-1 text-[11px] font-normal",
+        "flex max-w-[180px] gap-1 text-11 font-normal",
         pill.state === "inherit" && !pill.pending && "opacity-60",
         pill.pending && "ring-1 ring-primary/70",
       )}
@@ -776,10 +894,12 @@ const DEFAULT_SUGGESTION_COUNT = 5;
 const DEFAULT_SUGGESTION_FETCH = 8;
 
 function AccountSearchPicker({
+  flagKey,
   kind,
   excludedIds,
   onPick,
 }: {
+  readonly flagKey: string;
   readonly kind: "person" | "org";
   readonly excludedIds: readonly string[];
   readonly onPick: (picked: { id: string; label: string }) => void;
@@ -797,11 +917,12 @@ function AccountSearchPicker({
     return () => window.clearTimeout(timer);
   }, [normalizedSearch]);
 
-  const { data, isLoading } = useAdminUsers(
-    1,
-    20,
-    debouncedSearch || undefined,
+  const { data, isLoading } = useFeatureFlagTargets(
+    flagKey,
     kind,
+    debouncedSearch || undefined,
+    20,
+    focused && !!debouncedSearch,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
   const results =
@@ -812,22 +933,24 @@ function AccountSearchPicker({
       : [];
 
   // A flag card renders one picker per scope, so only fetch defaults while this
-  // picker's dropdown is actually open; identical keys dedupe across cards.
+  // picker's dropdown is actually open; repeated queries for this flag dedupe.
   const showDefaults = focused && !normalizedSearch;
-  const { data: defaultsData, isLoading: defaultsLoading } = useAdminUsers(
-    1,
-    DEFAULT_SUGGESTION_FETCH,
-    undefined,
-    kind,
-    { enabled: showDefaults },
-  );
+  const { data: defaultsData, isLoading: defaultsLoading } =
+    useFeatureFlagTargets(
+      flagKey,
+      kind,
+      undefined,
+      DEFAULT_SUGGESTION_FETCH,
+      showDefaults,
+    );
   const defaults = (defaultsData?.users ?? [])
     .filter((account) => !excludedIds.includes(account.id))
     .slice(0, DEFAULT_SUGGESTION_COUNT);
-  const remaining = Math.max(0, (defaultsData?.total ?? 0) - defaults.length);
+  const hasMoreSuggestions =
+    (defaultsData?.users.length ?? 0) > defaults.length;
 
   const isOrg = kind === "org";
-  const pick = (account: AdminUser) => {
+  const pick = (account: FeatureFlagTarget) => {
     onPick({ id: account.id, label: accountLabel(account, isOrg) });
     setSearch("");
     setDebouncedSearch("");
@@ -856,7 +979,7 @@ function AccountSearchPicker({
           aria-label={
             isOrg ? "Search organizations by name" : "Search users by email"
           }
-          className="h-8 pl-8 text-[12px]"
+          className="h-8 pl-8 text-12"
         />
       </div>
       {normalizedSearch ? (
@@ -905,9 +1028,9 @@ function AccountSearchPicker({
                     onPick={pick}
                   />
                 ))}
-                {remaining > 0 && (
-                  <p className="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
-                    +{remaining} more — keep typing to narrow
+                {hasMoreSuggestions && (
+                  <p className="border-t border-border/40 px-3 py-2 text-11 text-muted-foreground">
+                    More accounts — keep typing to narrow
                   </p>
                 )}
               </>
@@ -924,9 +1047,9 @@ function AccountOption({
   isOrg,
   onPick,
 }: {
-  readonly account: AdminUser;
+  readonly account: FeatureFlagTarget;
   readonly isOrg: boolean;
-  readonly onPick: (account: AdminUser) => void;
+  readonly onPick: (account: FeatureFlagTarget) => void;
 }) {
   return (
     <button
@@ -946,7 +1069,7 @@ function AccountOption({
   );
 }
 
-function accountLabel(account: AdminUser, isOrg: boolean): string {
+function accountLabel(account: FeatureFlagTarget, isOrg: boolean): string {
   return isOrg
     ? (account.display_name ?? account.slug ?? account.id)
     : account.email;
@@ -963,7 +1086,7 @@ function FlagsEmptyState({
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <PowerButtonIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground">{title}</p>
+        <p className="text-12 font-medium text-muted-foreground">{title}</p>
         <p className="text-xs text-muted-foreground">{subtitle}</p>
       </div>
     </div>
@@ -979,7 +1102,7 @@ function Group({
 }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <p className="text-11 font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </p>
       <div className="overflow-hidden rounded-lg border border-border/60 bg-background">
@@ -1009,7 +1132,7 @@ function ScopeRow({
         pending && "bg-primary/[0.07]",
       )}
     >
-      <span className="flex items-center gap-1.5 text-[12px] font-medium text-foreground">
+      <span className="flex items-center gap-1.5 text-12 font-medium text-foreground">
         {/* Dot slot is always reserved so labels don't shift when a row
             becomes pending; only its color/visibility changes. */}
         <span
@@ -1026,7 +1149,7 @@ function ScopeRow({
         disabled={disabled}
         onValueChange={(s) => onChange(s as ScopeState)}
       >
-        <SelectTrigger className="h-7 w-[120px] text-[12px]" aria-label={label}>
+        <SelectTrigger className="h-7 w-[120px] text-12" aria-label={label}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

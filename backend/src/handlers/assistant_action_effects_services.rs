@@ -1108,6 +1108,9 @@ mod tests {
     fn test_node(id: &str, owner_id: &str) -> Node {
         let now = chrono::Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: owner_id.to_string(),
             name: "route-node".to_string(),
@@ -1128,6 +1131,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),
@@ -1268,6 +1272,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -1788,6 +1793,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

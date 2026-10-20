@@ -1,3 +1,4 @@
+import "./lib/platform-personal-handoff";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -12,6 +13,8 @@ import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
 import { recoverFromAssetError } from "./lib/chunk-recovery";
+import { shouldRetryQuery } from "./lib/query-retry";
+import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
 
 // Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
@@ -31,17 +34,7 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 60 * 1000,
-      retry: (failureCount, error) => {
-        if (
-          error &&
-          typeof error === "object" &&
-          "status" in error &&
-          (error as { status: number }).status === 401
-        ) {
-          return false;
-        }
-        return failureCount < 3;
-      },
+      retry: shouldRetryQuery,
     },
   },
 });
@@ -166,6 +159,7 @@ function Root() {
   return (
     <>
       <RouterProvider router={router} />
+      <BuildUpdateBanner ready={ready} queryClient={queryClient} />
       {!agentKeyLogin && <ConsentBanner />}
     </>
   );

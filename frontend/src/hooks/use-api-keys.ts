@@ -239,6 +239,7 @@ export function useCreateApiKey() {
       return api.post<ApiKeyCreateResponse>("/api-keys", payload);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       void queryClient.invalidateQueries({
         predicate: (q) =>
           Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
@@ -272,6 +273,7 @@ export function useUpdateApiKey() {
       return api.put<ApiKey>(`/api-keys/${keyId}`, body);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       void queryClient.invalidateQueries({
         predicate: (q) =>
           Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",
@@ -288,6 +290,7 @@ export function useDeleteApiKey() {
       return api.delete<void>(`/api-keys/${id}`);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       // Invalidate both the personal scope and every org-scope cache.
       // `predicate` catches keys like `["api-keys", "org", <orgId>]` that
       // `useAllAdminedApiKeys` populates lazily.
@@ -307,6 +310,7 @@ export function useRotateApiKey() {
       return api.post<ApiKeyCreateResponse>(`/api-keys/${id}/rotate`);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       void queryClient.invalidateQueries({
         predicate: (q) =>
           Array.isArray(q.queryKey) && q.queryKey[0] === "api-keys",

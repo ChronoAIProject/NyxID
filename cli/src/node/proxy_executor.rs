@@ -43,6 +43,30 @@ pub async fn execute_proxy_request(
     use_binary_proxy_chunks: bool,
     http_client: &Client,
 ) {
+    static IFTTT: std::sync::LazyLock<
+        std::result::Result<nyxid_service_adapters::ifttt::Client, String>,
+    > = std::sync::LazyLock::new(|| {
+        let builder = crate::tls::client_builder().map_err(|e| e.to_string())?;
+        nyxid_service_adapters::ifttt::Client::new(builder).map_err(|e| e.to_string())
+    });
+    let ifttt_client = match IFTTT.as_ref() {
+        Ok(client) => client,
+        Err(error) => {
+            metrics.record_error();
+            let request_id = request["request_id"].as_str().unwrap_or("");
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    &format!("HTTP client configuration failed: {error}"),
+                    502,
+                    false,
+                ),
+            )
+            .await;
+            return;
+        }
+    };
     execute_proxy_request_with_ifttt_client(
         request,
         credentials,
@@ -52,7 +76,7 @@ pub async fn execute_proxy_request(
         tx,
         use_binary_proxy_chunks,
         http_client,
-        nyxid_service_adapters::ifttt::client(),
+        ifttt_client,
     )
     .await;
 }
@@ -68,6 +92,59 @@ pub async fn execute_proxy_request_with_ifttt_client(
     use_binary_proxy_chunks: bool,
     http_client: &Client,
     ifttt_client: &nyxid_service_adapters::ifttt::Client,
+) {
+    execute_proxy_request_inner(
+        request,
+        credentials,
+        signing_secret,
+        replay_guard,
+        metrics,
+        tx,
+        use_binary_proxy_chunks,
+        http_client,
+        ifttt_client,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_proxy_upload(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    http_client: &Client,
+    upload: super::proxy_upload::VerifiedUpload,
+) {
+    execute_proxy_request_inner(
+        request,
+        credentials,
+        None,
+        replay_guard,
+        metrics,
+        tx,
+        true,
+        http_client,
+        nyxid_service_adapters::ifttt::client(),
+        Some(upload),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_proxy_request_inner(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    use_binary_proxy_chunks: bool,
+    http_client: &Client,
+    ifttt_client: &nyxid_service_adapters::ifttt::Client,
+    upload: Option<super::proxy_upload::VerifiedUpload>,
 ) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
@@ -89,7 +166,8 @@ pub async fn execute_proxy_request_with_ifttt_client(
         .await;
         return;
     }
-    if (target_selected || request.get("signature_version").is_some())
+    if upload.is_none()
+        && (target_selected || request.get("signature_version").is_some())
         && (request["signature_version"].as_u64() != Some(2)
             || signing_secret.is_none()
             || request["signature"].as_str().is_none())
@@ -180,6 +258,19 @@ pub async fn execute_proxy_request_with_ifttt_client(
         }
     };
 
+    if upload.is_some() && (cred.aws_sigv4_credential().is_some() || cred.ifttt_key().is_some()) {
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "This credential requires a bounded structured request",
+                400,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
     if target_selected
         && !cred.header().is_some_and(|(name, value)| {
             name.eq_ignore_ascii_case("Authorization") && value.starts_with("Bearer ")
@@ -345,8 +436,23 @@ pub async fn execute_proxy_request_with_ifttt_client(
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let destination_client;
-    let http_client = if target_selected {
-        destination_client = target_http_client();
+    let http_client = if target_selected || upload.as_ref().is_some_and(|upload| upload.git()) {
+        destination_client = match target_http_client() {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        &format!("TLS client configuration failed: {error}"),
+                        502,
+                        false,
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
         &destination_client
     } else {
         http_client
@@ -387,7 +493,25 @@ pub async fn execute_proxy_request_with_ifttt_client(
     }
 
     // 5. Inject header credentials (legacy header/bearer path).
-    if let Some((hdr_name, hdr_value)) = cred.header() {
+    if upload.as_ref().is_some_and(|upload| upload.git()) {
+        let Some((_, token)) = cred.header().filter(|(name, value)| {
+            name.eq_ignore_ascii_case("Authorization") && value.starts_with("Bearer ")
+        }) else {
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    "GitHub git requires a token credential",
+                    400,
+                    false,
+                ),
+            )
+            .await;
+            return;
+        };
+        req_builder =
+            req_builder.basic_auth("x-access-token", Some(token.trim_start_matches("Bearer ")));
+    } else if let Some((hdr_name, hdr_value)) = cred.header() {
         req_builder = req_builder.header(hdr_name, hdr_value);
     }
 
@@ -448,9 +572,12 @@ pub async fn execute_proxy_request_with_ifttt_client(
         }
     }
 
+    let streamed_request = upload.is_some();
     // 6b. Attach the body now that any signing pass that needed to read
     //     it has run.
-    if let Some(bytes) = body_bytes {
+    if let Some(upload) = upload {
+        req_builder = req_builder.body(upload.into_body());
+    } else if let Some(bytes) = body_bytes {
         req_builder = req_builder.body(bytes);
     }
 
@@ -458,7 +585,7 @@ pub async fn execute_proxy_request_with_ifttt_client(
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
-            let is_streaming = should_stream_response(&response, status);
+            let is_streaming = streamed_request || should_stream_response(&response, status);
 
             if is_streaming {
                 stream_proxy_response(
@@ -524,13 +651,17 @@ pub async fn execute_proxy_request_with_ifttt_client(
 #[cfg(any(test, feature = "node-proxy-test"))]
 tokio::task_local! { pub static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
 
-fn target_http_client() -> Client {
+fn target_http_client() -> std::result::Result<Client, String> {
     #[cfg(any(test, feature = "node-proxy-test"))]
     if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
-        return build_target_http_client(builder);
+        return Ok(build_target_http_client(builder));
     }
-    static CLIENT: std::sync::LazyLock<Client> =
-        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
+    static CLIENT: std::sync::LazyLock<std::result::Result<Client, String>> =
+        std::sync::LazyLock::new(|| {
+            crate::tls::client_builder()
+                .map(build_target_http_client)
+                .map_err(|e| e.to_string())
+        });
     CLIENT.clone()
 }
 
@@ -544,7 +675,7 @@ fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
 }
 
 pub fn build_http_client() -> Result<Client> {
-    Ok(Client::builder()
+    Ok(crate::tls::client_builder()?
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()?)

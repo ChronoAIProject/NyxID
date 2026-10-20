@@ -263,9 +263,16 @@ pub async fn register_node(
     ws_url: &str,
     registration_token: &str,
 ) -> Result<(String, String, Option<String>)> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        ws_url,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    )
+    .await
+    .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -336,6 +343,17 @@ pub async fn run_with_shutdown(
     credential_sender: Arc<SharedCredentialsSender>,
     backend: Arc<SecretBackend>,
 ) {
+    if let Some(binding) = &config.managed_runtime
+        && (super::managed_runtime::validate_existing_config(&config, binding).is_err()
+            || signing_secret
+                .as_ref()
+                .is_none_or(|secret| secret.is_empty()))
+    {
+        tracing::error!(
+            "Managed node startup refused invalid profile, endpoint, or signing material"
+        );
+        return;
+    }
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
     let signing_secret = signing_secret.map(|secret| Arc::new(Zeroizing::new(secret)));
@@ -345,6 +363,8 @@ pub async fn run_with_shutdown(
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
     let storage_backend = config.storage_backend.clone();
+    let managed_binding = config.managed_runtime.clone();
+    let managed_directory = config_dir.clone();
     let pending_poll_shutdown_rx = shutdown_rx.clone();
     let connection_shutdown_rx = shutdown_rx;
     let pending_poll_server_url = config.server.url.clone();
@@ -394,7 +414,12 @@ pub async fn run_with_shutdown(
                 tracing::error!(%error, "Pending credential poll loop terminated unexpectedly");
             }
         }
-        _ = shutdown_signal() => {
+        _ = async {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                _ = super::managed_runtime::wait_for_runtime_end(&managed_directory, managed_binding.as_ref()) => {},
+            }
+        } => {
             tracing::info!("Shutdown signal received, draining in-flight requests and SSH tunnels...");
             let _ = shutdown_tx.send(true);
             let deadline = tokio::time::Instant::now()
@@ -438,9 +463,14 @@ async fn pending_credential_poll_loop(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(&server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential poll HTTP client");
         return;
@@ -534,9 +564,14 @@ async fn handle_pending_credentials_available(
     storage_backend: &str,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential nudge HTTP client");
         return;
@@ -794,6 +829,30 @@ async fn run_connection_loop(
     shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = ReconnectBackoff::new();
+    let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
+    // Replay protection spans WebSocket reconnects. A request can be delivered
+    // again while the caller is recovering a lost response; the machine
+    // runtime's receipt ledger then returns its original outcome without
+    // executing the operation twice.
+    let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
+    let mut machine = if config.managed_runtime.is_none()
+        && (config.machine.shell
+            || config.machine.files
+            || config.machine.computer
+            || config.machine.browser_enabled())
+    {
+        match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                tracing::error!(
+                    "Machine configuration refused; credential proxy remains available"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
         if shutdown_requested(&shutdown) {
@@ -811,8 +870,12 @@ async fn run_connection_loop(
             credential_sender,
             in_flight.clone(),
             shutdown.clone(),
+            &mut machine,
+            proxy_uploads.clone(),
+            replay_guard.clone(),
         )
         .await;
+        proxy_uploads.disconnect().await;
         if shutdown_requested(&shutdown) {
             break;
         }
@@ -834,6 +897,9 @@ async fn run_connection_loop(
             _ = wait_for_shutdown(&mut shutdown_wait) => break,
         }
     }
+    if let Some(machine) = machine {
+        machine.shutdown().await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -849,11 +915,21 @@ async fn connect_and_serve(
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
+    machine_state: &mut Option<Arc<super::machine::Runtime>>,
+    proxy_uploads: Arc<super::proxy_upload::Uploads>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
-    let connect =
-        tokio_tungstenite::connect_async_with_config(&config.server.url, Some(ws_config), false);
+    // Disable Nagle for interactive machine traffic while retaining shared TLS trust.
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        &config.server.url,
+        Some(ws_config),
+        machine_state.is_some() || config.managed_runtime.is_some(),
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    );
     tokio::pin!(connect);
     let (ws_stream, _) = tokio::select! {
         result = &mut connect => {
@@ -865,11 +941,17 @@ async fn connect_and_serve(
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     // 2. Authenticate
-    let auth_msg = serde_json::json!({
+    let mut auth_msg = serde_json::json!({
         "type": "auth",
         "node_id": config.node.id,
         "token": auth_token,
     });
+    if let Some(binding) = &config.managed_runtime {
+        binding
+            .validate()
+            .map_err(|reason| Error::Config(reason.into()))?;
+        auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
+    }
     tokio::select! {
         result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
@@ -877,25 +959,48 @@ async fn connect_and_serve(
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     }
 
-    // 3. Wait for auth_ok
-    let response = tokio::select! {
-        response = tokio::time::timeout(Duration::from_secs(10), ws_stream.next()) => {
-            response
-                .map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))?
-                .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
-                .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?
-        }
+    // 3. Wait for auth_ok. Intermediaries may send ping/pong frames (or a
+    // stale control frame) while the server is claiming the node connection;
+    // those frames are not authentication failures. Keep reading until the
+    // actual auth response or the bounded handshake timeout.
+    let parsed = tokio::select! {
+        response = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = ws_stream
+                    .next()
+                    .await
+                    .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
+                    .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?;
+                let Message::Text(text) = message else {
+                    if matches!(message, Message::Close(_)) {
+                        return Err(Error::AuthFailed("Connection closed during auth".to_string()));
+                    }
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    tracing::debug!("Ignoring non-JSON control frame during node authentication");
+                    continue;
+                };
+                match value["type"].as_str() {
+                    Some("auth_ok" | "auth_error") => return Ok(value),
+                    _ => tracing::debug!("Ignoring non-auth control frame during node authentication"),
+                }
+            }
+        }) => response.map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))??,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
-
-    let text = match response {
-        Message::Text(t) => t.to_string(),
-        _ => return Err(Error::AuthFailed("Unexpected message type".to_string())),
-    };
-
-    let parsed: serde_json::Value = serde_json::from_str(&text)?;
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
+            if let Some(binding) = &config.managed_runtime {
+                let accepted = parsed.get("managed_runtime").cloned().and_then(|value| {
+                    serde_json::from_value::<nyxid_machine::managed::Binding>(value).ok()
+                });
+                if accepted.as_ref() != Some(binding) {
+                    return Err(Error::AuthFailed(
+                        "Managed runtime fence was not acknowledged".into(),
+                    ));
+                }
+            }
             let enabled = parsed["capabilities"]["proxy_binary_chunks"]
                 .as_bool()
                 .unwrap_or(false);
@@ -921,9 +1026,73 @@ async fn connect_and_serve(
             return Err(Error::AuthFailed(msg.to_string()));
         }
         _ => {
-            return Err(Error::AuthFailed(format!("Unexpected response: {text}")));
+            return Err(Error::AuthFailed(
+                "Unexpected authentication response".to_string(),
+            ));
         }
     };
+
+    // Managed runtimes may touch the workspace while initializing. Wait for
+    // the backend's exact live generation/epoch acknowledgement before even
+    // constructing them, including a restart with a persisted config. Keep
+    // the admitted runtime across reconnects so existing bounded jobs retain
+    // the ordinary signed-lease behavior.
+    let managed_window = if let Some(binding) = &config.managed_runtime {
+        let window: nyxid_machine::managed::SignedRuntimeWindow = serde_json::from_value(
+            parsed
+                .get("managed_runtime_window")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| Error::AuthFailed("Managed runtime deadline missing".into()))?;
+        let secret = signing_secret
+            .as_ref()
+            .ok_or_else(|| Error::AuthFailed("Managed runtime signing key missing".into()))?;
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(secret.as_str())
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+        );
+        window
+            .verify(binding, &bytes, chrono::Utc::now().timestamp_millis())
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline invalid".into()))?;
+        super::managed_deadline::install_deadline_marker(config_dir, &window.window)
+            .map_err(|_| Error::AuthFailed("Managed runtime deadline is terminal".into()))?;
+        Some(window)
+    } else {
+        None
+    };
+    if config.managed_runtime.is_some() && machine_state.is_none() {
+        super::managed_runtime::admit_workspace()
+            .map_err(|_| Error::Config("Managed workspace admission setup refused".into()))?;
+        *machine_state = Some(
+            super::machine::Runtime::new(&config.machine, &config.node.id, config_dir)
+                .map_err(|_| Error::Config("Managed machine runtime refused startup".into()))?,
+        );
+    }
+    let machine = machine_state.clone();
+    if let Some(machine) = &machine {
+        if let Some(binding) = &config.managed_runtime {
+            machine
+                .bind_managed_runtime(binding)
+                .map_err(|_| Error::Config("Managed runtime fence mismatch".into()))?;
+            let bytes = zeroize::Zeroizing::new(
+                hex::decode(
+                    signing_secret
+                        .as_ref()
+                        .expect("managed key checked")
+                        .as_str(),
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime signing key invalid".into()))?,
+            );
+            machine
+                .apply_managed_window(
+                    managed_window.as_ref().expect("managed window checked"),
+                    &bytes,
+                )
+                .map_err(|_| Error::AuthFailed("Managed runtime deadline fenced".into()))?;
+        }
+        machine.report_connected();
+    }
 
     // Derive the idle watchdog from the server's heartbeat cadence so
     // installations that customize NODE_HEARTBEAT_INTERVAL_SECS don't trigger
@@ -943,6 +1112,7 @@ async fn connect_and_serve(
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let active_http_requests: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ssh_execs: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let cert_host_key_store: SharedCertHostKeyStore =
         Arc::new(Mutex::new(CertHostKeyStore::load(config_dir).map_err(
@@ -972,6 +1142,8 @@ async fn connect_and_serve(
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("http_signature_v2".to_string(), true.into());
+    capabilities.insert("proxy_upload_v1".to_string(), true.into());
+    capabilities.insert("http_cancellation".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
@@ -981,17 +1153,56 @@ async fn connect_and_serve(
         "proxy_max_body_size".to_string(),
         config.server.proxy_max_body_size.into(),
     );
-    let caps_msg = serde_json::json!({
+    if let Some(machine) = &machine {
+        capabilities.insert(
+            "machine".into(),
+            serde_json::to_value(machine.profile().await)?,
+        );
+    }
+    if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
+        let bytes = zeroize::Zeroizing::new(hex::decode(secret.as_str()).unwrap_or_default());
+        if machine.connect(tx.clone(), &bytes).await.is_err() {
+            tracing::warn!("Machine gateway could not start");
+        }
+    }
+    let mut caps_msg = serde_json::json!({
         "type": "status_update",
         "agent_version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
     });
     let _ = send_ws_message(&tx, caps_msg.to_string()).await;
 
+    let usage_task = machine
+        .as_ref()
+        .filter(|_| config.managed_runtime.is_some())
+        .map(|machine| {
+            let machine = machine.clone();
+            let sender = tx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let machine = machine.clone();
+                    let sample = tokio::task::spawn_blocking(move || machine.managed_usage()).await;
+                    if let Ok(Ok(sample)) = sample
+                        && let Ok(mut value) = serde_json::to_value(sample)
+                    {
+                        value["type"] = serde_json::json!("managed_machine_usage");
+                        if sender
+                            .try_send(NodeWsMessage::Text(value.to_string()))
+                            .is_err()
+                            && sender.is_closed()
+                        {
+                            break;
+                        }
+                    }
+                }
+            })
+        });
+
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
-    let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
-
     let serving_started = tokio::time::Instant::now();
 
     // 5. Reader loop: process incoming messages from the server
@@ -1033,6 +1244,20 @@ async fn connect_and_serve(
             break false;
         };
         let text = match msg {
+            Ok(Message::Binary(bytes)) if nyxid_machine::binary::is_machine(&bytes) => {
+                if let Ok(frame) = nyxid_machine::binary::Frame::decode(&bytes)
+                    && matches!(
+                        frame.kind,
+                        nyxid_machine::binary::Kind::ProxyUpload
+                            | nyxid_machine::binary::Kind::ProxyUploadAbort
+                    )
+                {
+                    proxy_uploads.frame(frame).await;
+                } else if let Some(machine) = &machine {
+                    machine.binary(&bytes).await;
+                }
+                continue;
+            }
             Ok(Message::Text(t)) => t.to_string(),
             Ok(Message::Close(frame)) => {
                 tracing::info!(?frame, "Server closed node WebSocket");
@@ -1056,12 +1281,138 @@ async fn connect_and_serve(
 
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
+                if let Some(machine) = &machine {
+                    machine.report_connected();
+                    let ready = machine.updater_ready();
+                    let updater = serde_json::json!(machine.updater_status());
+                    if caps_msg["capabilities"]["machine"]["updater_ready"] != ready
+                        || caps_msg["capabilities"]["machine"]["updater"] != updater
+                    {
+                        caps_msg["capabilities"]["machine"]["updater"] = updater;
+                        caps_msg["capabilities"]["machine"]["updater_ready"] =
+                            serde_json::json!(ready);
+                        let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+                    }
+                }
                 let pong = serde_json::json!({
                     "type": "heartbeat_pong",
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
                 if !send_ws_message(&tx, pong.to_string()).await {
                     break false;
+                }
+            }
+            Some("managed_runtime_window") => {
+                if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
+                    let accepted = serde_json::from_value::<
+                        nyxid_machine::managed::SignedRuntimeWindow,
+                    >(parsed["window"].clone())
+                    .ok()
+                    .is_some_and(|window| {
+                        let bytes = zeroize::Zeroizing::new(
+                            hex::decode(secret.as_str()).unwrap_or_default(),
+                        );
+                        machine.apply_managed_window(&window, &bytes).is_ok()
+                    });
+                    if !accepted {
+                        machine.shutdown().await;
+                        break false;
+                    }
+                }
+            }
+            Some("machine_service_response") => {
+                if let Some(machine) = &machine {
+                    machine
+                        .gateway_response(
+                            parsed["request_id"].as_str().unwrap_or_default(),
+                            parsed.clone(),
+                        )
+                        .await;
+                }
+            }
+            Some("machine_job_finished_ack") => {
+                if let Some(machine) = &machine {
+                    machine
+                        .job_finished_ack(parsed["request_id"].as_str().unwrap_or_default())
+                        .await;
+                }
+            }
+            Some("machine_request" | "machine_request_v2" | "machine_request_v3") => {
+                if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
+                    && let Ok(request) =
+                        serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
+                {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let request_id = request.request_id.clone();
+                        let operation = request.operation;
+                        let mut parameters = request.parameters.clone();
+                        parameters["_signed_authority"] = serde_json::to_value(&request.authority)
+                            .unwrap_or(serde_json::Value::Null);
+                        parameters["_signed_external_authority"] =
+                            serde_json::to_value(&request.external_authority)
+                                .unwrap_or(serde_json::Value::Null);
+                        let revision = machine.control_revision(operation, &parameters).await;
+                        let signing_bytes = zeroize::Zeroizing::new(
+                            hex::decode(secret.as_str()).unwrap_or_default(),
+                        );
+                        let result = machine.handle(request, &signing_bytes).await;
+                        machine
+                            .send_result(&tx, &request_id, operation, revision, &parameters, result)
+                            .await;
+                    });
+                }
+            }
+            Some("proxy_upload" | "proxy_upload_v2") => {
+                let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
+                let verified = if let Some(secret) = signing_secret.as_ref() {
+                    proxy_uploads
+                        .begin(parsed, &config.node.id, secret.as_str())
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("upload signature missing"))
+                };
+                match verified {
+                    Ok((metadata, upload)) => {
+                        if upload.operation() != nyxid_machine::Operation::ProxyUpload {
+                            let machine = machine.clone();
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                super::machine::transfer::execute(machine, metadata, upload, tx)
+                                    .await;
+                            });
+                            continue;
+                        }
+                        let tx = tx.clone();
+                        let creds = credentials.snapshot();
+                        let replay = replay_guard.clone();
+                        let metrics = metrics.clone();
+                        let client = proxy_http_client.clone();
+                        let in_flight = in_flight.clone();
+                        let active_http = active_http_requests.clone();
+                        let mut cancellation =
+                            register_active_ssh_exec(&active_http, Some(&request_id)).await;
+                        in_flight.fetch_add(1, Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            run_http_proxy_until_cancel(
+                                &mut cancellation.receiver,
+                                proxy_executor::execute_proxy_upload(
+                                    &metadata, &creds, &replay, &metrics, &tx, &client, upload,
+                                ),
+                            )
+                            .await;
+                            finish_active_ssh_exec(
+                                &active_http,
+                                Some(&request_id),
+                                cancellation.generation,
+                            )
+                            .await;
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
+                    Err(_) => {
+                        let _=send_ws_message(&tx,serde_json::json!({"type":"proxy_response","request_id":request_id,"status":403,"headers":{},"body":"","error":"Upload authorization refused"}).to_string()).await;
+                    }
                 }
             }
             Some("proxy_request") => {
@@ -1073,22 +1424,40 @@ async fn connect_and_serve(
                 let http_client = proxy_http_client.clone();
                 let in_flight_clone = in_flight.clone();
 
+                let active_http = active_http_requests.clone();
+                let request_id = parsed["request_id"].as_str().map(str::to_owned);
+                let mut cancellation =
+                    register_active_ssh_exec(&active_http, request_id.as_deref()).await;
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
                 tokio::spawn(async move {
-                    proxy_executor::execute_proxy_request(
-                        &parsed,
-                        &creds,
-                        secret.as_deref().map(|secret| secret.as_str()),
-                        &replay,
-                        &metrics_clone,
-                        &tx_clone,
-                        use_binary_proxy_chunks,
-                        &http_client,
+                    run_http_proxy_until_cancel(
+                        &mut cancellation.receiver,
+                        proxy_executor::execute_proxy_request(
+                            &parsed,
+                            &creds,
+                            secret.as_deref().map(|secret| secret.as_str()),
+                            &replay,
+                            &metrics_clone,
+                            &tx_clone,
+                            use_binary_proxy_chunks,
+                            &http_client,
+                        ),
+                    )
+                    .await;
+                    finish_active_ssh_exec(
+                        &active_http,
+                        request_id.as_deref(),
+                        cancellation.generation,
                     )
                     .await;
                     in_flight_clone.fetch_sub(1, Ordering::Relaxed);
                 });
+            }
+            Some("proxy_cancel") => {
+                if let Some(id) = parsed["request_id"].as_str() {
+                    cancel_http_proxy(&active_http_requests, id).await;
+                }
             }
             Some("ssh_tunnel_open") => {
                 let tx_clone = tx.clone();
@@ -1321,9 +1690,17 @@ async fn connect_and_serve(
     } else {
         drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     }
+    cancel_active_ssh_execs(&active_http_requests).await;
     cancel_active_ssh_execs(&active_ssh_execs).await;
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
+    proxy_uploads.disconnect().await;
+    if let Some(machine) = &machine {
+        machine.disconnect().await;
+    }
+    if let Some(task) = usage_task {
+        task.abort();
+    }
     writer_task.abort();
     Ok(Some(served_for))
 }
@@ -1820,6 +2197,23 @@ fn normalize_target_host(host: &str) -> String {
 // ---------------------------------------------------------------------------
 // SSH exec handler
 // ---------------------------------------------------------------------------
+
+async fn run_http_proxy_until_cancel(
+    receiver: &mut watch::Receiver<bool>,
+    work: impl std::future::Future<Output = ()>,
+) {
+    tokio::select! {
+        biased;
+        () = wait_for_ssh_exec_cancel(receiver) => {},
+        () = work => {},
+    }
+}
+
+async fn cancel_http_proxy(active: &ActiveSshExecMap, request_id: &str) {
+    if let Some(entry) = active.lock().await.remove(request_id) {
+        let _ = entry.cancel_tx.send(true);
+    }
+}
 
 struct ActiveSshExecCancellation {
     generation: Option<uuid::Uuid>,
@@ -3818,9 +4212,26 @@ async fn handle_ws_proxy_open(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
+    let tls_config = match crate::tls::shared_config() {
+        Ok(config) => config,
+        Err(error) => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("TLS configuration failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WS_PROXY_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), false),
+        tokio_tungstenite::connect_async_tls_with_config(
+            ws_request,
+            Some(ws_config),
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(tls_config)),
+        ),
     )
     .await;
 
@@ -4442,6 +4853,82 @@ mod tests {
         NodeConfig::new(server_url, "node-1".to_string(), "file".to_string())
     }
 
+    #[tokio::test]
+    async fn managed_handshake_refuses_missing_or_stale_fence_before_runtime_start() {
+        for stale in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let binding = nyxid_machine::managed::Binding {
+                node_id: uuid::Uuid::new_v4().to_string(),
+                sandbox_uid: uuid::Uuid::new_v4().to_string(),
+                pod_uid: uuid::Uuid::new_v4().to_string(),
+                runtime_generation: 1,
+                credential_epoch: 1,
+                writer_fence: uuid::Uuid::new_v4().to_string(),
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                delivery_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let mut config = NodeConfig::new(
+                format!("ws://{}/api/v1/nodes/ws", listener.local_addr().unwrap()),
+                binding.node_id.clone(),
+                "file".into(),
+            );
+            config.managed_runtime = Some(binding.clone());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let auth = socket.next().await.unwrap().unwrap();
+                let auth: serde_json::Value =
+                    serde_json::from_str(auth.to_text().unwrap()).unwrap();
+                assert_eq!(
+                    auth["managed_runtime"],
+                    serde_json::to_value(&binding).unwrap()
+                );
+                let mut response = serde_json::json!({"type":"auth_ok"});
+                if stale {
+                    let mut old = binding;
+                    old.credential_epoch += 1;
+                    response["managed_runtime"] = serde_json::to_value(old).unwrap();
+                }
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let (sender, credentials) =
+                SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+            let (_shutdown, receiver) = watch::channel(false);
+            let mut machine = None;
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                connect_and_serve(
+                    &config,
+                    &dir.path().join("config.toml"),
+                    dir.path(),
+                    "file",
+                    "fixture-auth",
+                    Some(shared_signing_secret(&"a".repeat(64))),
+                    &credentials,
+                    &Arc::new(sender),
+                    Arc::new(AtomicUsize::new(0)),
+                    receiver,
+                    &mut machine,
+                    Arc::new(super::super::proxy_upload::Uploads::default()),
+                    replay_guard(),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, Err(Error::AuthFailed(_))));
+            assert!(
+                machine.is_none(),
+                "unacknowledged binding must not construct a runtime"
+            );
+            server.await.unwrap();
+        }
+    }
+
     fn rci_metadata(pending_id: &str) -> rci_crypto::PendingCredentialCryptoMetadata {
         rci_crypto::PendingCredentialCryptoMetadata {
             pending_id: pending_id.to_string(),
@@ -4661,6 +5148,228 @@ mod tests {
         )
         .await;
         server_task.await.expect("downstream server task");
+    }
+
+    #[tokio::test]
+    async fn pool_node_http_cancellation_closes_real_provider_transport() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for streaming in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .contains("Bearer node-test")
+                );
+                if streaming {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n").await.unwrap();
+                }
+                started_tx.send(()).unwrap();
+                socket.read(&mut byte).await.unwrap()
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            config.credentials.insert(
+                "pool-native".into(),
+                CredentialConfig::new_header(
+                    "Authorization".into(),
+                    Some(encryption.encrypt("Bearer node-test").unwrap()),
+                    Some(format!("http://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let request = serde_json::json!({
+                "request_id": "pool-cancel", "service_slug": "pool-native", "method": "GET",
+                "path": "/run", "base_url": format!("http://{addr}"), "headers": {},
+            });
+            let active: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let mut cancellation = register_active_ssh_exec(&active, Some("pool-cancel")).await;
+            let (tx, mut rx) = mpsc::channel(8);
+            let task_active = active.clone();
+            let task = tokio::spawn(async move {
+                run_http_proxy_until_cancel(
+                    &mut cancellation.receiver,
+                    proxy_executor::execute_proxy_request(
+                        &request,
+                        &credentials,
+                        None,
+                        &tokio::sync::Mutex::new(ReplayGuard::new()),
+                        &NodeMetrics::new(),
+                        &tx,
+                        true,
+                        &reqwest::Client::new(),
+                    ),
+                )
+                .await;
+                finish_active_ssh_exec(&task_active, Some("pool-cancel"), cancellation.generation)
+                    .await;
+            });
+            tokio::time::timeout(Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if streaming {
+                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            cancel_http_proxy(&active, "pool-cancel").await;
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "provider socket must close on cancellation"
+            );
+            assert!(active.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_upload_cancellation_closes_provider_after_body_is_complete() {
+        use nyxid_machine::{
+            Operation, Request,
+            binary::{Frame, Kind},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for streaming in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(String::from_utf8_lossy(&request).contains("Bearer node-test"));
+                if String::from_utf8_lossy(&request)
+                    .to_ascii_lowercase()
+                    .contains("transfer-encoding: chunked")
+                {
+                    let mut body = Vec::new();
+                    while !body.ends_with(b"0\r\n\r\n") {
+                        assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                        body.push(byte[0]);
+                    }
+                }
+                if streaming {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n").await.unwrap();
+                }
+                started_tx.send(()).unwrap();
+                socket.read(&mut byte).await.unwrap()
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            config.credentials.insert(
+                "upload-service".into(),
+                CredentialConfig::new_header(
+                    "Authorization".into(),
+                    Some(encryption.encrypt("Bearer node-test").unwrap()),
+                    Some(format!("http://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let uploads = Arc::new(super::super::proxy_upload::Uploads::default());
+            let id = uuid::Uuid::new_v4();
+            let mut opening = Request {
+                version: 1,
+                authority: None,
+                external_authority: None,
+                request_id: id.to_string(),
+                node_id: config.node.id.clone(),
+                operation: Operation::ProxyUpload,
+                parameters: serde_json::json!({
+                    "service_slug":"upload-service", "method":"POST", "path":"/run",
+                    "base_url":format!("http://{addr}"), "max_bytes":1024, "headers":{},
+                }),
+                timestamp: chrono::Utc::now().timestamp(),
+                nonce: uuid::Uuid::new_v4().to_string(),
+                signature: String::new(),
+            };
+            opening.signature = nyxid_machine::signing::sign(&opening, &[17; 32]);
+            let (metadata, upload) = uploads
+                .begin(
+                    serde_json::to_value(&opening).unwrap(),
+                    &config.node.id,
+                    &"11".repeat(32),
+                )
+                .await
+                .unwrap();
+            uploads
+                .frame(Frame {
+                    kind: Kind::ProxyUpload,
+                    id,
+                    sequence: 0,
+                    end: true,
+                    bytes: &[],
+                })
+                .await;
+            let active: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let request_id = id.to_string();
+            let mut cancellation = register_active_ssh_exec(&active, Some(&request_id)).await;
+            let (tx, mut rx) = mpsc::channel(8);
+            let task_active = active.clone();
+            let task_id = request_id.clone();
+            let task = tokio::spawn(async move {
+                run_http_proxy_until_cancel(
+                    &mut cancellation.receiver,
+                    proxy_executor::execute_proxy_upload(
+                        &metadata,
+                        &credentials,
+                        &tokio::sync::Mutex::new(ReplayGuard::new()),
+                        &NodeMetrics::new(),
+                        &tx,
+                        &reqwest::Client::new(),
+                        upload,
+                    ),
+                )
+                .await;
+                finish_active_ssh_exec(&task_active, Some(&task_id), cancellation.generation).await;
+            });
+            tokio::time::timeout(Duration::from_secs(3), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if streaming {
+                tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            cancel_http_proxy(&active, &request_id).await;
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+            assert!(active.lock().await.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -4960,6 +5669,10 @@ mod tests {
             let auth: serde_json::Value = serde_json::from_str(auth.to_text().unwrap()).unwrap();
             assert_eq!(auth["type"], "auth");
             if authenticated {
+                // A control frame can arrive before auth_ok when a proxy or
+                // the server heartbeat task is already active. It must not
+                // force an unnecessary reconnect.
+                socket.send(Message::Ping(Vec::new().into())).await.unwrap();
                 socket
                     .send(Message::Text(
                         serde_json::json!({"type": "auth_ok"}).to_string().into(),
@@ -4967,7 +5680,15 @@ mod tests {
                     .await
                     .unwrap();
                 // Read capability advertisement to ensure the serving loop is entered.
-                assert!(socket.next().await.unwrap().unwrap().is_text());
+                let mut capability = None;
+                while let Some(message) = socket.next().await {
+                    let message = message.unwrap();
+                    if message.is_text() {
+                        capability = Some(message);
+                        break;
+                    }
+                }
+                assert!(capability.is_some());
             }
             if clean_close {
                 socket

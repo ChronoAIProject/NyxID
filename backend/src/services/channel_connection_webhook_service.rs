@@ -1,10 +1,15 @@
 use bson::doc;
 
-use super::channel_platform::{BotCredentials, CredentialResolution, PlatformAdapter};
+use super::channel_platform::{
+    BotCredentials, CredentialResolution, PlatformAdapter, WebhookSetupProgress,
+};
 use super::coordination_service::{LeaseStore, cluster_lease_runtime};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{COLLECTION_NAME, ChannelBot};
+
+pub(crate) const SETUP_PENDING_ERROR: &str =
+    "Webhook setup has not completed; select Verify to retry.";
 
 pub fn supports(adapter: &dyn PlatformAdapter) -> bool {
     adapter.platform_webhook()
@@ -12,6 +17,13 @@ pub fn supports(adapter: &dyn PlatformAdapter) -> bool {
             adapter.credential_resolution(),
             CredentialResolution::OAuthConnection { .. }
         )
+}
+
+pub fn callback_url(base_url: &str, platform: &str) -> String {
+    format!(
+        "{}/api/v1/webhooks/channel/{platform}/platform",
+        base_url.trim_end_matches('/')
+    )
 }
 
 pub(crate) async fn serialized<T>(
@@ -61,32 +73,59 @@ pub async fn configure(
     if !supports(adapter) {
         return Ok(false);
     }
+    let progress = WebhookSetupProgress::default();
+    let started = std::sync::atomic::AtomicBool::new(false);
     // Keep provider setup state off the shared channel verification stack.
     let result = serialized(db, adapter.platform_id(), Box::pin(async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
         }
-        let result = configure_inner(db, billing, keys, http, adapter, &current, base_url).await;
-        if result.is_err() && current.platform == "x"
-            && (billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::public_events_enabled(&current)) {
+        started.store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = configure_inner(db, billing, keys, http, adapter, &current, base_url, &progress).await;
+        if result.is_err()
+            && setup_failure_requires_stop(&current, billing.billing_enabled(), &progress) {
             super::channel_credentials::fail_bot(db, &current,
-                "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
+                super::channel_bot_health::codes::WEBHOOK_SETUP_FAILED,
+                "Webhook setup needs attention. Check the channel configuration, then select Verify.").await?;
         }
         result
     })).await;
     if result.is_err()
-        && bot.platform == "x"
-        && (billing.billing_enabled()
-            || bot.webhook_registered
-            || super::channel_adapters::x::public_events_enabled(bot))
+        && started.load(std::sync::atomic::Ordering::Relaxed)
+        && setup_failure_requires_stop(bot, billing.billing_enabled(), &progress)
     {
-        super::channel_credentials::fail_bot(db, bot,
-            "Webhook setup did not complete. Check credits and webhook configuration, then select Verify.").await?;
+        super::channel_credentials::fail_bot(
+            db,
+            bot,
+            super::channel_bot_health::codes::WEBHOOK_SETUP_FAILED,
+            "Webhook setup did not complete. Check the channel configuration, then select Verify.",
+        )
+        .await?;
     }
     result
 }
 
+fn setup_failure_requires_stop(
+    bot: &ChannelBot,
+    billing_enabled: bool,
+    progress: &WebhookSetupProgress,
+) -> bool {
+    if bot.webhook_registered
+        && bot.status == "active"
+        && progress.read_only_safe()
+        && !progress.mutation_started()
+    {
+        return false;
+    }
+    bot.platform == "x"
+        && (billing_enabled
+            || super::channel_adapters::x::webhook_events_enabled(bot)
+            || bot.webhook_registered
+            || progress.mutation_started())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn configure_inner(
     db: &mongodb::Database,
     billing: &super::billing::BillingService,
@@ -95,6 +134,7 @@ async fn configure_inner(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
     base_url: &str,
+    progress: &WebhookSetupProgress,
 ) -> AppResult<bool> {
     if !supports(adapter) {
         return Ok(false);
@@ -106,10 +146,11 @@ async fn configure_inner(
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     if !adapter.connection_webhook_configured(&platform) {
         if adapter.platform_id() == "x"
-            && (billing.billing_enabled() || super::channel_adapters::x::public_events_enabled(bot))
+            && (billing.billing_enabled()
+                || super::channel_adapters::x::webhook_events_enabled(bot))
         {
             return Err(AppError::BillingNotConfigured(
-                "Paid X channels and public events require the platform webhook credentials".into(),
+                "Paid X channels and events other than DMs require the platform webhook credentials".into(),
             ));
         }
         if bot.webhook_registered {
@@ -124,7 +165,15 @@ async fn configure_inner(
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
         }
-        let token = super::channel_credentials::resolve_bot_token(db, keys, adapter, &current).await?;
+        let token = match super::channel_credentials::resolve_bot_token(db, keys, adapter, &current).await {
+            Err(error @ AppError::ChannelPlatformError(_)) => {
+                // Live credential resolution classifies temporary refresh failures
+                // separately from revoked/missing credentials, which fail the bot.
+                progress.mark_read_only_safe();
+                return Err(error);
+            }
+            result => result?,
+        };
         if let Some(meter) = super::channel_billing_service::ChannelBilling::for_bot(db, billing, &current, None) {
             meter.admit().await?;
         }
@@ -132,23 +181,42 @@ async fn configure_inner(
             billing: None,
             token: &token, platform_bot_id: Some(&current.platform_bot_id), platform_secrets: Some(&platform),
         };
-        let url = format!("{}/api/v1/webhooks/channel/{}/platform", base_url.trim_end_matches('/'), adapter.platform_id());
-        if billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::public_events_enabled(&current) {
-            // Record a possible remote subscription before the provider effect,
-            // so failed/partial setup remains eligible for cleanup retry.
-            let marked = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-                doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
-                doc! {"$set": {"webhook_registered": true}},
-            ).await?;
-            if marked.matched_count == 0 {
-                return Err(AppError::Conflict("Channel changed before webhook setup; retry".into()));
-            }
+        let url = callback_url(base_url, adapter.platform_id());
+        // Persist recovery state before any remote effect, including first-time
+        // unmetered DM setup. Interrupted setup stays visible to cleanup.
+        let mut setup_state = doc! {"webhook_registered": true};
+        if !current.webhook_registered {
+            setup_state.insert("status", "failed");
+            setup_state.insert("error", SETUP_PENDING_ERROR);
         }
-        adapter.setup_connection_webhook(http, &credentials, &current, &url).await?;
+        let marked = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+            doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+            doc! {"$set": setup_state},
+        ).await?;
+        if marked.matched_count == 0 {
+            return Err(AppError::Conflict("Channel changed before webhook setup; retry".into()));
+        }
+        progress.mark_read_only_safe();
+        if let Err(error) = adapter.setup_connection_webhook(http, &credentials, &current, &url, progress).await {
+            if !current.webhook_registered && !billing.billing_enabled()
+                && !super::channel_adapters::x::webhook_events_enabled(&current)
+                && !progress.mutation_started() {
+                // A completed read-only failure created no account subscription.
+                // Restore the existing DM polling fallback under the same fence.
+                db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                    doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at), "status": "failed"},
+                    doc! {"$set": {"webhook_registered": false, "status": &current.status, "error": &current.error}},
+                ).await?;
+            }
+            return Err(error);
+        }
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
             doc! {"$set": {"webhook_registered": true, "status": "active", "error": null,
-                "poll_lease_until": null, "poll_error_count": 0, "updated_at": bson::DateTime::now()}},
+                "poll_lease_until": null, "poll_backoff_until": null, "poll_error_count": 0,
+                "diagnostics.subscription_state": {"registered": true, "checked_at": bson::DateTime::now(), "last_error": null},
+                "diagnostics.failure_reason": null, "diagnostics.last_webhook_error": null, "diagnostics.consecutive_errors": 0,
+                "updated_at": bson::DateTime::now()}},
         ).await?;
         if result.matched_count == 0 {
             let latest = super::channel_bot_service::get_bot(db, &current.id).await?;
@@ -159,6 +227,47 @@ async fn configure_inner(
         }
         Ok(true)
     }.await
+}
+
+/// Read-only live subscription check, persisted as the bot's subscription
+/// state. `None` when the platform has no connection webhooks.
+pub async fn check_live(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    base_url: &str,
+) -> AppResult<Option<super::channel_platform::LiveWebhookStatus>> {
+    use super::channel_platform::LiveWebhookStatus;
+    if !supports(adapter) {
+        return Ok(None);
+    }
+    let descriptor = adapter
+        .platform_credentials()
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
+    let status = if adapter.connection_webhook_configured(&platform) {
+        let url = callback_url(base_url, adapter.platform_id());
+        match adapter
+            .connection_webhook_status(http, &platform, bot, &url)
+            .await?
+        {
+            Some(status) => status,
+            None => return Ok(None),
+        }
+    } else {
+        LiveWebhookStatus::missing(super::channel_bot_health::codes::WEBHOOK_UNCONFIGURED)
+    };
+    super::channel_bot_service::record_subscription_state(
+        db,
+        &bot.id,
+        status.registered,
+        status.error,
+    )
+    .await?;
+    Ok(Some(status))
 }
 
 /// Recheck failed/deleted state under the Verify lease so a recovered channel

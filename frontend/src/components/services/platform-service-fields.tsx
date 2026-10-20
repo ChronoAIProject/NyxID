@@ -1,5 +1,6 @@
-import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
-import { Badge } from "@/components/ui/badge";
+import { VoiceInferenceFields } from "./voice-inference-fields";
+import { BillingLaneFields } from "./billing-lane-fields";
+import { EffectiveBillingSummary } from "@/components/admin-billing/effective-billing";
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
 import { useController, useFormContext } from "react-hook-form";
 import type { SharedServiceFormData } from "@/schemas/services";
@@ -57,8 +58,9 @@ export function PlatformServiceFields({
   }
   return (
     <div className="space-y-5">
+      {service?.id && <EffectiveBillingSummary serviceId={service.id} />}
       <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Inference</h3>
+        <h3 className="text-13 font-semibold">Inference</h3>
         <Label htmlFor="inference-protocol">Wire protocol</Label>
         <Select
           value={inference?.wire_protocol ?? "none"}
@@ -70,7 +72,9 @@ export function PlatformServiceFields({
                 : {
                     wire_protocol: value as InferenceMetadata["wire_protocol"],
                     model_list: inference?.model_list ?? false,
-                    realtime: inference?.realtime ?? false,
+                    realtime:
+                      !!inference?.voice || (inference?.realtime ?? false),
+                    voice: inference?.voice,
                   },
               { shouldDirty: true, shouldValidate: true },
             )
@@ -105,7 +109,12 @@ export function PlatformServiceFields({
               </Label>
               <Switch
                 id={`inference-${field}`}
-                checked={inference[field] ?? false}
+                checked={
+                  field === "realtime" && inference.voice
+                    ? true
+                    : (inference[field] ?? false)
+                }
+                disabled={field === "realtime" && !!inference.voice}
                 onCheckedChange={(value) =>
                   form.setValue(
                     "inference",
@@ -116,10 +125,26 @@ export function PlatformServiceFields({
               />
             </div>
           ))}
+        {inference && (
+          <VoiceInferenceFields
+            value={inference.voice}
+            onChange={(voice) =>
+              form.setValue(
+                "inference",
+                {
+                  ...inference,
+                  voice,
+                  realtime: !!voice || inference.realtime,
+                },
+                { shouldDirty: true, shouldTouch: true, shouldValidate: true },
+              )
+            }
+          />
+        )}
       </section>
       {credentialSupported && (
         <section className="space-y-3">
-          <h3 className="text-[13px] font-semibold">Platform key</h3>
+          <h3 className="text-13 font-semibold">Platform key</h3>
           {!form.watch("platform_key") && service?.legacy_public_master && (
             <p className="text-xs text-muted-foreground">
               Enabled, public (implicit)
@@ -197,7 +222,7 @@ export function PlatformServiceFields({
         </section>
       )}
       <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Endpoint policy</h3>
+        <h3 className="text-13 font-semibold">Endpoint policy</h3>
         <p className="text-xs text-muted-foreground">
           These HTTP method and path rules apply to every binding of this
           service, including own keys, platform keys, and agents. An empty
@@ -306,230 +331,7 @@ export function PlatformServiceFields({
           </>
         )}
       </section>
-      <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Billing lanes</h3>
-        {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
-          <p className="text-xs text-muted-foreground">
-            No lane prices are configured. Legacy billing below still applies.
-          </p>
-        )}
-        <div className="grid gap-3 sm:grid-cols-2">
-          {(["byok_pricing", "platform_key_pricing"] as const).map((field) => {
-            const lane = form.watch(field);
-            const status = service?.billing?.[field]?.sync_status;
-            const setLane = (value: SharedServiceFormData[typeof field]) =>
-              form.setValue(field, value, {
-                shouldDirty: true,
-                shouldValidate: true,
-              });
-            return (
-              <div
-                key={field}
-                className="space-y-3 rounded-lg border border-border/50 p-3"
-              >
-                <div className="text-xs font-medium">
-                  {field === "byok_pricing"
-                    ? "Your own key"
-                    : "NyxID platform key"}
-                </div>
-                <div className="flex items-center justify-between">
-                  <Label htmlFor={`${field}-enabled`}>
-                    {lane ? "Charge" : "Free"}
-                  </Label>
-                  <Switch
-                    id={`${field}-enabled`}
-                    checked={Boolean(lane)}
-                    onCheckedChange={(enabled) =>
-                      setLane(
-                        enabled
-                          ? { metric: "requests", credits_per_unit: "0" }
-                          : null,
-                      )
-                    }
-                  />
-                </div>
-                {lane && (
-                  <>
-                    <Label htmlFor={`${field}-metric`}>Unit</Label>
-                    <Select
-                      value={lane.metric}
-                      onValueChange={(metric) =>
-                        setLane({
-                          ...lane,
-                          metric: metric as NonNullable<
-                            SharedServiceFormData[typeof field]
-                          >["metric"],
-                        })
-                      }
-                    >
-                      <SelectTrigger id={`${field}-metric`}>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {BILLING_METRICS.map((metric) => (
-                          <SelectItem key={metric} value={metric}>
-                            {metricLabel(metric)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <FormField
-                      control={form.control}
-                      name={`${field}.credits_per_unit`}
-                      render={({ field: input }) => (
-                        <FormItem>
-                          <FormLabel>Credits per unit</FormLabel>
-                          <FormControl>
-                            <Input {...input} inputMode="decimal" />
-                          </FormControl>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                    {status && (
-                      <Badge
-                        variant={status === "synced" ? "success" : "warning"}
-                      >
-                        {status === "synced"
-                          ? "Synced"
-                          : status === "failed"
-                            ? "Failed"
-                            : "Pending"}
-                      </Badge>
-                    )}
-                    {(lane.components ?? []).map((component, index) => {
-                      const saved = service?.billing?.[field]?.components?.find(
-                        (item) => item.metric === component.metric,
-                      );
-                      return (
-                        <div
-                          key={index}
-                          className="space-y-2 border-t border-border/50 pt-3"
-                        >
-                          <FormField
-                            control={form.control}
-                            name={`${field}.components.${index}.metric`}
-                            render={({ field: input }) => (
-                              <FormItem>
-                                <FormLabel>Component unit</FormLabel>
-                                <Select
-                                  value={input.value}
-                                  onValueChange={input.onChange}
-                                >
-                                  <FormControl>
-                                    <SelectTrigger
-                                      aria-label={`Component ${index + 1} unit`}
-                                    >
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                  </FormControl>
-                                  <SelectContent>
-                                    {BILLING_METRICS.map((metric) => (
-                                      <SelectItem key={metric} value={metric}>
-                                        {metricLabel(metric)}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <FormField
-                            control={form.control}
-                            name={`${field}.components.${index}.credits_per_unit`}
-                            render={({ field: input }) => (
-                              <FormItem>
-                                <FormLabel>Credits per unit</FormLabel>
-                                <FormControl>
-                                  <Input
-                                    {...input}
-                                    inputMode="decimal"
-                                    aria-label={`Component ${index + 1} price`}
-                                  />
-                                </FormControl>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-                          <div className="flex items-center justify-between">
-                            {saved?.sync_status && (
-                              <Badge
-                                variant={
-                                  saved.sync_status === "synced"
-                                    ? "success"
-                                    : "warning"
-                                }
-                              >
-                                {saved.sync_status === "synced"
-                                  ? "Synced"
-                                  : saved.sync_status === "failed"
-                                    ? "Failed"
-                                    : "Pending"}
-                              </Badge>
-                            )}
-                            <Button
-                              type="button"
-                              variant="outline"
-                              onClick={() =>
-                                setLane({
-                                  ...lane,
-                                  components: lane.components?.filter(
-                                    (_, i) => i !== index,
-                                  ),
-                                })
-                              }
-                            >
-                              Remove component
-                            </Button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      disabled={
-                        (lane.components?.length ?? 0) >=
-                        BILLING_METRICS.length - 1
-                      }
-                      onClick={() => {
-                        const metric = BILLING_METRICS.find(
-                          (metric) =>
-                            metric !== lane.metric &&
-                            !lane.components?.some(
-                              (component) => component.metric === metric,
-                            ),
-                        );
-                        if (metric)
-                          setLane({
-                            ...lane,
-                            components: [
-                              ...(lane.components ?? []),
-                              { metric, credits_per_unit: "0" },
-                            ],
-                          });
-                      }}
-                    >
-                      Add component
-                    </Button>
-                    <p className="text-[11px] text-muted-foreground">
-                      Prices support up to 12 decimal places. Each unit is
-                      charged separately.
-                    </p>
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        {(form.watch("byok_pricing") || form.watch("platform_key_pricing")) && (
-          <p className="text-xs text-muted-foreground">
-            Billing lanes supersede legacy platform billing below. A lane set to
-            Free has no lane charge. Resale billing remains separate.
-          </p>
-        )}
-      </section>
+      <BillingLaneFields service={service} />
     </div>
   );
 }

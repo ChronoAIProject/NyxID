@@ -1,0 +1,131 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub const COLLECTION_NAME: &str = "assistant_groups";
+pub const MESSAGES_COLLECTION_NAME: &str = "assistant_group_messages";
+pub const MAX_MEMBERS: usize = 8;
+pub const MAX_NAME_CHARS: usize = 60;
+pub const MAX_PARTICIPANTS: usize = 16;
+pub const REQUESTS_COLLECTION_NAME: &str = "assistant_group_requests";
+/// NyxBot threads that posted into a group and wait for its outcome.
+pub const MAX_FOLLOWERS: usize = 8;
+pub const FOLLOWER_TTL_HOURS: i64 = 24;
+
+/// A group chat: the owner plus several of their agents (Grok-Bot style).
+/// Each member speaks through its own hidden member thread, so it keeps its
+/// own key, grants and memory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssistantGroup {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub participant_user_ids: Vec<String>,
+    #[serde(default)]
+    pub created_by_user_id: Option<String>,
+    pub name: String,
+    pub member_agent_ids: Vec<String>,
+    /// Answers user messages that mention no one: NyxBot when it is a member.
+    pub lead_agent_id: String,
+    #[serde(default)]
+    pub last_recipient_ids: Vec<String>,
+    #[serde(default)]
+    pub last_recipient_ids_by_actor: HashMap<String, Vec<String>>,
+    /// `user` or `nyxbot`.
+    pub created_by: String,
+    pub message_count: i64,
+    /// Members addressed but not yet started (busy, or the pool was full).
+    #[serde(default)]
+    pub pending_agent_ids: Vec<String>,
+    /// Remaining agent hand-offs since the last user message.
+    #[serde(default)]
+    pub hops_remaining: i32,
+    /// NyxBot threads that posted work here from outside: woken with a
+    /// summary once the group goes quiet.
+    #[serde(default)]
+    pub followers: Vec<GroupFollower>,
+    /// When the retry sweep last looked at its waiting members (rotation).
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub pending_checked_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_message_at: Option<DateTime<Utc>>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One message in a group transcript.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupMessage {
+    #[serde(default)]
+    pub activities: Vec<super::assistant_conversation::TurnActivity>,
+    /// Server-only routing marker, including notices with no human author.
+    #[serde(default)]
+    pub org_group: bool,
+    #[serde(default)]
+    pub author_user_id: Option<String>,
+    #[serde(default)]
+    pub author_display_name: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub user_id: String,
+    pub seq: i64,
+    /// `user`, `agent` or `notice` (NyxID-authored).
+    pub role: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub recipient_agent_ids: Vec<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
+/// A NyxBot thread waiting for a group's answer to what it posted: a
+/// temporary participant, not a member, with no decision authority over
+/// member cards.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupFollower {
+    pub conversation_id: String,
+    /// Its post; the summary covers the messages after it.
+    pub since_seq: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    /// `created_at + FOLLOWER_TTL_HOURS`; rows written before expiry existed
+    /// use the same rule from `created_at`.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl GroupFollower {
+    pub fn expiry(&self) -> DateTime<Utc> {
+        self.expires_at
+            .unwrap_or(self.created_at + chrono::Duration::hours(FOLLOWER_TTL_HOURS))
+    }
+}
+
+/// One org-group message chain; actor and attachment authority never change
+/// when an agent hands work to another member.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupRequest {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub user_id: String,
+    pub actor_user_id: String,
+    pub message_seq: i64,
+    pub attachment_ids: Vec<String>,
+    pub pending_agent_ids: Vec<String>,
+    pub hops_remaining: i32,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}

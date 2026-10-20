@@ -67,9 +67,9 @@ export function IdentityPropagationConfig({
 
       {showFieldToggles && (
         <div className="space-y-3 rounded-lg border p-3">
-          <p className="text-[12px] font-medium">Include Fields</p>
+          <p className="text-12 font-medium">Include Fields</p>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-user-id" className="text-[12px] font-normal">
+            <Label htmlFor="include-user-id" className="text-12 font-normal">
               User ID
             </Label>
             <Switch
@@ -79,7 +79,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-email" className="text-[12px] font-normal">
+            <Label htmlFor="include-email" className="text-12 font-normal">
               Email
             </Label>
             <Switch
@@ -89,7 +89,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-name" className="text-[12px] font-normal">
+            <Label htmlFor="include-name" className="text-12 font-normal">
               Display Name
             </Label>
             <Switch

@@ -49,7 +49,7 @@ export function InputCard({
               : "border-border bg-overlay"
         }`}
       >
-        <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
+        <div className="flex items-center gap-2 text-12 font-semibold text-foreground">
           {submitted ? (
             <Loader2 className="h-4 w-4 animate-spin text-warning" />
           ) : (
@@ -63,11 +63,11 @@ export function InputCard({
               ? "Answer sent"
               : "Input cancelled"}
         </div>
-        <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+        <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
           {block.prompt}
         </p>
         {submitted ? (
-          <p className="mt-1.5 text-[11px] text-text-tertiary">
+          <p className="mt-1.5 text-11 text-text-tertiary">
             Waiting for committed confirmation.
           </p>
         ) : null}
@@ -84,10 +84,10 @@ export function InputCard({
           <MessageSquareText className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-[13px] font-semibold text-foreground">
+          <h3 className="text-13 font-semibold text-foreground">
             Input required
           </h3>
-          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+          <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
             {block.prompt}
           </p>
         </div>
@@ -100,7 +100,7 @@ export function InputCard({
             return (
               <label
                 key={option.option_id}
-                className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 text-[12px] hover:bg-muted"
+                className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-border px-3 py-2.5 text-12 hover:bg-muted"
               >
                 <input
                   checked={checked}
@@ -125,7 +125,7 @@ export function InputCard({
                     {option.label}
                   </span>
                   {option.description ? (
-                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                    <span className="mt-0.5 block text-11 text-muted-foreground">
                       {option.description}
                     </span>
                   ) : null}

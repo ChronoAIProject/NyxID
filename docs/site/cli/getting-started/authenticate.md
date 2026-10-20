@@ -20,7 +20,7 @@ nyxid login --base-url <BASE_URL>
 
 Plain `nyxid login` deliberately defaults to selectable **device-code v2**, on desktop too. It is the only terminal-originated flow where the approving human sees the requester attribution panel (IP, timezone, origin, screen) and chooses between a full account session and a restricted Agent Key (#1535). This is why 0.16.0 (`78cb26b`) changed the default; that commit message omitted the rationale. The legacy local-callback flow always grants a full account session without a requester review step.
 
-The CLI prints the code and opens only the bare `verification_uri`, never `verification_uri_complete`. Manual entry keeps the deliberate code-transfer step used by GitHub CLI. To paste instead of retyping, opt into `-c` / `--clipboard`:
+The CLI prints the code separately and opens a URL without any login code. Without approval preferences it uses the bare `verification_uri`; with preferences, only those hints are added. The JSON field `verification_uri_complete` is retained for compatibility but also excludes the code. Manual entry keeps the deliberate code-transfer step used by GitHub CLI. To paste instead of retyping, opt into `-c` / `--clipboard`:
 
 ```bash
 nyxid login --clipboard --base-url <BASE_URL>
@@ -52,7 +52,7 @@ nyxid login resume <REQUEST_ID> --profile work --once --output json
 ```
 
 The first command creates one request and returns its human code, bare verification
-URL, expiry, poll interval and nonsecret local resume handle. It opens no browser
+URL, a code-free `verification_uri_complete` with any approval preferences, expiry, poll interval and nonsecret local resume handle. It opens no browser
 and never waits for approval. The poll secret stays in a mode-0600 local pending
 file. A handle works only on the same machine/profile/destination; it cannot
 redeem a login remotely. `--once` performs at most one eligible poll and preserves
@@ -76,6 +76,7 @@ the shape `{"error":{"code":"login_pending","message":"..."}}`:
 | 19 | `login_unavailable` |
 | 20 | `login_unsupported` |
 | 21 | `login_storage_failed` |
+| 22 | `login_input_unavailable` |
 
 ### Login with a one-time code
 
@@ -88,8 +89,26 @@ machine:
 nyxid login --code --profile work --base-url <BASE_URL>
 ```
 
-The command prompts for the code without displaying it. The optional argument
-form `--code XXXX-XXXX` supports automation but may enter shell history.
+The command prompts for the code without displaying it. On Unix it disables and
+verifies echo on the stdin terminal itself, including managed PTYs without a
+controlling `/dev/tty`. It restores the saved terminal settings after entry,
+errors or interruption (including Ctrl-C). The existing explicit argument form
+remains accepted for compatibility; keep codes out of command lines, environment
+variables, shell history and logs.
+
+Piped/non-terminal stdin is refused; there is no secret-from-pipe opt-in. If
+hidden input cannot be guaranteed, no code is read or redeemed. Text and JSON
+report `login_input_unavailable` (exit 22), with `diagnostic.stage: "input"`, a
+fixed `diagnostic.reason` such as `stdin_not_terminal` or
+`hidden_input_unavailable`, and the same recovery hint: run in an interactive
+terminal, or use plain `nyxid login` (device flow) or `nyxid login --callback`.
+Input interruptions use `input_interrupted`; read/closed-input failures use
+`input_read_failed` / `input_closed`. A failed terminal restoration reports
+`terminal_restore_failed` and prevents redemption. Diagnostics never include
+entered text or raw IO errors. In JSON mode the prompt goes to stderr and stdout
+contains only the structured result. A code rejected or cancelled by the server
+still reports `login_code_invalid` (exit 18).
+
 Codes are consumed once. The issuing screen shows redemption and requester
 context; Cancel stops a pending code, while Revoke invalidates its delivered
 session or child credential. Neither the code nor a poll secret belongs in URLs
@@ -152,3 +171,11 @@ Profiles also scope the `nyxid node` daemon, so you can run multiple credential-
 ## Next
 
 - [Your first connection](/docs/cli/getting-started/first-connection) — connect a service and verify a proxied call.
+
+## Network troubleshooting
+
+Use `nyxid doctor --json` to inspect trust sources and network failures.
+`login_unavailable` keeps exit code 19 and adds a sanitized `error.diagnostic`
+with the stage, status when available, endpoint, causes and a hint.
+See [Network, proxies and TLS](/docs/cli/guides/network) for CA configuration,
+proxy behavior, and background node services.

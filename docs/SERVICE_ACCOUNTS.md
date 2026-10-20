@@ -21,6 +21,7 @@ Service accounts provide machine-to-machine authentication for automated systems
   - [Proxy to Downstream Services](#proxy-to-downstream-services)
   - [Provider Management](#provider-management)
 - [Token Expiry and Re-Authentication](#token-expiry-and-re-authentication)
+- [Platform catalog editors](#platform-catalog-editors)
 - [Scopes and Access Control](#scopes-and-access-control)
 - [Token Revocation](#token-revocation)
 - [Security](#security)
@@ -115,7 +116,7 @@ Content-Type: application/json
 }
 ```
 
-Scope changes affect future token issuance. Curation additionally checks the live account scopes and grant on every request, so removing a curation scope immediately removes that authority from existing tokens.
+Scope changes affect future token issuance. CatalogEditor also checks live account scopes on every request; removing a scope removes that authority from existing tokens. Legacy editors additionally check their assigned global role permissions. Legacy Curation checks live scopes and its grant.
 
 ### Rotating the Secret
 
@@ -495,27 +496,29 @@ class NyxIDClient:
 | `proxy:*` | Existing alias of `proxy`; grants the same access, not additional access |
 | `llm:proxy` | Passes the LLM gateway scope check, including status |
 | `roles` | Includes assigned roles and permissions in OAuth userinfo |
-| `catalog:skills:read` | Granted Curation discovery, skills, and history |
-| `catalog:skills:write` | Granted Curation recommendation changes and restore |
-| `user-services:read` | Nonsecret `GET /keys` listing and `GET /keys/{uuid}` metadata for connections in a live key read grant |
+| `catalog:skills:read` | Catalog metadata, key metadata, skills, and history after a platform admin saves the scope; legacy Curation uses its grant |
+| `catalog:skills:write` | Catalog recommendation changes and restore after a platform admin saves the scope; legacy Curation uses its grant |
+| `user-services:read` | Nonsecret private connection metadata with General/Curation connection grants; also required by legacy role-based editors for key GETs |
 | `groups` | Includes groups in OAuth userinfo; service accounts have no group memberships, so the list is empty |
 
-The default suggestion menu includes all eight values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. The catalog skill scopes also require a platform-admin-issued curation grant for the selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+The default suggestion menu includes all eight values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. A platform administrator saving catalog scopes grants CatalogEditor access. Legacy editors retain their matching global role requirement until an explicit scope save. Legacy Curation instead requires a platform-admin-issued grant for selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
 
-General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation. Curation and key metadata reads additionally check the live configured scope on every request.
+General accounts support free-form scope strings; an explicit platform-admin save containing catalog scopes grants CatalogEditor authority. CatalogEditor accounts accept only `catalog:skills:read`, `catalog:skills:write`, `user-services:read`, and `proxy`. Legacy Curation accounts restrict scopes to their grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation. Curation and key metadata reads additionally check the live configured scope on every request.
 
 ### Routes Accessible to Service Accounts
 
-The general route table below does not widen Curation access: that purpose permits its catalog-curation routes, exact granted HTTP proxy target, and exact connection metadata GETs with a separate key read grant.
+The general route table below does not widen CatalogEditor or Curation access. CatalogEditor permits catalog metadata GETs, recommendation PUTs to exact catalog UUIDs under `/keys`, catalog-curation routes, and the Ornn HTTP target described below. Legacy Curation remains confined to its grants.
 
 | Endpoint | Existing scope check |
 |----------|----------------------|
 | `ANY /api/v1/llm/{provider}/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
-| `GET /api/v1/keys` | `user-services:read` in token and live account, live key read grant, and live owner access for each listed connection |
-| `GET /api/v1/keys/{uuid}` | `user-services:read` in token and live account, exact key read grant, and live owner access |
+| `ANY /api/v1/proxy/{service_id}/*` | General: `proxy` or `proxy:*`; CatalogEditor/Curation: token and live `proxy` plus the exact live Ornn target |
+| `ANY /api/v1/proxy/s/{slug}/*` | CatalogEditor: token and live `proxy`, resolving only its authorized Ornn catalog slug; legacy Curation cannot use this alias |
+| `GET /api/v1/keys` | CatalogEditor: catalog read scope (legacy role-based editors also need `user-services:read` and a catalog read role); General/Curation: live connection grant and owner access |
+| `GET /api/v1/keys/{uuid}` | Same authority as list; catalog UUID for CatalogEditor, connection UUID for General/Curation |
+| `PUT /api/v1/keys/{catalog_uuid}` | CatalogEditor only: token and live `catalog:skills:write` (legacy editors also need the global catalog write role); body accepts only `recommended_skill_refs` |
 | `GET /api/v1/mcp/config` | `proxy` or `proxy:*`; General SAs only, using their own discovery identity |
 | Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
@@ -529,7 +532,7 @@ Service accounts cannot access human-only endpoints:
 - `/api/v1/api-keys/*` (API key management)
 - `/api/v1/admin/*` (admin panel)
 - `/api/v1/services/*` (service definition management)
-- `/api/v1/keys` without a live key read grant, slug reads, writes, and `/keys/{id}/authorization`; granted metadata GETs use the separate grant below
+- `/api/v1/keys` without catalog editor authority or a live connection grant; slug reads and `/keys/{id}/authorization` are unavailable to SAs. Writes are unavailable except for the CatalogEditor exact-catalog-UUID PUT above.
 
 ---
 
@@ -650,7 +653,88 @@ All service account operations are logged:
 | `POST` | `/oauth/revoke` | Revoke a specific token |
 
 
+## Platform catalog editors
+
+A platform administrator grants catalog access by saving `catalog:skills:read` and/or `catalog:skills:write` in the ordinary service account create/edit form. These scopes cover all existing and future catalog services. There is no separate catalog role, activation action, connection grant, or service UUID allowlist.
+
+For Aevatar, save `catalog:skills:read catalog:skills:write proxy` in **Allowed Scopes**. Keep its existing Ornn role assigned for package content operations. Then request a client-credentials token with these scopes. The existing account and secret can be used.
+
+| Operation | Required scope on token and live account |
+| --- | --- |
+| `GET /api/v1/keys` | `catalog:skills:read` |
+| `GET /api/v1/keys/{catalog_uuid}` | `catalog:skills:read` |
+| `PUT /api/v1/keys/{catalog_uuid}` with only `recommended_skill_refs` | `catalog:skills:write` |
+| Catalog discovery, skills, history, OpenAPI contract | `catalog:skills:read` |
+| Catalog recommendation PUT or restore | `catalog:skills:write` |
+
+Read and write are independent. Read alone authorizes both key GETs; `user-services:read` is unnecessary for this catalog metadata path. Write alone does not grant GET access. A successful key PUT returns the written entry's safe catalog metadata, including names, type, active status, references, revision, and digest, without requiring read scope. The scopes authorize catalog metadata and recommendations, not execution against the services or access to private connections.
+
+The same grant can be saved with the CLI using a platform administrator's identity:
+
+```sh
+nyxid service-account update "$SA_ID" \
+  --scopes 'catalog:skills:read catalog:skills:write proxy' \
+  --output json
+```
+
+This replaces the allowed scopes and preserves assigned roles. The backend records `catalog_scope_authorized: true`, `purpose: "catalog_editor"`, and `platform_protected: true` atomically with the scopes. These are server-controlled fields; ordinary request bodies cannot set them. Organization administrators cannot grant platform catalog authority. Accounts remain under platform-admin management after scope removal, so owners cannot restore revoked access or obtain unrestricted account routes.
+
+The ordinary edit form also supports saving catalog scopes already present on an older account. Its usual change review includes the resulting platform-wide catalog grant. Access updates include the account's original roles, scopes, purpose, protection, authorization marker, and enabled state as an atomic precondition. A concurrent change returns HTTP 409; reload before saving. The CLI and existing API clients can omit this optional precondition and should inspect current account settings before replacing scopes.
+
+Existing CatalogEditor accounts keep their previous role-based authority until an administrator explicitly saves catalog scopes. In that legacy mode, live global `nyxid:catalog:skills:read/write` permissions remain required, and key GETs additionally require `user-services:read`. Removing a legacy authorizing role still revokes access. A scope save deliberately converts the account to scope authority; subsequent catalog revocation uses the allowed scopes. Existing General or Curation accounts are not upgraded merely because their stored scopes contain these strings. Role-only and metadata-only API updates do not convert them.
+
+For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalog_service"` on every row. Both `id` and `catalog_service_id` are **catalog UUIDs**. Use an `id` from this list for key detail/PUT and `/catalog-curation/services/{id}/skills`; personal/org connection UUIDs are a separate namespace. Existing and disabled catalog entries are included; inspect `is_active`. Responses contain names, identifiers, type, active status, recommendations, references, revision, and manifest digest. Queries project these metadata fields without loading credentials or private connection settings. GET and PUT responses use `Cache-Control: private, no-store`.
+
+Both the key PUT and the [machine recommendation API](#machine-recommendation-api) use the same transactional writer, history, token revocation, and credential-generation checks. Scope, account, and token changes conflict with in-flight mutation transactions and force revalidation; legacy role authority is also fenced. A persisted per-account write window applies across both routes and replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope blocks subsequent requests with existing tokens; a newly added scope must also be present on the token.
+
+### Assigning references through key PUT
+
+CatalogEditors may replace a catalog service's complete recommendation list with the existing key URL:
+
+```http
+PUT /api/v1/keys/{catalog_uuid}
+Authorization: Bearer <service-account-token>
+Content-Type: application/json
+
+{
+  "recommended_skill_refs": [{
+    "source": "ornn",
+    "skill_id": "immutable-skill-id",
+    "name": "operations/manual",
+    "version": "1.5",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dependencies": []
+  }]
+}
+```
+
+The example hash is illustrative; supply the actual package hash. Reference validation and size bounds are identical to the machine recommendation API. NyxID validates the reference structure without fetching package bytes or proving the hash. This write changes NyxID catalog recommendations; Ornn package content, versions, visibility, and bindings are managed through Ornn's API separately.
+
+The SA body accepts exactly `recommended_skill_refs`. Missing/null values and additional fields (including `base_revision`, `request_id`, or connection settings) return 422. Invalid pins return 400. `[]` stores empty references and derived advisory names; it does not remove the refs field. A later names-only admin edit therefore still needs replacement refs or `clear_refs`. The body limit is 70,000 bytes. Authorization runs before body extraction; a caller lacking write authority receives 403 even with a malformed body. A valid catalog UUID that does not exist, including a private connection UUID, returns 404.
+
+The response is 200 with the same safe catalog metadata shape as the SA detail GET. The server captures the current revision once and commits against that revision. A concurrent change after the snapshot returns 409; the server does not silently rebase. An identical retry is a no-op when the recommendations are unchanged. The simple request cannot detect a list based on an earlier client read: retrying after an intervening edit can replace that edit. For explicit stale-write protection and durable replay, use `PUT /api/v1/catalog-curation/services/{catalog_uuid}/skills` with `base_revision` and `request_id` as documented below.
+
+Legacy CatalogEditors need the existing global write role permission plus matching token/live write scopes, but no extra read scope for this PUT. General and Curation SAs cannot use this alias. Human key updates keep their connection request contract; they ignore the unknown `recommended_skill_refs` field while processing supported fields normally. API-key, delegated, and relay writes remain denied. Invalid or expired SA credentials return 401; valid unauthorized accounts return 403. POST, DELETE, history, slug writes, and upgrades remain outside the SA key exception.
+
+Deploy this alias on every backend replica before using it. Older replicas still reject the SA PUT with 403; rollback restores that restriction without changing stored recommendation data. This alias adds no account migration or configuration requirement.
+
+### Ornn proxy access
+
+Ornn HTTP requests require `proxy` on both the token and the live account. Keep the assigned Ornn role permissions `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for package content operations. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. Both `/api/v1/proxy/{catalog_uuid}/...` and `/api/v1/proxy/s/{target_slug}/...` resolve directly to that catalog target. In particular, `POST /api/v1/proxy/s/ornn-api/api/v1/skill-format/validate` remains available after saving catalog scopes, including with an existing token that already contains `proxy`.
+
+For a scope-authorized editor, an absent `proxy_operation_policy` preserves normal Ornn routing: there is no duplicate per-API allowlist to maintain in NyxID. An explicitly configured policy still applies; an empty policy denies everything. Ornn enforces its own route permissions and object ownership/sharing. Authenticated routes without an Ornn permission requirement also remain reachable, including metered operations subject to Ornn quota. Administrators who want a smaller callable surface can configure an optional operation policy. Legacy role-authorized editors and exact-grant Curation accounts still require a policy.
+
+Downstream authentication first uses the SA's own active connection credential. An explicitly disabled SA connection blocks execution. A no-auth target that does not require a user credential needs no separate credential. Scope-authorized editors can also use the catalog's server credential for an active internal HTTP service with JWT or Both identity propagation, no provider configuration, no `platform_key` configuration, no destination targets, and `requires_user_credential: false`. The shared master-credential ACL and platform rate limit apply to the SA; private catalog access requires the SA's own consent. `PLATFORM_REQUIRE_OPERATION_POLICY`, when enabled, still applies to this credential path. The credential stays on the server, and forwarding requires a successfully generated signed identity assertion containing the SA UUID and live role permissions. Creator credentials, endpoint overrides, gateway URLs, and nodes are never inherited. Legacy editors and Curation have no master-credential fallback.
+
+Configure JWT or Both identity propagation so Ornn receives the SA UUID and live Ornn permissions. Revoking catalog scopes does not revoke the separate `proxy` capability; remove `proxy`, revoke tokens, or disable the account to stop Ornn access.
+
+The account is confined to these metadata/skill routes and its Ornn HTTP target. It cannot manage service definitions, use other proxy targets, select instances, upgrade to WebSocket, or use MCP/LLM/general account administration. Legacy exact grants cannot change a CatalogEditor's purpose or grant fallback authority.
+
+**Deployment order:** upgrade every serving backend replica before using scope grants and deploy the frontend after the backend. Older catalog-editor binaries ignore the new marker and still require roles, so newly scope-authorized requests can fail during a mixed deployment. Existing legacy editors retain their old behavior. Binaries predating CatalogEditor cannot deserialize its purpose. Before rollback, disable affected accounts and revoke tokens; retain binaries that understand their purpose until accounts are migrated. After deployment, verify both GETs with the intended SA and a catalog ID returned by its list.
+
 ## Catalog skill curation
+
+The following exact-grant setup remains available for deliberately limited legacy Curation workloads. Platform-wide Aevatar editors use the scope setup above; both modes share the recommendation API and Ornn content semantics below.
 
 A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
 
@@ -664,9 +748,9 @@ Upgrade **all backend replicas that authenticate tokens, proxy requests, or serv
 
 Before rolling back to a backend without these checks, disable the Curation accounts and revoke their tokens. Do not deliver or re-enable their credentials while any old replica remains. No live account provisioning or deployment is performed by the implementation itself.
 
-### Platform administration
+### Legacy Curation platform administration
 
-Create the account with `catalog:skills:read catalog:skills:write`. In Allowed Scopes, choose **catalog: → skills: → read/write**, or paste the complete scopes. These suggestions come from `/options/service-scope` and do not require previously configured accounts. After creation, issue the separate grant from **Catalog skill curation** on the account detail page; selecting scopes alone does not grant access. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+Existing legacy Curation accounts retain their exact grants and token/live scope requirements. Manage their grants from **Catalog skill curation** on the account detail page or through the routes below. Saving catalog scopes through platform-admin create/update now grants platform-wide CatalogEditor access instead; it is the supported setup for new catalog editors. Do not use an ordinary scope save to maintain exact Curation authority. Existing grant revocation, metadata updates, disable, and token revocation remain available to platform admins.
 
 Use the existing Admin → Service Accounts detail page, or:
 
@@ -777,10 +861,7 @@ and the CRUD
 and
 [`service.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/domains/skills/crud/service.ts).
 
-The Ornn role is only the downstream authorization. It does not grant the NyxID
-service-account token the `proxy` scope, create the Curation grant, attach the
-service-account's Ornn credential, or add paths to NyxID's operation policy. A
-working content-editing actor therefore needs all of these independent controls:
+The Ornn role controls downstream authorization. It does not add OAuth scopes, attach a credential, or configure NyxID operation policy. The following checklist is for legacy Curation; CatalogEditor uses the scope setup above:
 
 1. The NyxID account must be Curation-protected with `catalog:skills:read`,
    `catalog:skills:write`, and `proxy` in its configured scopes. The client-
@@ -853,9 +934,9 @@ curl --fail-with-body "$NYXID_URL/oauth/token" \
 ```
 
 Use the returned access token as `$CURATION_TOKEN`. The `proxy` scope is required for Ornn content operations; a token containing only the two `catalog:skills:*` scopes can read/assign recommendations but receives `403` from the Ornn proxy.
-After the scope and connection checks pass, a missing operation-policy rule fails
-closed as `404 Service operation not found`; that response means the exact method
-and path still need to be added to the Ornn catalog row's policy.
+When the target has an explicit operation policy, a missing rule fails closed as
+`404 Service operation not found`; the exact method and path must be permitted by
+that policy. Scope-authorized editors do not require a policy when none is configured.
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
@@ -866,7 +947,7 @@ curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
   "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/openapi.json"
 ```
 
-Only grant-listed catalog services appear. The IDs in this API are catalog `DownstreamService` UUIDs; they are not `/keys` or `UserService` instance IDs. Use this route for catalog recommendations. Listing or reading individual connections through `/api/v1/keys` requires the separate key read grant; catalog IDs do not grant instance access. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
+CatalogEditor sees every catalog service; legacy Curation sees only grant-listed services. These are catalog `DownstreamService` UUIDs, also returned by CatalogEditor `/keys`. General/Curation connection reads use separate `UserService` UUIDs and connection grants. Catalog IDs never grant private instance access. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
 
 The operation-contract route can read a hosted overlay or a custom `openapi_spec_url`
 only when NyxID can fetch that URL without downstream credentials. It uses the
@@ -942,6 +1023,8 @@ Human metadata side effects remain after commit. Idempotent retries complete OID
 
 ## Connection metadata reads
 
+This section describes private connection metadata for General and legacy Curation accounts. CatalogEditor uses the catalog projection and scope grant described above; it does not need these grants.
+
 General and Curation service accounts may call `GET /api/v1/keys` and `GET /api/v1/keys/{uuid}` with `user-services:read` in both the issued token and the live SA scopes, plus a platform-admin-issued **key read grant**. The list contains only currently readable connections named in that grant; detail requires the exact UserService UUID. Ornn role permissions, `proxy`, and catalog grants do not authorize these reads. General accounts retain their purpose; they do not need a Curation grant. A Curation account still needs its live Curation grant in addition to the key read grant.
 
 In **Admin → Service Accounts**, add `user-services:read` to **Allowed Scopes**, then use **Connection metadata access → Grant read access** to enter the permitted connection UUIDs. Obtain a fresh client-credentials token including the new scope. No secret rotation is required.
@@ -965,6 +1048,6 @@ The SA detail response contains only `id`, `slug`, `name`, `label`, `service_typ
 
 Recommendation inheritance matches existing key reads: an endpoint name override (including an explicitly stored empty list) suppresses catalog refs and revision. Otherwise the catalog's names, refs and revision are returned. Custom connections without recommendations return null names/refs/revision and the digest of the empty state. This endpoint does not persist per-instance refs or permit any writes.
 
-Only the list and exact UUID detail GETs are allowed for SAs. Slugs, HEAD, upgrades, authorization evidence, history, and POST/PUT/DELETE remain unavailable. Disabled connections remain in the list and readable by UUID; deleted connections and missing/cross-owner backing endpoints disappear from the list and return 404 by UUID. Ungranted targets return 404 by UUID. Grant revocation/expiry, current scope removal, and owner changes deny both reads; inactive owners and lost org membership/access remove affected entries from the list and deny their detail reads. Existing token revocation, expiry and credential-generation checks still apply. Existing human, API-key and delegated key reads retain their response and authorization behavior.
+Only the list and exact UUID detail GETs are allowed for General and Curation SAs. Slugs, HEAD, upgrades, authorization evidence, history, and POST/PUT/DELETE remain unavailable to those accounts. Disabled connections remain in the list and readable by UUID; deleted connections and missing/cross-owner backing endpoints disappear from the list and return 404 by UUID. Ungranted targets return 404 by UUID. Grant revocation/expiry, current scope removal, and owner changes deny both reads; inactive owners and lost org membership/access remove affected entries from the list and deny their detail reads. Existing token revocation, expiry and credential-generation checks still apply. Existing human, API-key and delegated key reads retain their response and authorization behavior.
 
 Deploy all serving replicas before enabling clients; old replicas still reject the list endpoint for SAs. Existing accounts gain no access until both the scope and exact grant are configured.

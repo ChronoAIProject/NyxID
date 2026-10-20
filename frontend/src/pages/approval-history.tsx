@@ -154,8 +154,8 @@ export function ApprovalHistoryPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Approval Requests</p>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 font-medium text-muted-foreground">No Approval Requests</p>
+            <p className="text-12 text-muted-foreground">
               No approval requests match the current filter.
             </p>
           </div>
@@ -171,31 +171,31 @@ export function ApprovalHistoryPage() {
                     {isToolApproval(request) ? (
                       <div className="flex items-center gap-1.5">
                         <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <p className="text-[13px] font-semibold text-foreground truncate">{request.tool_name}</p>
+                        <p className="text-13 font-semibold text-foreground truncate">{request.tool_name}</p>
                       </div>
                     ) : (
-                      <p className="text-[13px] font-semibold text-foreground truncate">{request.service_name}</p>
+                      <p className="text-13 font-semibold text-foreground truncate">{request.service_name}</p>
                     )}
-                    <p className="text-[11px] text-muted-foreground truncate">
+                    <p className="text-11 text-muted-foreground truncate">
                       {request.requester_label ?? request.requester_type}
                     </p>
                   </div>
                   {getStatusBadge(request.status)}
                 </div>
-                <p className="mt-1.5 text-[11px] text-muted-foreground line-clamp-2">
+                <p className="mt-1.5 text-11 text-muted-foreground line-clamp-2">
                   {isToolApproval(request)
                     ? request.tool_arguments ?? "Tool execution approval"
                     : primaryActionLabel(request)}
                 </p>
                 {shouldShowRawIdentityLine(request) && (
-                  <p className="mt-1 text-[11px] text-muted-foreground">
+                  <p className="mt-1 text-11 text-muted-foreground">
                     {operationIdentityLabel(request)}
                   </p>
                 )}
                 {request.is_destructive && (
                   <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
                 )}
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                   <span>{formatDate(request.created_at)}</span>
                   {request.decided_at && <span>Decided {formatDate(request.decided_at)}</span>}
                 </div>
@@ -276,7 +276,7 @@ export function ApprovalHistoryPage() {
                           <span className="font-medium">
                             {request.service_name}
                           </span>
-                          <span className="text-[11px] text-muted-foreground">
+                          <span className="text-11 text-muted-foreground">
                             {request.service_slug}
                           </span>
                         </div>
@@ -287,7 +287,7 @@ export function ApprovalHistoryPage() {
                         <span>
                           {request.requester_label ?? request.requester_type}
                         </span>
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="text-11 text-muted-foreground">
                           {request.requester_type}
                         </span>
                       </div>
@@ -300,7 +300,7 @@ export function ApprovalHistoryPage() {
                               Tool execution approval
                             </span>
                             {request.tool_arguments && (
-                              <span className="max-w-[300px] truncate text-[11px] text-muted-foreground">
+                              <span className="max-w-[300px] truncate text-11 text-muted-foreground">
                                 {request.tool_arguments}
                               </span>
                             )}
@@ -312,12 +312,12 @@ export function ApprovalHistoryPage() {
                             </span>
                             {request.action_description &&
                               request.operation_summary && (
-                                <span className="text-[11px] text-muted-foreground">
+                                <span className="text-11 text-muted-foreground">
                                   {request.operation_summary}
                                 </span>
                               )}
                             {shouldShowRawIdentityLine(request) && (
-                              <span className="text-[11px] text-muted-foreground">
+                              <span className="text-11 text-muted-foreground">
                                 {operationIdentityLabel(request)}
                               </span>
                             )}
@@ -381,7 +381,7 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -395,7 +395,7 @@ export function ApprovalHistoryPage() {
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-[11px] text-text-tertiary">
+                <span className="text-11 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

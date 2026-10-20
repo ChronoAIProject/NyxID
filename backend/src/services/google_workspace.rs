@@ -58,29 +58,6 @@ impl GoogleProduct {
         scopes.into_iter().map(String::from).collect()
     }
 
-    pub fn required_scopes(self) -> &'static [&'static str] {
-        match self {
-            Self::Workspace | Self::Gmail => &[GMAIL_SEND],
-            Self::Calendar | Self::Drive | Self::Docs | Self::Sheets | Self::Slides => &[],
-        }
-    }
-
-    pub fn validate_required_scopes(self, scopes: Option<&str>) -> AppResult<()> {
-        for required in self.required_scopes() {
-            if !scopes
-                .unwrap_or_default()
-                .split_whitespace()
-                .any(|scope| scope == *required)
-            {
-                return Err(AppError::ValidationError(format!(
-                    "Gmail send permission ({required}) is required for this Google service. \
-                     Reconnect and approve Gmail sending access."
-                )));
-            }
-        }
-        Ok(())
-    }
-
     pub fn allowed_scopes(self) -> Vec<String> {
         MANAGED_SCOPES
             .iter()
@@ -118,7 +95,7 @@ impl GoogleProduct {
                 "Scope {scope} is not supported by this Google service"
             )));
         }
-        self.validate_required_scopes(scopes)
+        Ok(())
     }
 
     pub fn spec_key(self) -> &'static str {
@@ -262,12 +239,7 @@ mod tests {
                 ),
             ] {
                 assert_eq!(
-                    product
-                        .validate_scopes(Some(&format!(
-                            "{} {scope}",
-                            product.required_scopes().join(" ")
-                        )))
-                        .is_ok(),
+                    product.validate_scopes(Some(scope)).is_ok(),
                     allowed,
                     "{product:?} {scope}"
                 );
@@ -280,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn gmail_send_is_required_for_workspace_and_gmail_authorization() {
+    fn gmail_send_is_optional_for_workspace_and_gmail_authorization() {
         for product in [GoogleProduct::Workspace, GoogleProduct::Gmail] {
             for scopes in [
                 None,
@@ -288,17 +260,9 @@ mod tests {
                 Some(GMAIL_READONLY),
                 Some("openid email profile"),
             ] {
-                assert!(product.validate_scopes(scopes).is_err());
-                assert!(product.validate_required_scopes(scopes).is_err());
+                product.validate_scopes(scopes).unwrap();
             }
             product.validate_scopes(Some(GMAIL_SEND)).unwrap();
-            // Google may return broader grants from the shared project.
-            product
-                .validate_required_scopes(Some(&format!("{GMAIL_SEND} {DRIVE}")))
-                .unwrap();
-        }
-        for product in [GoogleProduct::Drive, GoogleProduct::Calendar] {
-            product.validate_required_scopes(None).unwrap();
         }
     }
 

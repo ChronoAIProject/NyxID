@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
 # official paths so they align with overlay paths, which are relative to
 # the seeded base_url)
 OFFICIAL_SPECS = {
+    "chrono-sandbox.openapi.json": ("https://sandbox.chrono-ai.fun/openapi.json", False, ""),
     "aurinko.openapi.json": (
         "https://apirefs.aurinko.io/assets/swagger.json",
         False,

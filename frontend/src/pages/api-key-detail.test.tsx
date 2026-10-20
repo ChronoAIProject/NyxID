@@ -1,3 +1,4 @@
+vi.mock("@/components/shared/machine-grant-card", () => ({ MachineGrantCard: () => null }));
 vi.mock("@/components/dashboard/api-key-detail/service-scope-card", () => ({
   ServiceScopeCard: () => null,
 }));
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   conversation: undefined as string | undefined,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useSearch: () => ({}),
   useParams: () => ({ keyId: "key" }),
   Link: ({ children, search }: {
     children: import("react").ReactNode; search: { c: string };
@@ -27,6 +29,11 @@ vi.mock("@/hooks/use-api-keys", () => ({
       name: "Agent",
       key_prefix: "nyxid_ag_12345678",
       is_active: true,
+      state_version: 4,
+      purpose: "general",
+      scopes: "proxy",
+      allowed_service_ids: [],
+      allowed_services: [],
       credential_source: mocks.source,
       assistant_conversation_id: mocks.conversation,
     },
@@ -69,6 +76,9 @@ vi.mock("@/components/dashboard/api-key-detail/rate-limit-card", () => ({
 }));
 vi.mock("@/components/dashboard/api-key-detail/bindings-card", () => ({
   BindingsCard: () => null,
+}));
+vi.mock("@/components/dashboard/api-key-detail/operation-scope-card", () => ({
+  OperationScopeCard: () => null,
 }));
 vi.mock("@/components/dashboard/api-key-detail/usage-stats-card", () => ({
   UsageStatsCard: () => null,

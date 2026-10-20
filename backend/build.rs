@@ -5,6 +5,12 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/refs");
     println!("cargo:rerun-if-env-changed=NYXID_GIT_HASH");
 
+    // macOS integration tests link the real node runtime's ScreenCaptureKit
+    // bridge. Cargo does not propagate dependency build-script rpaths.
+    if std::env::var("TARGET").is_ok_and(|target| target.contains("apple-darwin")) {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
+
     // If the caller already provided NYXID_GIT_HASH (e.g. Docker build arg in
     // CI, where .git is not in the build context), honor it verbatim.
     let full = std::env::var("NYXID_GIT_HASH")

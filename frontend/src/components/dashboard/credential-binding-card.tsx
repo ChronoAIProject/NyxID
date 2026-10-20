@@ -66,7 +66,7 @@ export function CredentialBindingCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-[15px]">Service key</CardTitle>
+        <CardTitle className="text-15">Service key</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-xs">
         <p>

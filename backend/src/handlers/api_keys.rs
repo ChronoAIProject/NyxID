@@ -56,7 +56,7 @@ async fn resolve_api_key_write_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -83,7 +83,7 @@ async fn resolve_api_key_read_owner(
     let key = state
         .db
         .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id })
+        .find_one(doc! { "_id": key_id, "purpose": {"$nin": ["public_nyxbot", "shared_entry_transport"]} })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
@@ -1915,6 +1915,51 @@ pub async fn reauthorize_durable_grants(
     Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 
+/// GET /api/v1/api-keys/{key_id}/operations
+///
+/// Per-service operation choices for an ordinary Agent Key: every service it
+/// may use, with the current selection and revision.
+pub async fn list_key_operations(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+) -> AppResult<Json<Vec<crate::services::agent_operation_scope_service::ServiceOptions>>> {
+    Ok(Json(
+        Box::pin(crate::services::agent_operation_scope_service::key_options(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            &key_id,
+        ))
+        .await?,
+    ))
+}
+
+/// PUT /api/v1/api-keys/{key_id}/operations/{service_id}
+///
+/// Save the operations this key may call on one service. `all_operations`
+/// removes the restriction; an empty selection denies every operation.
+pub async fn set_key_operations(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, service_id)): Path<(String, String)>,
+    Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (key, revision) = Box::pin(crate::services::agent_operation_scope_service::set_key(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &key_id,
+        &service_id,
+        &body,
+    ))
+    .await?;
+    Ok(Json(serde_json::json!({
+        "api_key_id": key.id,
+        "service_id": service_id,
+        "revision": revision,
+        "all_operations": !key.assistant_operation_scopes.contains_key(&service_id),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2162,11 +2207,15 @@ mod tests {
                 is_active: true,
                 created_at: now,
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(now),
                 description: None,
                 allowed_service_ids: vec![service_id],
                 allowed_platform_service_ids: Vec::new(),
+                assistant_group_id: None,
+                assistant_agent_owner_id: None,
+                assistant_operation_scopes: Default::default(),
                 allowed_node_ids: Vec::new(),
                 allow_all_services: false,
                 allow_auto_connected_services: false,
@@ -2328,6 +2377,9 @@ mod tests {
         fn test_node(owner_id: &str) -> Node {
             let now = Utc::now();
             Node {
+                machine: None,
+                machine_confirm: Default::default(),
+                allow_single_user_saved_logins: false,
                 id: Uuid::new_v4().to_string(),
                 user_id: owner_id.to_string(),
                 name: "scoped-node".to_string(),
@@ -2478,6 +2530,7 @@ mod tests {
                 is_active: true,
                 created_at: Utc::now(),
                 rotation_predecessor_id: None,
+                machine_external_grants_present: false,
                 state_version: 1,
                 updated_at: Some(Utc::now()),
                 last_used_at: None,
@@ -2487,6 +2540,9 @@ mod tests {
                 allow_all_nodes: true,
                 allowed_service_ids: Vec::new(),
                 allowed_platform_service_ids: Vec::new(),
+                assistant_group_id: None,
+                assistant_agent_owner_id: None,
+                assistant_operation_scopes: Default::default(),
                 allowed_node_ids: Vec::new(),
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
@@ -2877,11 +2933,15 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![uuid::Uuid::new_v4().to_string()],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,

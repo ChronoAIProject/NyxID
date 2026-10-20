@@ -82,7 +82,7 @@ describe("WebDeviceLogin", () => {
     const trigger = screen.getByRole("button", {
       name: "Continue with the NyxID app",
     });
-    expect(trigger).toHaveClass("h-[46px]", "border-border", "bg-background", "px-4");
+    expect(trigger).toHaveClass("min-h-[46px]", "border-border", "bg-background", "px-4");
     expect(trigger.querySelector("img")).toHaveAttribute(
       "src",
       "/nyxid-coloured-icon.svg",

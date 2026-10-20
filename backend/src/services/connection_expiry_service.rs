@@ -350,6 +350,7 @@ mod tests {
     fn oauth_key(user_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            oauth_app_observation: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             label: "GitHub work account".to_string(),
@@ -392,6 +393,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("github-catalog".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -500,6 +502,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

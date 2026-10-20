@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -23,6 +24,9 @@ pub struct CreateChannelBotRequest {
     pub platform: String,
     #[serde(default)]
     pub bot_token: String,
+    /// Required except for Telegram bot tokens, where a blank label uses the
+    /// bot's Telegram name.
+    #[serde(default)]
     pub label: String,
     #[serde(default)]
     pub app_id: Option<String>,
@@ -62,6 +66,27 @@ pub struct UpdateChannelBotRequest {
     pub app_id: Option<String>,
     #[serde(default)]
     pub app_secret: Option<String>,
+}
+
+/// Body for `POST /api/v1/channel-bots/telegram/profile`.
+#[derive(Deserialize)]
+pub struct TelegramBotProfileRequest {
+    pub bot_token: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for TelegramBotProfileRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TelegramBotProfileRequest([REDACTED])")
+    }
+}
+
+/// Public Telegram identity for a bot token. `label` is the name NyxID uses
+/// when a Telegram bot is created without one.
+#[derive(Debug, Serialize)]
+pub struct TelegramBotProfileResponse {
+    pub username: String,
+    pub display_name: Option<String>,
+    pub label: Option<String>,
 }
 
 /// Query parameters for `GET /api/v1/channel-bots`. Pass `org_id` to
@@ -238,6 +263,7 @@ pub struct CreateChannelBotResponse {
     pub setup_instructions: &'static [&'static str],
     pub id: String,
     pub platform: String,
+    pub label: String,
     pub platform_bot_username: String,
     pub status: String,
     /// Lark/Feishu only: deep link to the developer console permissions
@@ -255,6 +281,169 @@ pub struct VerifyBotResponse {
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotErrorResponse {
+    pub code: String,
+    /// Stable failure code; `None` on rows written before codes existed.
+    pub reason: Option<String>,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotSubscriptionResponse {
+    pub registered: bool,
+    pub checked_at: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotDiagnosticsResponse {
+    pub last_inbound_at: Option<String>,
+    pub last_inbound_source: Option<String>,
+    pub last_outbound_at: Option<String>,
+    pub last_outbound_error: Option<ChannelBotErrorResponse>,
+    pub last_webhook_at: Option<String>,
+    pub last_webhook_error: Option<ChannelBotErrorResponse>,
+    pub subscription_state: Option<ChannelBotSubscriptionResponse>,
+    pub consecutive_errors: u32,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelBotHealthResponse {
+    pub diagnostics: ChannelBotDiagnosticsResponse,
+    pub id: String,
+    pub platform: String,
+    pub label: String,
+    pub platform_bot_username: String,
+    pub user_id: String,
+    pub mode: &'static str,
+    pub status: String,
+    pub webhook_registered: bool,
+    pub poll_error_count: u32,
+    pub last_polled_at: Option<String>,
+    pub next_poll_at: Option<String>,
+    pub error: Option<String>,
+    pub recommended_action: &'static str,
+    pub recommended_action_text: String,
+    /// Whether the caller may run the recovery action (owner write access).
+    pub can_write: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AdminChannelBotQuery {
+    pub platform: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// GET /api/v1/admin/channel-bots
+pub async fn admin_list(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AdminChannelBotQuery>,
+) -> AppResult<Json<Vec<ChannelBotHealthResponse>>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let bots = channel_bot_service::list_all_filtered(
+        &state.db,
+        query.platform.as_deref(),
+        query.status.as_deref(),
+        query.limit.unwrap_or(100).clamp(1, 500),
+        query.offset.unwrap_or(0).max(0),
+    )
+    .await?;
+    let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
+    let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
+    Ok(Json(
+        bots.iter()
+            .map(|bot| health_for(bot, gateway.contains(&bot.id), false))
+            .collect(),
+    ))
+}
+
+/// GET /api/v1/admin/channel-bots/{id}/health
+pub async fn admin_health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&bot, gateway, false)))
+}
+
+/// GET /api/v1/admin/channel-bots/webhook-rejections
+///
+/// Per-platform counters of webhook deliveries refused before a bot was
+/// authenticated (signature or target failures). Counters only; no bot ids.
+pub async fn admin_webhook_rejections(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<Vec<crate::services::channel_bot_health::WebhookRejectionCounter>>> {
+    crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
+    Ok(Json(
+        crate::services::channel_bot_health::list_webhook_rejections(&state.db).await?,
+    ))
+}
+
+fn diagnostics_response(
+    d: &crate::models::channel_bot::ChannelBotDiagnostics,
+) -> ChannelBotDiagnosticsResponse {
+    let error = |e: &crate::models::channel_bot::ChannelBotError| ChannelBotErrorResponse {
+        code: e.code.clone(),
+        reason: e.reason.clone(),
+        at: e.at.to_rfc3339(),
+    };
+    ChannelBotDiagnosticsResponse {
+        last_inbound_at: d.last_inbound_at.map(|v| v.to_rfc3339()),
+        last_inbound_source: d.last_inbound_source.clone(),
+        last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
+        last_outbound_error: d.last_outbound_error.as_ref().map(error),
+        last_webhook_at: d.last_webhook_at.map(|v| v.to_rfc3339()),
+        last_webhook_error: d.last_webhook_error.as_ref().map(error),
+        subscription_state: d
+            .subscription_state
+            .as_ref()
+            .map(|v| ChannelBotSubscriptionResponse {
+                registered: v.registered,
+                checked_at: v.checked_at.to_rfc3339(),
+                last_error: v.last_error.clone(),
+            }),
+        consecutive_errors: d.consecutive_errors,
+        failure_reason: d.failure_reason.clone(),
+    }
+}
+
+pub(crate) fn health_for(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+) -> ChannelBotHealthResponse {
+    let facts =
+        crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+    ChannelBotHealthResponse {
+        id: bot.id.clone(),
+        platform: bot.platform.clone(),
+        label: bot.label.clone(),
+        platform_bot_username: bot.platform_bot_username.clone(),
+        user_id: bot.user_id.clone(),
+        diagnostics: diagnostics_response(&bot.diagnostics),
+        mode: facts.mode(),
+        status: bot.status.clone(),
+        webhook_registered: bot.webhook_registered,
+        poll_error_count: bot.poll_error_count,
+        last_polled_at: bot.last_polled_at.map(|v| v.to_rfc3339()),
+        next_poll_at: bot.poll_backoff_until.map(|v| v.to_rfc3339()),
+        error: bot.error.clone(),
+        recommended_action: recommendation.action,
+        recommended_action_text: recommendation.text,
+        can_write,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -363,6 +552,7 @@ impl CreateChannelBotResponse {
             },
             id: bot.id,
             platform: bot.platform,
+            label: bot.label,
             platform_bot_username: bot.platform_bot_username,
             status: if bot.credential_source == "connection" {
                 bot.status
@@ -464,7 +654,7 @@ pub(crate) async fn resolve_bot_owner_for_write(
 
 /// Resolve the effective owner id for a READ operation on a bot.
 /// Allows any active member of the owning org (including viewers).
-async fn resolve_bot_owner_for_read(
+pub(crate) async fn resolve_bot_owner_for_read(
     state: &AppState,
     actor: &str,
     bot_id: &str,
@@ -588,6 +778,18 @@ pub(crate) async fn create_bot_with_adapter(
     adapter: &dyn PlatformAdapter,
     telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
+    create_bot_with_link(state, auth_user, tele, body, adapter, telegram_api, None).await
+}
+
+pub(crate) async fn create_bot_with_link(
+    state: &AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    body: CreateChannelBotRequest,
+    adapter: &dyn PlatformAdapter,
+    telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
+    link_claim: Option<&crate::services::channel_connect_link_service::Claim>,
+) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
     let descriptor = adapter.registration();
     if descriptor.managed_only {
@@ -595,8 +797,10 @@ pub(crate) async fn create_bot_with_adapter(
             descriptor.managed_only_message.to_string(),
         ));
     }
-    let label = body.label.trim();
-    if label.is_empty() || label.len() > 128 {
+    let label = Some(body.label.trim()).filter(|label| !label.is_empty());
+    if (label.is_none() && adapter.platform_id() != "telegram")
+        || label.is_some_and(|label| label.len() > 128)
+    {
         return Err(AppError::ValidationError(
             "Label must be between 1 and 128 characters".to_string(),
         ));
@@ -624,17 +828,32 @@ pub(crate) async fn create_bot_with_adapter(
     let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
-    let create_result = channel_bot_service::create_bot(
-        &state.db,
-        &state.config,
-        &state.encryption_keys,
-        &state.http_client,
-        adapter,
-        &owner_id,
-        label,
-        &fields,
-    )
-    .await?;
+    let create_result = if let Some(claim) = link_claim {
+        channel_bot_service::create_bot_linked(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &owner_id,
+            label,
+            &fields,
+            Some(claim),
+        )
+        .await?
+    } else {
+        channel_bot_service::create_bot(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &owner_id,
+            label,
+            &fields,
+        )
+        .await?
+    };
 
     let bot_id = create_result.bot.id.clone();
     let webhook_secret = create_result.webhook_secret;
@@ -719,6 +938,55 @@ pub(crate) async fn create_bot_with_adapter(
             webhook_secret,
         )?),
     ))
+}
+
+/// POST /api/v1/channel-bots/telegram/profile
+///
+/// Looks up a bot token's public Telegram name so setup forms can suggest a
+/// label. The token is only sent to Telegram; it is never stored or logged.
+pub async fn telegram_bot_profile(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<TelegramBotProfileRequest>,
+) -> AppResult<Json<TelegramBotProfileResponse>> {
+    let adapter = resolve_adapter("telegram", &state.token_exchange_cache)?;
+    telegram_bot_profile_with_adapter(&state, &auth_user, &body, adapter.as_ref()).await
+}
+
+pub(crate) async fn telegram_bot_profile_with_adapter(
+    state: &AppState,
+    auth_user: &AuthUser,
+    body: &TelegramBotProfileRequest,
+    adapter: &dyn PlatformAdapter,
+) -> AppResult<Json<TelegramBotProfileResponse>> {
+    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
+        state.db.clone(),
+        "channel_bot_telegram_profile",
+        20,
+        60,
+    );
+    if !limiter.check_shared(&auth_user.user_id.to_string()).await? {
+        return Err(AppError::RateLimited);
+    }
+    let token = body.bot_token.trim();
+    let fields = RegistrationValues([("bot_token", token)].into_iter().collect());
+    adapter.registration().validate(&fields, false)?;
+    let identity = adapter
+        .verify_bot_token(
+            &state.http_client,
+            &BotCredentials {
+                billing: None,
+                token: &adapter.registration_token(&fields)?,
+                platform_bot_id: None,
+                platform_secrets: None,
+            },
+        )
+        .await?;
+    Ok(Json(TelegramBotProfileResponse {
+        label: channel_bot_service::default_label(&identity),
+        username: identity.platform_bot_username,
+        display_name: identity.display_name,
+    }))
 }
 
 /// PATCH /api/v1/channel-bots/{id}
@@ -1064,6 +1332,106 @@ pub async fn verify_bot(
     .await
 }
 
+/// GET /api/v1/channel-bots/{id}/health
+pub async fn health(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (owner, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    let can_write = org_service::resolve_owner_access(&state.db, &actor, &owner)
+        .await?
+        .can_write();
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&bot, gateway, can_write)))
+}
+
+/// POST /api/v1/channel-bots/{id}/resubscribe
+///
+/// Re-registers the platform webhook subscription, then reads it back live.
+pub async fn resubscribe(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bot_id): Path<String>,
+) -> AppResult<Json<ChannelBotHealthResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (_owner, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    if bot.platform != "x" {
+        return Err(AppError::ValidationError(
+            "resubscribe is supported only for X bots".into(),
+        ));
+    }
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let outcome = resubscribe_with_adapter(&state, &bot, adapter.as_ref()).await;
+    crate::services::audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "channel_bot_resubscribed",
+        Some(serde_json::json!({
+            "bot_id": bot.id,
+            "platform": bot.platform,
+            "outcome": match &outcome {
+                Ok(true) => "registered",
+                Ok(false) => "not_registered",
+                Err(_) => "failed",
+            },
+        })),
+    );
+    outcome?;
+    let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
+    Ok(Json(health_for(&updated, gateway, true)))
+}
+
+pub(crate) async fn resubscribe_with_adapter(
+    state: &AppState,
+    bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<bool> {
+    let configured = crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter,
+        bot,
+        &state.config.base_url,
+    )
+    .await?;
+    if !configured {
+        // Platform webhook credentials are missing: only an admin can fix it.
+        channel_bot_service::record_subscription_state(
+            &state.db,
+            &bot.id,
+            false,
+            Some(crate::services::channel_bot_health::codes::WEBHOOK_UNCONFIGURED),
+        )
+        .await?;
+        return Ok(false);
+    }
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    let live = crate::services::channel_connection_webhook_service::check_live(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter,
+        &current,
+        &state.config.base_url,
+    )
+    .await;
+    let live = match live {
+        Ok(live) => live,
+        Err(error) => {
+            tracing::warn!(bot_id = %bot.id, error = %error, "X webhook subscription read-back failed after resubscribe");
+            let _ =
+                channel_bot_service::record_subscription_check_failure(&state.db, &bot.id).await;
+            return Ok(true);
+        }
+    };
+    Ok(live.is_none_or(|status| status.registered))
+}
+
 pub(crate) async fn verify_bot_with_adapter(
     state: &AppState,
     bot: crate::models::channel_bot::ChannelBot,
@@ -1207,6 +1575,22 @@ pub(crate) async fn verify_bot_with_adapter(
         )
         .await?
         {
+            // Setup reported success; confirm it with a read-only live check.
+            let configured = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+            let live = crate::services::channel_connection_webhook_service::check_live(
+                &state.db,
+                &state.encryption_keys,
+                &state.http_client,
+                adapter,
+                &configured,
+                &state.config.base_url,
+            )
+            .await;
+            if let Err(error) = live {
+                tracing::warn!(bot_id = %bot.id, error = %error, "X webhook subscription read-back failed after verify");
+                let _ = channel_bot_service::record_subscription_check_failure(&state.db, &bot.id)
+                    .await;
+            }
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
             return Ok(Json(VerifyBotResponse {
                 last_verification: None,
@@ -1500,6 +1884,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1576,6 +1961,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -1729,6 +2115,114 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{platform}: {error}");
         }
+    }
+
+    async fn telegram_get_me(server: &wiremock::MockServer, token: &str, first_name: &str) {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/bot{token}/getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"id": 4242, "is_bot": true, "first_name": first_name, "username": "acme_support_bot"}
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/setWebhook")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn blank_label_is_still_required_for_other_platforms() {
+        use crate::services::telegram_new_api::TelegramApi;
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+
+        let state = test_app_state_no_db().await;
+        let adapter = resolve_adapter("discord", &state.token_exchange_cache).unwrap();
+        let error = create_bot_with_adapter(
+            &state,
+            test_auth_user(&uuid::Uuid::new_v4().to_string()),
+            TelemetryContext::default(),
+            serde_json::from_value(serde_json::json!({
+                "platform": "discord", "bot_token": "token", "public_key": "key", "label": " ",
+            }))
+            .unwrap(),
+            adapter.as_ref(),
+            &TelegramApi {
+                http: &state.http_client,
+                base_url: "http://127.0.0.1:9",
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::ValidationError(message) if message.contains("Label")));
+    }
+
+    #[tokio::test]
+    async fn telegram_profile_returns_bot_name_without_echoing_token() {
+        use crate::services::channel_adapters::telegram::TelegramAdapter;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+
+        let Some(db) = connect_test_database("channel_bot_telegram_profile").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let server = wiremock::MockServer::start().await;
+        telegram_get_me(&server, "444:profile-token", " Acme Support ").await;
+        let body: TelegramBotProfileRequest =
+            serde_json::from_value(serde_json::json!({"bot_token": " 444:profile-token "}))
+                .unwrap();
+        assert!(!format!("{body:?}").contains("profile-token"));
+        let Json(profile) = telegram_bot_profile_with_adapter(
+            &state,
+            &test_auth_user(&uuid::Uuid::new_v4().to_string()),
+            &body,
+            &TelegramAdapter::media_test_adapter(&server.uri()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(profile.username, "acme_support_bot");
+        assert_eq!(profile.display_name.as_deref(), Some("Acme Support"));
+        assert_eq!(profile.label.as_deref(), Some("Acme Support"));
+        assert!(
+            !serde_json::to_string(&profile)
+                .unwrap()
+                .contains("profile-token")
+        );
+    }
+
+    #[test]
+    fn default_label_prefers_display_name_and_respects_byte_limit() {
+        use crate::services::channel_platform::BotIdentity;
+        let identity = |display_name: Option<&str>, username: &str| BotIdentity {
+            platform_bot_id: "1".into(),
+            platform_bot_username: username.into(),
+            display_name: display_name.map(str::to_string),
+        };
+        assert_eq!(
+            channel_bot_service::default_label(&identity(Some("Acme"), "acme_bot")).as_deref(),
+            Some("Acme")
+        );
+        assert_eq!(
+            channel_bot_service::default_label(&identity(Some("  "), "acme_bot")).as_deref(),
+            Some("acme_bot")
+        );
+        assert_eq!(
+            channel_bot_service::default_label(&identity(None, "")),
+            None
+        );
+        let long = "\u{1F916}".repeat(40);
+        let label = channel_bot_service::default_label(&identity(Some(&long), "acme_bot")).unwrap();
+        assert_eq!(label.len(), 128);
+        assert!(label.chars().all(|ch| ch == '\u{1F916}'));
     }
 
     #[test]

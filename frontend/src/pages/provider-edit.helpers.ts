@@ -38,6 +38,7 @@ export function providerFormValues(
     client_secret: "",
     client_id_param_name: provider.client_id_param_name ?? "",
     supports_pkce: provider.supports_pkce,
+    authorization_nonce_required: provider.authorization_nonce_required ?? false,
     device_code_url: provider.device_code_url ?? "",
     device_token_url: provider.device_token_url ?? "",
     hosted_callback_url: provider.hosted_callback_url ?? "",
@@ -56,6 +57,8 @@ export function providerFormPayload(data: UpdateProviderFormData) {
     ...settings,
     default_scopes: splitScopes(data.default_scopes) ?? [],
     supports_pkce: _type === "oauth2" ? data.supports_pkce : undefined,
+    authorization_nonce_required:
+      _type === "oauth2" ? data.authorization_nonce_required : undefined,
     credential_mode:
       _type === "oauth2" || _type === "device_code"
         ? data.credential_mode

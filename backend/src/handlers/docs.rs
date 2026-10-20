@@ -410,6 +410,36 @@ mod tests {
                 "{schema}"
             );
         }
+        let update = &value["paths"]["/api/v1/keys/{key_id}"]["put"];
+        assert_eq!(update["operationId"], "update_key");
+        assert_eq!(
+            update["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/KeyUpdateRequest"
+        );
+        assert_eq!(
+            update["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/KeyReadResponse"
+        );
+        assert_eq!(
+            value["components"]["schemas"]["KeyUpdateRequest"]["anyOf"],
+            serde_json::json!([
+                {"$ref":"#/components/schemas/UpdateKeyRequest"},
+                {"$ref":"#/components/schemas/CatalogSkillRefsUpdateRequest"}
+            ])
+        );
+        let refs_update = &value["components"]["schemas"]["CatalogSkillRefsUpdateRequest"];
+        assert_eq!(refs_update["additionalProperties"], false);
+        assert_eq!(
+            refs_update["required"],
+            serde_json::json!(["recommended_skill_refs"])
+        );
+        assert_eq!(refs_update["properties"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            refs_update["properties"]["recommended_skill_refs"]["type"],
+            "array"
+        );
+        assert!(value["components"]["schemas"]["SkillReference"].is_object());
+        assert!(value["components"]["schemas"]["SkillPin"].is_object());
         assert_eq!(
             value["components"]["schemas"]["KeyMetadataResponse"]["additionalProperties"], false,
             "The metadata branch must reject the extra fields of an ordinary key response"

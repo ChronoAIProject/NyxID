@@ -145,8 +145,8 @@ function KeyEffectResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-[13px] font-medium">Existing key</p>
-            <p className="break-all font-mono text-[12px] text-muted-foreground">
+            <p className="text-13 font-medium">Existing key</p>
+            <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -154,7 +154,7 @@ function KeyEffectResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[12px]">
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
               {result.fullKey}
             </code>
             <Button
@@ -168,7 +168,7 @@ function KeyEffectResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-[12px]">
+          <label className="flex cursor-pointer items-start gap-2 text-12">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
@@ -178,7 +178,7 @@ function KeyEffectResult({
         </div>
       )}
       {verified ? (
-        <p className="text-[11px] text-success">
+        <p className="text-11 text-success">
           Exact least-scope access verified.
         </p>
       ) : null}
@@ -382,7 +382,7 @@ export function AssistantKeyCreateDialog({
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Name</span>
               <span className="min-w-0 truncate font-medium">
@@ -409,7 +409,7 @@ export function AssistantKeyCreateDialog({
                 ))}
               </div>
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               Proxy access follows these service selections. Node access is denied.
             </p>
           </div>
@@ -426,7 +426,7 @@ export function AssistantKeyCreateDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

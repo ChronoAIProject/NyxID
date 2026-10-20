@@ -53,6 +53,37 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+## Remote Machine backend Kubernetes authentication
+
+| Variable | Default | Description |
+|---|---|---|
+| `NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE` | `token_file` only when unset | Exact `token_file` or `google_metadata`. Blank/unknown/padded values fail; no cross-mode fallback. |
+| `NYXID_REMOTE_MACHINE_KUBE_API` | *(none)* | Actual target Kubernetes/GKE HTTPS API; required in both modes. Credentials, query and fragment in the URL are rejected. |
+| `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE` | *(none)* | Required absolute path in `token_file` only. Protected regular file, at most 64 KiB, re-read per request to support rotation. Ignored in `google_metadata`. |
+| `NYXID_REMOTE_MACHINE_KUBE_CA_FILE` | System trust | Optional PEM CA for the target API, both modes; invalid/unreadable CA fails configuration. TLS and hostname verification stay enabled. |
+
+`google_metadata` is explicitly for the trusted backend Google identity. It uses
+the fixed Google metadata token endpoint and `Metadata-Flavor: Google`, directly
+without proxy/redirect, caches by positive `expires_in` and refreshes early under
+a shared single-flight cache. Limits: 1-second connect, 3-second request,
+5-second acquisition including wait, 64 KiB response, 16 KiB token, integer
+TTL 1–86400 seconds, refresh `min(60 seconds, TTL/10)` before conservative expiry,
+one-second failed-refresh cooldown. Failures reject and permit later retries;
+there is no expired/stale credential or unauthenticated fallback. There is no
+production metadata URL environment override. KMS ADC settings above are
+unrelated. KubeletCollector retains its independent credentials.
+
+Readiness checks the selected configuration, then existing async API probes
+exercise actual credentials/authorization; metadata mode never requires a token
+file. Managed bootstrap still uses a Pod-bound Kubernetes token with audience
+`nyxid-remote-machine-v1`. Tokens remain backend-only; untrusted metadata/network
+restrictions are not relaxed. Google `chrono-nyxid` is not the Kubernetes
+`nyxid-machine-manager` ServiceAccount: its actual principal, target permissions,
+API connectivity and CA must be verified in the deployment environment. See
+[Remote Machine deployment](../deploy/remote-machine/README.md) for the distinction,
+local-fixture limits and pending environment acceptance. No IAM/RBAC changes
+are supplied or authorized by this configuration support.
+
 ## Cluster coordination
 
 NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,
@@ -88,6 +119,32 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+### Upload ingress
+
+Assistant uploads add no environment variables. Every reverse proxy, CDN and
+ingress in front of NyxID must allow request bodies of at least **21 MiB** on
+`POST /api/v1/assistant/nyxagent/{conversations|groups}/{id}/attachments`.
+For nginx, set `client_max_body_size 21m;` in the existing location handling those
+paths, preserving its upstream configuration. NyxID itself accepts at most
+20 MiB per file and ten files per message, with 30 upload attempts per owner per
+minute across replicas. Larger files return HTTP 400; rate excess returns HTTP
+429. An earlier HTTP 413 can indicate a lower ingress body limit.
+
+Each replica admits four uploads and runs two isolated parser workers. Extraction
+has an eight-second worker deadline plus document/image expansion limits.
+Retention is configured at **Admin → Upload retention**, stored in MongoDB and
+refreshed across replicas every five seconds; it has no environment variable.
+Defaults are 24 hours for unsent files, 30 days for sent images/documents and the
+conversation lifetime for tool images. Admins can also delete images after their
+first turn settles. Reads enforce the current policy immediately; cleanup is a
+bounded, leased background sweep. This controls only NyxID's copy, not NyxAgent
+sessions or model-provider copies. Upgrade all replicas before changing policy;
+startup removes the old attachment TTL index. See [retention](chat/10-uploads.md#retention)
+for bounds and lifecycle details, and [Assistant uploads: ingress and operator limits](chat/10-uploads.md#ingress-and-operator-limits)
+for the complete limits, failure behavior and deployment contract.
+
+### Engine and diagnostics
+
 The default NyxAgent assistant introduces **no environment variable**. Its catalog
 slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
 configuration. The catalog row provides the upstream base URL. Readiness reports
@@ -121,6 +178,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BILLING_ALLOCATIONS_ENABLED` | `false` | Authoring capability for exact credit allocations, service/group ceilings and reclaim during holds. Enable only after upgrading every API replica and billing worker; see the allocation rollout contract below. Does not disable enforcement on existing allocations. |
 | `BILLING_ENABLED` | `false` | Enables platform usage capture and the prepaid wallet charging gate. When Lago is configured, owner wallets are provisioned idempotently on startup backfill, wallet access, registration best-effort, and first proxy use. |
 | `LAGO_API_URL` | *(empty)* | Lago API URL for the P2 sink. May include or omit `/api/v1`. |
 | `LAGO_API_KEY` | *(empty)* | Lago API bearer key for NyxID-to-Lago calls; redacted from config debug output. |
@@ -130,7 +188,7 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_RECONCILE_INTERVAL_SECS` | `300` | Reconcile sweep interval. Set `0` to disable event push/reconcile sweeps. |
 | `BILLING_RATE_CACHE_TTL_SECS` | `900` | Maximum age of a read-only rate used for reservation sizing. A missing or older rate rejects a billable request before forwarding. The reconcile sweep mirrors the Lago plan's standard charges into the cache each cycle (and once at startup), so the default works when the sweep is enabled; raise it only when `BILLING_RECONCILE_INTERVAL_SECS=0`. |
 | `BILLING_RESERVATION_ABANDON_SECS` | `600` | Grace before never-forwarded reserved rows are marked `abandoned`. |
-| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Hard default overdraft cap copied to newly provisioned wallets. The shared-store reservation gate enforces the wallet's cap atomically. |
+| `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` | `0` | Default overdraft cap copied to newly provisioned wallets unless an admin sets the global default on `/admin/billing` (Settings), which then wins. Existing wallets keep their cap. The shared-store reservation gate enforces the wallet's cap atomically. |
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
@@ -167,9 +225,9 @@ See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
 
 The Lago client is configured only when both `LAGO_API_URL` and `LAGO_API_KEY` are non-empty. With `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, and no Lago client, existing chargeable wallets degrade to unreserved meter-only capture and missing wallets cannot be auto-provisioned. `LAGO_WEBHOOK_SECRET` is independent of outbound client configuration: it authenticates inbound `/api/v1/webhooks/lago` calls and must be set to accept wallet or entitlement updates. `LAGO_PLAN_CODE` selects the subscription created during provisioning; `BILLING_RECONCILE_INTERVAL_SECS=0` disables both usage push and settlement recovery sweeps.
 
-Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge and local rate-cache row are removed. Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
+Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge is removed and the local rate-cache row is marked `retired_at` (retained for historical usage pricing). Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
 
-Credit benefits use five collections. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints but cannot mutate them. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
+Credit benefits use five financial/policy collections. A separate `credit_allocation_requests` collection stores durable actor-scoped request snapshots for retry-safe issuance; it does not hold funds. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints. Operators with the Credits Manager role may issue and reclaim one-time allocations; schedules and allowance writes remain admin-only. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
 All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
 
@@ -181,7 +239,9 @@ An "all users" one-shot grant snapshots active person and organization owners at
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
 
-Funding order is free allowance units, promotional grant microcredits (soonest expiry first), then wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
+Credit allocation policies use the existing grant identity and exact Decimal128 credit fields. `BILLING_ALLOCATIONS_ENABLED=true` exposes authoring capability through `GET /api/v1/admin/credits/allocations/summary`. New clients use the dedicated `/allocations` and `/allocations/schedules` mutations so an older server returns an error instead of ignoring service ceilings. Upgrade and drain ALL old API replicas and billing workers before enabling the flag. This is an operator assertion, not automatic worker-version attestation. Turning it off later stops new authoring but does not remove existing ceilings or pending reclaim fences; never restart an older binary while such rows exist. The legacy revoke endpoint retains immediate-only behavior with the flag off and rejects held allocations without marking a pending request. Financial enforcement and recovery always honor persisted policies, regardless of this authoring flag.
+
+Funding order is free allowance units, exact promotional grant credits (soonest expiry first), then exact wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
 
 Purchased credits expire 365 days after the Lago wallet transaction settles. Lago v1.50 exposes a wallet-level `expiration_at`, but that expires the entire wallet at one instant and cannot represent independently rolling purchases, so NyxID performs FIFO per-purchase expiry from traceable `remaining_credit_amount` values (with a conservative legacy wallet-balance fallback) and debits Lago with `voided_credits`. A durable operation embedded in `billing_wallet` holds expiring credits out of availability, recovers a provider debit by its unique operation name after a crash, reads back the exact Lago balance, updates top-up history, and confirms every `topup_expired` ledger entry before clearing. The existing reconcile interval drives grant expiry and purchased-credit expiry; no new environment variable is required. Keep `BILLING_RECONCILE_INTERVAL_SECS` non-zero in production.
 
@@ -206,6 +266,14 @@ nyxid billing verify-topup-flow --amount-credits 1 --open
 ```
 
 Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
+
+Human operators can inspect defaults with `nyxid admin billing config show`,
+prices with `nyxid admin billing service show <slug>` and
+`nyxid admin billing rates --service <slug>`, and integrity with
+`nyxid admin billing ledger verify --all`. Funding through
+`nyxid admin credits grant issue` and managed execution reads through
+`nyxid billing executions list|show` are covered in the
+[native billing reference](../skills/nyxid/references/billing.md).
 
 ## JWT
 
@@ -348,7 +416,7 @@ Both chains are re-verified automatically by a background sweep that walks the c
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAIN_VERIFY_INTERVAL_SECS` | `3600` | Interval between automatic verification chunks for both chains. `0` disables the sweep (manual verify endpoints still work). |
+| `CHAIN_VERIFY_INTERVAL_SECS` | `3600` | Interval between automatic chain-verification chunks and billing account-reconciliation passes. `0` disables both automatic runners (manual verify endpoints still work). |
 
 
 Unlike the audit chain, the billing ledger detects tail truncation: the reconcile sweep anchors the ledger head `(seq, head_hash)` into the audit chain (event `billing_ledger_head_anchored`) whenever it advances, and the verify endpoint cross-checks the newest anchor against the surviving head. Deleting ledger tail entries past an anchor reports `tail_truncated`; hiding it would additionally require truncating the audit chain back past the anchor, destroying unrelated audit history. Each anchor is also written to the server log (`billing ledger head anchored`), so shipped logs form an external anchor outside MongoDB. Entries newer than the latest anchor (up to one reconcile interval, `BILLING_RECONCILE_INTERVAL_SECS`) remain inside the undetectable window.
@@ -381,6 +449,7 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `TELEGRAM_WEBHOOK_SECRET` | | Secret for verifying Telegram webhook callbacks |
 | `TELEGRAM_WEBHOOK_URL` | | Public URL for Telegram webhooks (e.g. `https://auth.nyxid.dev/api/v1/webhooks/telegram`). Omit to use long polling mode. |
 | `TELEGRAM_BOT_USERNAME` | | Bot username without @ (for link instructions) |
+| `OPENAI_APPS_CHALLENGE_TOKEN` | | OpenAI plugin-portal domain verification token, served as plain text at `/.well-known/openai-apps-challenge` on the MCP host. Unset = 404 |
 | `APPROVAL_EXPIRY_INTERVAL_SECS` | `5` | Interval between approval expiry sweeps (seconds) |
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
@@ -392,6 +461,20 @@ The approval system works without Telegram -- users can always approve/reject vi
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
+
+The same interval schedules an independent [bot-link recovery and delivery sweep](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links). Setting it to `0` disables background recovery for both link types; request-time reconciliation remains available. Bot links add no environment variable.
+
+## Device Login Code Compatibility
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_DEVICE_EIGHT_CHAR_CODES` | `true` | Issue eight-character public codes for installed app compatibility. All backend readers and writers must support the shared public-code namespace. Set `false` to restore prefixed v2 issuance during rollback. Legacy account requests always use eight characters. |
+
+When upgrading servers that predate public-code reservations, explicitly deploy
+with this flag off, drain older servers, then enable it across the upgraded fleet.
+Turning it off stops new eight-character v2 issuance but does not make older
+binaries able to read outstanding v2 codes. Keep the compatibility readers during
+rollback. See [ADR-015](ADR-015-auth-device-login.md) for the rollout order.
 
 ## Agent Key Login
 
@@ -499,9 +582,10 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 ## Registration Gate
 
+Invitation codes are controlled by the global `auth:invitation-code` feature flag under Admin > Feature Flags. It defaults to enabled; disable it for public registration. `INVITE_CODE_REQUIRED` is no longer read.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INVITE_CODE_REQUIRED` | `true` | Gate new-user registration behind invite codes. Set to `false` for public registration. Accepts: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay
@@ -540,3 +624,39 @@ Drive and Workspace editor routing activates automatically at startup for recogn
 ## Service-history database topology
 
 All service-instance writes require transactions. Startup rejects standalone MongoDB before indexes or migrations. Use MongoDB 8 on a replica set or mongos. Bundled Compose creates authenticated `nyxid-rs` with a persistent internal keyfile and a primary-election initializer; backend startup waits for it. Local host connections to Compose use `directConnection=true`; external databases must use their actual replica-set/mongos URI. Existing data volumes require a coordinated backup and maintenance migration; see [SERVICE_HISTORY.md](SERVICE_HISTORY.md#mongodb-deployment-prerequisite). There is no new history environment variable or TTL.
+
+### Exact billing cutover (0.34.0)
+
+`BILLING_EXACT_CUTOVER_DRAINED=true` is a one-time operator acknowledgement
+required before the background task migrates existing wallets/grants. Pending
+cutover returns 503 for billed admission and pauses money sweeps; the server and
+nonbilling traffic continue serving. Drain all old billed requests and stop
+pre-v2 servers/reconcilers first. The acknowledgement and
+migration completion are durable; new replicas/restarts resume without the flag.
+Fresh databases need no acknowledgement. Do not restart old writers after
+cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-operations).
+
+### Machine node process environments
+
+Machine support adds no backend deployment environment variables. The machine
+container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
+The entrypoint removes the registration token before starting the daemon.
+`NYXID_PROFILE` keeps the existing CLI profile convention.
+
+The supervisor sets `CUA_DRIVER_RS_TELEMETRY_ENABLED=false` for every cua child.
+`DISPLAY`/`XAUTHORITY` are passed only to browser/cua children, never command
+children. `NYXID_BROWSER_SOCKET` identifies the protected native-messaging
+socket inside the managed browser process; it contains no credential and is
+not inherited by agent commands.
+
+Every machine command receives a fresh local `NYXID_GATEWAY_TOKEN` and
+`NYXID_GATEWAY_URL=http://127.0.0.1:<ephemeral-port>`. The token is job-bound,
+redacted from output, and expires at completion. Granted SDK services also get
+`OPENAI_BASE_URL`/`OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, or
+`XAI_BASE_URL`/`XAI_API_KEY`, with the local token in place of a provider key.
+Git receives gateway URL rewrites and headers through process-only
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`. Nothing writes
+these settings to a global or repository config. No NyxID or provider
+credential is inherited or copied to the command environment. See
+[MACHINE_NODES.md](MACHINE_NODES.md).

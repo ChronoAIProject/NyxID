@@ -4,6 +4,7 @@ use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::api_key_mutation_service::{map_transaction_error, transaction_result};
@@ -81,6 +82,7 @@ pub async fn require_current_bot(db: &Database, bot: &ChannelBot) -> AppResult<(
 #[derive(Clone, Debug)]
 pub struct TransferPreview {
     pub kind: ResourceKind,
+    pub tool_transfer: bool,
     pub resource_id: String,
     pub name: String,
     pub previous_owner_user_id: String,
@@ -510,6 +512,8 @@ async fn inspect(
         "person"
     };
     Ok(TransferPreview {
+        tool_transfer: kind == ResourceKind::Service
+            && raw.get_str("offering_kind").ok() == Some("tool"),
         kind,
         resource_id: resource_id.into(),
         name,
@@ -543,22 +547,48 @@ pub async fn preview(
     destination: &str,
     capacity: u32,
 ) -> AppResult<TransferPreview> {
-    preview_with_agent(db, actor, None, kind, resource_id, destination, capacity).await
+    preview_with_agent(
+        db,
+        actor,
+        None,
+        true,
+        kind,
+        resource_id,
+        destination,
+        capacity,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn preview_with_agent(
     db: &Database,
     actor: &str,
     api_key_id: Option<&str>,
+    first_party_human: bool,
     kind: ResourceKind,
     resource_id: &str,
     destination: &str,
     capacity: u32,
 ) -> AppResult<TransferPreview> {
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::refuse_platform_bot(db, resource_id).await?;
+    }
     let mut session = db.client().start_session().await?;
     session.start_transaction().await?;
     let owner = access::resource_owner(db, &mut session, kind, resource_id).await?;
-    access::authorize(db, &mut session, actor, api_key_id, &owner, false).await?;
+    access::authorize_resource(
+        db,
+        &mut session,
+        actor,
+        api_key_id,
+        first_party_human,
+        kind,
+        resource_id,
+        &owner,
+        false,
+    )
+    .await?;
     let result = inspect(
         db,
         &mut session,
@@ -576,6 +606,7 @@ pub async fn preview_with_agent(
 pub struct TransferCommand<'a> {
     pub actor: &'a str,
     pub api_key_id: Option<&'a str>,
+    pub first_party_human: bool,
     pub kind: ResourceKind,
     pub resource_id: &'a str,
     pub destination: &'a str,
@@ -588,6 +619,7 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
     let TransferCommand {
         actor,
         api_key_id,
+        first_party_human,
         kind,
         resource_id,
         destination,
@@ -595,6 +627,9 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
         expected_version,
         capacity,
     } = command;
+    if kind == ResourceKind::ChannelBot {
+        super::platform_bot_authority::refuse_platform_bot(db, resource_id).await?;
+    }
     valid_id(request_id)?;
     if Uuid::parse_str(request_id).is_ok_and(|id| id.get_version_num() != 4) {
         return Err(AppError::ValidationError(
@@ -637,15 +672,9 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
     {
         return if receipt_matches(&receipt) {
             let mut session = db.client().start_session().await?;
-            access::authorize(
-                &db,
-                &mut session,
-                &actor,
-                api_key_id.as_deref(),
-                &receipt.previous_owner_user_id,
-                false,
-            )
-            .await?;
+            session.start_transaction().await?;
+            access::authorize_replay(&db, &mut session, &receipt, first_party_human).await?;
+            session.commit_transaction().await?;
             Ok(receipt)
         } else {
             Err(AppError::Conflict(
@@ -654,7 +683,15 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
         };
     }
 
-    access::require_resource_access(&db, &actor, api_key_id.as_deref(), kind, &resource_id).await?;
+    access::require_resource_access(
+        &db,
+        &actor,
+        api_key_id.as_deref(),
+        first_party_human,
+        kind,
+        &resource_id,
+    )
+    .await?;
     let refresh_key_id = if kind == ResourceKind::ChannelBot {
         db.collection::<Document>(BOTS)
             .find_one(doc! { "_id": &resource_id, "platform": "x", "is_active": true })
@@ -697,11 +734,11 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                         "Transfer request ID was already used for another operation".into(),
                     ));
                 }
-                access::authorize(&db, transaction, &actor, api_key_id.as_deref(), &receipt.previous_owner_user_id, false).await?;
+                access::authorize_replay(&db, transaction, &receipt, first_party_human).await?;
                 return Ok(receipt);
             }
             let owner = access::resource_owner(&db, transaction, kind, &resource_id).await?;
-            access::authorize(&db, transaction, &actor, api_key_id.as_deref(), &owner, true).await?;
+            access::authorize_resource(&db, transaction, &actor, api_key_id.as_deref(), first_party_human, kind, &resource_id, &owner, true).await?;
             let reviewed = inspect(
                 &db,
                 transaction,
@@ -716,6 +753,11 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                 return Err(AppError::Conflict(
                     "The resource changed. Review a fresh transfer preview".into(),
                 ));
+            }
+            // The fence bumps the bot's route revision, so it must follow the
+            // version check that hashes the bot document.
+            if kind == ResourceKind::ChannelBot {
+                super::platform_bot_authority::fence_personal_routes(&db, &resource_id, &owner, transaction).await?;
             }
             if reviewed.moves_oauth_credential
                 && reviewed.oauth_credential_id.as_deref() != refresh_key_id.as_deref()
@@ -842,6 +884,7 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                 ));
             }
             let receipt = OwnershipTransfer {
+                tool_transfer: reviewed.tool_transfer,
                 id: request_id.clone(),
                 actor_user_id: actor.clone(),
                 actor_api_key_id: api_key_id.clone(),
@@ -885,7 +928,14 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                 .find_one(doc! { "_id": &request_id })
                 .await?;
             match receipt {
-                Some(receipt) if receipt_matches(&receipt) => Ok(receipt),
+                Some(receipt) if receipt_matches(&receipt) => {
+                    let mut session = db.client().start_session().await?;
+                    session.start_transaction().await?;
+                    access::authorize_replay(&db, &mut session, &receipt, first_party_human)
+                        .await?;
+                    session.commit_transaction().await?;
+                    Ok(receipt)
+                }
                 Some(_) => Err(AppError::Conflict(
                     "Transfer request ID was already used for another operation".into(),
                 )),
@@ -896,6 +946,37 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
             }
         }
     }
+}
+
+pub struct OwnerIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+pub async fn owner_identities(
+    db: &Database,
+    owner_ids: &[&str],
+) -> AppResult<HashMap<String, OwnerIdentity>> {
+    let users: Vec<Document> = db
+        .collection::<Document>(USERS)
+        .find(doc! { "_id": { "$in": owner_ids } })
+        .projection(doc! { "display_name": 1, "email": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(users
+        .into_iter()
+        .filter_map(|user| {
+            let id = user.get_str("_id").ok()?;
+            let name = user
+                .get_str("display_name")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned);
+            let email = user.get_str("email").ok().map(str::to_owned);
+            Some((id.to_owned(), OwnerIdentity { name, email }))
+        })
+        .collect())
 }
 
 pub async fn list_resources(

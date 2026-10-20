@@ -37,6 +37,7 @@ pub(super) struct Fixture {
 
 pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     let db = test_utils::connect_transaction_test_database(label).await;
+    crate::db::ensure_indexes(&db).await.unwrap();
     catalog_skill_service::ensure_indexes(&db).await.unwrap();
     crate::services::role_service::seed_system_roles(&db)
         .await
@@ -124,7 +125,7 @@ pub(super) async fn token(f: &Fixture, scope: Option<&str>) -> String {
     .access_token
 }
 
-fn router(state: &AppState) -> Router {
+pub(super) fn router(state: &AppState) -> Router {
     let (public, private) = crate::routes::build_router_with_state(state.clone());
     public.merge(private).with_state(state.clone())
 }
@@ -625,7 +626,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             None,
-            false
+            false,
+            None
         )
         .await
         .is_err()

@@ -19,6 +19,7 @@ import { useUpdateMember } from "@/hooks/use-org-members";
 import { useOrgRoleScopes } from "@/hooks/use-org-role-scopes";
 import type { MemberResponse } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 interface MemberScopeDialogProps {
   readonly orgId: string;
@@ -160,7 +161,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-[12px] font-medium text-foreground">
+              <span className="block text-12 font-medium text-foreground">
                 Inherit from role default
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -181,7 +182,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-[12px] font-medium text-foreground">
+              <span className="block text-12 font-medium text-foreground">
                 Customize for this member
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -209,7 +210,7 @@ function MemberScopeForm({
             <div className="space-y-1">
               <Label
                 htmlFor="member-scope-allow-all"
-                className="cursor-pointer text-[12px] font-medium"
+                className="cursor-pointer text-12 font-medium"
               >
                 Allow all org services
               </Label>
@@ -253,13 +254,14 @@ function MemberScopeForm({
                       />
                       <ServiceIcon
                         slug={service.catalog_service_slug}
+                        iconUrl={connectionIconUrl(service)}
                         size="2xs"
                       />
                       <Label
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"
                       >
-                        <span className="block text-[12px] font-medium text-foreground">
+                        <span className="block text-12 font-medium text-foreground">
                           {service.label}
                         </span>
                         <span className="block text-xs text-muted-foreground">
@@ -272,7 +274,7 @@ function MemberScopeForm({
               </div>
             )}
             {orgServices.length > 0 && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 Selecting nothing revokes proxy access to every org service.
               </p>
             )}

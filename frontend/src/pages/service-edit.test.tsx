@@ -1,18 +1,38 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DownstreamService } from "@/types/api";
+import type { DownstreamService, User } from "@/types/api";
 import { ApiError } from "@/lib/api-client";
 import { ServiceEditPage } from "./service-edit";
 import { serviceFormPatch, serviceFormValues } from "./service-edit.helpers";
 
-const { source, mutate } = vi.hoisted(() => ({
+type EditorUser = Pick<User, "id" | "is_admin" | "capabilities">;
+
+const { source, mutate, actor } = vi.hoisted(() => ({
   source: { data: undefined as DownstreamService | undefined },
   mutate: vi.fn(),
+  actor: { user: { id: "admin-1", is_admin: true } as EditorUser },
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   useParams: () => ({ serviceId: source.data?.id }),
+}));
+vi.mock("@/hooks/use-tools", () => ({
+  useToolTopics: () => ({
+    data: [{ slug: "web-search", label: "Web Search" }],
+  }),
+}));
+
+vi.mock("@/hooks/use-service-concurrency", () => ({
+  useServiceConcurrency: () => ({
+    data: { policy: null },
+    isPending: false,
+    isError: false,
+  }),
+  useUpdateServiceConcurrency: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
 }));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => ({
@@ -22,6 +42,18 @@ vi.mock("@/hooks/use-services", () => ({
     refetch: vi.fn(),
   }),
   useUpdateService: () => ({ mutateAsync: mutate, isPending: false }),
+}));
+// The editor's server-resolved effective billing panel is covered in
+// platform-service-fields.test.tsx; it renders nothing here.
+vi.mock("@/hooks/use-admin-billing", () => ({
+  useAdminBillingService: () => ({
+    data: undefined,
+    isLoading: false,
+    error: null,
+  }),
+}));
+vi.mock("@/hooks/use-endpoints", () => ({
+  useEndpoints: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({ data: { clients: [] } }),
@@ -34,8 +66,8 @@ vi.mock("@/components/dashboard/identity-propagation-config", () => ({
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (
-    selector: (state: { user: { is_admin: boolean } }) => unknown,
-  ) => selector({ user: { is_admin: true } }),
+    selector: (state: { user: EditorUser }) => unknown,
+  ) => selector(actor),
 }));
 vi.mock("@/hooks/use-admin", () => ({
   useAdminUsers: () => ({ data: { users: [] }, isFetching: false }),
@@ -79,8 +111,87 @@ function makeService(
   };
 }
 
+it("loads, edits and clears only the catalog bearer scheme while preserving unrelated patches", () => {
+  const service = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+  });
+  const values = serviceFormValues(service);
+  expect(values.auth_scheme).toBe("Zoho-oauthtoken");
+  expect(serviceFormPatch(values, service)).toEqual({});
+  expect(serviceFormPatch({ ...values, name: "Renamed" }, service)).toEqual({
+    name: "Renamed",
+  });
+  expect(
+    serviceFormPatch({ ...values, auth_scheme: "Bearer" }, service),
+  ).toEqual({ auth_scheme: "Bearer" });
+  expect(serviceFormPatch({ ...values, auth_scheme: "" }, service)).toEqual({
+    auth_scheme: null,
+  });
+  const nonBearer = makeService({ auth_method: "header" });
+  expect(
+    serviceFormPatch(
+      { ...serviceFormValues(nonBearer), auth_scheme: "Zoho-oauthtoken" },
+      nonBearer,
+    ),
+  ).toEqual({});
+});
+
+it("renders the optional bearer authorization scheme in the Admin editor", () => {
+  source.data = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+  });
+  render(<ServiceEditPage />);
+  expect(screen.getByLabelText("Authorization scheme")).toHaveValue(
+    "Zoho-oauthtoken",
+  );
+});
+
+it.each([
+  ["Admin", { id: "admin-1", is_admin: true }, true],
+  [
+    "owning Catalog Manager",
+    { id: "user-1", is_admin: false, capabilities: { manage_catalog: true } },
+    true,
+  ],
+  [
+    "foreign Catalog Manager",
+    { id: "user-2", is_admin: false, capabilities: { manage_catalog: true } },
+    false,
+  ],
+  ["plain user", { id: "user-1", is_admin: false }, false],
+] as const)("shows the authorization scheme only to an authorized %s", (_, user, visible) => {
+  actor.user = user;
+  source.data = makeService({
+    auth_method: "bearer",
+    auth_scheme: "Zoho-oauthtoken",
+    catalog_manager_created: true,
+  });
+  render(<ServiceEditPage />);
+  if (visible) {
+    expect(screen.getByLabelText("Authorization scheme")).toHaveValue(
+      "Zoho-oauthtoken",
+    );
+  } else {
+    expect(screen.queryByLabelText("Authorization scheme")).not.toBeInTheDocument();
+  }
+});
+
+it("hides the authorization scheme from a manager who owns an unmarked row", () => {
+  actor.user = {
+    id: "user-1",
+    is_admin: false,
+    capabilities: { manage_catalog: true },
+  };
+  source.data = makeService({ auth_method: "bearer" });
+  render(<ServiceEditPage />);
+  expect(screen.queryByLabelText("Authorization scheme")).not.toBeInTheDocument();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  actor.user = { id: "admin-1", is_admin: true };
   source.data = makeService({
     recommended_skills: ["old"],
     skills_revision: 7,
@@ -129,6 +240,85 @@ describe("service editor curation concurrency", () => {
         { metric: "cache_read_tokens", credits_per_unit: "0.000000250001" },
       ],
     });
+  });
+
+  it("preserves operation prices on unrelated edits and sends only editable operation fields", () => {
+    const service = makeService({
+      billing: {
+        platform_billable: false,
+        resale_billable: false,
+        resale_metric: "tokens",
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.1",
+          sync_status: "synced",
+          operations: [
+            {
+              operation: "get_me",
+              credits_per_unit: "0.25",
+              sync_status: "synced",
+            },
+          ],
+        },
+      },
+    });
+    const values = serviceFormValues(service);
+    expect(serviceFormPatch(values, service)).toEqual({});
+    expect(
+      serviceFormPatch({ ...values, name: "Renamed" }, service),
+    ).not.toHaveProperty("billing");
+    const patch = serviceFormPatch(
+      {
+        ...values,
+        byok_pricing: {
+          ...values.byok_pricing!,
+          operations: [{ operation: "get_me", credits_per_unit: "0.5" }],
+        },
+      },
+      service,
+    );
+    expect(patch.billing?.byok_pricing).toEqual({
+      metric: "requests",
+      credits_per_unit: "0.1",
+      operations: [{ operation: "get_me", credits_per_unit: "0.5" }],
+    });
+  });
+
+  it("saves offering metadata through the existing service form and clears supplier", async () => {
+    source.data = makeService({
+      supplier: "Vendor",
+      offering_kind: "ai_service",
+      topics: [],
+      import_source: { kind: "manual", reference: "review-proof" },
+    });
+    const user = userEvent.setup();
+    render(<ServiceEditPage />);
+    const serviceForm = screen
+      .getByRole("button", { name: "Save Changes" })
+      .closest("form");
+    expect(screen.getByLabelText("Supplier").closest("form")).toBe(serviceForm);
+    expect(
+      screen.getByRole("combobox", { name: "Offering kind" }).closest("form"),
+    ).toBe(serviceForm);
+    expect(serviceForm?.querySelectorAll("form")).toHaveLength(0);
+    expect(screen.getByText(/Import source: manual/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Supplier"));
+    await user.click(screen.getByRole("button", { name: "Web Search" }));
+    await user.click(screen.getByRole("combobox", { name: "Offering kind" }));
+    await user.click(screen.getByRole("option", { name: "Tool" }));
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
+    expect(mutate.mock.calls[0]![0].data).toEqual(
+      expect.objectContaining({
+        offering_kind: "tool",
+        topics: ["web-search"],
+        supplier: null,
+      }),
+    );
+    expect(mutate.mock.calls[0]![0].data).not.toHaveProperty("import_source");
   });
 
   it("omits unchanged skills on metadata edits", async () => {

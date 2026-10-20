@@ -91,6 +91,11 @@ const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 const ACTION_THROTTLE_MS = 750;
 const MAX_CONSECUTIVE_POLL_FAILURES = 3;
 
+export interface WebAuthDeviceTransport {
+  request: (body: ReturnType<typeof requestBodySchema.parse>) => Promise<unknown>;
+  poll: (deviceCode: string, isCurrent: () => boolean) => Promise<void>;
+}
+
 function getApiErrorCode(error: unknown): number | null {
   if (
     typeof error === "object" &&
@@ -121,12 +126,14 @@ function getTerminalPhase(errorCode: number | null): WebAuthDevicePhase | null {
  * Owns the browser-facing device-code request and polling lifecycle. The
  * device code remains in this hook's memory and is never persisted or logged.
  */
-export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
+export function useWebAuthDeviceLogin(transport?: WebAuthDeviceTransport): WebAuthDeviceLoginState & {
   readonly start: () => void;
   readonly generateNew: () => void;
   readonly close: () => void;
 } {
   const checkAuth = useAuthStore((state) => state.checkAuth);
+  const transportRef = useRef(transport);
+  useEffect(() => { transportRef.current = transport; }, [transport]);
   const [phase, setPhase] = useState<WebAuthDevicePhase>("idle");
   const [loginCode, setLoginCode] = useState<WebAuthDeviceLoginState["loginCode"]>(null);
   const [request, setRequest] =
@@ -181,7 +188,20 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       const body = pollBodySchema.parse({
         device_code: activeRequest.device_code,
       });
-      const response = await api.post<unknown>("/auth/device/v2/poll-web", body);
+      if (transportRef.current) {
+        await transportRef.current.poll(body.device_code, isCurrent);
+        if (!isCurrent()) return;
+        consecutiveFailuresRef.current = 0;
+        stopPolling();
+        setCurrentPhase("success");
+        setError(null);
+        return;
+      }
+      // The ordinary browser login is deliberately legacy/full-account. The
+      // grant-capable v2 protocol is reserved for /login/device requests so
+      // an installed older iOS app can approve this flow without a protocol
+      // upgrade and a browser cannot accidentally receive a restricted key.
+      const response = await api.post<unknown>("/auth/device/poll-web", body);
       if (!isCurrent()) return;
       const delivery = pollWebResponseSchema.parse(response);
       consecutiveFailuresRef.current = 0;
@@ -272,7 +292,11 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       }
       const body = requestBodySchema.parse(browserContext);
       const response = requestResponseSchema.parse(
-        await api.post<unknown>("/auth/device/v2/request", body),
+        // Keep /login's app sign-in on the legacy protocol. Restricted Agent
+        // Key choices are exposed only by the explicit /login/device surface.
+        transportRef.current
+          ? await transportRef.current.request(body)
+          : await api.post<unknown>("/auth/device/request", body),
       );
       if (requestGenerationRef.current !== requestGeneration) return;
       requestRef.current = response;

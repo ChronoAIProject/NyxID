@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -13,9 +14,10 @@ import {
 const ROOT = "/channel-bots/telegram-new";
 
 export function useTelegramNewConfiguration(requestId?: string, poll = true) {
+  const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
   return useQuery({
-    queryKey: ["telegram-new", actor, requestId],
+    queryKey: ["telegram-new", actor, requestId, link?.id],
     enabled: Boolean(actor),
     retry: false,
     staleTime: 0,
@@ -29,18 +31,15 @@ export function useTelegramNewConfiguration(requestId?: string, poll = true) {
     },
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
-    queryFn: async () =>
-      telegramNewConfigSchema.parse(
-        await api.get(
-          requestId
-            ? `${ROOT}?request_id=${encodeURIComponent(requestId)}`
-            : ROOT,
-        ),
-      ),
+    queryFn: async () => {
+      const config = telegramNewConfigSchema.parse(await api.get(requestId ? `${ROOT}?request_id=${encodeURIComponent(requestId)}` : ROOT));
+      return link && !requestId ? { ...config, request: null } : config;
+    },
   });
 }
 
 export function useTelegramNew(requestId?: string) {
+  const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
   const client = useQueryClient();
   const key = ["telegram-new", actor] as const;
@@ -53,7 +52,10 @@ export function useTelegramNew(requestId?: string) {
     if (connectedBotId)
       void client.invalidateQueries({ queryKey: ["channel-bots"] });
   }, [client, connectedBotId]);
-  const refresh = () => client.invalidateQueries({ queryKey: key });
+  const refresh = async () => {
+    await client.invalidateQueries({ queryKey: key });
+    await link?.refresh();
+  };
   const begin = useMutation({
     mutationKey: key,
     gcTime: 0,
@@ -63,7 +65,7 @@ export function useTelegramNew(requestId?: string) {
       auto_connect?: boolean;
     }) =>
       telegramNewLaunchSchema.parse(
-        await api.post(ROOT, telegramNewBeginSchema.parse(input)),
+        await api.post(link ? "/channel-connect-links/telegram/start" : ROOT, link ? { token: link.token } : telegramNewBeginSchema.parse(input)),
       ),
     onSettled: refresh,
   });

@@ -19,7 +19,7 @@ pub struct TelegramNewAdapter {
 
 impl TelegramNewAdapter {
     #[cfg(test)]
-    pub(super) fn media_test_adapter(base: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
         Self {
             transport: TelegramAdapter::media_test_adapter(base),
         }
@@ -50,6 +50,46 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramNewAdapter {
+    async fn resolve_thread(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        self.transport
+            .resolve_thread(http, credentials, facts, ancestors)
+            .await
+    }
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .send_thread_reply(http, credentials, target, reply)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        self.transport.thread_facts(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Telegram"
     }
@@ -63,6 +103,10 @@ impl PlatformAdapter for TelegramNewAdapter {
 
     fn platform_id(&self) -> &str {
         PLATFORM
+    }
+
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        self.transport.message_ids_are_chat_scoped()
     }
 
     fn platform_credentials(&self) -> Option<PlatformCredentialDescriptor> {
@@ -128,6 +172,53 @@ impl PlatformAdapter for TelegramNewAdapter {
     ) -> AppResult<FetchedMedia> {
         self.transport
             .fetch_attachment(http, credentials, attachment, max_bytes)
+            .await
+    }
+
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .chat_title(http, credentials, conversation_id)
+            .await
+    }
+
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        self.transport
+            .send_reply_outcome(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn send_bound_reply_outcome(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation: &str,
+        reply: &OutboundReply,
+        target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
+    ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if let Some(target) = target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation) {
+                return Err(crate::services::channel_thread_service::unavailable());
+            }
+            return self
+                .transport
+                .thread_reply_outcome(http, credentials, target, reply)
+                .await;
+        }
+        self.send_reply_outcome(http, credentials, conversation, reply)
             .await
     }
 

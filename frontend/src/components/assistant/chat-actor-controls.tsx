@@ -91,7 +91,7 @@ export function ChatActorControls({
   return (
     <section aria-label="Actor controls" className="space-y-3">
       {disabled ? (
-        <p role="status" className="text-[11px] text-muted-foreground">
+        <p role="status" className="text-11 text-muted-foreground">
           Waiting for current state before controls can be used.
         </p>
       ) : null}
@@ -144,7 +144,7 @@ export function ChatActorControls({
 
       {controllableSteps.map((step) => (
         <section key={step.stepId} className="rounded-lg border border-border bg-card px-3 py-2.5">
-          <div className="text-[12px] font-medium text-foreground">
+          <div className="text-12 font-medium text-foreground">
             {step.description || step.stepId}
           </div>
           <div className="mt-2 flex gap-2">

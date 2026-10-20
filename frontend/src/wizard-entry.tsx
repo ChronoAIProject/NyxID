@@ -666,7 +666,7 @@ function AckingPanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-serif text-[28px] font-normal">Service added</h2>
+      <h2 className="font-serif text-28 font-normal">Service added</h2>
       <p className="text-sm text-muted-foreground">
         <code className="font-mono text-xs">{result.slug}</code> is now connected. Check
         your terminal for the final summary.
@@ -689,7 +689,7 @@ function DonePanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Done</h2>
+        <h2 className="font-serif text-28 font-normal">Done</h2>
         <p className="text-sm text-muted-foreground">
           You can close this tab and return to your terminal.
         </p>
@@ -702,7 +702,7 @@ function CancelledPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Cancelled</h2>
+        <h2 className="font-serif text-28 font-normal">Cancelled</h2>
         <p className="text-sm text-muted-foreground">
           Nothing was created. You can close this tab — your CLI should
           already be back at the prompt.
@@ -728,7 +728,7 @@ function WizardLostPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Wizard interrupted
         </h2>
         <p className="text-sm text-muted-foreground">

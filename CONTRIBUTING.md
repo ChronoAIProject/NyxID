@@ -235,6 +235,20 @@ Wait until `db.hello().isWritablePrimary` is `true` before starting the suite.
 The CI workflow uses the same startup contract and verifies the effective
 parameter with `getParameter` before running tests.
 
+Database setup shares one 90-second readiness deadline across ping, a unique
+probe write, and initial run-lease publication. A busy shared mongod can recover
+after the former five-second probe limit; the original operation waits within
+this budget without retrying the test. Errors still fail immediately, a server
+that remains unavailable fails at the deadline, and an explicit URI never falls
+back to another server. Heartbeat, stale-sweep, and cleanup fencing retain their
+separate short deadlines.
+
+If readiness fails, inspect the reported phase and elapsed time alongside the
+`resources-backend-test` artifact and the job's MongoDB diagnostics. Clustered
+setup failures alone do not establish the cause of a server stall. Preserve
+these diagnostics and fix recurring setup failures instead of repeatedly
+rerunning the full workflow or adding test retries.
+
 ```bash
 # Backend unit tests
 cargo test
@@ -305,23 +319,35 @@ Include:
 
 ### CI Checks
 
-Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. The single required status check is **CI Pipeline**, an aggregator that always runs and treats `success` and `skipped` as passing.
+Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. **CI Pipeline** aggregates the required jobs and treats `success` and `skipped` as passing. Branch rules must require this status check to enforce the gate at merge time.
 
 | Job | What it does | Triggers on |
 |-----|--------------|-------------|
 | **Rust Format** | `cargo fmt --all -- --check` -- ensures consistent formatting | any Rust change (backend, cli, mcp-demo, root Cargo files) |
 | **Rust Clippy** | `cargo clippy --workspace --all-targets -- -D warnings` -- catches common mistakes and enforces idioms | any Rust change |
-| **Backend Test** | `cargo nextest run -p nyxid` against a MongoDB 8.0 service container -- handler, service, and integration tests | `backend/**` or shared workspace files |
+| **Backend Test** | `cargo nextest run -p nyxid -p nyxid-service-adapters` against a MongoDB 8.0 replica set -- handler, service, and integration tests | `backend/**` or shared workspace files |
+| **Backend Billing Smoke** | Runs the standalone billing route smoke test with its original Cargo feature set | backend changes |
+| **Backend Image Inputs** | Builds the production backend binary and checks that Docker stages every embedded input | backend changes |
+| **Coverage (Backend)** | Measures PR-head coverage and enforces the line threshold | backend changes |
+| **Coverage (Backend Base)** | Reuses an exact-commit report or measures the base branch for the informational PR delta | backend PRs |
 | **CLI Test** | `cargo nextest run -p nyxid-cli` -- CLI + node-agent unit and integration tests | `cli/**` or shared workspace files |
 | **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile | `backend/**` or shared workspace files |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check | `frontend/**` or `.node-version` |
 | **CLI Wizard Bundle Freshness** | Re-hashes the wizard's source closure (from `cli/src/wizard/bundle-meta/index.manifest`) and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). | `frontend/**`, `cli/src/wizard/**`, or `.node-version` |
 | **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles | `sdk/**` or `.node-version` |
-| **CI Pipeline** | Aggregator that depends on all of the above and reports a single pass/fail to branch protection. Treats `skipped` as success. | always |
+| **CI Pipeline** | Aggregator for all correctness checks above; the base coverage comparison is informational. Treats `skipped` as success. | always |
 
-A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` forces every job to run.
+A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` or `.github/scripts/**` forces every job to run.
 
-All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
+Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
+
+Backend test and coverage jobs use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+to keep the large test binary within hosted-runner memory. Use the same setting
+for head and base coverage measurements. This preserves line locations and LLVM
+coverage instrumentation; keep the full test selection and coverage thresholds.
+When a runner exits with code 143 during compilation, inspect the last completed
+step before treating it as a test failure. Repeated shutdowns at the same compile
+stage need a build-resource correction rather than repeated full-workflow retries.
 
 ### Rollup Health Triage
 
@@ -350,6 +376,8 @@ check evidence:
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
+- Merge branch-sync PRs with **Create a merge commit**. Squashing drops the
+  merged branch's ancestry, so GitHub can still report the same conflicts.
 
 ---
 

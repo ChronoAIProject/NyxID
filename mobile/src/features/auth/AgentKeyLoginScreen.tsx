@@ -28,7 +28,6 @@ import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
   formatAuthDeviceUserCode,
   normalizeAuthDeviceUserCode,
-  supportsRestrictedDeviceLogin,
 } from "./deviceUserCode";
 import {
   formatDeviceLoginOriginValue,
@@ -382,7 +381,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 </Text>
               )}
               {step === "review" &&
-                (isAuthenticated && (mint || flow === "agent-key" || supportsRestrictedDeviceLogin(code)) ? (
+                (isAuthenticated && (mint || flow === "agent-key" || preview?.supports_grant_choice === true) ? (
                   <PrimaryButton
                     label="Choose an Agent Key"
                     disabled={pending || expired}

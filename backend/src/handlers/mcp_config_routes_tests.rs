@@ -230,13 +230,48 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
     .await;
     assert_eq!(status, StatusCode::OK, "{listing}");
     let mut services = catalog.services;
-    if auth.chat.is_some() {
-        services.push(crate::services::assistant_account_tools::virtual_service());
+    if let Some(chat) = auth.chat.as_ref() {
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
     }
-    let expected: Vec<Value> = mcp_service::generate_tool_definitions(&services, None)
+    let mut definitions = mcp_service::generate_tool_definitions(&services, None);
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        definitions.extend(
+            Box::pin(crate::services::machine_access_service::definitions(
+                &state.db, chat,
+            ))
+            .await
+            .unwrap(),
+        );
+        definitions.push(crate::services::assistant_upload_service::definition());
+        definitions.push(crate::services::assistant_upload_service::list_definition());
+        definitions.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    }
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+    {
+        definitions.push(crate::services::assistant_resource_service::definition());
+    }
+    let expected: Vec<Value> = definitions
         .iter()
-        .filter(|t| !(super::is_scoped_api_key(&auth) && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str())))
-        .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))
+        .filter(|t| {
+            !(super::is_scoped_api_key(&auth)
+                && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str()))
+        })
+        .map(|t| {
+            // Owner chat turns are offered the action-card id on every tool,
+            // exactly as tools/list renders it.
+            let mut tool = json!({"name": t.name, "description": t.description,
+                "inputSchema": super::webhook_tool_schema(&auth, &t.input_schema)});
+            if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["title"] = annotations["title"].clone();
+                tool["annotations"] = annotations;
+            }
+            tool
+        })
         .collect();
     assert_eq!(listing["result"]["tools"], json!(expected), "{listing}");
 }

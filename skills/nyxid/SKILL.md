@@ -37,6 +37,8 @@ Credential nodes can be personal or org-owned. Org admins manage org-owned nodes
 
 For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` (populated at install time from the NyxID server's `/llms.txt` endpoint), or fetch the latest directly from `<NYXID_BASE_URL>/llms.txt`.
 
+For device login, approval-time Agent Key choice and safe URL hints, read `references/device-login.md`. Its discovery endpoint map distinguishes public deployment metadata, the human's eligible approval choices, and services available to the agent's current credential. Read it before choosing login permissions or constructing an approval link.
+
 ## CLI setup (optional)
 
 Install the NyxID CLI when a shell is available. This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host. HTTP-only clients can instead call the authenticated Web API described in the reference pages.
@@ -53,7 +55,7 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-> **Registration may require an invite code.** NyxID instances can gate new accounts behind invite codes (controlled by the backend `INVITE_CODE_REQUIRED` env var, default `true`). When enabled, users need a code from an admin and can register via the web UI or the CLI:
+> **Registration may require an invite code.** The global `auth:invitation-code` feature flag defaults to enabled and can be toggled by a platform admin. When enabled, users need a code from an admin and can register via the web UI or the CLI:
 >
 > ```bash
 > nyxid register --base-url https://nyx-api.chrono-ai.fun \
@@ -125,11 +127,13 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "which services can this app access", "Authorized Apps", "OAuth consent", "consent service access", "restrict this app to service X", "legacy grant", "resource indicators", "RFC 8707", OAuth `resource` parameter, "app default services", `default_service_catalog_slugs`, "consent defaults" | `references/oauth-consent.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
 | "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, remote credential injection / `node-credential inject` / "push a secret to a node from my laptop or browser without SSH" / fingerprint verification / browser accept page, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
+| "device login", "login approval link", "prefill permissions", "choose an Agent Key at login", "choose connected accounts", "login scope flags", "default login options", "what is available before login", "what can the current user access", `nyxid mcp discover`, `nyxid catalog list --public`, `nyxid login --device/--agent-key/--no-wait`, `nyxid login resume`, `/login/device`, `/login/agent-key` | `references/device-login.md` |
 | "provision a headless device", "approve a device", "ESP32", "factory key", "nyxprov QR", "device-code grant", `nyxid device approve/onboard/factory-key`, `/devices/code/*`, `/devices/onboard` | `references/devices.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs, granular approval rules (method/path/verb), allow-list or deny specific endpoints, `default_effect`, scoped grants | `references/notifications.md` |
 | "channel bot", "register a bot", conversation routing, proactive / unprompted messages, `/channel-relay/send`, `/channel-relay/conversations`, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
 | "inbound trigger", "webhook trigger", provider event relay, bearer/query/HMAC trigger verification, durable webhook delivery, delivery history/replay, signing-key rotation, Lark Base automation to Aevatar | `references/triggers.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |
+| Billing configuration, exact prices, Telnyx managed offerings, credit grants, wallet funding, execution IDs, pending usage verification, `nyxid admin billing`, `nyxid admin credits`, `nyxid admin usage`, `nyxid billing executions`, `nyxid mcp tools/call` | `references/billing.md` |
 | `nyxid whoami / status / profile / mfa / session`, `nyxid admin user list/show/set-role`, platform roles (admin / operator / user), `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
 | "list / revoke broker authorizations", "what apps hold credentials for me", `/settings/authorizations`, `nyxid oauth bindings`, OAuth `binding_id` / token vault, distinction from "Authorized Apps" (consents) | `references/oauth-broker.md` |
 
@@ -162,7 +166,7 @@ Proxy to a pool by its slug exactly like a normal service slug:
 nyxid proxy request <pool_slug> /v1/path -m POST -d '<body>'
 ```
 
-Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For the shipped proxy behavior and current documentation bounds, load `references/service-pools.md`.
+Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For priority/failover, AI aliases, owner-aware CLI management and health, load `references/service-pools.md`.
 
 ## External Endpoints
 

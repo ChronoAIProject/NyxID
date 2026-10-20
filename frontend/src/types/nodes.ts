@@ -1,4 +1,5 @@
 export interface NodeMetadata {
+  readonly provisioning_source?: string | null;
   readonly agent_version: string | null;
   readonly os: string | null;
   readonly arch: string | null;
@@ -40,6 +41,9 @@ export interface NodeAdminInfo {
 }
 
 export interface NodeInfo {
+  readonly machine?: import("@/schemas/machines").MachineProfile | null;
+  readonly machine_confirm?: "none" | "changes" | "all";
+  readonly allow_single_user_saved_logins?: boolean;
   readonly id: string;
   readonly name: string;
   readonly owner: NodeOwnerInfo;

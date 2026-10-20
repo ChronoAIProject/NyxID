@@ -439,6 +439,39 @@ pub struct RateAdmission {
 pub struct RateWindowStore;
 
 impl RateWindowStore {
+    /// Couple admission to a caller's reservation transaction. A failed
+    /// reservation consumes no rate budget and Mongo retries remain atomic.
+    pub(crate) async fn admit_in_session(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        limit: u64,
+        window: Duration,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<bool> {
+        let window_ms = duration_millis(window, "rate window")?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| AppError::Internal("Rate limit out of range".into()))?;
+        let admission_id = uuid::Uuid::new_v4().to_string();
+        let record = db
+            .collection::<RateWindowRecord>(RATE_WINDOW_COLLECTION_NAME)
+            .find_one_and_update(
+                doc! {"_id": hash_parts(&[namespace, key])},
+                rate_window_pipeline(
+                    namespace,
+                    &hash_parts(&[key]),
+                    &admission_id,
+                    limit,
+                    window_ms,
+                ),
+            )
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .session(session)
+            .await?;
+        Ok(record.is_some_and(|r| r.last_admission_id.as_deref() == Some(&admission_id)))
+    }
+
     pub async fn admit(
         db: &mongodb::Database,
         namespace: &str,

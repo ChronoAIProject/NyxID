@@ -10,6 +10,10 @@ export function usageStats(
     completion_tokens: 20,
     cached_tokens: 30,
     cache_creation_tokens: 5,
+    audio_input_tokens: 0,
+    audio_output_tokens: 0,
+    image_input_tokens: 0,
+    image_output_tokens: 0,
     total_tokens: 120,
     gross_cost_micros: 2_000_000,
     wallet_cost_micros: 1_000_000,
@@ -43,7 +47,14 @@ export function usageFixture(): AdminUsageResponse {
       period: "24h",
     },
     totals: usageStats(),
-    by_service: [{ ...service, ...usageStats(), by_credential_class: [lane] }],
+    by_service: [
+      {
+        ...service,
+        ...usageStats(),
+        by_credential_class: [lane],
+        by_operation: [],
+      },
+    ],
     by_credential_class: [lane],
     ranking: [
       {

@@ -4,6 +4,42 @@ use crate::models::usage_meter::CredentialClass;
 use super::route_inventory::BillingIngress;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BillingLane {
+    Byok,
+    PlatformKey,
+}
+
+impl BillingLane {
+    pub fn for_credential(class: CredentialClass) -> Option<Self> {
+        match class {
+            CredentialClass::NyxidPlatformOauthApp
+            | CredentialClass::UserOwned
+            | CredentialClass::AgentOverrideUserOwned
+            | CredentialClass::NodeManaged => Some(Self::Byok),
+            CredentialClass::NyxidManagedMaster => Some(Self::PlatformKey),
+            CredentialClass::NoAuth => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Byok => "Your own key (BYOK)",
+            Self::PlatformKey => "NyxID platform key",
+        }
+    }
+
+    fn pricing(
+        self,
+        billing: &ServiceBilling,
+    ) -> Option<&crate::models::service_billing::LanePricing> {
+        match self {
+            Self::Byok => billing.byok_pricing.as_ref(),
+            Self::PlatformKey => billing.platform_key_pricing.as_ref(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeIntent {
     Direct,
     Node,
@@ -13,6 +49,14 @@ pub enum NodeIntent {
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
     pub ingress: BillingIngress,
+    pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
+    pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
+    /// An internal durable public call reservation; never accepted from HTTP.
+    pub(crate) public_admission: Option<PublicBillingAdmission>,
+    /// Internal readiness probe uses the same durable funding transaction.
+    pub(crate) public_probe: bool,
+    pub(crate) managed_admission: Option<ManagedBillingAdmission>,
+    pub(crate) managed_billing: Option<ServiceBilling>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -25,17 +69,42 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub platform_lago_metric_code: String,
+    /// Operation key whose price replaced the primary request rate.
+    pub operation: Option<String>,
+    /// Synced operation prices of the selected, synced Requests lane:
+    /// `(operation key, Lago metric code)`.
+    operation_prices: Vec<(String, String)>,
     pub resale: Option<ResaleSpec>,
     /// Additional platform rows, each with independent funding and Lago identity.
     pub platform_components: Vec<ResaleSpec>,
     pub capture_tokens: bool,
     pub request_bytes: i64,
+    /// Purpose-confined public text execution reserves its bounded full response.
+    native_text_bound: Option<(i64, i64, i64)>,
     pub requested_images: i64,
+    /// Duration reserved before forwarding a voice window. Ordinary routes use zero.
+    pub requested_voice_seconds: i64,
+    pub voice_initial_window: bool,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
     pub(crate) service_platform_billable: bool,
+    lane_pricing_configured: bool,
     pub(crate) platform_metered: bool,
     pub(crate) platform_billable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PublicBillingAdmission {
+    pub call_id: String,
+    pub model_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedBillingAdmission {
+    pub execution_id: String,
+    pub route_digest: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl BillingRouteContext {
@@ -72,19 +141,13 @@ impl BillingRouteContext {
             .to_string();
 
         let mut platform_components = Vec::new();
+        let mut operation_prices = Vec::new();
         let mut platform_metric = platform_metric;
         if let Some(billing) =
             service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
         {
-            let lane = match credential_class {
-                // Shared-app OAuth tokens retain their existing user-token price lane.
-                CredentialClass::NyxidPlatformOauthApp
-                | CredentialClass::UserOwned
-                | CredentialClass::AgentOverrideUserOwned
-                | CredentialClass::NodeManaged => billing.byok_pricing.as_ref(),
-                CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
-                CredentialClass::NoAuth => None,
-            };
+            let lane = BillingLane::for_credential(credential_class)
+                .and_then(|lane| lane.pricing(billing));
             if let Some(lane) = lane {
                 use crate::models::service_billing::PricingSyncStatus;
                 // Until the primary syncs, the entire lane uses legacy billing.
@@ -102,6 +165,14 @@ impl BillingRouteContext {
                             lago_metric_code: component.lago_metric_code.clone(),
                         })
                         .collect();
+                    if lane.metric == BillingMetric::Requests {
+                        operation_prices = lane
+                            .operations
+                            .iter()
+                            .filter(|price| price.sync_status == PricingSyncStatus::Synced)
+                            .map(|price| (price.operation.clone(), price.lago_metric_code.clone()))
+                            .collect();
+                    }
                 }
             } else {
                 service_platform_billable = false;
@@ -117,7 +188,15 @@ impl BillingRouteContext {
             service_platform_billable = false;
         }
         Self {
+            public_admission: None,
+            public_probe: false,
+            managed_admission: None,
+            managed_billing: service_billing
+                .filter(|billing| billing.managed_execution.is_some())
+                .cloned(),
             ingress,
+            pool_attempt: None,
+            machine_usage: None,
             billing_request_id,
             billing_owner_id,
             actor_user_id,
@@ -130,6 +209,8 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             platform_lago_metric_code,
+            operation: None,
+            operation_prices,
             resale,
             platform_components,
             capture_tokens: platform_metric.is_token_family()
@@ -150,11 +231,68 @@ impl BillingRouteContext {
                     })
                 }),
             request_bytes: 0,
+            native_text_bound: None,
             requested_images: 1,
+            requested_voice_seconds: 0,
+            voice_initial_window: false,
             service_platform_billable,
+            lane_pricing_configured: service_billing
+                .is_some_and(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some()),
             platform_metered: false,
             platform_billable: false,
         }
+    }
+
+    /// Whether the selected lane prices any operation, so callers resolve
+    /// the request's operation only when it can change the charge.
+    pub fn prices_operations(&self) -> bool {
+        !self.operation_prices.is_empty()
+    }
+
+    /// Synced operation prices of the selected lane: `(operation, Lago metric code)`.
+    pub(crate) fn operation_prices(&self) -> &[(String, String)] {
+        &self.operation_prices
+    }
+
+    /// Replaces the primary request rate with the operation's synced price.
+    /// Unpriced, pending and failed operations keep the primary rate.
+    pub fn with_operation(mut self, operation: Option<&str>) -> Self {
+        if let Some(operation) = operation
+            && let Some((key, code)) = self
+                .operation_prices
+                .iter()
+                .find(|(key, _)| key == operation)
+        {
+            self.platform_lago_metric_code = code.clone();
+            self.operation = Some(key.clone());
+        }
+        self
+    }
+
+    pub(crate) fn require_platform_price(&self) -> crate::errors::AppResult<()> {
+        if self.service_platform_billable {
+            return Ok(());
+        }
+        let slug = self.service_slug.as_deref().unwrap_or("unknown");
+        let lane = BillingLane::for_credential(self.credential_class)
+            .map_or("None (meter only)", BillingLane::label);
+        let traffic = if self.credential_class == CredentialClass::NyxidPlatformOauthApp {
+            " used by shared-app channel traffic"
+        } else {
+            ""
+        };
+        let cause = if self.lane_pricing_configured {
+            format!(
+                "has no synced price on the {lane} lane{traffic}; configure a Requests price there"
+            )
+        } else {
+            format!(
+                "has no lane prices and legacy platform billing is disabled; enable legacy Requests billing or configure a synced Requests price on the {lane} lane{traffic}"
+            )
+        };
+        Err(crate::errors::AppError::BillingNotConfigured(format!(
+            "The service ({slug}) {cause}"
+        )))
     }
 
     pub fn with_request_body(mut self, body: Option<&[u8]>) -> Self {
@@ -185,12 +323,50 @@ impl BillingRouteContext {
         )
     }
 
+    pub(crate) fn with_native_text_bound(
+        mut self,
+        input: i64,
+        output: i64,
+        response_bytes: i64,
+    ) -> Self {
+        self.native_text_bound = Some((input.max(1), output.max(1), response_bytes.max(1)));
+        self
+    }
+
+    pub(crate) fn has_native_text_bound(&self) -> bool {
+        self.native_text_bound.is_some()
+    }
+
     pub fn estimated_quantity(&self, metric: BillingMetric) -> i64 {
+        if let Some((input, output, response_bytes)) = self.native_text_bound {
+            return match metric {
+                BillingMetric::Tokens => input.saturating_add(output),
+                BillingMetric::InputTokens
+                | BillingMetric::CacheReadTokens
+                | BillingMetric::CacheWriteTokens => input,
+                BillingMetric::OutputTokens => output,
+                BillingMetric::Requests => 1,
+                BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
+                BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
+                // Machine runtime is reserved only by dedicated admission.
+                BillingMetric::MachineRunningSeconds => 0,
+            };
+        }
+        if self.requested_voice_seconds > 0 {
+            return match metric {
+                BillingMetric::VoiceSeconds => self.requested_voice_seconds,
+                BillingMetric::Requests => i64::from(self.voice_initial_window),
+                _ => 0,
+            };
+        }
         match metric {
             BillingMetric::Tokens | BillingMetric::InputTokens | BillingMetric::OutputTokens => {
                 crate::services::llm_usage_service::estimate_tokens_from_bytes(self.request_bytes)
             }
             BillingMetric::Images => self.requested_images,
+            BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
+            // Dedicated Machine admission reserves a finite runtime window.
+            BillingMetric::MachineRunningSeconds => 0,
             // Cache quantities are already covered by the input estimate.
             BillingMetric::CacheReadTokens
             | BillingMetric::CacheWriteTokens
@@ -227,6 +403,7 @@ mod tests {
 
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
@@ -260,10 +437,42 @@ mod tests {
     }
 
     #[test]
+    fn required_price_reports_lane_and_legacy_configuration() {
+        use crate::errors::AppError;
+        for (class, label) in [
+            (
+                CredentialClass::NyxidPlatformOauthApp,
+                "Your own key (BYOK)",
+            ),
+            (CredentialClass::NyxidManagedMaster, "NyxID platform key"),
+        ] {
+            let mut ctx = context_for(class);
+            ctx.service_slug = Some("api-twitter".into());
+            for lane_mode in [false, true] {
+                ctx.lane_pricing_configured = lane_mode;
+                let Err(AppError::BillingNotConfigured(message)) = ctx.require_platform_price()
+                else {
+                    panic!("missing price must fail closed");
+                };
+                assert!(message.contains("api-twitter"));
+                assert!(message.contains(label));
+                assert!(message.contains("Requests"));
+                assert_eq!(
+                    message.contains("no lane prices and legacy platform billing is disabled"),
+                    !lane_mode
+                );
+            }
+            ctx.service_platform_billable = true;
+            assert!(ctx.require_platform_price().is_ok());
+        }
+    }
+
+    #[test]
     fn lane_selection_uses_final_credential_and_supersedes_legacy() {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let lane = |metric, code: &str| LanePricing {
             components: Vec::new(),
+            operations: Vec::new(),
             metric,
             credits_per_unit: "0.125".into(),
             lago_metric_code: code.into(),
@@ -461,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn native_text_bound_does_not_reserve_machine_runtime() {
+        let ctx = context_for(CredentialClass::UserOwned).with_request_body(Some(&[b'x'; 400]));
+        assert_eq!(
+            ctx.estimated_quantity(BillingMetric::MachineRunningSeconds),
+            0
+        );
+        let ctx = ctx.with_native_text_bound(320, 64, 4096);
+        for (metric, expected) in [
+            (BillingMetric::Tokens, 384),
+            (BillingMetric::InputTokens, 320),
+            (BillingMetric::OutputTokens, 64),
+            (BillingMetric::CacheReadTokens, 320),
+            (BillingMetric::CacheWriteTokens, 320),
+            (BillingMetric::Requests, 1),
+            (BillingMetric::Bytes, 4496),
+            (BillingMetric::Images, 0),
+            (BillingMetric::VoiceSeconds, 0),
+            (BillingMetric::MachineRunningSeconds, 0),
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), expected, "{metric:?}");
+        }
+    }
+
+    #[test]
     fn request_image_count_is_only_read_when_an_active_spec_prices_images() {
         let ctx = context_for(CredentialClass::UserOwned);
         assert_eq!(
@@ -562,6 +795,7 @@ mod tests {
     #[test]
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
+            managed_execution: None,
             platform_billable: false,
             platform_charge_nyxid_credentials_only: false,
             platform_metric: None,

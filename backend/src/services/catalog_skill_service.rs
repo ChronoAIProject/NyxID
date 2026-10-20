@@ -26,7 +26,7 @@ use crate::{
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static COLLISION: transactions::TransactionCollisionHook;
-    static AUTHORITY_PAUSE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+    pub(crate) static AUTHORITY_PAUSE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -67,6 +67,7 @@ impl SkillActor {
     }
 }
 
+#[derive(Debug)]
 pub struct SkillCommit {
     pub service: DownstreamService,
     pub state: SkillState,
@@ -148,6 +149,11 @@ pub fn resolve_update(current: &SkillState, input: &SkillUpdate) -> AppResult<Sk
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for reference in refs {
+            if reference.disabled {
+                return Err(AppError::BadRequest(
+                    "Catalog recommended skill refs cannot be disabled".into(),
+                ));
+            }
             validate_pin(
                 &reference.source,
                 &reference.skill_id,
@@ -257,7 +263,18 @@ async fn machine_authority(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Unauthorized("Service account not found".into()))?;
-    grants::require_service(&sa, scope, grants::WRITE_SCOPE, service_id)?;
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+        super::catalog_editor_service::authorize_in_session(
+            db,
+            session,
+            &sa,
+            scope,
+            grants::WRITE_SCOPE,
+        )
+        .await?;
+    } else {
+        grants::require_service(&sa, scope, grants::WRITE_SCOPE, service_id)?;
+    }
     let token = db
         .collection::<ServiceAccountToken>(TOKENS)
         .find_one(doc! {"jti": token_jti, "service_account_id": id})
@@ -281,6 +298,50 @@ async fn reserve_budget(
     session: &mut ClientSession,
     sa: &ServiceAccount,
 ) -> AppResult<String> {
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+        super::catalog_editor_service::fence_write_in_session(db, session, sa).await?;
+        let now = Utc::now();
+        let current = db
+            .collection::<Document>(ACCOUNTS)
+            .find_one(doc! {"_id": &sa.id})
+            .projection(doc! {"catalog_editor_write_window": 1, "catalog_editor_writes_used": 1})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Service account not found".into()))?;
+        let started = current
+            .get_datetime("catalog_editor_write_window")
+            .ok()
+            .copied();
+        let reset = started.is_none_or(|started| {
+            now.signed_duration_since(started.to_chrono())
+                .num_milliseconds()
+                >= 1000
+        });
+        let used = if reset {
+            0
+        } else {
+            current.get_i64("catalog_editor_writes_used").unwrap_or(0)
+        };
+        let limit = sa.rate_limit_override.unwrap_or(60).min(i64::MAX as u64) as i64;
+        if used >= limit {
+            return Err(AppError::RateLimited);
+        }
+        let window = if reset {
+            bson::DateTime::from_chrono(now)
+        } else {
+            started.unwrap()
+        };
+        let result = db.collection::<Document>(ACCOUNTS).update_one(
+            doc! {"_id": &sa.id, "purpose": "catalog_editor", "platform_protected": true, "is_active": true, "$expr": {"$eq": [{"$ifNull": ["$credential_generation", 0_i64]}, sa.credential_generation]}},
+            doc! {"$inc": {"catalog_editor_write_sequence": 1_i64}, "$set": {"catalog_editor_write_window": window, "catalog_editor_writes_used": used + 1}},
+        ).session(session).await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Catalog editor authority changed".into(),
+            ));
+        }
+        return Ok(format!("catalog-editor:{}", sa.id));
+    }
     let grant = grants::live_grant(sa)?;
     let now = Utc::now();
     let reset = now
@@ -313,6 +374,38 @@ fn duplicate_key(error: &AppError) -> bool {
     }
 }
 
+/// Replace references against one server-observed revision. Transaction retries
+/// retain that revision so a competing writer produces a conflict, not a rebase.
+pub async fn replace_refs_at_current_revision(
+    db: &Database,
+    service_id: &str,
+    actor: &SkillActor,
+    refs: Vec<SkillReference>,
+) -> AppResult<(SkillCommit, String)> {
+    let revision = super::catalog_editor_catalog_service::read(db, service_id)
+        .await?
+        .skills_revision;
+    let request_id = Uuid::new_v4().to_string();
+    let input = SkillUpdate {
+        recommended_skill_refs: Some(refs),
+        ..Default::default()
+    };
+    let committed = commit(
+        db,
+        service_id,
+        actor,
+        &input,
+        revision,
+        &request_id,
+        &Document::new(),
+        &Document::new(),
+        None,
+        None,
+    )
+    .await?;
+    Ok((committed, request_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn commit(
     db: &Database,
@@ -325,6 +418,41 @@ pub async fn commit(
     identity_filter: &Document,
     restore_revision: Option<i64>,
     fingerprint_input: Option<&serde_json::Value>,
+) -> AppResult<SkillCommit> {
+    commit_with_audit(
+        db,
+        service_id,
+        actor,
+        input,
+        base_revision,
+        request_id,
+        metadata,
+        identity_filter,
+        restore_revision,
+        fingerprint_input,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_with_audit(
+    db: &Database,
+    service_id: &str,
+    actor: &SkillActor,
+    input: &SkillUpdate,
+    base_revision: i64,
+    request_id: &str,
+    metadata: &Document,
+    identity_filter: &Document,
+    restore_revision: Option<i64>,
+    fingerprint_input: Option<&serde_json::Value>,
+    audit: Option<(&super::audit_service::AuditActor, &[u8])>,
+    mutation: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
 ) -> AppResult<SkillCommit> {
     // Duplicate receipt keys do not have MongoDB's transient-transaction label.
     // A fresh transaction rechecks current authority and resolves the winner.
@@ -340,6 +468,8 @@ pub async fn commit(
             identity_filter,
             restore_revision,
             fingerprint_input,
+            audit,
+            mutation,
         )
         .await;
         if result.as_ref().err().is_some_and(duplicate_key) {
@@ -369,6 +499,11 @@ async fn commit_once(
     identity_filter: &Document,
     restore_revision: Option<i64>,
     fingerprint_input: Option<&serde_json::Value>,
+    audit: Option<(&super::audit_service::AuditActor, &[u8])>,
+    mutation: Option<(
+        &DownstreamService,
+        &super::catalog_mutation_service::Authority,
+    )>,
 ) -> AppResult<SkillCommit> {
     if base_revision < 0
         || Uuid::parse_str(request_id).is_err()
@@ -405,6 +540,8 @@ async fn commit_once(
     let (kind, actor_id) = actor.identity();
     let operation_filter =
         doc! {"actor_kind": kind, "actor_id": actor_id, "request_id": request_id};
+    let audit = audit.map(|(actor, key)| (actor.clone(), zeroize::Zeroizing::new(key.to_vec())));
+    let mutation = mutation.map(|(row, authority)| (row.clone(), authority.clone()));
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let service_id = service_id.to_owned();
@@ -444,6 +581,14 @@ async fn commit_once(
                 reached.wait().await;
                 resume.wait().await;
             }
+            if let Some((observed, authority)) = &mutation {
+                let (live, admin) = super::catalog_mutation_service::validate_parent(db, session, observed, Some(authority)).await?;
+                super::catalog_mutation_service::require_desired_kind(&live, &metadata, authority, admin)?;
+                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin).await?;
+                if metadata.get_str("offering_kind") == Ok("tool") {
+                    super::catalog_mutation_service::require_providerless_tool(db, session, &live).await?;
+                }
+            }
             if current.skills_revision != base_revision { return Err(AppError::Conflict(format!("Skills revision changed; expected {base_revision}, current {}", current.skills_revision))); }
             let previous = state(&current);
             let desired = if let Some(revision) = restore_revision {
@@ -459,6 +604,20 @@ async fn commit_once(
             });
             if !changed && !metadata_changed {
                 return Ok(SkillCommit { revision: current.skills_revision, service: current, state: desired, replayed: false, changed: false, mutated: false });
+            }
+            if let Some((observed, authority)) = &mutation {
+                super::catalog_mutation_service::fence(db, session, observed, Some(authority)).await?;
+            }
+            if current.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+                let SkillActor::Human { id } = actor else {
+                    return Err(AppError::Forbidden("Tool metadata requires human authority".into()));
+                };
+                if !super::tools_manager_service::fence_authority(db, session, id).await? {
+                    return Err(AppError::Forbidden("Tool skill metadata requires Admin authority".into()));
+                }
+                if super::tools_manager_service::tool_contract_changed(&current, &metadata)? {
+                    super::service_endpoint_service::demote_tool_in_session(db, session, service_id, None, audit.as_ref().map(|(actor,key)| (actor,key.as_slice()))).await?;
+                }
             }
             if changed && let SkillActor::Curation { id, token_jti, .. } = actor {
                 let fenced = db.collection::<ServiceAccountToken>(TOKENS).update_one(
@@ -544,6 +703,18 @@ pub async fn create(
     request_id: &str,
     fingerprint: &str,
 ) -> AppResult<DownstreamService> {
+    create_with_endpoints(db, service, actor_id, input, request_id, fingerprint, &[]).await
+}
+
+pub async fn create_with_endpoints(
+    db: &Database,
+    service: &DownstreamService,
+    actor_id: &str,
+    input: &SkillUpdate,
+    request_id: &str,
+    fingerprint: &str,
+    endpoints: &[crate::models::service_endpoint::ServiceEndpoint],
+) -> AppResult<DownstreamService> {
     let desired = resolve_update(&SkillState::default(), input)?;
     if let Some(replay) = replay_create(db, actor_id, request_id, fingerprint).await? {
         return Ok(replay);
@@ -559,6 +730,7 @@ pub async fn create(
     let transaction_actor = actor_id.to_owned();
     let transaction_request = request_id.to_owned();
     let transaction_fingerprint = fingerprint.to_owned();
+    let endpoints = endpoints.to_vec();
     let committed = session
         .start_transaction()
         .and_run2(async move |session| {
@@ -573,6 +745,75 @@ pub async fn create(
             }
 
             let result: AppResult<()> = async {
+                let mut endpoints = endpoints.clone();
+                if service.offering_kind == crate::models::downstream_service::OfferingKind::Tool {
+                    let admin =
+                        super::tools_manager_service::fence_authority(db, session, actor_id)
+                            .await?;
+                    if !service.tools_manager_created && !admin {
+                        return Err(AppError::Forbidden(
+                            "Tool creation requires live Admin authority".into(),
+                        ));
+                    }
+                }
+                if service.tools_manager_created
+                    && let Some(source) = service.import_source.as_ref().filter(|s| {
+                        matches!(
+                            s.kind,
+                            crate::models::downstream_service::CatalogImportKind::CatalogTwin
+                        )
+                    })
+                {
+                    let live = db
+                        .collection::<DownstreamService>(SERVICES)
+                        .find_one(doc! {"slug":&source.reference,"is_active":true})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::Conflict("Twin source changed".into()))?;
+                    if source.version.as_deref() != Some(live.updated_at.to_rfc3339().as_str())
+                        || (live.visibility == "private"
+                            && live.owner_user_id.as_deref().unwrap_or(&live.created_by)
+                                != actor_id)
+                    {
+                        return Err(AppError::Conflict(
+                            "Twin source changed or is no longer visible".into(),
+                        ));
+                    }
+                    use futures::TryStreamExt;
+                    endpoints = db
+                        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                            crate::models::service_endpoint::COLLECTION_NAME,
+                        )
+                        .find(doc! {"service_id":&live.id})
+                        .session(&mut *session)
+                        .await?
+                        .stream(&mut *session)
+                        .try_collect()
+                        .await?;
+                    for row in &mut endpoints {
+                        if row.target_id.is_some() {
+                            return Err(AppError::ValidationError(
+                                "Manager twins cannot inherit destination-bound operations".into(),
+                            ));
+                        }
+                        row.id = Uuid::new_v4().to_string();
+                        row.service_id = service.id.clone();
+                        row.publication = crate::models::service_endpoint::PublicationState::Draft;
+                        row.is_active = false;
+                        row.operation_generation = 1;
+                        row.created_at = service.created_at;
+                        row.updated_at = service.created_at;
+                        row.async_operation = None;
+                        row.execution = Default::default();
+                    }
+                    db.collection::<mongodb::bson::Document>(SERVICES)
+                        .update_one(
+                            doc! {"_id":&live.id},
+                            doc! {"$inc":{"tools_twin_fence":1_i64}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 if let Some(provider_id) = service.provider_config_id.as_deref() {
                     super::provider_link_service::link_in_session(
                         db,
@@ -587,6 +828,14 @@ pub async fn create(
                         .insert_one(&service)
                         .session(&mut *session)
                         .await?;
+                }
+                if !endpoints.is_empty() {
+                    db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                        crate::models::service_endpoint::COLLECTION_NAME,
+                    )
+                    .insert_many(&endpoints)
+                    .session(&mut *session)
+                    .await?;
                 }
                 if changed {
                     db.collection::<CatalogSkillRevision>(HISTORY)

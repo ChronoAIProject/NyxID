@@ -52,7 +52,7 @@ An admin configures the downstream service in NyxID with:
 
 - **Delegation Token Injection** enabled (`inject_delegation_token: true`)
 - **Delegation Token Scope** set (e.g., `llm:proxy`)
-- **Identity Propagation** set to `headers` (or `jwt` or `both`)
+- **Identity Propagation** optionally set to `headers`, `jwt` or `both`; delegation injection also works with `none`
 - **Endpoints** defined as MCP tools (method, path, parameters, descriptions)
 
 ### Step-by-Step Flow
@@ -163,6 +163,46 @@ Key fields:
 - `act.sub` -- the service slug (identifies which downstream service is acting)
 - `delegated: true` -- distinguishes delegation tokens from direct user tokens
 - `scope` -- constrained to only the configured delegation scope
+
+REST and MCP use the same token signer and authenticated restriction projection.
+The subject remains the calling person or service account (not the billing
+owner). Catalog-backed aliases use the canonical catalog slug in `act.sub`;
+custom services use their own slug. Resource restrictions and effective
+service/node allowlists, including live organization-agent intersections and
+relay restrictions, are preserved. Both direct and node-routed calls carry the
+header, independently of identity-header propagation. Services without
+`inject_delegation_token` receive no generated delegation header. Tokens are
+never included in logs or audit records.
+
+Scheduled-invocation keys require the REST durable proxy protocol and cannot
+use MCP to bypass its grant admission. MCP applies the same API-key purpose
+guard before tool execution or delegation-token generation.
+
+### Caller bearer and provider-credential parity
+
+`forward_access_token` is independent of delegation-token injection. REST and
+MCP use the same request-local bearer extraction and downstream forwarding
+rules, on both direct HTTP and node-routed calls. A supplied `Authorization:
+Bearer …` is forwarded unchanged when enabled, including service-account,
+delegated and relay bearers. API-key-only (`x-api-key`) and session-only calls
+have no bearer to forward: NyxID does not synthesize one. Scheduled invocation
+credentials are never forwarded, and MCP session fallback never forwards the
+expired or invalid JWT that failed authentication. Raw bearers are not stored
+in MCP sessions, logs or audits; their request-local wrapper redacts Debug and
+zeroizes its storage on drop.
+
+Node-routed MCP and REST calls share the preparation of delegated provider
+credentials: path prefixes, encoded query parameters, and header/bearer
+injection. They share header precedence as well, preserving server-owned
+headers and the node's responsibility for its local service credential.
+
+Legacy provider lookup uses the resolved service owner when present and the
+verified proxy principal otherwise. Service-account calls therefore select
+their effective owner's provider connection, while retaining the service
+account as the token subject and audit actor. Both REST and MCP apply this
+fallback; it also corrects the old pure-legacy REST lookup by service-account
+UUID. UserService routes continue to use their own resolved credential and
+skip legacy provider lookup, including organization-owned connections.
 
 #### Example: Calling the LLM Gateway
 

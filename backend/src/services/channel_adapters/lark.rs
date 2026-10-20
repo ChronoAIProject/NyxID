@@ -34,6 +34,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "chat does not exist",
 ];
 
+#[path = "lark_thread.rs"]
+mod thread;
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
@@ -799,7 +802,7 @@ pub(crate) fn updated_lark_token(
 
 #[cfg(test)]
 impl LarkFamilyAdapter {
-    pub(super) fn media_test_adapter(base: &str, platform: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str, platform: &str) -> Self {
         Self {
             base_url: base.into(),
             platform: platform.into(),
@@ -810,6 +813,53 @@ impl LarkFamilyAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for LarkFamilyAdapter {
+    async fn resolve_thread(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        self.resolve_native_thread(http, credentials, facts, ancestors)
+            .await
+    }
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+    async fn thread_history(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        self.history_in_thread(http, credentials, target, before)
+            .await
+    }
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_history: true,
+            thread_follow: true,
+            ..Default::default()
+        }
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        _bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::lark(inbound, bot_user_id)
+    }
+
     fn display_name(&self) -> &str {
         if self.platform == "feishu" {
             "Feishu"
@@ -944,6 +994,61 @@ impl PlatformAdapter for LarkFamilyAdapter {
         }
     }
 
+    async fn bot_user_id(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+    ) -> AppResult<Option<String>> {
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!("{}/open-apis/bot/v3/info", self.base_url))
+                .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["bot"]["open_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .map(str::to_owned))
+    }
+
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        if conversation_id.is_empty()
+            || conversation_id.len() > 128
+            || !conversation_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Ok(None);
+        }
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!(
+                "{}/open-apis/im/v1/chats/{conversation_id}",
+                self.base_url
+            ))
+            .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["data"]["name"].as_str().map(str::to_owned))
+    }
+
     async fn fetch_attachment(
         &self,
         http: &reqwest::Client,
@@ -1029,24 +1134,46 @@ impl PlatformAdapter for LarkFamilyAdapter {
                         media::safe_filename(attachment.filename.as_deref()),
                     );
                 }
-                let upload = media::response_json(
+                let upload = media::platform_json(
                     http.post(format!("{}/open-apis/im/v1/{endpoint}", self.base_url))
                         .bearer_auth(token.as_str())
                         .multipart(form),
+                    self.display_name(),
+                    &[],
                 )
                 .await?;
-                if upload["code"] != 0 {
-                    return Err(media::upload_failed());
+                let code = upload["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                upload["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
                 }
                 let handle = upload["data"][key]
                     .as_str()
                     .ok_or_else(media::upload_failed)?;
                 let content = serde_json::json!({key: handle}).to_string();
-                let response = media::response_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
+                let response = media::platform_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
                     .query(&[("receive_id_type", "chat_id")]).bearer_auth(token.as_str())
-                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content}))).await?;
-                if response["code"] != 0 {
-                    return Err(media::upload_failed());
+                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content})), self.display_name(), &[]).await?;
+                let code = response["code"].as_i64().ok_or_else(media::upload_failed)?;
+                if code != 0 {
+                    return Err(
+                        crate::services::channel_platform::classify_upstream_refusal(
+                            self.display_name(),
+                            &format!(
+                                "code {code}: {}",
+                                response["msg"].as_str().unwrap_or("provider refusal")
+                            ),
+                            &[],
+                        ),
+                    );
                 }
                 last = Some(
                     response["data"]["message_id"]
@@ -1078,6 +1205,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             self.base_url
         );
 
+        crate::services::channel_platform::mark_provider_attempt();
         let resp: serde_json::Value = http
             .post(&url)
             .header("Authorization", format!("Bearer {tenant_token}"))
@@ -1231,6 +1359,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: app_id.to_string(),
+            display_name: None,
             platform_bot_username: format!("{}_bot", self.platform),
         })
     }
@@ -1364,6 +1493,7 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

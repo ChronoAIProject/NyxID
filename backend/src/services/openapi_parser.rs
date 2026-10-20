@@ -21,6 +21,12 @@ pub struct ParsedEndpoint {
     pub request_body_required: bool,
     pub response: OperationResponseContract,
     pub risk: Option<EndpointRisk>,
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists where its method says otherwise; `None` leaves it
+    /// to the method.
+    pub changes_existing: Option<bool>,
     pub supports_idempotency_key: bool,
 }
 
@@ -42,6 +48,31 @@ enum Swagger2FormBodyKind {
 /// Use this when the spec has already been fetched through a hardened path
 /// (e.g., `api_docs_service::fetch_spec_json`).
 pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<ParsedEndpoint>> {
+    let mut endpoints = parse_hosted_openapi_spec_value(spec)?;
+    // Resolve references/overrides first, then discard NyxID-only authority from
+    // remote specifications, including markers hidden behind arbitrary refs.
+    // Standard allowReserved remains available to remote producers.
+    for endpoint in &mut endpoints {
+        if let Some(parameters) = endpoint
+            .parameters
+            .as_mut()
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for parameter in parameters {
+                if let Some(object) = parameter.as_object_mut() {
+                    object.remove(super::operation_path::PATH_SEGMENTS);
+                }
+            }
+        }
+    }
+    Ok(endpoints)
+}
+
+/// Only compiled overlays may opt in with NyxID-owned parameter metadata.
+/// Callers loading remote specs must use `parse_openapi_spec_value` instead.
+pub(crate) fn parse_hosted_openapi_spec_value(
+    spec: &serde_json::Value,
+) -> AppResult<Vec<ParsedEndpoint>> {
     let is_openapi3 = spec.get("openapi").is_some();
     let is_swagger2 = spec.get("swagger").is_some();
 
@@ -54,7 +85,22 @@ pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<Parse
     parse_endpoints_from_spec(spec, is_openapi3)
 }
 
-/// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec from a URL.
+/// NyxID-owned extensions are honoured only when the supplied document is
+/// exactly the compiled overlay registered for this hosted path. Any other
+/// document at a lookalike URL (for example an instance-mounted spec) is parsed
+/// as a remote document: its own operations govern and NyxID extensions are
+/// stripped.
+pub(crate) fn parse_openapi_spec_for_url(
+    spec: &serde_json::Value,
+    url: &str,
+) -> AppResult<Vec<ParsedEndpoint>> {
+    match super::api_docs_service::hosted_catalog_spec_for_url(url)? {
+        Some(hosted) if hosted.as_ref() == spec => parse_hosted_openapi_spec_value(&hosted),
+        _ => parse_openapi_spec_value(spec),
+    }
+}
+
+/// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec (JSON or YAML) from a URL.
 ///
 /// For each path+operation, extracts the operationId (or generates one from
 /// method+path), summary/description, parameters, and requestBody schema.
@@ -62,6 +108,9 @@ pub async fn parse_openapi_spec(
     client: &reqwest::Client,
     url: &str,
 ) -> AppResult<Vec<ParsedEndpoint>> {
+    if let Some(spec) = super::api_docs_service::hosted_catalog_spec_for_url(url)? {
+        return parse_hosted_openapi_spec_value(&spec);
+    }
     let resp = client
         .get(url)
         .timeout(std::time::Duration::from_secs(30))
@@ -77,31 +126,13 @@ pub async fn parse_openapi_spec(
     }
 
     let body = resp
-        .text()
+        .bytes()
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read OpenAPI spec body: {e}")))?;
 
-    let spec: serde_json::Value = if body.trim_start().starts_with('{') {
-        serde_json::from_str(&body)
-            .map_err(|e| AppError::BadRequest(format!("Invalid JSON in OpenAPI spec: {e}")))?
-    } else {
-        // Try YAML parsing via serde_json (only JSON supported for now)
-        return Err(AppError::BadRequest(
-            "Only JSON OpenAPI specs are supported".to_string(),
-        ));
-    };
+    let spec = crate::services::api_docs_service::parse_spec_body(body).await?;
 
-    // Determine spec version
-    let is_openapi3 = spec.get("openapi").is_some();
-    let is_swagger2 = spec.get("swagger").is_some();
-
-    if !is_openapi3 && !is_swagger2 {
-        return Err(AppError::BadRequest(
-            "Spec must contain an 'openapi' or 'swagger' key".to_string(),
-        ));
-    }
-
-    parse_endpoints_from_spec(&spec, is_openapi3)
+    parse_openapi_spec_for_url(&spec, url)
 }
 
 fn parse_endpoints_from_spec(
@@ -152,6 +183,14 @@ fn parse_endpoints_from_spec(
                         EndpointRisk::Write
                     }
                 });
+            let destructive = operation
+                .get("x-aevatar-tool")
+                .and_then(|value| value.get("destructive"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let changes_existing = operation
+                .get("x-nyxid-changes-existing")
+                .and_then(|value| value.as_bool());
             let supports_idempotency_key = operation
                 .get("x-nyxid-idempotency-key")
                 .and_then(|value| value.as_bool())
@@ -193,6 +232,8 @@ fn parse_endpoints_from_spec(
                 request_body_required: request_body.required,
                 response,
                 risk,
+                destructive,
+                changes_existing,
                 supports_idempotency_key,
             });
         }
@@ -343,7 +384,7 @@ fn generate_name(method: &str, path: &str) -> String {
 }
 
 /// Sanitize a string into a valid MCP tool name: ^[a-z][a-z0-9_]*$
-fn sanitize_name(raw: &str) -> String {
+pub(crate) fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| {
@@ -2520,6 +2561,76 @@ mod tests {
     // ---- parse_openapi_spec_value ----
 
     #[test]
+    fn catalog_spec_path_segments_trust_boundary_and_allow_reserved() {
+        let spec = serde_json::json!({
+            "openapi":"3.1.0",
+            "x-parameters":{"file":{"name":"location", "in":"path", "required":true,
+                "x-nyxid-path-segments":true, "schema":{"type":"string"}}},
+            "paths":{"/files/{location}":{"parameters":[{"$ref":"#/x-parameters/file"}],
+                "get":{"operationId":"read"}}}
+        });
+        let parameter =
+            |endpoints: Vec<ParsedEndpoint>| endpoints[0].parameters.as_ref().unwrap()[0].clone();
+        let remote = parameter(parse_openapi_spec_value(&spec).unwrap());
+        assert!(remote.get("x-nyxid-path-segments").is_none());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&remote, "a/b").unwrap(),
+            "a%2Fb"
+        );
+        let hosted = parameter(parse_hosted_openapi_spec_value(&spec).unwrap());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&hosted, "a/b").unwrap(),
+            "a/b"
+        );
+        let mut standard = spec.clone();
+        standard["x-parameters"]["file"]["allowReserved"] = serde_json::json!(true);
+        let remote = parameter(parse_openapi_spec_value(&standard).unwrap());
+        assert!(remote.get("x-nyxid-path-segments").is_none());
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&remote, "a/b").unwrap(),
+            "a/b"
+        );
+        // A different document at a hosted-looking URL (for example an
+        // instance-mounted spec) keeps its own operations, and its NyxID
+        // extensions are never honoured.
+        let lookalike = parse_openapi_spec_for_url(
+            &spec,
+            "https://untrusted.example/api/v1/catalog-specs/github/openapi.json",
+        )
+        .unwrap();
+        assert!(lookalike.iter().any(|op| op.name == "read"));
+        assert!(!lookalike.iter().any(|op| op.name == "get_file_contents"));
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&parameter(lookalike), "a/b").unwrap(),
+            "a%2Fb"
+        );
+        // Only the exact compiled overlay at its hosted path carries them.
+        let compiled = super::super::catalog_spec_registry::spec_for_key("github").unwrap();
+        let exact = parse_openapi_spec_for_url(
+            &compiled,
+            "https://untrusted.example/api/v1/catalog-specs/github/openapi.json",
+        )
+        .unwrap();
+        let contents = exact
+            .into_iter()
+            .find(|op| op.name == "get_file_contents")
+            .unwrap();
+        let path = contents
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.as_array())
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "path")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            super::super::operation_path::encode_parameter(&path, "backend/src").unwrap(),
+            "backend/src"
+        );
+    }
+
+    #[test]
     fn parse_openapi_spec_value_rejects_non_spec_document() {
         let spec = serde_json::json!({"foo": "bar"});
         let result = parse_openapi_spec_value(&spec);
@@ -2611,6 +2722,49 @@ mod tests {
         let endpoints = parse_openapi_spec_value(&spec).unwrap();
         assert_eq!(endpoints[0].risk, Some(EndpointRisk::Write));
         assert!(endpoints[0].supports_idempotency_key);
+    }
+
+    #[test]
+    fn operations_carry_their_destructive_marker() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/items/{id}": {
+                    "patch": {
+                        "operationId": "updateItem",
+                        "x-aevatar-tool": { "readOnly": false, "destructive": true },
+                        "responses": { "200": {} }
+                    },
+                    "get": { "operationId": "getItem", "responses": { "200": {} } }
+                },
+                "/items/{id}/edit": {
+                    "post": {
+                        "operationId": "editItem",
+                        "x-nyxid-changes-existing": true,
+                        "responses": { "200": {} }
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        let destructive = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .destructive
+        };
+        let changes = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .changes_existing
+        };
+        assert!(destructive("updateitem"));
+        assert!(!destructive("getitem"));
+        assert_eq!(changes("edititem"), Some(true));
+        assert_eq!(changes("getitem"), None);
     }
 
     // ---- extract_swagger2_consumes ----
@@ -2893,5 +3047,47 @@ mod mcp_projection_tests {
             bad["paths"]["/files/{id}"]["post"]["requestBody"] = sibling;
             assert!(parse_openapi_spec_value(&bad).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod spec_format_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn discovery_fetches_yaml_and_json_specs() {
+        let server = wiremock::MockServer::start().await;
+        let yaml = "openapi: 3.0.0\ninfo: {title: n8n, version: 1.1.1}\npaths:\n  /workflows:\n    get:\n      operationId: getWorkflows\n      responses:\n        200: {description: ok}\n";
+        let json = r#"{"openapi":"3.0.0","info":{"title":"n8n","version":"1.1.1"},"paths":{"/workflows":{"get":{"operationId":"getWorkflows","responses":{"200":{"description":"ok"}}}}}}"#;
+        for (path, body) in [
+            ("/api/v1/openapi.yml", yaml),
+            ("/api/v1/openapi.json", json),
+            ("/api/v1/not-a-spec", "<html><body>Not found</body></html>"),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::path(path))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let client = reqwest::Client::new();
+
+        for path in ["/api/v1/openapi.yml", "/api/v1/openapi.json"] {
+            let endpoints = parse_openapi_spec(&client, &format!("{}{path}", server.uri()))
+                .await
+                .unwrap_or_else(|err| panic!("{path}: {err:?}"));
+            assert_eq!(endpoints.len(), 1, "{path}");
+            assert_eq!(endpoints[0].method, "GET");
+            assert_eq!(endpoints[0].path, "/workflows");
+        }
+
+        let Err(AppError::BadRequest(message)) =
+            parse_openapi_spec(&client, &format!("{}/api/v1/not-a-spec", server.uri())).await
+        else {
+            panic!("an HTML page is not a spec");
+        };
+        assert!(
+            message.starts_with("Spec was not valid JSON or YAML"),
+            "{message}"
+        );
     }
 }

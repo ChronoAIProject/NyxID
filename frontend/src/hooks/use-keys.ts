@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api-client";
 import { connectWatchInterval } from "@/lib/assistant/connect-watch";
+import { modeAQueryIdentity } from "@/components/cli-wizard/client";
 import type {
   KeyInfo,
   KeyListResponse,
@@ -16,12 +17,28 @@ import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --
 
-export function useKeys() {
+export function useKeys(options: { includeTools?: boolean } = {}) {
   const identity = useAuthStore((state) => state.user?.id);
+  const authority = modeAQueryIdentity() ?? identity;
   const query = useQuery({
-    queryKey: ["keys", "list", identity],
-    queryFn: async (): Promise<readonly KeyInfo[]> => {
-      const res = await api.get<KeyListResponse>("/keys");
+    queryKey: options.includeTools
+      ? ["keys", "list", authority, true]
+      : ["keys", "list", authority],
+    enabled: Boolean(authority),
+    queryFn: async ({ queryKey }): Promise<readonly KeyInfo[]> => {
+      const actor = queryKey[2];
+      const authorityGuard = () => {
+        if (
+          !actor ||
+          (modeAQueryIdentity() ?? useAuthStore.getState().user?.id) !== actor
+        )
+          throw new Error("Account changed before loading connections");
+      };
+      authorityGuard();
+      const res = await api.get<KeyListResponse>(
+        options.includeTools ? "/keys?include_tool_bindings=true" : "/keys",
+        { authorityGuard },
+      );
       return res.keys;
     },
     staleTime: 0,
@@ -42,7 +59,8 @@ export function useKey(keyId: string) {
       } catch (error) {
         // Rejected access must also erase the cached copy, so a later network
         // failure cannot make previously accessible details reappear.
-        if (!isTransientKeyReadError(error)) client.setQueryData(queryKey, null);
+        if (!isTransientKeyReadError(error))
+          client.setQueryData(queryKey, null);
         throw error;
       }
     },
@@ -60,7 +78,10 @@ export function useKey(keyId: string) {
 }
 
 function isTransientKeyReadError(error: unknown): boolean {
-  return error instanceof TypeError || (error instanceof ApiError && error.status >= 500);
+  return (
+    error instanceof TypeError ||
+    (error instanceof ApiError && error.status >= 500)
+  );
 }
 
 /** Terminal states of a placeholder key created for an out-of-band flow. */
@@ -133,7 +154,10 @@ export function useKeyAuthorizationStatus(
       status === KEY_AUTH_FAILED ||
       (status === KEY_AUTH_ACTIVE && authorizationAdvanced)
     ) {
-      void queryClient.invalidateQueries({ queryKey: ["keys", "list", identity], exact: true });
+      void queryClient.invalidateQueries({
+        queryKey: ["keys", "list", identity],
+        exact: true,
+      });
       if (keyId) {
         void queryClient.invalidateQueries({
           queryKey: ["keys", keyId, identity],
@@ -250,7 +274,10 @@ export function useKeyAuthorizationWatch(
   const terminalActive = status === KEY_AUTH_ACTIVE && authorizationAdvanced;
   useEffect(() => {
     if (terminalActive || status === KEY_AUTH_FAILED) {
-      void queryClient.invalidateQueries({ queryKey: ["keys", "list", identity], exact: true });
+      void queryClient.invalidateQueries({
+        queryKey: ["keys", "list", identity],
+        exact: true,
+      });
       if (keyId) {
         void queryClient.invalidateQueries({
           queryKey: ["keys", keyId, identity],
@@ -383,6 +410,7 @@ export function useDeleteKey() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["service-preference"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
@@ -405,6 +433,8 @@ interface UpdateKeyParams {
   readonly credential?: string;
   readonly keyId: string;
   readonly label?: string;
+  /** Empty string clears the icon override. */
+  readonly icon_url?: string;
   readonly recommended_skills?: readonly string[];
   readonly endpoint_url?: string;
   readonly auth_method?: string;
@@ -433,6 +463,7 @@ export function useUpdateKey() {
     },
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["service-preference"] });
       void queryClient.invalidateQueries({
         queryKey: ["keys", variables.keyId],
       });

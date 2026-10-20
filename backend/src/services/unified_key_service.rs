@@ -139,6 +139,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
         auth_method,
         auth_key_name,
         catalog_service_id: Some(catalog.id.clone()),
+        icon_url: None,
         node_id: None,
         node_priority: 0,
         service_type: "http".into(),
@@ -549,6 +550,7 @@ pub struct CreateKeyResult {
 /// Combined view for GET /keys and GET /keys/:id.
 #[derive(Debug)]
 pub struct KeyView {
+    pub offering_kind: crate::models::downstream_service::OfferingKind,
     pub id: String,
     pub label: String,
     pub slug: String,
@@ -562,6 +564,8 @@ pub struct KeyView {
     pub platform_key_available: bool,
     pub platform_key_pricing: Option<super::inference_service::LanePricingView>,
     pub byok_pricing: Option<super::inference_service::LanePricingView>,
+    pub inference: Option<super::inference_service::InferenceView>,
+    pub capabilities: Option<super::inference_service::ServiceCapabilitiesView>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -572,6 +576,10 @@ pub struct KeyView {
     pub catalog_service_id: Option<String>,
     pub catalog_service_slug: Option<String>,
     pub catalog_service_name: Option<String>,
+    /// Per-connection icon override.
+    pub icon_url: Option<String>,
+    /// The catalog service's own icon, shown when there is no override.
+    pub catalog_icon_url: Option<String>,
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub service_type: String,
@@ -615,6 +623,8 @@ pub struct KeyView {
     /// re-typing the credential. `None` otherwise. The client_secret is
     /// never surfaced (write-only across the API).
     pub oauth_client_id: Option<String>,
+    /// Resolved OAuth app source, including legacy provider-token metadata.
+    pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection, parsed from the
     /// backing `UserApiKey.token_scopes`. Lets the connect UIs pre-select and
     /// lock the existing grant when adding scopes to an existing connection
@@ -1478,6 +1488,10 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -1495,6 +1509,7 @@ async fn create_key_inner(
             visibility: "private".to_string(),
             auth_method: "none".to_string(),
             auth_type: Some("ssh".to_string()),
+            auth_scheme: None,
             auth_key_name: String::new(),
             credential_encrypted: empty_credential.clone(),
             platform_key: None,
@@ -1507,6 +1522,10 @@ async fn create_key_inner(
             requires_user_credential: false,
             is_active: true,
             created_by: user_id.to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -1521,6 +1540,8 @@ async fn create_key_inner(
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -1864,7 +1885,7 @@ pub async fn auto_provision_no_auth_services(
     auto_provision_with_grants(db, user_id, &grants, &providers).await
 }
 
-async fn auto_provision_with_grants(
+pub(crate) async fn auto_provision_with_grants(
     db: &mongodb::Database,
     user_id: &str,
     grants: &OwnerGrants,
@@ -2520,6 +2541,18 @@ pub async fn list_keys_read_only_with_grants(
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
+    list_keys_read_only_with_tool_bindings(db, encryption_keys, user_id, grants, providers, false)
+        .await
+}
+
+pub async fn list_keys_read_only_with_tool_bindings(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+    include_tool_bindings: bool,
+) -> AppResult<Vec<KeyView>> {
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
@@ -2571,6 +2604,8 @@ pub async fn list_keys_read_only_with_grants(
         .await?
     };
     let ak_map: HashMap<&str, &UserApiKey> = api_keys.iter().map(|k| (k.id.as_str(), k)).collect();
+    let app_sources =
+        super::oauth_app_source::load(db, &api_keys.iter().collect::<Vec<_>>()).await?;
 
     // Batch-load catalog services (for names + SSH config).
     let catalog_ids: Vec<&str> = tagged
@@ -2612,6 +2647,19 @@ pub async fn list_keys_read_only_with_grants(
     let mut views: Vec<KeyView> = tagged
         .into_iter()
         .filter_map(|t| {
+            if !include_tool_bindings
+                && t.service
+                    .catalog_service_id
+                    .as_deref()
+                    .and_then(|id| cat_map.get(id))
+                    .is_some_and(|catalog| {
+                        catalog.offering_kind
+                            == crate::models::downstream_service::OfferingKind::Tool
+                    })
+                && super::platform_key_service::binding(&t.service) == "platform"
+            {
+                return None;
+            }
             let ep = ep_map.get(t.service.endpoint_id.as_str())?;
             let ak = t
                 .service
@@ -2633,6 +2681,11 @@ pub async fn list_keys_read_only_with_grants(
     // present. Sequential await is fine — N is bounded by the user's
     // key count and decrypt is fast.
     for view in views.iter_mut() {
+        view.oauth_app_source = view
+            .api_key_id
+            .as_ref()
+            .and_then(|id| app_sources.get(id))
+            .map(|source| source.as_str().to_owned());
         if let Some(catalog) = view
             .catalog_service_id
             .as_deref()
@@ -2642,6 +2695,13 @@ pub async fn list_keys_read_only_with_grants(
                 .get(view.endpoint_id.as_str())
                 .map(|ep| ep.user_id.as_str())
                 .unwrap_or(user_id);
+            view.catalog_icon_url = super::catalog_service::catalog_icon_url(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+            );
             view.platform_key_available = platform_key_service::available_with_grants(
                 catalog,
                 catalog
@@ -2650,6 +2710,15 @@ pub async fn list_keys_read_only_with_grants(
                     .and_then(|id| providers.get(id)),
                 owner,
                 grants,
+            );
+            view.inference = super::inference_service::view(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id))
+                    .map(|p| p.slug.as_str()),
+                view.platform_key_available,
             );
         }
         let enc = view
@@ -2723,10 +2792,37 @@ pub async fn get_key(
         user_service_service::CredentialSource::Personal,
     );
 
+    let app_sources = super::oauth_app_source::load(db, &ak.iter().collect::<Vec<_>>()).await?;
+    view.oauth_app_source = view
+        .api_key_id
+        .as_ref()
+        .and_then(|id| app_sources.get(id))
+        .map(|source| source.as_str().to_owned());
+
     if let Some(catalog) = catalog_ds.as_ref() {
-        view.platform_key_available =
-            super::platform_key_service::available(db, catalog, user_id).await?;
+        let provider = if let Some(id) = &catalog.provider_config_id {
+            db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+                .find_one(doc! {"_id": id})
+                .await?
+        } else {
+            None
+        };
+        view.catalog_icon_url =
+            super::catalog_service::catalog_icon_url(catalog, provider.as_ref());
+        view.platform_key_available = super::platform_key_service::available_with_provider(
+            db,
+            catalog,
+            provider.as_ref(),
+            user_id,
+        )
+        .await?;
+        view.inference = super::inference_service::view(
+            catalog,
+            provider.as_ref().map(|p| p.slug.as_str()),
+            view.platform_key_available,
+        );
     }
+
     enrich_view_with_oauth_client_id(
         encryption_keys,
         &mut view,
@@ -4462,6 +4558,9 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
+        offering_kind: catalog_ds.map(|c| c.offering_kind).unwrap_or_default(),
+        inference: catalog_ds.and_then(|c| super::inference_service::view(c, None, false)),
+        capabilities: catalog_ds.and_then(super::inference_service::capabilities),
         platform_key_available: false,
         platform_key_pricing: catalog_ds
             .and_then(|c| c.billing.as_ref())
@@ -4493,6 +4592,8 @@ fn build_key_view(
         catalog_service_id: svc.catalog_service_id.clone(),
         catalog_service_slug: catalog_ds.map(|ds| ds.slug.clone()),
         catalog_service_name: catalog_ds.map(|ds| ds.name.clone()),
+        icon_url: svc.icon_url.clone(),
+        catalog_icon_url: None,
         node_id: svc.node_id.clone(),
         node_priority: svc.node_priority,
         service_type: svc.service_type.clone(),
@@ -4523,6 +4624,9 @@ fn build_key_view(
         // `EncryptionKeys` operations are async and `build_key_view`
         // is intentionally sync.
         oauth_client_id: None,
+        oauth_app_source: ak
+            .and_then(super::oauth_app_source::from_key)
+            .map(|source| source.as_str().to_owned()),
         // OAuth providers echo scopes using either spaces or commas. Normalize
         // both forms at the read boundary while preserving the raw provider
         // response in storage and the first-occurrence display order.
@@ -4619,6 +4723,107 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn tools_hide_only_platform_bindings_and_preserve_byok_inventory() {
+        let db = crate::test_utils::connect_test_database("tool_key_inventory")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.offering_kind = crate::models::downstream_service::OfferingKind::Tool;
+        catalog.service_category = "internal".into();
+        catalog.auth_method = "none".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut byok_id = String::new();
+        for binding in ["platform", "user"] {
+            let endpoint_id = uuid::Uuid::new_v4().to_string();
+            let id = uuid::Uuid::new_v4().to_string();
+            let endpoint = crate::test_utils::test_user_endpoint(
+                &endpoint_id,
+                &owner,
+                binding,
+                "https://api.example.com",
+                None,
+                Some(&catalog.id),
+            );
+            db.collection::<crate::models::user_endpoint::UserEndpoint>(
+                crate::models::user_endpoint::COLLECTION_NAME,
+            )
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+            let mut service = crate::test_utils::test_user_service(
+                &id,
+                &owner,
+                binding,
+                &endpoint_id,
+                Some(&catalog.id),
+                None,
+            );
+            service.credential_binding = Some(binding.into());
+            service.auth_method = "bearer".into();
+            db.collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .insert_one(service)
+            .await
+            .unwrap();
+            if binding == "user" {
+                byok_id = id;
+            }
+        }
+        let state = crate::test_utils::test_app_state(db.clone());
+        let grants = OwnerGrants::load_for_listing(&db, &owner).await.unwrap();
+        let views = list_keys_read_only_with_grants(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            &grants,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, byok_id);
+        assert_eq!(
+            views[0].offering_kind,
+            crate::models::downstream_service::OfferingKind::Tool
+        );
+        assert_eq!(views[0].credential_binding, "user");
+        let auth = crate::test_utils::test_auth_user(&owner);
+        let axum::Json(hidden) =
+            crate::handlers::keys::list_keys(axum::extract::State(state.clone()), auth.clone())
+                .await
+                .unwrap();
+        assert_eq!(hidden.keys.len(), 1);
+        assert_eq!(hidden.keys[0].id, byok_id);
+        let axum::Json(included) =
+            crate::handlers::keys::list_keys_with_tool_bindings(state, auth, true)
+                .await
+                .unwrap();
+        assert_eq!(included.keys.len(), 2);
+        assert!(
+            included
+                .keys
+                .iter()
+                .any(|key| key.id == byok_id && key.credential_binding == "user")
+        );
+        assert!(included.keys.iter().any(|key| key.offering_kind
+            == crate::models::downstream_service::OfferingKind::Tool
+            && key.credential_binding == "platform"));
+        db.drop().await.unwrap();
+    }
+
     use std::collections::HashMap;
     use std::sync::{
         Arc,
@@ -4643,15 +4848,17 @@ mod tests {
 
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
-        OpenApiSpecUrlInput, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy, SshCreateParams,
-        UpdateCredentialAction, auto_provision_no_auth_services, auto_provision_source_id,
-        build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
+        OpenApiSpecUrlInput, OwnerGrants, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy,
+        SshCreateParams, UpdateCredentialAction, auto_provision_no_auth_services,
+        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, ensure_user_api_key_for_update,
+        exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
-        is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
-        reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
-        revoke_key_if_pending, slug_candidate_with_suffix, validate_catalog_credential,
+        is_duplicate_slug_app_error, list_keys, list_keys_read_only_with_grants,
+        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
+        slug_candidate_with_suffix, validate_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -4720,6 +4927,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -4788,6 +4996,7 @@ mod tests {
             auth_method: auth_method.to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
@@ -4907,6 +5116,10 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            offering_kind: Default::default(),
+            topics: Vec::new(),
+            supplier: None,
+            import_source: None,
             destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
@@ -4923,6 +5136,7 @@ mod tests {
             credential_encrypted: vec![],
             platform_key: None,
             auth_type: None,
+            auth_scheme: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -4932,6 +5146,10 @@ mod tests {
             requires_user_credential: true,
             is_active: true,
             created_by: "system".to_string(),
+            catalog_manager_created: false,
+            tools_manager_created: false,
+            icon_url: None,
+            tools_credential_frozen: false,
             identity_propagation_mode: "both".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,
@@ -4946,6 +5164,8 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -4998,6 +5218,9 @@ mod tests {
     async fn insert_active_node(db: &mongodb::Database, user_id: &str, node_id: &str) {
         let now = Utc::now();
         let node = Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: node_id.to_string(),
             user_id: user_id.to_string(),
             name: format!("node-{node_id}"),
@@ -6227,6 +6450,29 @@ mod tests {
         assert_eq!(list_view.label, show_view.label);
     }
 
+    #[test]
+    fn oauth_app_metadata_key_view_exposes_observed_modern_oauth() {
+        let service = sample_service("oauth2");
+        let mut key = sample_api_key("oauth2");
+        key.connection_id = Some("connection".into());
+        key.provider_config_id = Some("provider".into());
+        key.access_token_encrypted = Some(vec![1]);
+        key.oauth_app_observation = Some(
+            super::super::oauth_app_source::OAuthAppSource::Platform
+                .observation(key.credential_epoch),
+        );
+        let view = build_key_view(
+            &service,
+            &sample_endpoint(),
+            Some(&key),
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+        assert_eq!(view.oauth_app_source.as_deref(), Some("platform"));
+        assert!(view.oauth_client_id.is_none());
+    }
+
     /// Companion guard: when the service has no api key (auto-provisioned
     /// no-auth), the label falls back to the endpoint label. If a caller
     /// later updates the endpoint label, both paths must reflect the new
@@ -6789,6 +7035,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,
@@ -8108,6 +8355,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: stripped_key_id.clone(),
                 user_id: user_id.clone(),
@@ -8278,6 +8526,7 @@ mod tests {
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
+            authorization_nonce_required: false,
             requires_gateway_url: false,
             created_by: "system".to_string(),
             revocation_seed_version: 0,

@@ -19,11 +19,9 @@ import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
 
 import type { CredentialSource } from "@/schemas/orgs";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
-function sameOwner(
-  a?: CredentialSource,
-  b?: CredentialSource,
-): boolean {
+function sameOwner(a?: CredentialSource, b?: CredentialSource): boolean {
   const aType = a?.type ?? "personal";
   const bType = b?.type ?? "personal";
   if (aType !== bType) return false;
@@ -42,8 +40,38 @@ function canScopeServiceToApiKey(
   return serviceSource.allowed;
 }
 
-export function ServiceScopeCard({
+type ServiceScopeProps = {
+  readonly keyId: string;
+  readonly initialCatalogServiceId?: string;
+  readonly allowAllServices: boolean;
+  readonly allowAutoConnectedServices?: boolean;
+  readonly allowedServiceIds: readonly string[];
+  readonly allowedServices: readonly {
+    readonly id: string;
+    readonly slug: string;
+    readonly label: string;
+    readonly catalog_service_name: string | null;
+    readonly auto_connected?: boolean;
+  }[];
+  readonly apiKeySource?: CredentialSource;
+  readonly canWrite?: boolean;
+};
+export function ServiceScopeCard(props: ServiceScopeProps) {
+  const { data: allKeys, isLoading } = useKeys({ includeTools: true });
+  if (isLoading && props.initialCatalogServiceId)
+    return <p className="text-12">Loading tool grants…</p>;
+  return (
+    <ServiceScopeEditor
+      key={`${props.keyId}:${props.initialCatalogServiceId ?? ""}`}
+      {...props}
+      allKeys={allKeys ?? []}
+    />
+  );
+}
+function ServiceScopeEditor({
   keyId,
+  initialCatalogServiceId,
+  allKeys,
   allowAllServices,
   allowAutoConnectedServices = false,
   allowedServiceIds,
@@ -52,6 +80,8 @@ export function ServiceScopeCard({
   canWrite = true,
 }: {
   readonly keyId: string;
+  readonly initialCatalogServiceId?: string;
+  readonly allKeys: readonly import("@/types/keys").KeyInfo[];
   readonly allowAllServices: boolean;
   readonly allowAutoConnectedServices?: boolean;
   readonly allowedServiceIds: readonly string[];
@@ -66,13 +96,23 @@ export function ServiceScopeCard({
   readonly canWrite?: boolean;
 }) {
   const [allowPlatform, setAllowPlatform] = useState(
-    allowAutoConnectedServices,
+    initialCatalogServiceId ? false : allowAutoConnectedServices,
   );
-  const [editing, setEditing] = useState(false);
-  const [allowAll, setAllowAll] = useState(allowAllServices);
-  const [selectedIds, setSelectedIds] =
-    useState<readonly string[]>(allowedServiceIds);
-  const { data: allKeys } = useKeys();
+  const preselected =
+    canWrite && initialCatalogServiceId
+      ? allKeys.find(
+          (key) =>
+            key.catalog_service_id === initialCatalogServiceId &&
+            canScopeServiceToApiKey(key.credential_source, apiKeySource),
+        )
+      : undefined;
+  const [editing, setEditing] = useState(Boolean(preselected));
+  const [allowAll, setAllowAll] = useState(preselected ? false : allowAllServices);
+  const [selectedIds, setSelectedIds] = useState<readonly string[]>(
+    preselected && !allowedServiceIds.includes(preselected.id)
+      ? [...allowedServiceIds, preselected.id]
+      : allowedServiceIds,
+  );
   // Personal API keys may scope to org services the actor can proxy.
   // Org-owned API keys remain owner-bound to the same org.
   const personalKeys = useMemo(
@@ -127,8 +167,8 @@ export function ServiceScopeCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <Shield className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Service Scope</CardTitle>
+          <Shield className="h-4 w-4 text-primary-text" />
+          <CardTitle className="text-15">Service Scope</CardTitle>
         </div>
         <CardDescription>
           Which external services this key can access via proxy
@@ -143,7 +183,7 @@ export function ServiceScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-[12px]">
+              <Label htmlFor="allow-all-services" className="text-12">
                 Allow all services
               </Label>
             </div>
@@ -163,7 +203,7 @@ export function ServiceScopeCard({
                           checked={selectedIds.includes(k.id)}
                           onCheckedChange={() => toggleService(k.id)}
                         />
-                        <ServiceIcon slug={k.catalog_service_slug} size="2xs" />
+                        <ServiceIcon slug={k.catalog_service_slug} iconUrl={connectionIconUrl(k)} size="2xs" />
                         <Label htmlFor={`svc-${k.id}`} className="text-xs">
                           {k.label}
                           <span className="text-muted-foreground">

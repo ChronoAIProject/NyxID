@@ -1,0 +1,107 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LinkedIn API",
+    "version": "v1.0-nyxid-overlay",
+    "description": "NyxID-hosted LinkedIn operations for connected members. Profile access uses LinkedIn OpenID Connect; publishing requires the w_member_social permission and LinkedIn app approval."
+  },
+  "servers": [
+    {
+      "url": "https://api.linkedin.com",
+      "description": "LinkedIn API"
+    }
+  ],
+  "paths": {
+    "/v2/userinfo": {
+      "get": {
+        "operationId": "get_profile",
+        "summary": "Get the connected LinkedIn profile",
+        "x-aevatar-tool": {
+          "name": "get_profile",
+          "description": "Get the OpenID Connect profile for the connected LinkedIn member.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Connected member profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/ugcPosts": {
+      "post": {
+        "operationId": "create_post",
+        "summary": "Create a LinkedIn post",
+        "x-aevatar-tool": {
+          "name": "create_post",
+          "description": "Create a text post on behalf of the connected LinkedIn member.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "author",
+                  "lifecycleState",
+                  "specificContent",
+                  "visibility"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "author": {
+                    "type": "string",
+                    "description": "The author URN, for example urn:li:person:<id> from the connected profile subject."
+                  },
+                  "lifecycleState": {
+                    "type": "string",
+                    "enum": [
+                      "PUBLISHED"
+                    ]
+                  },
+                  "specificContent": {
+                    "type": "object",
+                    "description": "LinkedIn share content. For a text post, use com.linkedin.ugc.ShareContent with shareCommentary.text and shareMediaCategory set to NONE.",
+                    "additionalProperties": true
+                  },
+                  "visibility": {
+                    "type": "object",
+                    "description": "Visibility object, normally {\"com.linkedin.ugc.MemberNetworkVisibility\":\"PUBLIC\"}.",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Post created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

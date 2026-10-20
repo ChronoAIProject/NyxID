@@ -72,6 +72,23 @@ import type { OAuthFlowKind } from "@/types/oauth-popup";
 
 const POPUP_CLOSED_POLL_MS = 1_000;
 
+function postHogRegion(entry: CatalogEntry): "US" | "EU" | null {
+  if (entry.provider_type !== "oauth2" || !/^PostHog(?:\s|$)/i.test(entry.name)) {
+    return null;
+  }
+  try {
+    const url = new URL(entry.base_url);
+    if (url.protocol !== "https:" || url.port || url.username || url.password) {
+      return null;
+    }
+    if (url.hostname === "us.posthog.com") return "US";
+    if (url.hostname === "eu.posthog.com") return "EU";
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 type WizardStep =
   | "binding"
   | "catalog"
@@ -391,11 +408,21 @@ function CatalogGrid({
   const { data: entries, isLoading } = useCatalog();
   const [search, setSearch] = useState("");
 
-  const filtered = entries?.filter(
-    (e) =>
-      e.name.toLowerCase().includes(search.toLowerCase()) ||
-      e.slug.toLowerCase().includes(search.toLowerCase()),
-  );
+  const [choosingPostHogRegion, setChoosingPostHogRegion] = useState(false);
+  const postHogEntries = entries?.filter((entry) => postHogRegion(entry)) ?? [];
+  const consolidatePostHog =
+    postHogEntries.length === 2 &&
+    new Set(postHogEntries.map(postHogRegion)).size === 2;
+  const postHogRepresentative = consolidatePostHog ? postHogEntries[0] : null;
+  const matchesSearch = (entry: CatalogEntry) =>
+    entry.name.toLowerCase().includes(search.toLowerCase()) ||
+    entry.slug.toLowerCase().includes(search.toLowerCase());
+  const filtered = entries?.filter((entry) => {
+    if (postHogRepresentative && postHogRegion(entry)) {
+      return entry === postHogRepresentative && postHogEntries.some(matchesSearch);
+    }
+    return matchesSearch(entry);
+  });
 
   if (isLoading) {
     return (
@@ -403,6 +430,48 @@ function CatalogGrid({
         {Array.from({ length: 9 }, (_, i) => (
           <Skeleton key={i} className="h-[7.5rem] rounded-lg" />
         ))}
+      </div>
+    );
+  }
+
+  if (choosingPostHogRegion && consolidatePostHog) {
+    return (
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setChoosingPostHogRegion(false)}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          Back to catalog
+        </button>
+        <StepHeader
+          slug={postHogRepresentative?.slug}
+          iconUrl={postHogRepresentative?.icon_url}
+          title="Connect PostHog"
+          description="Choose where your existing PostHog project is hosted."
+        />
+        <div className="grid grid-cols-2 gap-3">
+          {[...postHogEntries]
+            .sort((a, b) =>
+              Number(postHogRegion(b) === "US") - Number(postHogRegion(a) === "US"),
+            )
+            .map((entry) => (
+              <button
+                key={entry.slug}
+                type="button"
+                onClick={() => onSelect(entry)}
+                className="flex flex-col gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-hairline-strong hover:bg-accent/40"
+              >
+                <span className="text-12 font-medium">
+                  {postHogRegion(entry) === "US" ? "United States" : "European Union"}
+                </span>
+                <span className="text-11 text-muted-foreground">
+                  {new URL(entry.base_url).hostname}
+                </span>
+              </button>
+            ))}
+        </div>
       </div>
     );
   }
@@ -423,7 +492,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustom}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom Endpoint</span>
@@ -432,7 +501,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustomSsh}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom SSH</span>
@@ -442,39 +511,45 @@ function CatalogGrid({
           <button
             key={entry.slug}
             type="button"
-            onClick={() => onSelect(entry)}
-            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
+            onClick={() =>
+              entry === postHogRepresentative
+                ? setChoosingPostHogRegion(true)
+                : onSelect(entry)
+            }
+            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
           >
             <div className="flex w-full items-start justify-between gap-2">
-              <ServiceIcon slug={entry.slug} size="sm" />
+              <ServiceIcon slug={entry.slug} iconUrl={entry.icon_url} size="sm" />
               <div className="flex flex-wrap justify-end gap-1">
                 {entry.service_type === "ssh" && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     SSH
                   </Badge>
                 )}
                 {entry.requires_gateway_url && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     URL required
                   </Badge>
                 )}
                 {entry.provider_type === "oauth2" && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     OAuth
                   </Badge>
                 )}
                 {entry.provider_type === "device_code" && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     Device Code
                   </Badge>
                 )}
               </div>
             </div>
-            <span className="line-clamp-1 w-full text-[12px] font-medium">
-              {entry.name}
+            <span className="line-clamp-1 w-full text-12 font-medium">
+              {entry === postHogRepresentative ? "PostHog" : entry.name}
             </span>
-            <span className="line-clamp-2 w-full text-[11px] leading-snug text-muted-foreground">
-              {entry.description ?? entry.base_url}
+            <span className="line-clamp-2 w-full text-11 leading-snug text-muted-foreground">
+              {entry === postHogRepresentative
+                ? "Connect projects and analytics in the US or EU."
+                : (entry.description ?? entry.base_url)}
             </span>
           </button>
         ))}
@@ -540,6 +615,7 @@ function RoutingStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry
             ? `Configure routing for ${catalogEntry.name}`
@@ -564,12 +640,12 @@ function RoutingStep({
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "direct"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-white/[0.15]"
+                  : "border-border hover:border-hairline-strong"
               }`}
             >
               <Globe className="h-5 w-5" />
               <span className="text-xs font-medium">Direct</span>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-10 text-muted-foreground">
                 NyxID proxies to endpoint
               </span>
             </button>
@@ -580,12 +656,12 @@ function RoutingStep({
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "node"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-white/[0.15]"
+                  : "border-border hover:border-hairline-strong"
               }`}
             >
               <Server className="h-5 w-5" />
               <span className="text-xs font-medium">Via Node</span>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-10 text-muted-foreground">
                 {catalogEntry?.auth_method === "ifttt_mcp"
                   ? "IFTTT OAuth uses direct routing"
                   : "Route through credential node"}
@@ -593,7 +669,7 @@ function RoutingStep({
             </button>
           </div>
         ) : (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             SSH services must be routed through a credential node.
           </p>
         )}
@@ -649,12 +725,12 @@ function RoutingStep({
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 clientSource === "managed"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-white/[0.15]"
+                  : "border-border hover:border-hairline-strong"
               }`}
             >
               <NyxidIcon className="h-5 w-5" />
               <span className="text-xs font-medium">NyxID managed</span>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-10 text-muted-foreground">
                 One click. NyxID’s OAuth app handles authorization. Curated
                 scopes.
               </span>
@@ -667,12 +743,12 @@ function RoutingStep({
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 clientSource === "self"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-white/[0.15]"
+                  : "border-border hover:border-hairline-strong"
               }`}
             >
               <KeyRound className="h-5 w-5" />
               <span className="text-xs font-medium">Your own OAuth app</span>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-10 text-muted-foreground">
                 Use your own client credentials. Full scope control.
               </span>
             </button>
@@ -759,6 +835,7 @@ function KeyForm({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"
         }
@@ -773,7 +850,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -802,7 +879,7 @@ function KeyForm({
             maxLength={200}
             onChange={(e) => onChange({ label: e.target.value })}
           />
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-11 text-muted-foreground">
             Give it a name you'll recognize. The proxy slug is auto-generated
             from this.
           </p>
@@ -841,7 +918,7 @@ function KeyForm({
                       }
                     />
                     {field.secret && (
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="text-11 text-muted-foreground">
                         Stored encrypted. NyxID exchanges this server-side for
                         an access token and caches it -- you never have to
                         refresh tokens, and the secret never leaves NyxID.
@@ -891,7 +968,7 @@ function KeyForm({
                       update({ secret_access_key: e.target.value })
                     }
                   />
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-11 text-muted-foreground">
                     Stored encrypted. The IAM policy attached to this key
                     enforces read-only — NyxID never elevates it.
                   </p>
@@ -916,7 +993,7 @@ function KeyForm({
                     />
                   </div>
                 </div>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Cost Explorer is single-region (us-east-1, service=ce). For
                   other AWS services, change `service` to match (e.g. `s3`,
                   `dynamodb`).
@@ -963,19 +1040,19 @@ function KeyForm({
               }
             />
             {!requiresCredential && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 This service can be used without storing a user credential in
                 NyxID.
               </p>
             )}
             {requiresCredential && form.authMethod === "body" && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 NyxID injects this value into the request JSON body under the
                 field name below.
               </p>
             )}
             {requiresCredential && form.authMethod === "bot_bearer" && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 Sent as{" "}
                 <code className="font-mono">
                   Authorization: Bot &lt;token&gt;
@@ -1031,7 +1108,7 @@ function KeyForm({
           {openapiSpecUrlError && (
             <p className="text-xs text-destructive">{openapiSpecUrlError}</p>
           )}
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-11 text-muted-foreground">
             When set, AI agents discover concrete operations from the spec
             instead of being limited to a single generic proxy tool.
           </p>
@@ -1170,6 +1247,7 @@ function NodeSetupStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={
           catalogEntry ? `${catalogEntry.name} — Node setup` : "Node setup"
         }
@@ -1254,7 +1332,7 @@ function NodeSetupStep({
                         onChange({ sshPrincipals: e.target.value })
                       }
                     />
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       Comma-separated Unix usernames for certificate login
                     </p>
                   </div>
@@ -1275,7 +1353,7 @@ function NodeSetupStep({
                     {sshTtlError && (
                       <p className="text-xs text-destructive">{sshTtlError}</p>
                     )}
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       15-60 minutes. Shorter is more secure.
                     </p>
                   </div>
@@ -1292,7 +1370,7 @@ function NodeSetupStep({
                   value={form.endpointUrl}
                   onChange={(e) => onChange({ endpointUrl: e.target.value })}
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   The target URL configured on your node agent
                 </p>
               </div>
@@ -1356,8 +1434,8 @@ function NodeSetupStep({
 
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 text-primary" />
-          <p className="text-[12px] font-medium">Node Setup Instructions</p>
+          <Terminal className="h-4 w-4 text-primary-text" />
+          <p className="text-12 font-medium">Node Setup Instructions</p>
         </div>
 
         {isSsh ? (
@@ -1379,10 +1457,10 @@ function NodeSetupStep({
               {`nyxid node credentials setup --service ${slug || "<slug>"}`}
             </CopyableCode>
             {isCustom && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 The exact service slug will be shown on the service detail page
                 after creation. Update the{" "}
-                <code className="text-[10px]">--service</code> flag accordingly.
+                <code className="text-10">--service</code> flag accordingly.
               </p>
             )}
             {catalogEntry?.api_key_url && (
@@ -1390,7 +1468,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -1919,6 +1997,7 @@ function OAuthStep({
       <div className="space-y-4">
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`Authorize ${catalogEntry.name}`}
           description={`Open ${catalogEntry.name} to approve access. Leave this open — it updates automatically when you're done.`}
         />
@@ -1927,14 +2006,14 @@ function OAuthStep({
           href={authorizationUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-[13px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-13 font-medium text-primary-foreground transition-opacity hover:opacity-90"
         >
           <ExternalLink className="h-4 w-4" />
           Open {catalogEntry.name}
         </a>
 
         <div
-          className="flex items-center gap-2 rounded-lg border border-hairline bg-overlay px-3 py-2 text-[12px]"
+          className="flex items-center gap-2 rounded-lg border border-hairline bg-overlay px-3 py-2 text-12"
           role="status"
           aria-live="polite"
         >
@@ -2024,6 +2103,7 @@ function OAuthStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
         description="This service uses OAuth to authenticate. Click the button below to connect your account."
       />
@@ -2043,7 +2123,7 @@ function OAuthStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
           {error}
         </div>
       )}
@@ -2469,6 +2549,7 @@ function DeviceCodeStep({
 
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description="This service uses a device code to authenticate. Click continue to request a code."
         />
@@ -2515,6 +2596,7 @@ function DeviceCodeStep({
         </button>
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description={`Requesting code from ${catalogEntry.name}...`}
         />
@@ -2530,6 +2612,7 @@ function DeviceCodeStep({
       <div className="space-y-4">
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${catalogEntry.name} connected`}
           description={`Your ${catalogEntry.name} account has been connected successfully.`}
         />
@@ -2565,12 +2648,13 @@ function DeviceCodeStep({
         </button>
         <StepHeader
           slug={catalogEntry?.slug}
+          iconUrl={catalogEntry?.icon_url}
           title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
           description="Something went wrong. Review the error below and try again."
         />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
-          <p className="text-[12px] text-destructive text-center">
+          <p className="text-12 text-destructive text-center">
             {errorMessage}
           </p>
         </div>
@@ -2600,6 +2684,7 @@ function DeviceCodeStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`${reconnectMode ? "Reconnect" : "Connect"} to ${catalogEntry.name}`}
         description={`Enter this code at ${catalogEntry.name} to finish authenticating.`}
       />
@@ -2609,7 +2694,7 @@ function DeviceCodeStep({
           Your code
         </p>
         <div className="flex items-center gap-3">
-          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary">
+          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
             {userCode}
           </code>
           <Button
@@ -2635,7 +2720,7 @@ function DeviceCodeStep({
         </Button>
       </div>
 
-      <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
+      <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
         <ol className="list-decimal list-inside space-y-1">
           <li>Click the link above to open the authentication page</li>
           <li>Enter the code shown above</li>
@@ -2725,6 +2810,7 @@ function OAuthCredentialsStep({
 
       <StepHeader
         slug={catalogEntry?.slug}
+        iconUrl={catalogEntry?.icon_url}
         title={`Setup ${catalogEntry.name} credentials`}
         description="This service requires your own OAuth app credentials."
       />
@@ -2734,7 +2820,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />
@@ -2750,7 +2836,7 @@ function OAuthCredentialsStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
           {error}
         </div>
       )}
@@ -2831,7 +2917,7 @@ function OwnerPicker({
           <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
         </div>
       </div>
-      <p className="mt-1 text-[11px] text-muted-foreground">
+      <p className="mt-1 text-11 text-muted-foreground">
         Org-owned services are shared with every admin of that organization and
         can be proxied by its members.
       </p>
@@ -2853,7 +2939,7 @@ function AccessPolicyPicker({
           <Label htmlFor="add-key-admin-only" className="text-xs font-medium">
             Admin-only execution
           </Label>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-11 text-muted-foreground">
             Restrict this org-owned service to organization admins.
           </p>
         </div>

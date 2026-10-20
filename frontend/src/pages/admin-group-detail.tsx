@@ -299,7 +299,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BenchesIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No members in this group.
             </p>
           </div>
@@ -402,7 +402,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-[12px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value

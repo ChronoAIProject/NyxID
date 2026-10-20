@@ -8,7 +8,7 @@ on:
     # `main` is intentionally not listed here -- pushes to main are gated
     # through publish-images.yml, which calls this workflow via workflow_call.
     # Listing main twice would cause CI to run on every merge commit twice.
-    branches: [dev]
+    branches: [dev, 'rollup-*']
   # Allow other workflows (publish-images, release) to reuse this one as a
   # gate via `uses: ./.github/workflows/ci.yml`. Callers should pass
   # `force-all: true` to skip path filtering and run the full suite as a
@@ -32,7 +32,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
-# Both backend jobs start an explicit single-node replica set and use this
+# Backend test and coverage jobs start an explicit single-node replica set and use this
 # authoritative URI. Multi-document transaction tests must never fall back to a
 # standalone developer mongod or silently skip because topology is unsupported.
   NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
@@ -63,17 +63,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      backend_image: ${{ steps.filter.outputs.backend_image }}
       cli: ${{ steps.filter.outputs.cli }}
+      machine: ${{ steps.filter.outputs.machine }}
+      permissions: ${{ steps.filter.outputs.permissions }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
       mobile: ${{ steps.filter.outputs.mobile }}
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
+      codex_plugin: ${{ steps.filter.outputs.codex_plugin }}
+      claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v6
+      - name: Test CI helpers
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -84,8 +91,43 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            backend_image:
+              - 'backend/Dockerfile'
+              - '.dockerignore'
+              - '.github/scripts/prepare-backend-runner.sh'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/publish-images.yml'
+            permissions:
+              - 'permissions/**'
+              - 'scripts/test-drive-permissions-poc.py'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            machine:
+              - 'frontend/scripts/machine-seccomp.ts'
+              - 'frontend/src/schemas/machines.ts'
+              - 'cli/src/commands/update_attestation*'
+              - 'cli/src/commands/update_attestation/**'
+              - 'machine/**'
+              - 'machine-updater/**'
+              - 'cli/src/node/machine/**'
+              - 'cli/resources/machine-browser/**'
+              - 'cli/resources/machine-container/**'
+              - 'cli/container/**'
+              - 'cli/Dockerfile.machine'
+              - 'cli/Dockerfile.machine-updater'
+              - 'cli/src/machine_updater/**'
+              - 'cli/src/commands/machine_native_update.rs'
+              - 'cli/tests/machine*'
+              - 'cli/tests/Dockerfile.machine'
+              - 'cli/tests/Dockerfile.updater-browser'
+              - 'cli/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             backend:
               - 'backend/**'
+              - 'permissions/**'
+              - 'machine/**'
+              - 'machine-updater/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -101,6 +143,9 @@ jobs:
               - '.config/nextest.toml'
             cli:
               - 'cli/**'
+              - 'machine/**'
+              - 'machine-updater/**'
+              - 'skills/nyxid/scripts/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
@@ -118,10 +163,13 @@ jobs:
               - 'backend/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cli/**'
+              - 'machine/**'
+              - 'machine-updater/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
               - 'mcp-demo/**'
+              - 'permissions/**'
               - 'docs/AI_AGENT_PLAYBOOK.md'
               - '.dockerignore'
               - 'scripts/check-backend-docker-embeds.py'
@@ -158,6 +206,18 @@ jobs:
               - 'integrations/cursor-plugin/**'
               - '.cursor-plugin/**'
               - 'scripts/validate-cursor-plugin.py'
+            codex_plugin:
+              - 'integrations/codex-plugin/**'
+              - 'integrations/plugin-source/**'
+              - '.agents/plugins/**'
+              - 'scripts/build-codex-plugin.sh'
+              - 'scripts/sync-plugins.py'
+            claude_plugin:
+              - 'integrations/claude-plugin/**'
+              - 'integrations/plugin-source/**'
+              - '.claude-plugin/**'
+              - 'scripts/validate-claude-plugin.py'
+              - 'scripts/sync-plugins.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -167,10 +227,49 @@ jobs:
             ci:
               - '.github/workflows/**'
               - '.github/actions/**'
+              - '.github/scripts/**'
 
   # ---------------------------------------------------------------------------
-  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
+  # Reusable workflow permissions: a ci.yml job requesting a scope that the
+  # Publish Images `ci-gate` call does not grant passes on PRs but makes Publish
+  # Images fail to start on main and tags. Cheap enough to run every time.
   # ---------------------------------------------------------------------------
+  workflow-permissions:
+    name: Workflow Permissions
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: Check reusable workflow permissions against their callers
+        run: python3 scripts/check-reusable-workflow-permissions.py
+
+  # ---------------------------------------------------------------------------
+  # Permission engine: no database or Google credentials required.
+  # ---------------------------------------------------------------------------
+  permissions-test:
+    name: Google Permissions
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -p nyxid-permissions --check
+      - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
+      - run: cargo test -p nyxid-permissions --locked
+      - run: python3 scripts/test-drive-permissions-poc.py
+
+  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
   cursor-plugin-validate:
     name: Cursor Plugin Validate
     needs: changes
@@ -180,6 +279,56 @@ jobs:
       - uses: actions/checkout@v6
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
+
+  # Codex / OpenAI plugin: generated files, manifest, MCP, skills, and
+  # package allowlist.
+  codex-plugin-validate:
+    name: Codex Plugin Validate
+    permissions:
+      contents: read
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.codex_plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check generated plugin files match integrations/plugin-source
+        run: python3 scripts/sync-plugins.py --check
+      - name: Validate Codex plugin
+        run: scripts/build-codex-plugin.sh --check
+
+  # Claude plugin: manifest, remote MCP, skills, and directory bundle limits.
+  # The repository-limit step runs on every PR because the Claude directory
+  # also reads repository-wide size and entry counts; the package steps run
+  # only when the plugin or its validator changes.
+  claude-plugin-validate:
+    name: Claude Plugin Validate
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_VERSION: 2.1.284
+      PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check repository limits for the Claude directory
+        run: python3 scripts/validate-claude-plugin.py --repo-only
+      - uses: actions/setup-node@v6
+        if: env.PACKAGE_CHANGED == 'true'
+        with:
+          node-version-file: .node-version
+      - name: Install pinned Claude Code
+        if: env.PACKAGE_CHANGED == 'true'
+        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Check generated plugin files match integrations/plugin-source
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/sync-plugins.py --check
+      - name: Validate Claude plugin
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/validate-claude-plugin.py --require-claude
+      - name: Validate Claude marketplace
+        if: env.PACKAGE_CHANGED == 'true'
+        run: claude plugin validate --strict .
 
   oracle-worker-test:
     name: Oracle Worker Test
@@ -215,7 +364,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -228,18 +377,26 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # Workspace all-target analysis exhausted 16 GiB RAM + 3 GiB swap.
+    # Retain every target while bounding simultaneous compiler memory use.
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check Clippy with resource samples
+        run: python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # Rust: backend build + test
+  # Rust: backend tests
   # Handler + service tests use the explicit NYXID_TEST_DATABASE_URL above. The
   # container is started as a single-node replica set so atomic rotation/binding
   # tests exercise real transactions rather than silently skipping.
@@ -249,82 +406,207 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Reduce debug-information volume while retaining locations and backtraces.
+    # Resource samples distinguish future compilation shutdowns from test failures.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
-        run: |
-          # MongoDB 8 otherwise retains dropped per-test WiredTiger idents for
-          # the default 300-second snapshot window, exhausting FDs during this
-          # high-churn suite. This container is dedicated to this CI job.
-          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
-            --ulimit nofile=65536:65536 \
-            mongo:8.0 --replSet rs0 --bind_ip_all \
-            --setParameter minSnapshotHistoryWindowInSeconds=0
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
-          snapshot_window="$(docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'db.adminCommand({getParameter:1,minSnapshotHistoryWindowInSeconds:1}).minSnapshotHistoryWindowInSeconds')"
-          if [ "$snapshot_window" != "0" ]; then
-            echo "expected minSnapshotHistoryWindowInSeconds=0, got: $snapshot_window"
-            exit 1
-          fi
-          docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.hello().isWritablePrimary' | grep -q true; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
+        run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
 
       - name: Check RCI backend boundary
         run: bash scripts/check-rci-backend-boundary.sh
 
-      - name: Billing route coverage smoke
-        run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
-
-      # Keep this feature/profile aligned with backend/Dockerfile so the
-      # dep-info guard covers every compile-time input of the image build.
-      - name: Build backend image binary
-        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
-
-      - name: Check backend Docker embedded assets
-        run: python3 scripts/check-backend-docker-embeds.py
-
       - name: Run backend tests
-        run: cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Publish test summary
         if: always()
         uses: test-summary/action@v2.6
         with:
           paths: target/nextest/ci/junit.xml
-          show: all
+          show: fail
+
+      - name: Upload backend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-backend
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-test
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Keep the standalone test-profile build and smoke assertion. It exercises
+  # a different Cargo feature-unification path from the combined nextest run.
+  backend-billing-smoke:
+    name: Backend Billing Smoke
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Same test-binary compile as backend-test; see the note there.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Start transaction-capable MongoDB
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-billing-smoke
+      - name: Billing route coverage smoke
+        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-billing-smoke
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Keep the production feature/profile and dep-info guard together while
+  # letting the full backend tests run on their own runner.
+  backend-image-inputs:
+    name: Backend Image Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-image-inputs
+      - name: Build backend image binary
+        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+      - name: Check backend Docker embedded assets
+        run: python3 scripts/check-backend-docker-embeds.py
+
+  # Exercise the image's compiler and release build when its infrastructure changes.
+  backend-image-smoke:
+    name: Backend Release Image
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.backend_image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prepare backend image memory reserve
+        timeout-minutes: 5
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build backend release image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ github.sha }}
+          outputs: type=cacheonly
+          push: false
+          cache-from: |
+            type=gha,scope=backend-pr-linux-amd64
+            type=gha,scope=backend-linux-amd64
+          cache-to: type=gha,mode=max,scope=backend-pr-linux-amd64
+          provenance: false
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
   # ---------------------------------------------------------------------------
+  machine-container:
+    name: Machine Container E2E
+    needs: changes
+    permissions:
+      contents: read
+      attestations: read
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Build machine image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine
+          load: true
+          tags: nyxid-node-machine:ci
+          cache-from: type=gha,scope=machine-pr
+          cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Verify sandbox, isolation, saved logins, takeover and live desktop
+        run: |
+          docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
+          docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+          python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+          docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
+      - name: Verify existing-profile migration, signed updates and rollback
+        env:
+          MACHINE_IMAGE: nyxid-node-machine:ci
+          MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
+        run: sh cli/tests/machine_updater_e2e.sh
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install command-rendering dependencies
+        run: npm ci --ignore-scripts --prefix frontend
+      - name: Verify read-only production updater and rendered commands
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node cli/tests/machine_updater_production.mjs
+      - name: Remove test images and build cache
+        if: always()
+        run: |
+          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci nyxid-machine-updater-e2e:local nyxid-machine-updater:production-test || true
+          docker builder prune -f
+
   cli-test:
     name: CLI Test
     needs: changes
@@ -333,25 +615,42 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
 
       - name: Build CLI
         run: cargo build -p nyxid-cli
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - name: Test saved-login extension and signed package freshness
+        run: node --test cli/tests/machine_filler.test.mjs
+
       - name: Run CLI tests
-        run: cargo nextest run -p nyxid-cli --profile ci
+        run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
 
       - name: Publish test summary
         if: always()
         uses: test-summary/action@v2.6
         with:
           paths: target/nextest/ci/junit.xml
-          show: all
+          show: fail
+
+      - name: Upload CLI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-cli
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # Rust: build with feature flags (KMS providers). Backend-only build.
@@ -361,6 +660,11 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
@@ -373,14 +677,26 @@ jobs:
             cache-suffix: aws-and-gcp-kms
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: features-${{ matrix.cache-suffix }}
       - name: Build with --features ${{ matrix.features }}
-        run: cargo build -p nyxid --features ${{ matrix.features }}
+        run: python3 .github/scripts/ci_resources.py features-${{ matrix.cache-suffix }} cargo build -p nyxid --features ${{ matrix.features }}
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-rust-features-${{ matrix.cache-suffix }}
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Frontend: lint, type-check, test, build
@@ -459,8 +775,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: wizard-freshness
@@ -496,10 +813,10 @@ jobs:
   #      enforced threshold (Rust: `cargo llvm-cov --fail-under-lines`;
   #      Frontend: vitest `coverage.thresholds.lines` in vite.config.ts).
   #   2. Emit a machine-readable line-% number + an lcov report.
-  #   3. On pull_request events, also measure the BASE branch so the comment
-  #      job can show a per-component line-% delta (AC #4). The base measurement
-  #      is best-effort (`continue-on-error`): if it can't be produced the head
-  #      gate still runs and the delta simply renders as "n/a". It never blocks.
+  #   3. On pull_request events, also compare with the BASE branch so the
+  #      comment can show a per-component line-% delta (AC #4). Backend base
+  #      measurement runs in parallel and reuses an exact-commit report when
+  #      available. Base results remain best-effort and never gate the head.
   #   4. Upload the report + a tiny `coverage-<component>.json` summary as a CI
   #      artifact (AC #6). The summary files feed the PR-comment job.
   #
@@ -517,68 +834,47 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Backend (nyxid) line coverage. Mirrors `backend-test`: uses the same explicit
-  # single-node replica set so DB and transaction tests run (otherwise coverage
-  # would be understated). The instrumented run is slow (~15 min); the base-branch
-  # comparison adds a second run, so it is gated to pull_request only and allowed
-  # to fail without blocking the gate.
+  # single-node replica set so DB and transaction tests run. PR-head coverage
+  # retains its threshold; the informational base comparison runs separately.
   # ---------------------------------------------------------------------------
   coverage-backend:
     name: Coverage (Backend)
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    # Cache a report for every rollup tip, including documentation-only pushes.
+    if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    # A live suite exceeded 45 minutes on a slow hosted runner. Allow headroom
+    # for compilation, complete test execution and export without retrying tests.
+    timeout-minutes: 90
+    # Coverage counters do not require full DWARF; retain line locations.
+    # Resource samples record whether compilation approaches runner limits.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # Merge per-test coverage into four profiles per binary to bound disk use.
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Identify coverage measurement inputs
+        id: coverage-identity
+        run: python3 .github/scripts/coverage_identity.py
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
-        run: |
-          # MongoDB 8 otherwise retains dropped per-test WiredTiger idents for
-          # the default 300-second snapshot window, exhausting FDs during this
-          # high-churn suite. This container is dedicated to this CI job.
-          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
-            --ulimit nofile=65536:65536 \
-            mongo:8.0 --replSet rs0 --bind_ip_all \
-            --setParameter minSnapshotHistoryWindowInSeconds=0
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
-          snapshot_window="$(docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'db.adminCommand({getParameter:1,minSnapshotHistoryWindowInSeconds:1}).minSnapshotHistoryWindowInSeconds')"
-          if [ "$snapshot_window" != "0" ]; then
-            echo "expected minSnapshotHistoryWindowInSeconds=0, got: $snapshot_window"
-            exit 1
-          fi
-          docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.hello().isWritablePrimary' | grep -q true; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
+        run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage-backend
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
 
       # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
       # a one-line summary JSON. The threshold is enforced as the final step in
@@ -586,9 +882,17 @@ jobs:
       # produced — even on a regression — and surface in the PR comment.
       # `report` is package-scoped so the % isn't diluted by the rest of the
       # workspace (whose tests this job does not run).
+      # Match backend-test's process isolation and bounded, no-retry CI profile.
       - name: Measure (head)
+        run: >-
+          python3 .github/scripts/ci_resources.py coverage-test
+          cargo llvm-cov nextest --package nyxid --profile ci --no-report
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
+      - name: Export head coverage
         run: |
-          cargo llvm-cov --package nyxid --summary-only
           cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
           cargo llvm-cov report --package nyxid --json --summary-only --output-path coverage-backend.raw.json
 
@@ -598,32 +902,170 @@ jobs:
             backend "Backend (nyxid)" 73 \
             coverage-backend.raw.json coverage-backend.json
 
-      # Base: best-effort second run for the delta. Never blocks the gate.
-      - name: Measure base branch
-        if: github.event_name == 'pull_request'
+      # Push and publish runs make their measured head available to PRs whose
+      # base is this exact commit. Recipe or runner-image changes invalidate it.
+      - name: Prepare reusable base report
+        if: github.event_name != 'pull_request'
+        run: cp coverage-backend.raw.json coverage-backend.base.json
+      - name: Cache reusable base report
+        if: github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git worktree add ../base-coverage "$BASE_REF"
-          ( cd ../base-coverage && cargo llvm-cov --package nyxid --summary-only \
-              && cargo llvm-cov report --package nyxid --json --summary-only \
-                 --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json" )
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
 
-      - name: Merge base line % into summary
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 .github/scripts/coverage_merge_base.py \
-            coverage-backend.json coverage-backend.base.json
-
-      # Enforce the threshold LAST, after the report + summary + delta are built,
-      # so a regression fails the job *and* still surfaces the failing number in
-      # the PR comment. Re-reads the existing profdata (no re-run).
+      # Re-reads the existing profdata (no re-run). The report and summary are
+      # produced before a regression fails the job and remain available to the
+      # PR comment.
       - name: Enforce coverage gate (head)
         run: cargo llvm-cov report --package nyxid --fail-under-lines 73
 
       - name: Upload coverage artifact
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
+          path: |
+            coverage-backend.lcov
+            coverage-backend.json
+          if-no-files-found: warn
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-coverage-backend
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The base percentage is informational. Reuse only a report for the exact
+  # base SHA, measurement recipe and runner image; otherwise measure afresh
+  # as before on the base commit, in parallel with PR-head coverage.
+  coverage-backend-base:
+    name: Coverage (Backend Base)
+    needs: changes
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Identify coverage measurement inputs
+        id: coverage-identity
+        run: python3 .github/scripts/coverage_identity.py
+      - name: Restore exact base report
+        if: steps.coverage-identity.outputs.reusable == 'true'
+        id: base-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
+      - name: Checkout base tree
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-coverage
+      - name: Prepare backend memory reserve
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Start transaction-capable MongoDB
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Install system dependencies
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          key: coverage-backend-base
+      - uses: taiki-e/install-action@v2
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+      - name: Measure base branch
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        working-directory: base-coverage
+        run: >-
+          python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
+          cargo llvm-cov nextest --package nyxid --profile ci --no-report
+      - name: Test MongoDB diagnostics
+        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
+      - name: Export base coverage
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        working-directory: base-coverage
+        run: |
+          cargo llvm-cov report --package nyxid --json --summary-only \
+            --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
+      - name: Cache measured base report
+        if: steps.base-cache.outputs.cache-hit != 'true' && steps.coverage-identity.outputs.reusable == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
+      - name: Upload base report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-base-report
+          path: coverage-backend.base.json
+          if-no-files-found: warn
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-coverage-backend-base
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Restore the original PR artifact contract after the parallel base lookup.
+  # This is informational; the coverage-backend job remains the threshold gate.
+  coverage-backend-summary:
+    name: Coverage (Backend Summary)
+    needs: [changes, coverage-backend, coverage-backend-base]
+    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download head report
+        id: head-report
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage-head
+        continue-on-error: true
+      - name: Download base report
+        if: steps.head-report.outcome == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-base-report
+        continue-on-error: true
+      - name: Merge base line % into summary
+        if: steps.head-report.outcome == 'success'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-backend.json coverage-backend.base.json
+      - name: Upload coverage artifact
+        if: steps.head-report.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-backend
@@ -645,20 +1087,23 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage-cli
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
 
       # Measure WITHOUT the gate (enforced as the final step below). `report` is
       # package-scoped so the % isn't diluted by the rest of the workspace.
       - name: Measure (head)
         run: |
-          cargo llvm-cov --package nyxid-cli --summary-only
+          cargo llvm-cov --package nyxid-cli --no-report
           cargo llvm-cov report --package nyxid-cli --lcov --output-path coverage-cli.lcov
           cargo llvm-cov report --package nyxid-cli --json --summary-only --output-path coverage-cli.raw.json
 
@@ -675,7 +1120,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: |
           git worktree add ../base-coverage "$BASE_REF"
-          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --summary-only \
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --no-report \
               && cargo llvm-cov report --package nyxid-cli --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
 
@@ -807,7 +1252,7 @@ jobs:
     name: Coverage Comment Payload
     if: always() && github.event_name == 'pull_request'
     needs:
-      - coverage-backend
+      - coverage-backend-summary
       - coverage-cli
       - coverage-frontend
     runs-on: ubuntu-latest
@@ -861,14 +1306,23 @@ jobs:
     if: always()
     needs:
       - changes
+      - workflow-permissions
       - cursor-plugin-validate
+      - codex-plugin-validate
+      - claude-plugin-validate
       - oracle-worker-test
       - rust-fmt
       - rust-clippy
       - backend-test
+      - permissions-test
+      - backend-billing-smoke
+      - backend-image-inputs
+      - backend-image-smoke
       - cli-test
+      - machine-container
       - rust-features
       - frontend
+      - mobile
       - wizard-bundle-freshness
       - sdk
       - coverage-backend
@@ -884,14 +1338,23 @@ jobs:
           # coverage drops below the enforced threshold.
           RESULTS: |
             changes=${{ needs.changes.result }}
+            workflow-permissions=${{ needs.workflow-permissions.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
+            codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
+            claude-plugin-validate=${{ needs.claude-plugin-validate.result }}
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}
+            permissions-test=${{ needs.permissions-test.result }}
+            backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
+            backend-image-inputs=${{ needs.backend-image-inputs.result }}
+            backend-image-smoke=${{ needs.backend-image-smoke.result }}
             cli-test=${{ needs.cli-test.result }}
+            machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
             frontend=${{ needs.frontend.result }}
+            mobile=${{ needs.mobile.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}
             coverage-backend=${{ needs.coverage-backend.result }}
@@ -900,10 +1363,10 @@ jobs:
         run: |
           set -eu
           echo "Job results:"
-          echo "$RESULTS" | sed 's/^/  /'
           failed=0
           while IFS='=' read -r job result; do
             [ -z "$job" ] && continue
+            printf '  %s=%s\n' "$job" "$result"
             case "$result" in
               success|skipped) ;;
               *)

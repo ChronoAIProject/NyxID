@@ -16,6 +16,7 @@ import {
   Bell,
   WalletCards,
   Coins,
+  ReceiptText,
   ClipboardList,
   ChartNoAxesCombined,
   Lock,
@@ -41,19 +42,27 @@ import { cn } from "@/lib/utils";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
-import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
-
-type SidebarMode = "expanded" | "collapsed" | "hover";
-const STORAGE_KEY = "nyxid:sidebar-mode";
+import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
+import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
+import {
+  canAdminWrite,
+  canManageTools,
+  canReadAdminUsage,
+  canReadFeatureFlags,
+  hasAdminRead,
+  isBillingAvailable,
+} from "@/types/api";
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
-  { to: "/billing", icon: WalletCards, label: "Billing" },
+  { to: "/tools", icon: Sparkles, label: "Tools" },
+  { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
+  { to: "/onboarding/setups", icon: Bot, label: "Bot Setups" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/docs", icon: BookOpen, label: "Docs" },
@@ -72,15 +81,24 @@ export const DEVELOPER_NAV = [
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
+const ADMIN_USAGE_PATH = "/admin/usage";
+
 export const ADMIN_NAV = [
+  { to: "/admin/platform-bots", icon: Bot, label: "Platform BotFather" },
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
-  { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
+  { to: "/admin/upload-retention", icon: HardDrive, label: "Upload retention" },
+  {
+    to: "/admin/platform-credentials",
+    icon: KeyRound,
+    label: "Platform Credentials",
+  },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
   { to: "/admin/credits", icon: Coins, label: "Credits" },
+  { to: "/admin/billing", icon: ReceiptText, label: "Billing" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
@@ -88,6 +106,7 @@ export const ADMIN_NAV = [
   { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
   { to: "/admin/ownership", icon: Server, label: "Ownership transfers" },
   { to: "/services", icon: Server, label: "Services" },
+  { to: "/admin/tools", icon: Sparkles, label: "Tools" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
 
@@ -105,12 +124,29 @@ export function getVisibleMainNav(
   );
 }
 
-function getVisibleAdminNav(
-  user: Parameters<typeof canAdminWrite>[0],
+/// Admin nav entries permitted by platform roles or scoped capabilities.
+export function getVisibleAdminNav(
+  user: Parameters<typeof canReadAdminUsage>[0],
 ): readonly NavItemDef[] {
+  if (!hasAdminRead(user)) {
+    return ADMIN_NAV.filter(
+      (item) =>
+        (item.to === ADMIN_USAGE_PATH && canReadAdminUsage(user)) ||
+        (item.to === "/admin/tools" && canManageTools(user)) ||
+        (item.to === "/admin/feature-flags" && canReadFeatureFlags(user)),
+    );
+  }
   return ADMIN_NAV.filter(
     (item) =>
-      !["/admin/platform-credentials", "/admin/ownership"].includes(item.to) || canAdminWrite(user),
+      ![
+        "/admin/platform-credentials",
+        "/admin/platform-bots",
+        "/admin/ownership",
+        "/admin/tools",
+        "/admin/upload-retention",
+      ].includes(item.to) ||
+      canAdminWrite(user) ||
+      (item.to === "/admin/tools" && canManageTools(user)),
   );
 }
 
@@ -148,7 +184,7 @@ function NavItem({
       onClick={onClick}
       title={collapsed ? item.label : undefined}
       className={cn(
-        "group/nav flex items-center rounded-lg py-2 text-[13px] overflow-hidden",
+        "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
@@ -164,8 +200,8 @@ function NavItem({
       />
       <span
         className={cn(
-          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
-          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+          "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
         {item.label}
@@ -195,7 +231,7 @@ export function AssistantNavEntry({
       className={cn(
         "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
-        mobile ? "gap-3 px-4 py-3 text-[14px]" : "py-[7px] text-[12px]",
+        mobile ? "gap-3 px-4 py-3 text-14" : "py-[7px] text-12",
         !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
       )}
     >
@@ -207,15 +243,15 @@ export function AssistantNavEntry({
       />
       <span
         className={cn(
-          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
-          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+          "min-w-0 flex-1 truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
         Assistant
       </span>
       <span
         className={cn(
-          "ml-auto rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-[9px] font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >
@@ -223,24 +259,6 @@ export function AssistantNavEntry({
       </span>
     </Link>
   );
-}
-
-function readMode(): SidebarMode {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v === "expanded" || v === "collapsed" || v === "hover") return v;
-  } catch {
-    // ignore
-  }
-  return "expanded";
-}
-
-function writeMode(mode: SidebarMode) {
-  try {
-    localStorage.setItem(STORAGE_KEY, mode);
-  } catch {
-    // ignore
-  }
 }
 
 export function Sidebar({
@@ -253,15 +271,21 @@ export function Sidebar({
   const mainNav = getVisibleMainNav(user);
   const adminNav = getVisibleAdminNav(user);
 
-  const [mode, setMode] = useState<SidebarMode>(readMode);
+  const mode = useThemeStore((s) => s.sidebarMode);
+  const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
+  const savedWidth = useThemeStore((s) => s.sidebarWidths.dashboard);
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
+  const width = previewWidth ?? savedWidth;
   const [hovered, setHovered] = useState(false);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const changeMode = useCallback((next: SidebarMode) => {
-    setMode(next);
-    writeMode(next);
-    setHovered(false);
-  }, []);
+  const changeMode = useCallback(
+    (next: SidebarMode) => {
+      setSidebarMode(next);
+      setHovered(false);
+    },
+    [setSidebarMode],
+  );
 
   useEffect(() => {
     return () => {
@@ -272,11 +296,6 @@ export function Sidebar({
   const isVisuallyExpanded =
     mobile || mode === "expanded" || (mode === "hover" && hovered);
   const isCollapsed = !isVisuallyExpanded;
-
-  useEffect(() => {
-    const width = mode === "expanded" ? "200px" : "52px";
-    document.documentElement.style.setProperty("--sidebar-width", width);
-  }, [mode]);
 
   function handleMouseEnter() {
     if (mode !== "hover") return;
@@ -312,7 +331,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
               Approvals
             </span>
           )}
@@ -333,7 +352,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
               Developer
             </span>
           )}
@@ -350,13 +369,13 @@ export function Sidebar({
           ))}
         </div>
 
-        {hasAdminRead(user) && (
+        {adminNav.length > 0 && (
           <>
             <div className="px-3 my-2 flex items-center">
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+                <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
                   Admin
                 </span>
               )}
@@ -398,7 +417,7 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-[13px] font-medium text-foreground">
+                <p className="text-13 font-medium text-foreground">
                   Sidebar control
                 </p>
               </div>
@@ -445,8 +464,9 @@ export function Sidebar({
           className={cn(
             "absolute inset-y-0 left-0 z-30 flex flex-col border-r border-border/60 bg-background overflow-hidden",
             "transition-[width,box-shadow] duration-200 ease-out",
-            hovered ? "w-[200px] shadow-xl shadow-black/20" : "w-[52px]",
+            hovered ? "shadow-xl shadow-black/20" : "w-[52px]",
           )}
+          style={hovered ? { width } : undefined}
         >
           {sidebarContent}
         </div>
@@ -457,11 +477,23 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "flex h-full flex-col border-r border-border/60 overflow-hidden transition-[width] duration-300 ease-in-out",
-        mode === "collapsed" ? "w-[52px]" : "w-[200px]",
+        "relative flex h-full flex-col border-r border-border/60",
+        // No width animation while dragging, so the edge tracks the pointer.
+        previewWidth === null && "transition-[width] duration-300 ease-in-out",
+        mode === "collapsed" && "w-[52px]",
       )}
+      style={mode === "collapsed" ? undefined : { width }}
     >
-      {sidebarContent}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {sidebarContent}
+      </div>
+      {mode === "expanded" && (
+        <SidebarResizeHandle
+          sidebar="dashboard"
+          label="Resize sidebar"
+          onPreview={setPreviewWidth}
+        />
+      )}
     </aside>
   );
 }
@@ -480,7 +512,7 @@ function SidebarModeOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-overlay-strong",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-13 transition-colors duration-200 hover:bg-overlay-strong",
         active
           ? "text-foreground"
           : "text-muted-foreground hover:text-foreground",

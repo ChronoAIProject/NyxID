@@ -762,7 +762,10 @@ async fn catalog_discovery_issues_no_writes_beyond_api_key_authentication_bookke
         State(f.state.clone()),
         auth,
         Default::default(),
-        Query(super::CatalogListQuery { include_all: true }),
+        Query(super::CatalogListQuery {
+            include_all: true,
+            offering_kind: None,
+        }),
     )
     .await
     .unwrap();

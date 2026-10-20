@@ -19,11 +19,11 @@ export function AssistantPlatformServiceFields({
   readonly onAllowAllChange: (value: boolean) => void;
   readonly disabled: boolean;
 }) {
-  const services = useKeys();
+  const services = useKeys({ includeTools: true });
   const key = useApiKey(keyId ?? "");
   if (keyId && !key.data)
     return (
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         {key.isError
           ? "Could not load service scope."
           : "Loading service scope…"}

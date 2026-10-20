@@ -1,4 +1,4 @@
-//! Platform-admin feature-flag management handlers.
+//! Feature-flag management with platform and creator-scoped authorization.
 
 use axum::{
     Json,
@@ -11,12 +11,14 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::feature_flag_metadata::FeatureFlagMetadata;
 use crate::models::feature_flag_override::{FeatureFlagOverride, FlagTargetKind};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::role_service::{self, FeatureFlagAccess};
 use crate::services::{audit_service, feature_flag_service};
 use feature_flag_service::FlagTarget;
+use mongodb::bson::doc;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminUserFeatureFlagOverride {
@@ -97,6 +99,8 @@ pub struct AdminFeatureFlagItem {
     pub metadata_updated_at: Option<String>,
     pub metadata_updated_by: Option<String>,
     pub default_enabled: bool,
+    pub created_by: Option<String>,
+    pub can_edit: bool,
     pub global_override: Option<bool>,
     pub org_overrides: Vec<AdminOrgFeatureFlagOverride>,
     pub user_overrides: Vec<AdminUserFeatureFlagOverride>,
@@ -170,20 +174,179 @@ fn parse_target(kind: AdminFlagTargetKind, key: Option<&str>) -> AppResult<Admin
     }
 }
 
+async fn require_feature_flag_access(
+    state: &AppState,
+    auth: &AuthUser,
+) -> AppResult<FeatureFlagAccess> {
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": auth.user_id.to_string() })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    let role = role_service::resolve_platform_role(&state.db, &user).await?;
+    let access = role_service::feature_flag_access(&state.db, &user, role).await?;
+    if !access.read_all && !access.manage_own {
+        return Err(AppError::Forbidden("Feature flag access required".into()));
+    }
+    Ok(access)
+}
+
+async fn require_flag_write(
+    state: &AppState,
+    auth: &AuthUser,
+    key: &str,
+) -> AppResult<feature_flag_service::FlagDefinition> {
+    let access = require_feature_flag_access(state, auth).await?;
+    let def = feature_flag_service::get_definition(&state.db, key).await?;
+    if !(access.manage_all
+        || access.manage_own
+            && def.created_by.as_deref() == Some(auth.user_id.to_string().as_str()))
+    {
+        return Err(AppError::Forbidden(
+            "You may only edit feature flags you created".into(),
+        ));
+    }
+    Ok(def)
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateFeatureFlagRequest {
+    pub key: String,
+    pub description: String,
+    #[serde(default)]
+    pub default_enabled: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateFeatureFlagResponse {
+    pub key: String,
+    pub created_by: Option<String>,
+}
+
+pub async fn create_feature_flag(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateFeatureFlagRequest>,
+) -> AppResult<impl IntoResponse> {
+    let access = require_feature_flag_access(&state, &auth).await?;
+    if !access.manage_own {
+        return Err(AppError::Forbidden(
+            "Feature flag creation permission required".into(),
+        ));
+    }
+    let def = feature_flag_service::create_definition(
+        &state.db,
+        &body.key,
+        &body.description,
+        body.default_enabled,
+        &auth.user_id.to_string(),
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "admin_feature_flag_created",
+        Some(serde_json::json!({ "flag_key": def.key, "default_enabled": def.default_enabled })),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateFeatureFlagResponse {
+            key: def.key,
+            created_by: def.created_by,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeatureFlagTargetsQuery {
+    pub flag_key: String,
+    pub kind: String,
+    pub search: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FeatureFlagTargetResponse {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub slug: Option<String>,
+}
+
+/// Limited directory projection, available only while editing an authorized flag.
+pub async fn list_feature_flag_targets(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<FeatureFlagTargetsQuery>,
+) -> AppResult<Json<Vec<FeatureFlagTargetResponse>>> {
+    require_flag_write(&state, &auth, &query.flag_key).await?;
+    let rows = feature_flag_service::search_rollout_targets(
+        &state.db,
+        &query.kind,
+        query.search.as_deref(),
+        query.limit.unwrap_or(20).clamp(1, 20),
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "feature_flag_targets_searched",
+        Some(serde_json::json!({ "flag_key": query.flag_key, "kind": query.kind })),
+    );
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| FeatureFlagTargetResponse {
+                id: row.id,
+                email: row.email,
+                display_name: row.display_name,
+                slug: row.slug,
+            })
+            .collect(),
+    ))
+}
+
 /// GET /api/v1/admin/feature-flags
 pub async fn list_feature_flags(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<AdminFeatureFlagListResponse>> {
-    require_admin_or_operator(&state, &auth_user, "admin.feature_flags.list").await?;
-    let overrides = feature_flag_service::list_platform_overrides(&state.db).await?;
-    let org_rows = feature_flag_service::list_all_org_scope_overrides(&state.db).await?;
+    let access = require_feature_flag_access(&state, &auth_user).await?;
+    if access.read_all && !access.manage_all {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "admin.read.by_operator",
+            Some(serde_json::json!({ "endpoint": "admin.feature_flags.list" })),
+        );
+    }
+    let actor = auth_user.user_id.to_string();
+    let definitions: Vec<_> = feature_flag_service::list_definitions(&state.db)
+        .await?
+        .into_iter()
+        .filter(|def| access.read_all || def.created_by.as_deref() == Some(actor.as_str()))
+        .collect();
+    let keys: std::collections::HashMap<_, _> = definitions
+        .iter()
+        .map(|def| (def.key.as_str(), def.id.as_deref()))
+        .collect();
+    let mut overrides = feature_flag_service::list_platform_overrides(&state.db).await?;
+    overrides.retain(|row| {
+        keys.get(row.flag_key.as_str())
+            .is_some_and(|id| *id == row.definition_id.as_deref())
+    });
+    let mut org_rows = feature_flag_service::list_all_org_scope_overrides(&state.db).await?;
+    org_rows.retain(|row| {
+        keys.get(row.flag_key.as_str())
+            .is_some_and(|id| *id == row.definition_id.as_deref())
+    });
     let users = feature_flag_service::fetch_platform_override_users(&state.db, &overrides).await?;
     let orgs = feature_flag_service::fetch_override_org_display(&state.db, &org_rows).await?;
     let metadata = feature_flag_service::list_metadata(&state.db).await?;
-    let mut flags = Vec::with_capacity(feature_flag_service::FEATURE_FLAGS.len());
+    let mut flags = Vec::with_capacity(definitions.len());
 
-    for def in feature_flag_service::FEATURE_FLAGS {
+    for def in &definitions {
         let global_override = overrides
             .iter()
             .find(|row| row.flag_key == def.key && row.target_kind == FlagTargetKind::Global)
@@ -200,7 +363,7 @@ pub async fn list_feature_flags(
             .cloned()
             .map(|row| AdminUserFeatureFlagOverride::from_row(row, &users))
             .collect::<AppResult<Vec<_>>>()?;
-        let meta = metadata.get(def.key);
+        let meta = metadata.get(&def.key);
         let custom_description = meta.and_then(|row| row.description.clone());
         flags.push(AdminFeatureFlagItem {
             key: def.key.to_string(),
@@ -213,6 +376,9 @@ pub async fn list_feature_flags(
             metadata_updated_at: meta.map(|row| row.updated_at.to_rfc3339()),
             metadata_updated_by: meta.map(|row| row.updated_by.clone()),
             default_enabled: def.default_enabled,
+            created_by: def.created_by.clone(),
+            can_edit: access.manage_all
+                || (access.manage_own && def.created_by.as_deref() == Some(actor.as_str())),
             global_override,
             org_overrides,
             user_overrides,
@@ -229,7 +395,7 @@ pub async fn set_feature_flag(
     Path(flag_key): Path<String>,
     Json(body): Json<SetAdminFeatureFlagRequest>,
 ) -> AppResult<Json<AdminUserFeatureFlagOverrideOrGlobal>> {
-    require_admin(&state, &auth_user).await?;
+    require_flag_write(&state, &auth_user, &flag_key).await?;
     let actor = auth_user.user_id.to_string();
     let row = match parse_target(body.target_kind, body.target_key.as_deref())? {
         AdminTarget::Platform(target) => {
@@ -318,7 +484,7 @@ pub struct AdminFeatureFlagMetadataResponse {
 }
 
 impl AdminFeatureFlagMetadataResponse {
-    fn build(def: &feature_flag_service::FeatureFlagDef, row: Option<FeatureFlagMetadata>) -> Self {
+    fn build(def: &feature_flag_service::FlagDefinition, row: Option<FeatureFlagMetadata>) -> Self {
         let custom_description = row.as_ref().and_then(|meta| meta.description.clone());
         Self {
             key: def.key.to_string(),
@@ -345,9 +511,7 @@ pub async fn update_feature_flag_metadata(
     Path(flag_key): Path<String>,
     Json(body): Json<UpdateFeatureFlagMetadataRequest>,
 ) -> AppResult<Json<AdminFeatureFlagMetadataResponse>> {
-    require_admin(&state, &auth_user).await?;
-    let def = feature_flag_service::find_flag(&flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let def = require_flag_write(&state, &auth_user, &flag_key).await?;
     let row = feature_flag_service::set_metadata(
         &state.db,
         &flag_key,
@@ -371,7 +535,7 @@ pub async fn update_feature_flag_metadata(
         })),
     );
 
-    Ok(Json(AdminFeatureFlagMetadataResponse::build(def, row)))
+    Ok(Json(AdminFeatureFlagMetadataResponse::build(&def, row)))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -396,9 +560,7 @@ pub async fn patch_feature_flag_metadata(
     Path(flag_key): Path<String>,
     Json(body): Json<PatchFeatureFlagMetadataRequest>,
 ) -> AppResult<Json<AdminFeatureFlagMetadataResponse>> {
-    require_admin(&state, &auth_user).await?;
-    let def = feature_flag_service::find_flag(&flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let def = require_flag_write(&state, &auth_user, &flag_key).await?;
     let changed = body.description.is_some() || body.owner.is_some();
     let row = feature_flag_service::patch_metadata(
         &state.db,
@@ -420,7 +582,7 @@ pub async fn patch_feature_flag_metadata(
             ),
         );
     }
-    Ok(Json(AdminFeatureFlagMetadataResponse::build(def, row)))
+    Ok(Json(AdminFeatureFlagMetadataResponse::build(&def, row)))
 }
 
 /// DELETE /api/v1/admin/feature-flags/{flag_key}
@@ -430,9 +592,7 @@ pub async fn clear_feature_flag(
     Path(flag_key): Path<String>,
     Query(query): Query<ClearAdminFeatureFlagQuery>,
 ) -> AppResult<impl IntoResponse> {
-    require_admin(&state, &auth_user).await?;
-    feature_flag_service::find_flag(&flag_key)
-        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    require_flag_write(&state, &auth_user, &flag_key).await?;
     let removed = match parse_target(query.target_kind, query.target_key.as_deref())? {
         AdminTarget::Platform(target) => {
             feature_flag_service::clear_platform_override(&state.db, &flag_key, &target).await?
@@ -472,6 +632,21 @@ mod tests {
     async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
         let db = connect_test_database(prefix).await?;
         role_service::seed_system_roles(&db).await.ok()?;
+        db.collection::<mongodb::bson::Document>(
+            crate::models::feature_flag_definition::COLLECTION_NAME,
+        )
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "flag_key": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .expect("definition key index");
         let role_ids = role_service::get_platform_role_ids(&db).await.ok()?;
         let admin_id = Uuid::new_v4().to_string();
         let operator_id = Uuid::new_v4().to_string();
@@ -485,6 +660,276 @@ mod tests {
             .await
             .ok()?;
         Some((test_app_state(db), admin_id, operator_id, target_id))
+    }
+
+    async fn assign_flag_role(state: &AppState, user_id: &str, slug: &str) {
+        let role = state
+            .db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": slug })
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": user_id },
+                doc! { "$addToSet": { "role_ids": role.id } },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feature_flag_operator_ownership_and_admin_access() {
+        let (state, platform_admin, legacy_operator, creator) =
+            setup("flag_roles").await.expect("feature flag test setup");
+        assign_flag_role(
+            &state,
+            &creator,
+            crate::models::role::FEATURE_FLAG_OPERATOR_ROLE_SLUG,
+        )
+        .await;
+        create_feature_flag(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Json(CreateFeatureFlagRequest {
+                key: "team:owned".into(),
+                description: "Our feature".into(),
+                default_enabled: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(list) = list_feature_flags(State(state.clone()), test_auth_user(&creator))
+            .await
+            .unwrap();
+        assert_eq!(list.flags.len(), 1);
+        assert_eq!(list.flags[0].key, "team:owned");
+        assert_eq!(list.flags[0].created_by.as_deref(), Some(creator.as_str()));
+        assert!(list.flags[0].can_edit);
+        let Json(enabled) = set_feature_flag(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Path("team:owned".into()),
+            Json(SetAdminFeatureFlagRequest {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+                enabled: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(enabled.enabled);
+        assert!(
+            feature_flag_service::resolve_personal_features(&state.db, &creator)
+                .await
+                .unwrap()
+                .contains(&"team:owned".to_string())
+        );
+        let Json(targets) = list_feature_flag_targets(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Query(FeatureFlagTargetsQuery {
+                flag_key: "team:owned".into(),
+                kind: "person".into(),
+                search: None,
+                limit: Some(2),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(targets.len(), 2);
+        let target_json = serde_json::to_value(&targets[0]).unwrap();
+        assert_eq!(target_json.as_object().unwrap().len(), 4);
+        let mut inactive = test_user(&Uuid::new_v4().to_string(), UserType::Person);
+        inactive.email = "inactive-target@example.invalid".into();
+        inactive.is_active = false;
+        state
+            .db
+            .collection(USERS)
+            .insert_one(inactive)
+            .await
+            .unwrap();
+        let Json(targets) = list_feature_flag_targets(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Query(FeatureFlagTargetsQuery {
+                flag_key: "team:owned".into(),
+                kind: "person".into(),
+                search: Some("inactive-target".into()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(targets.is_empty());
+        clear_feature_flag(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Path("team:owned".into()),
+            Query(ClearAdminFeatureFlagQuery {
+                target_kind: AdminFlagTargetKind::Global,
+                target_key: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !feature_flag_service::resolve_personal_features(&state.db, &creator)
+                .await
+                .unwrap()
+                .contains(&"team:owned".to_string())
+        );
+        // Neither code flags nor another creator's flag may be claimed by editing metadata.
+        assert!(matches!(
+            patch_feature_flag_metadata(
+                State(state.clone()),
+                test_auth_user(&creator),
+                Path("example_ui".into()),
+                Json(PatchFeatureFlagMetadataRequest {
+                    description: None,
+                    owner: Some(Some(creator.clone())),
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        feature_flag_service::create_definition(
+            &state.db,
+            "team:other",
+            "Other flag",
+            false,
+            &platform_admin,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            clear_feature_flag(
+                State(state.clone()),
+                test_auth_user(&creator),
+                Path("team:other".into()),
+                Query(ClearAdminFeatureFlagQuery {
+                    target_kind: AdminFlagTargetKind::Global,
+                    target_key: None,
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let Json(metadata) = patch_feature_flag_metadata(
+            State(state.clone()),
+            test_auth_user(&creator),
+            Path("team:owned".into()),
+            Json(PatchFeatureFlagMetadataRequest {
+                description: Some(None),
+                owner: Some(Some("Someone else".into())),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(metadata.owner.as_deref(), Some("Someone else"));
+        assert!(
+            require_flag_write(&state, &test_auth_user(&creator), "team:owned")
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            create_feature_flag(
+                State(state.clone()),
+                test_auth_user(&creator),
+                Json(CreateFeatureFlagRequest {
+                    key: "team:owned".into(),
+                    description: "Overwrite".into(),
+                    default_enabled: true,
+                })
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            create_feature_flag(
+                State(state.clone()),
+                test_auth_user(&creator),
+                Json(CreateFeatureFlagRequest {
+                    key: "example_ui".into(),
+                    description: "Claim built-in".into(),
+                    default_enabled: true,
+                })
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        // Existing platform operators keep their read-only behavior.
+        let Json(list) = list_feature_flags(State(state.clone()), test_auth_user(&legacy_operator))
+            .await
+            .unwrap();
+        assert!(list.flags.len() > 2);
+        assert!(list.flags.iter().all(|flag| !flag.can_edit));
+        assert!(
+            require_flag_write(&state, &test_auth_user(&legacy_operator), "team:owned")
+                .await
+                .is_err()
+        );
+        // A feature flag admin is an ordinary user and can edit built-ins and other creators' flags.
+        let flag_admin_id = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&flag_admin_id, UserType::Person))
+            .await
+            .unwrap();
+        assign_flag_role(
+            &state,
+            &flag_admin_id,
+            crate::models::role::FEATURE_FLAG_ADMIN_ROLE_SLUG,
+        )
+        .await;
+        assert!(
+            require_flag_write(&state, &test_auth_user(&flag_admin_id), "example_ui")
+                .await
+                .is_ok()
+        );
+        assert!(
+            require_flag_write(&state, &test_auth_user(&flag_admin_id), "team:owned")
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::handlers::admin_helpers::require_admin(&state, &test_auth_user(&flag_admin_id))
+                .await
+                .is_err()
+        );
+        // Revocation applies on the next request, including directory access.
+        state
+            .db
+            .collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": &creator },
+                doc! { "$set": { "role_ids": [] } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            list_feature_flags(State(state.clone()), test_auth_user(&creator))
+                .await
+                .is_err()
+        );
+        assert!(
+            list_feature_flag_targets(
+                State(state),
+                test_auth_user(&creator),
+                Query(FeatureFlagTargetsQuery {
+                    flag_key: "team:owned".into(),
+                    kind: "person".into(),
+                    search: None,
+                    limit: None,
+                })
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[test]

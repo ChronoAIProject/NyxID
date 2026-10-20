@@ -738,3 +738,106 @@ The HMAC-SHA256 input is compact UTF-8 JSON for this ordered array (strings thro
 ```
 
 The usual timestamp and replay checks apply. The version tag separates the signature domain from legacy HTTP and WebSocket signatures. Service identity, target ID, and origin cannot be changed without invalidating the signature. Non-target HTTP calls retain the existing signature and wire shape, including compatibility with older nodes. Upgrade and verify every participating and failover node before starting a backend release that automatically activates Drive/Workspace editor routing. See the rollout prerequisites in [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md).
+
+## Machine protocol v1
+
+Machine access is additive. `status_update.capabilities.machine` carries a
+serde-defaulted profile: `version: 1`, `runtime_id` (new each daemon start),
+`shell`, `files`, `computer`, `os`, `arch`, `roots`, `computer_mode`,
+`cua_version`, `computer_tools`, `computer_ready`, `browser_isolated` and
+`saved_login_ready`, plus optional `computer_permissions` with nullable
+`screen_recording` and `accessibility` grants on macOS. A legacy node never receives a machine operation. The
+server checks the advertised profile; the node separately checks its local
+configuration. Root paths are display metadata, not a shell sandbox.
+
+A `machine_request` includes `request_id`, `node_id`, `operation`, `parameters`,
+`timestamp` (Unix seconds), `nonce` (UUID) and `signature`. Operations are
+`exec`, `job`, `job_cancel`, `list_files`, `read_file`, `write_file`, `edit_file`,
+`save_attachment`, `share_file`, `computer`, `fill_login`, `desktop_open`,
+`desktop_close`, `desktop_control` and `desktop_input`. A `machine_result`
+returns the request ID and `result`, with stable numeric errors where refused.
+Results are compact JSON bounded to 9,000 bytes; reads/listings/jobs expose
+continuation offsets. Job output lives in a bounded node ring, not MongoDB.
+Cross-replica dispatch uses the node's live owner fence as SSH/proxy do.
+
+Signing is mandatory regardless of `NODE_HMAC_SIGNING_ENABLED`. HMAC-SHA256
+uses the node signing secret and the domain `nyxid.machine.request.v1\0`.
+Append each field prefixed by its byte length as an unsigned big-endian u64:
+request ID, node ID, JSON-encoded operation string, SHA256 of canonical
+parameters (recursive sorted object keys, compact JSON), timestamp encoded as
+a signed big-endian i64, and nonce. Signature encoding is hex. Receivers
+require a matching node, valid UUID request/nonce, a timestamp within 60 seconds,
+a constant-time verified MAC and a previously unseen nonce. The bounded replay
+cache fails closed and node-side caches survive WebSocket reconnects.
+
+`machine_service_call` uses the same signed envelope with operation
+`service_call` or `job_finished`. Its parameters identify a server-issued job,
+conversation and runtime; identity/key authority is loaded from that job, never
+from node claims. NyxID validates the live key, grants, ownership and capability
+before the ordinary proxy pipeline executes. `machine_service_response` carries
+status/headers; bodies stream as binary chunks. A durable completion receives
+`machine_job_finished_ack`. Nodes retry completion with the same request ID and
+fresh nonce/timestamp until acknowledged; local gateway tokens expire at job
+end regardless of acknowledgement.
+
+Machine binary frames have this 30-byte header, followed by payload:
+
+| Bytes | Meaning |
+|---|---|
+| 0–3 | ASCII `NYXM` |
+| 4 | Kind |
+| 5 | End flag, 0 or 1 |
+| 6–21 | UUID bytes: stream/request or desktop-session ID |
+| 22–29 | Monotonic big-endian u64 sequence |
+
+Kinds: 1 desktop dirty rectangle, 2 signed owner input, 3 gateway upload, 4 gateway
+download, 5 reserved file stream, 6/7 upload/download abort, 8/9 proxy upload
+and abort, 10 gateway cancellation, 11 desktop action/cursor metadata. Desktop
+frames are capped at 5 MiB; all other chunks at 64 KiB. Upload/download streams
+require ordered sequence numbers and an explicit end; disconnect or abort is
+never interpreted as successful EOF. Queues enforce backpressure and idle
+stream deadlines. Legacy proxy binary chunks retain their UUID-text prefix.
+
+Attachment transfers use a signed `proxy_upload` opening whose operation is
+`save_attachment` or `share_file`, followed by kind-8 chunks. The node checks
+file capability, root confinement, length and digest, then streams the response
+through the existing `proxy_response_start`, binary chunks and
+`proxy_response_end`. Cross-replica `/proxy-upload` transports the same opening
+and body. The server attaches nothing without a successful end.
+
+Desktop sessions use durable controller revisions. Every input binds the
+session, controller viewer ID and revision inside the signed envelope. Only
+human owner WebSockets under `/assistant/nyxagent/...` can view/control them;
+delegated GET upgrades are denied. Only transient relays carry pixels/input,
+including across replicas. Native capture runs at 30 Hz and compares 64-pixel
+tiles; changed tiles are merged into one JPEG rectangle. A kind-1 payload starts
+with `NYXD`, then six big-endian u16 values (canvas width/height, rectangle x/y,
+rectangle width/height), then a big-endian u64 base-frame sequence and JPEG
+bytes. Base zero means a full frame. Browsers apply patches sequentially and
+request a rate-limited `refresh_frame` after a missing base or decode backlog.
+Frames are limited to 1920×1200 and 2 MiB/second; idle sends no frames. No frame
+is stored in MongoDB or audit.
+Human pointer coordinates are capture pixels. The node maps them into the
+driver's screen coordinate space using the last transmitted frame's dimensions,
+including downscaled Retina screens; out-of-frame coordinates are refused.
+Owner takeover is an authority barrier that cancels agent jobs and blocks all
+agent access to the machine. Controller epochs cancel pending agent operations
+and discard late results without a lock across I/O. Linux human capture uses
+X11/XFixes and independent XTest input; macOS uses ScreenCaptureKit and a
+separate human cua input session destroyed before hand-back. Agent observations
+and actions remain on cua. Audit contains control metadata only.
+
+`fill_login` carries only one selected value (NyxID computes TOTP), allowed
+HTTPS origins and field kind. A nonce-bound native message delivers it to the
+force-installed extension; no DevTools pipe or TCP debugging interface exists.
+The reply contains only success/refusal metadata. Never log, audit or debug
+print a machine envelope, stream body, command, path, clipboard or fill value.
+
+Exec requests carry a signed `environment` specification derived by NyxID from
+only the job's explicitly declared services. `variables` maps environment names
+to tagged `{"kind":"gateway_path","path":"/s/slug"}` or
+`{"kind":"gateway_token"}` values; `git` carries `{origin,path}` rewrites.
+The node applies this metadata without catalog slug mappings. The server stores
+ID+slug declarations on the job and rejects every other service even when its
+chat key has wider grants. Both streaming hops preserve Content-Encoding and
+Content-Length; local SDK/git clients decode compression themselves.

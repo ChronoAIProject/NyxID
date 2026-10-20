@@ -49,9 +49,10 @@ fn selection() -> Selection {
 async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
     let (state, actor) = fixture("device_reused_parent_cleanup").await;
     for concurrent in [false, true] {
-        let first = initiate_v2(&state.db, KEY, InitiateInput::default())
+        let first = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
             .await
             .unwrap();
+        assert_eq!(first.user_code.replace('-', "").len(), 8);
         approve_with_agent_key(
             &state.db,
             &state.encryption_keys,
@@ -69,7 +70,7 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
             .unwrap()
             .unwrap();
         let grant = row.agent_key_grant.unwrap();
-        let second = initiate_v2(&state.db, KEY, InitiateInput::default())
+        let second = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
             .await
             .unwrap();
         let approve = approve_with_agent_key(
@@ -78,6 +79,7 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
             KEY,
             input(&actor, &second.user_code),
             Selection::Existing {
+                permission_snapshot: None,
                 api_key_id: grant.api_key_id.clone(),
             },
             None,
@@ -151,10 +153,10 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
         .await
         .is_err()
     );
-    let request = initiate_v2(&state.db, KEY, InitiateInput::default())
+    let request = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
         .await
         .unwrap();
-    assert!(request.user_code.starts_with("2-"));
+    assert_eq!(normalize_user_code(&request.user_code).unwrap().len(), 8);
     assert!(request.device_code.starts_with("nyx_adc2_"));
     approve_with_agent_key(
         &state.db,
@@ -228,6 +230,7 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
             requested_profile: Some("fixture-profile".into()),
             ..Default::default()
         },
+        true,
     )
     .await
     .unwrap();
@@ -363,7 +366,7 @@ async fn expiry_during_decryption_reports_expired_for_cli_and_browser() {
     });
     let encryption = EncryptionKeys::with_provider(provider.clone());
     for browser in [false, true] {
-        let request = initiate_v2(&state.db, KEY, InitiateInput::default())
+        let request = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
             .await
             .unwrap();
         approve(
@@ -423,7 +426,7 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
     });
     let encryption = EncryptionKeys::with_provider(provider.clone());
     for deliver in [true, false] {
-        let request = initiate_v2(&state.db, KEY, InitiateInput::default())
+        let request = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
             .await
             .unwrap();
         approve(
@@ -496,7 +499,7 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
 #[tokio::test]
 async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
     let (state, actor) = fixture("device_browser_rollback").await;
-    let request = initiate_v2(&state.db, KEY, InitiateInput::default())
+    let request = initiate_v2(&state.db, KEY, InitiateInput::default(), true)
         .await
         .unwrap();
     approve(
@@ -589,12 +592,15 @@ async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
 #[tokio::test]
 async fn retained_terminal_outcomes_precede_expiry_and_codes_are_not_reused() {
     let (state, actor) = fixture("device_terminal_code_reuse").await;
-    let request =
-        initiate_with_user_code_generator(&state.db, KEY, InitiateInput::default(), || {
-            "2ABCDEFGH".into()
-        })
-        .await
-        .unwrap();
+    let request = initiate_with_user_code_generator_for_protocol(
+        &state.db,
+        KEY,
+        InitiateInput::default(),
+        true,
+        || "2ABCDEFGH".into(),
+    )
+    .await
+    .unwrap();
     deny(
         &state.db,
         KEY,
@@ -625,14 +631,20 @@ async fn retained_terminal_outcomes_precede_expiry_and_codes_are_not_reused() {
         Err(AppError::AuthDeviceCodeDenied)
     ));
     let mut calls = 0;
-    let next = initiate_with_user_code_generator(&state.db, KEY, InitiateInput::default(), || {
-        calls += 1;
-        if calls == 1 {
-            "2ABCDEFGH".into()
-        } else {
-            "212345678".into()
-        }
-    })
+    let next = initiate_with_user_code_generator_for_protocol(
+        &state.db,
+        KEY,
+        InitiateInput::default(),
+        true,
+        || {
+            calls += 1;
+            if calls == 1 {
+                "2ABCDEFGH".into()
+            } else {
+                "212345678".into()
+            }
+        },
+    )
     .await
     .unwrap();
     assert_eq!(calls, 2);

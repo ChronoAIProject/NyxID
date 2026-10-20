@@ -50,13 +50,22 @@ use crate::telemetry::{
 
 #[derive(Debug, Deserialize)]
 pub struct AsyncReplyRequest {
+    /// Explicitly request the original admitted thread; absent preserves legacy sends.
+    #[serde(default)]
+    pub thread_reply: bool,
     pub message_id: String,
     pub reply: AsyncReplyBody,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateReplyRequest {
+    /// Upstream platform message ID. Telegram numbers messages per chat, so
+    /// this alone does not identify one outbound row.
     pub message_id: String,
+    /// NyxID `message_id` returned by `/reply` or `/send`; pins the edit to
+    /// that exact outbound row.
+    #[serde(default)]
+    pub outbound_message_id: Option<String>,
     pub reply: AsyncReplyBody,
 }
 
@@ -144,6 +153,8 @@ pub struct AsyncReplyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Platform acceptance receipt; does not prove that a recipient saw the message.
     pub platform_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_as: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,17 +286,53 @@ fn validate_reply_for_adapter(
     body: &AsyncReplyBody,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    if body.attachments.len() > 10 {
+    validate_reply_parts(
+        body.text.as_deref(),
+        body.metadata.as_ref(),
+        body.attachments
+            .iter()
+            .map(|attachment| (attachment.kind, attachment.mime_type.as_deref())),
+        adapter,
+    )
+}
+
+fn validate_prepared_reply(
+    body: &OutboundReply,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<()> {
+    validate_reply_parts(
+        body.text.as_deref(),
+        body.metadata.as_ref(),
+        body.attachments
+            .iter()
+            .map(|attachment| (attachment.kind, attachment.mime_type.as_deref())),
+        adapter,
+    )
+}
+
+fn validate_reply_parts<'a>(
+    text: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    attachments: impl ExactSizeIterator<
+        Item = (
+            crate::services::channel_platform::MediaKind,
+            Option<&'a str>,
+        ),
+    >,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<()> {
+    let count = attachments.len();
+    if count > 10 {
         return Err(AppError::ValidationError(
             "At most 10 attachments are allowed".into(),
         ));
     }
     let supported = adapter.media_capabilities().outbound;
-    for attachment in &body.attachments {
-        if !supported.contains(&attachment.kind) {
+    for (kind, mime_type) in attachments {
+        if !supported.contains(&kind) {
             return Err(AppError::ValidationError(format!(
                 "Unsupported media kind {}; supported kinds: {}",
-                attachment.kind.as_str(),
+                kind.as_str(),
                 supported
                     .iter()
                     .map(|kind| kind.as_str())
@@ -293,7 +340,7 @@ fn validate_reply_for_adapter(
                     .join(", ")
             )));
         }
-        if attachment.mime_type.as_deref().is_some_and(|mime| {
+        if mime_type.is_some_and(|mime| {
             reqwest::multipart::Part::bytes(Vec::new())
                 .mime_str(mime)
                 .is_err()
@@ -303,21 +350,13 @@ fn validate_reply_for_adapter(
             ));
         }
     }
-    if !body.attachments.is_empty()
-        || body.text.as_deref().is_some_and(|text| !text.is_empty())
-        || body
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| adapter.supports_reply_metadata(metadata))
+    if count > 0
+        || text.is_some_and(|text| !text.is_empty())
+        || metadata.is_some_and(|metadata| adapter.supports_reply_metadata(metadata))
     {
         return Ok(());
     }
-    if body
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("card"))
-        .is_some()
-    {
+    if metadata.and_then(|metadata| metadata.get("card")).is_some() {
         return Err(AppError::ValidationError(format!(
             "metadata.card is only supported on Lark/Feishu (got platform={})",
             adapter.platform_id()
@@ -390,11 +429,44 @@ fn message_to_item(
 const REPLY_TOKEN_USE_TTL_BUFFER_SECS: i64 = 120;
 
 #[derive(Debug)]
-struct ReplyRequestContext {
+pub(crate) struct ReplyRequestContext {
     original: ChannelMessage,
     conversation: ChannelConversation,
     attributed_api_key_id: String,
     validated_bot: Option<ChannelBot>,
+}
+
+pub(crate) fn image_reply_audience(
+    context: &ReplyRequestContext,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<String> {
+    let original = &context.original;
+    let bot_id = context
+        .validated_bot
+        .as_ref()
+        .map(|bot| bot.id.as_str())
+        .or(original.channel_bot_id.as_deref())
+        .ok_or_else(|| AppError::NotFound("Image bot unavailable".into()))?;
+    let mut reply = OutboundReply {
+        text: None,
+        metadata: None,
+        attachments: Vec::new(),
+        reply_to_platform_message_id: original.platform_message_id.clone(),
+    };
+    adapter.reply_context(
+        crate::services::channel_image_audience::message_thread(original),
+        original.created_at,
+        &mut reply.metadata,
+    );
+    Ok(crate::services::channel_image_audience::resolve(
+        bot_id,
+        adapter.platform_id(),
+        original
+            .platform_conversation_id
+            .as_deref()
+            .unwrap_or(&context.conversation.platform_conversation_id),
+        &reply,
+    ))
 }
 
 #[derive(Debug)]
@@ -403,6 +475,9 @@ struct EditRequestContext {
     conversation: ChannelConversation,
     bot: ChannelBot,
     attributed_api_key_id: String,
+    /// The caller named the exact row, or a reply token's inbound anchor
+    /// bounds it to one chat.
+    row_pinned: bool,
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> AppResult<Option<String>> {
@@ -480,6 +555,7 @@ async fn load_active_api_key(state: &AppState, api_key_id: &str) -> AppResult<Ap
         .await?
         .ok_or_else(|| AppError::Unauthorized("API key not found".to_string()))?;
 
+    crate::services::key_service::require_ordinary_purpose(api_key.purpose)?;
     let expired = api_key.expires_at.is_some_and(|exp| exp <= Utc::now());
     if !api_key.is_active || expired {
         return Err(AppError::Unauthorized("API key is inactive".to_string()));
@@ -495,6 +571,7 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
         )
     })?;
     let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -583,15 +660,15 @@ async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult
 
 async fn check_message_edit_rate_limit(
     state: &AppState,
-    platform_message_id: &str,
+    outbound_message_id: &str,
 ) -> AppResult<()> {
     if !state
         .per_message_edit_limiter
-        .check_shared(platform_message_id)
+        .check_shared(outbound_message_id)
         .await?
     {
         tracing::warn!(
-            platform_message_id = %platform_message_id,
+            outbound_message_id = %outbound_message_id,
             "Per-message edit rate limit exceeded"
         );
         return Err(AppError::RateLimited);
@@ -737,25 +814,18 @@ async fn resolve_reply_token_edit_context(
         ));
     }
 
-    let outbound = channel_relay_service::get_outbound_message_by_platform_id(
+    // The lookup itself binds the row to the token's key, conversation and
+    // inbound anchor.
+    let outbound = channel_relay_service::get_outbound_reply_for_inbound(
         &state.db,
-        &claims.platform,
+        &claims.api_key_id,
+        &claims.conversation_id,
+        &claims.inbound_message_id,
         &body.message_id,
+        body.outbound_message_id.as_deref(),
     )
     .await?;
-
-    if outbound.reply_to_message_id.as_deref() != Some(claims.inbound_message_id.as_str()) {
-        return Err(AppError::Unauthorized(
-            "Reply token inbound_message_id mismatch".to_string(),
-        ));
-    }
-
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
-    if claims.conversation_id != conversation.id || outbound.conversation_id != conversation.id {
-        return Err(AppError::Unauthorized(
-            "Reply token conversation mismatch".to_string(),
-        ));
-    }
 
     if claims.platform != outbound.platform || claims.platform != conversation.platform {
         return Err(AppError::Unauthorized(
@@ -775,6 +845,7 @@ async fn resolve_reply_token_edit_context(
         conversation,
         bot,
         attributed_api_key_id: api_key.id,
+        row_pinned: true,
     })
 }
 
@@ -793,6 +864,7 @@ async fn resolve_api_key_edit_context(
         &state.db,
         caller_api_key_id,
         &body.message_id,
+        body.outbound_message_id.as_deref(),
     )
     .await?;
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
@@ -814,10 +886,11 @@ async fn resolve_api_key_edit_context(
         conversation,
         bot,
         attributed_api_key_id: caller_api_key_id.to_string(),
+        row_pinned: body.outbound_message_id.is_some(),
     })
 }
 
-async fn resolve_reply_request_context(
+pub(crate) async fn resolve_reply_request_context(
     state: &AppState,
     headers: &HeaderMap,
     auth_user: Option<&AuthUser>,
@@ -857,7 +930,10 @@ async fn resolve_edit_request_context(
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn check_initiate_rate_limit(state: &AppState, conversation_id: &str) -> AppResult<()> {
+pub(crate) async fn check_initiate_rate_limit(
+    state: &AppState,
+    conversation_id: &str,
+) -> AppResult<()> {
     if !state
         .per_conversation_initiate_limiter
         .check_shared(conversation_id)
@@ -916,6 +992,7 @@ async fn resolve_initiated_context(
         .as_deref()
         .ok_or_else(|| AppError::ChannelBotNotFound("Conversation has no bot".to_string()))?;
     let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    crate::services::platform_bot_authority::require_personal_routes(&state.db, &bot.id).await?;
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -971,7 +1048,7 @@ pub async fn send_message(
     .map(Json)
 }
 
-async fn deliver_initiated_message(
+pub(crate) async fn deliver_initiated_message(
     state: &AppState,
     headers: &HeaderMap,
     auth_user: &AuthUser,
@@ -979,6 +1056,61 @@ async fn deliver_initiated_message(
     bot: &ChannelBot,
     body: SendMessageRequest,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<AsyncReplyResponse> {
+    deliver_initiated_inner(
+        state,
+        headers,
+        auth_user,
+        conversation,
+        bot,
+        body,
+        adapter,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_prepared_initiated_message(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_user: &AuthUser,
+    conversation: &ChannelConversation,
+    bot: &ChannelBot,
+    outbound: OutboundReply,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<AsyncReplyResponse> {
+    let body = SendMessageRequest {
+        conversation_id: conversation.id.clone(),
+        idempotency_key: None,
+        message: AsyncReplyBody {
+            text: outbound.text.clone(),
+            metadata: outbound.metadata.clone(),
+            attachments: Vec::new(),
+        },
+    };
+    deliver_initiated_inner(
+        state,
+        headers,
+        auth_user,
+        conversation,
+        bot,
+        body,
+        adapter,
+        Some(outbound),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_initiated_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_user: &AuthUser,
+    conversation: &ChannelConversation,
+    bot: &ChannelBot,
+    body: SendMessageRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+    prepared: Option<OutboundReply>,
 ) -> AppResult<AsyncReplyResponse> {
     if !adapter.outbound_capabilities().initiated_send
         || (bot.platform == "x"
@@ -988,7 +1120,18 @@ async fn deliver_initiated_message(
     {
         return Err(AppError::ChannelPlatformSendUnsupported);
     }
-    validate_reply_for_adapter(&body.message, adapter)?;
+    if let Some(outbound) = &prepared {
+        validate_prepared_reply(outbound, adapter)?;
+        if outbound
+            .attachments
+            .iter()
+            .any(|attachment| attachment.bytes.len() as u64 > state.config.channel_media_max_bytes)
+        {
+            return Err(AppError::ChannelMediaTooLarge);
+        }
+    } else {
+        validate_reply_for_adapter(&body.message, adapter)?;
+    }
     // These are relay-internal interaction credentials, not durable target/thread IDs.
     if body
         .message
@@ -1020,10 +1163,10 @@ async fn deliver_initiated_message(
             "idempotency_key must contain 1 to 128 characters".to_string(),
         ));
     }
-    let attachment_kinds: Vec<_> = body.message.attachments.iter().map(|a| a.kind).collect();
-    let content_type = attachment_kinds
-        .first()
-        .map_or("text", |kind| kind.as_str());
+    let attachment_kinds: Vec<_> = prepared.as_ref().map_or_else(
+        || body.message.attachments.iter().map(|a| a.kind).collect(),
+        |outbound| outbound.attachments.iter().map(|a| a.kind).collect(),
+    );
     let claim = if let Some(key) = &body.idempotency_key {
         let fingerprint = channel_send_service::delivery_fingerprint(
             body.message.text.as_deref(),
@@ -1042,6 +1185,7 @@ async fn deliver_initiated_message(
                 return Ok(AsyncReplyResponse {
                     message_id,
                     platform_message_id,
+                    delivered_as: None,
                 });
             }
         }
@@ -1057,11 +1201,20 @@ async fn deliver_initiated_message(
     );
     let send_result = async {
         crate::services::ownership_transfer_service::require_current_bot(&state.db, bot).await?;
-        let attachments = channel_media_service::materialize(
-            &body.message.attachments,
-            state.config.channel_media_max_bytes,
-        )
-        .await?;
+        let mut outbound = match prepared {
+            Some(outbound) => outbound,
+            None => OutboundReply {
+                attachments: channel_media_service::materialize(
+                    &body.message.attachments,
+                    state.config.channel_media_max_bytes,
+                )
+                .await?,
+                text: body.message.text,
+                metadata: body.message.metadata,
+                reply_to_platform_message_id: None,
+            },
+        };
+        outbound.reply_to_platform_message_id = None;
         let token = crate::services::channel_credentials::resolve_bot_token(
             &state.db,
             &state.encryption_keys,
@@ -1092,12 +1245,7 @@ async fn deliver_initiated_message(
                     platform_secrets: platform_secrets.as_ref(),
                 },
                 &conversation.platform_conversation_id,
-                &OutboundReply {
-                    attachments,
-                    text: body.message.text,
-                    reply_to_platform_message_id: None,
-                    metadata: body.message.metadata,
-                },
+                &outbound,
             )
             .await
     }
@@ -1130,6 +1278,20 @@ async fn deliver_initiated_message(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_message_id = outcome.final_id;
+    let delivered_as = outcome
+        .delivered_kinds
+        .as_ref()
+        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
+    let attachment_kinds = outcome.delivered_kinds.unwrap_or(attachment_kinds);
+    let content_type = attachment_kinds
+        .first()
+        .map_or("text", |kind| kind.as_str());
+    crate::services::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        outcome.error.as_ref(),
+    )
+    .await;
     // After upstream acceptance, retain pending claims on persistence failure.
     // An uncertain outcome must never automatically dispatch a second copy.
     let stored = channel_relay_service::store_outbound_message(
@@ -1195,6 +1357,7 @@ async fn deliver_initiated_message(
     Ok(AsyncReplyResponse {
         message_id: stored.id,
         platform_message_id,
+        delivered_as,
     })
 }
 
@@ -1257,8 +1420,49 @@ pub async fn async_reply(
     if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
-    let adapter = resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)?;
+    let adapter = reply_adapter(&state, &context)?;
     deliver_async_reply(&state, &headers, context, body, adapter.as_ref()).await
+}
+
+/// Test-only adapter substitution, keyed by channel bot id, so NyxBot's
+/// production reply path can reach a mocked platform API.
+#[cfg(test)]
+pub(crate) static TEST_REPLY_ADAPTERS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>,
+        >,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn reply_adapter(
+    state: &AppState,
+    context: &ReplyRequestContext,
+) -> AppResult<std::sync::Arc<dyn crate::services::channel_platform::PlatformAdapter>> {
+    #[cfg(test)]
+    if let Some(adapter) = context
+        .original
+        .channel_bot_id
+        .as_deref()
+        .and_then(|bot_id| TEST_REPLY_ADAPTERS.lock().unwrap().get(bot_id).cloned())
+    {
+        return Ok(adapter);
+    }
+    resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)
+        .map(std::sync::Arc::from)
+}
+
+/// POST /api/v1/channel-relay/thread-reply. A distinct endpoint prevents an
+/// older replica from ignoring the target extension and sending to the parent.
+pub async fn async_thread_reply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    Json(mut body): Json<AsyncReplyRequest>,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    body.thread_reply = true;
+    Box::pin(async_reply(State(state), headers, auth, Json(body))).await
 }
 
 async fn deliver_async_reply(
@@ -1267,6 +1471,39 @@ async fn deliver_async_reply(
     context: ReplyRequestContext,
     body: AsyncReplyRequest,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    deliver_reply(state, headers, context, body, adapter, None).await
+}
+
+/// Internal materialized media uses the same authority, billing, metadata,
+/// provider send and persistence path as the public asynchronous reply API.
+pub(crate) async fn deliver_prepared_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ReplyRequestContext,
+    outbound: OutboundReply,
+    thread_reply: bool,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    let body = AsyncReplyRequest {
+        message_id: context.original.id.clone(),
+        thread_reply,
+        reply: AsyncReplyBody {
+            text: outbound.text.clone(),
+            metadata: outbound.metadata.clone(),
+            attachments: Vec::new(),
+        },
+    };
+    deliver_reply(state, headers, context, body, adapter, Some(outbound)).await
+}
+
+async fn deliver_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ReplyRequestContext,
+    body: AsyncReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+    prepared: Option<OutboundReply>,
 ) -> AppResult<Json<AsyncReplyResponse>> {
     let ReplyRequestContext {
         original,
@@ -1294,7 +1531,18 @@ async fn deliver_async_reply(
     // Runs after bot lookup so we can reject card-only replies destined
     // for platforms (Telegram/Discord) that would otherwise emit an empty
     // message downstream.
-    validate_reply_for_adapter(&body.reply, adapter)?;
+    if let Some(outbound) = &prepared {
+        validate_prepared_reply(outbound, adapter)?;
+        if outbound
+            .attachments
+            .iter()
+            .any(|attachment| attachment.bytes.len() as u64 > state.config.channel_media_max_bytes)
+        {
+            return Err(AppError::ChannelMediaTooLarge);
+        }
+    } else {
+        validate_reply_for_adapter(&body.reply, adapter)?;
+    }
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
@@ -1312,28 +1560,34 @@ async fn deliver_async_reply(
 
     if bot.platform == "x"
         && crate::services::channel_adapters::x::is_public_conversation(platform_conversation_id)
-        && !body.reply.attachments.is_empty()
+        && prepared
+            .as_ref()
+            .map_or(!body.reply.attachments.is_empty(), |reply| {
+                !reply.attachments.is_empty()
+            })
     {
         return Err(AppError::ChannelMediaUnsupported);
     }
 
-    let mut metadata = body.reply.metadata;
-    adapter.reply_context(
-        original.thread_id.as_deref(),
-        original.created_at,
-        &mut metadata,
-    );
-
-    let outbound = OutboundReply {
-        attachments: channel_media_service::materialize(
-            &body.reply.attachments,
-            state.config.channel_media_max_bytes,
-        )
-        .await?,
-        text: body.reply.text,
-        reply_to_platform_message_id: original.platform_message_id.clone(),
-        metadata,
+    let mut outbound = match prepared {
+        Some(outbound) => outbound,
+        None => OutboundReply {
+            attachments: channel_media_service::materialize(
+                &body.reply.attachments,
+                state.config.channel_media_max_bytes,
+            )
+            .await?,
+            text: body.reply.text,
+            metadata: body.reply.metadata,
+            reply_to_platform_message_id: None,
+        },
     };
+    outbound.reply_to_platform_message_id = original.platform_message_id.clone();
+    adapter.reply_context(
+        crate::services::channel_image_audience::message_thread(&original),
+        original.created_at,
+        &mut outbound.metadata,
+    );
 
     // Send reply to platform
     let platform_secrets = if bot.credential_source == "platform" {
@@ -1355,22 +1609,110 @@ async fn deliver_async_reply(
         &bot,
         Some(&attributed_api_key_id),
     );
-    let send_result = adapter
-        .send_bound_reply_outcome(
+    if body.thread_reply {
+        let credentials = crate::services::channel_platform::BotCredentials {
+            billing: billing.as_ref(),
+            token: &bot_token,
+            platform_bot_id: Some(&bot.platform_bot_id),
+            platform_secrets: platform_secrets.as_ref(),
+        };
+        let target = crate::services::channel_thread_service::gateway::reply_target(
             &state.db,
-            &state.http_client,
+            adapter,
             &bot,
+            &credentials,
             &original,
-            &crate::services::channel_platform::BotCredentials {
-                billing: billing.as_ref(),
-                token: &bot_token,
-                platform_bot_id: Some(&bot.platform_bot_id),
-                platform_secrets: platform_secrets.as_ref(),
-            },
-            platform_conversation_id,
+        )
+        .await?
+        .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        let outcome = crate::services::channel_thread_service::delivery::send_reply(
+            &state.db,
+            adapter,
+            &bot,
+            &credentials,
+            &target,
             &outbound,
         )
-        .await;
+        .await?;
+        if let Some(error) = outcome.error {
+            return Err(error);
+        }
+        let id = outcome
+            .message_ids
+            .last()
+            .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        let stored = state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(
+                doc! {"channel_bot_id":&bot.id,"user_id":&bot.user_id,"direction":"outbound",
+                "reply_to_message_id":&original.id,"platform_message_id":id},
+            )
+            .await?
+            .ok_or_else(|| AppError::Conflict("thread_target_unavailable".into()))?;
+        return Ok(Json(AsyncReplyResponse {
+            message_id: stored.id,
+            platform_message_id: Some(id.clone()),
+            delivered_as: (!outcome.delivered_kinds.is_empty()).then(|| {
+                outcome
+                    .delivered_kinds
+                    .iter()
+                    .map(|kind| kind.as_str().to_owned())
+                    .collect()
+            }),
+        }));
+    }
+    let mut stored_parts = None;
+    let credentials = crate::services::channel_platform::BotCredentials {
+        billing: billing.as_ref(),
+        token: &bot_token,
+        platform_bot_id: Some(&bot.platform_bot_id),
+        platform_secrets: platform_secrets.as_ref(),
+    };
+    let send_result = if let Some(parts) = crate::services::channel_reply_plan::ordinary(
+        &outbound,
+        adapter.platform_id(),
+        platform_conversation_id,
+    )? {
+        Box::pin(crate::services::channel_reply_delivery::send_parts(
+            &state.db,
+            &state.http_client,
+            adapter,
+            &bot,
+            &original,
+            &attributed_api_key_id,
+            platform_conversation_id,
+            &credentials,
+            parts,
+        ))
+        .await
+        .map(|(stored, outcome)| {
+            stored_parts = Some(stored);
+            outcome
+        })
+    } else {
+        adapter
+            .send_bound_reply_outcome(
+                &state.db,
+                &state.http_client,
+                &bot,
+                &original,
+                &credentials,
+                platform_conversation_id,
+                &outbound,
+                None,
+            )
+            .await
+    };
+    crate::services::channel_bot_service::record_outbound_outcome(
+        &state.db,
+        &bot.id,
+        match &send_result {
+            Ok(outcome) => outcome.error.as_ref(),
+            Err(error) => Some(error),
+        },
+    )
+    .await;
     let mut outcome = match send_result {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1394,32 +1736,40 @@ async fn deliver_async_reply(
         observation.waba_id = bot.app_id.clone();
     }
     let platform_msg_id = outcome.final_id;
+    let delivered_as = outcome
+        .delivered_kinds
+        .as_ref()
+        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
+    let kinds: Vec<_> = outcome
+        .delivered_kinds
+        .unwrap_or_else(|| outbound.attachments.iter().map(|a| a.kind).collect());
     // Store outbound-message metadata only (per ADR-013). The reply text
     // is already on the wire to the platform; we do not persist it.
-    let stored = channel_relay_service::store_outbound_message(
-        &state.db,
-        &bot.id,
-        &conversation.id,
-        &bot.user_id,
-        &bot.platform,
-        &attributed_api_key_id,
-        Some(&original.id),
-        platform_msg_id.as_deref(),
-        original.platform_conversation_id.as_deref(),
-        outbound
-            .attachments
-            .first()
-            .map_or("text", |a| a.kind.as_str()),
-        outcome.observation,
-    )
-    .await?;
+    let stored = match stored_parts {
+        Some(stored) => stored,
+        None => {
+            channel_relay_service::store_outbound_message(
+                &state.db,
+                &bot.id,
+                &conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                &attributed_api_key_id,
+                Some(&original.id),
+                platform_msg_id.as_deref(),
+                original.platform_conversation_id.as_deref(),
+                kinds.first().map_or("text", |kind| kind.as_str()),
+                outcome.observation,
+            )
+            .await?
+        }
+    };
 
     if let Some(error) = outcome.error {
         return Err(error);
     }
 
     if !outbound.attachments.is_empty() {
-        let kinds: Vec<_> = outbound.attachments.iter().map(|a| a.kind).collect();
         audit_service::log_async(
             state.db.clone(),
             Some(bot.user_id.clone()),
@@ -1478,6 +1828,7 @@ async fn deliver_async_reply(
     Ok(Json(AsyncReplyResponse {
         message_id: stored.id,
         platform_message_id: platform_msg_id,
+        delivered_as,
     }))
 }
 
@@ -1508,10 +1859,10 @@ pub async fn update_reply(
             "Reply updates do not accept attachments".into(),
         ));
     }
-    // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
-    check_message_edit_rate_limit(&state, &body.message_id).await?;
-
     let context = resolve_edit_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+    // Keyed on the resolved row: platform message IDs repeat across chats and
+    // tenants, so keying on them would let unrelated edits drain each other.
+    check_message_edit_rate_limit(&state, &context.outbound.id).await?;
     if is_device_reply_forbidden(&context.outbound.platform, &context.conversation.platform) {
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
@@ -1545,11 +1896,21 @@ async fn edit_resolved_reply(
         conversation,
         bot,
         attributed_api_key_id,
+        row_pinned,
     } = context;
     if !body.reply.attachments.is_empty() {
         return Err(AppError::ValidationError(
             "Reply updates do not accept attachments".into(),
         ));
+    }
+    // Even a unique match may belong to another chat when the intended row
+    // expired or was never stored, so these platforms need the exact row.
+    if !row_pinned && adapter.message_ids_are_chat_scoped() {
+        return Err(AppError::ValidationError(format!(
+            "outbound_message_id is required to edit {} messages: their message IDs repeat \
+             across chats. Pass the message_id returned by /reply or /send.",
+            bot.platform
+        )));
     }
     validate_reply_for_adapter(&body.reply, adapter)?;
     let inbound = if !outbound
@@ -1661,6 +2022,7 @@ pub async fn fetch_attachment(
         })?;
         crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth).await?;
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id,
             reply: AsyncReplyBody {
                 text: None,
@@ -1903,6 +2265,11 @@ mod tests {
 
     use crate::test_utils::{connect_test_database, test_app_state};
 
+    mod complete_replies {
+        use super::*;
+        include!("channel_relay_complete_tests.rs");
+    }
+
     struct ReplyTokenFixture {
         state: AppState,
         api_key: ApiKey,
@@ -1915,6 +2282,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSendAdapter {
         whatsapp_base: Option<String>,
+        telegram_base: Option<String>,
         calls: std::sync::atomic::AtomicUsize,
         media: bool,
         recorded_media: std::sync::Mutex<Vec<bytes::Bytes>>,
@@ -1927,6 +2295,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::services::channel_platform::PlatformAdapter for RecordingSendAdapter {
+        fn message_ids_are_chat_scoped(&self) -> bool {
+            matches!(self.edit_platform, Some("telegram" | "telegram-new"))
+        }
         fn media_capabilities(&self) -> crate::services::channel_platform::MediaCapabilities {
             if self.media {
                 crate::services::channel_platform::MediaCapabilities::ALL
@@ -1999,8 +2370,10 @@ mod tests {
             credentials: &crate::services::channel_platform::BotCredentials<'_>,
             target: &str,
             reply: &OutboundReply,
+            thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
         ) -> AppResult<crate::services::channel_platform::SendOutcome> {
-            if self.whatsapp_base.is_some() {
+            assert!(thread_target.is_none());
+            if self.whatsapp_base.is_some() || self.telegram_base.is_some() {
                 self.send_reply_outcome(http, credentials, target, reply)
                     .await
             } else {
@@ -2016,7 +2389,13 @@ mod tests {
             target: &str,
             reply: &OutboundReply,
         ) -> AppResult<crate::services::channel_platform::SendOutcome> {
-            if let Some(base) = &self.whatsapp_base {
+            if let Some(base) = &self.telegram_base {
+                crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+                    base,
+                )
+                .send_reply_outcome(http, credentials, target, reply)
+                .await
+            } else if let Some(base) = &self.whatsapp_base {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 crate::services::channel_adapters::whatsapp::send_outcome_at(
                     http,
@@ -2367,6 +2746,7 @@ mod tests {
             validated_bot: Some(fixture.bot.clone()),
         };
         let request = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: body(Some(&"t".repeat(4097)), None),
         };
@@ -2399,8 +2779,28 @@ mod tests {
         );
         let record = stored.platform_send.unwrap();
         assert_eq!(record.component_ids, vec!["wamid.accepted"]);
-        assert!(!record.complete);
-        assert!(record.uncertain);
+        // Each row now describes one platform part; the logical receipt owns completion.
+        assert!(record.complete);
+        assert!(!record.uncertain);
+        let logical = fixture
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME)
+            .find_one(doc! {"inbound_message_id": &fixture.message.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!logical.get_bool("complete").unwrap());
+        let parts = logical.get_array("parts").unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0].as_document().unwrap().get_str("status").unwrap(),
+            "accepted"
+        );
+        assert_eq!(
+            parts[1].as_document().unwrap().get_str("status").unwrap(),
+            "uncertain"
+        );
         assert_eq!(record.waba_id.as_deref(), Some("456"));
         fixture.state.db.drop().await.unwrap();
     }
@@ -2627,10 +3027,11 @@ mod tests {
         ] {
             let mut denied = auth.clone();
             denied.auth_method = method;
-            assert!(matches!(
-                resolve_initiated_context(&fixture.state, &denied, "missing").await,
-                Err(AppError::Forbidden(_))
-            ));
+            assert!(
+                resolve_initiated_context(&fixture.state, &denied, "missing")
+                    .await
+                    .is_err_and(|error| error.is_forbidden())
+            );
         }
         let mut wrong = auth.clone();
         wrong.api_key_id = Some(Uuid::new_v4().to_string());
@@ -2770,10 +3171,11 @@ mod tests {
                 .unwrap();
         }
         auth.oauth_client_id = Some("external-app".into());
-        assert!(matches!(
-            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id).await,
-            Err(AppError::Forbidden(_))
-        ));
+        assert!(
+            resolve_initiated_context(&fixture.state, &auth, &fixture.conversation.id)
+                .await
+                .is_err_and(|error| error.is_forbidden())
+        );
         let mut mismatch = fixture.bot.clone();
         mismatch.user_id = Uuid::new_v4().to_string();
         assert!(matches!(
@@ -2970,6 +3372,7 @@ mod tests {
                     .platform_message_id
                     .clone()
                     .unwrap(),
+                outbound_message_id: Some(fixture.outbound_message.id.clone()),
                 reply: body(Some("Updated digest"), None),
             };
             let context = resolve_edit_request_context(
@@ -3038,9 +3441,7 @@ mod tests {
                     )
                     .await
                     .unwrap_err();
-                    assert!(
-                        matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
-                    );
+                    assert!(matches!(error, AppError::NotFound(_)));
                 }
             } else {
                 assert!(matches!(
@@ -3090,6 +3491,7 @@ mod tests {
         let auth = api_key_auth_user(&fixture.api_key);
         let request = UpdateReplyRequest {
             message_id: "initiated-receipt".into(),
+            outbound_message_id: None,
             reply: body(Some("Updated digest"), None),
         };
         let context =
@@ -3155,9 +3557,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
-        );
+        assert!(matches!(error, AppError::NotFound(_)));
         db.drop().await.unwrap();
     }
 
@@ -3427,6 +3827,7 @@ mod tests {
 
     fn reply_request(message_id: &str) -> AsyncReplyRequest {
         AsyncReplyRequest {
+            thread_reply: false,
             message_id: message_id.to_string(),
             reply: body(Some("hello"), None),
         }
@@ -3435,6 +3836,7 @@ mod tests {
     fn update_reply_request(platform_message_id: &str) -> UpdateReplyRequest {
         UpdateReplyRequest {
             message_id: platform_message_id.to_string(),
+            outbound_message_id: None,
             reply: body(Some("hello"), None),
         }
     }
@@ -3452,6 +3854,12 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(&api_key.user_id).expect("valid api key user id"),
             session_id: None,
             scope: api_key.scopes.clone(),
@@ -3478,6 +3886,12 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "openid profile email proxy".to_string(),
@@ -3601,11 +4015,15 @@ mod tests {
             is_active: true,
             created_at: now,
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -3619,6 +4037,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -3655,6 +4074,7 @@ mod tests {
         };
 
         let conversation = ChannelConversation {
+            activity_callback: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot.id.clone()),
@@ -3672,6 +4092,8 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            thread_context: None,
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -3682,19 +4104,24 @@ mod tests {
             direction: "inbound".to_string(),
             platform: conversation.platform.clone(),
             platform_message_id: Some("msg_123".to_string()),
+            native_event_id: None,
             sender_platform_id: Some("user_123".to_string()),
             sender_display_name: Some("Alice".to_string()),
             content_type: "text".to_string(),
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: Some("delivered".to_string()),
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: None,
         };
 
         let outbound_message = ChannelMessage {
+            thread_context: None,
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -3705,14 +4132,17 @@ mod tests {
             direction: "outbound".to_string(),
             platform: conversation.platform.clone(),
             platform_message_id: Some("platform_reply_123".to_string()),
+            native_event_id: None,
             sender_platform_id: None,
             sender_display_name: None,
             content_type: "text".to_string(),
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: Some(message.id.clone()),
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: Some(now),
         };
@@ -3892,6 +4322,8 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            thread_context: None,
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -4129,6 +4561,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
@@ -4394,8 +4827,9 @@ mod tests {
         .await
         .unwrap_err();
 
+        // Rows outside the token's inbound anchor are not-found-shaped.
         assert!(
-            matches!(err, AppError::Unauthorized(msg) if msg.contains("inbound_message_id mismatch"))
+            matches!(err, AppError::NotFound(msg) if msg.contains("Outbound message not found"))
         );
         db.drop().await.unwrap();
     }
@@ -4481,6 +4915,154 @@ mod tests {
             matches!(err, AppError::NotFound(msg) if msg.contains("Outbound message not found"))
         );
         db.drop().await.unwrap();
+    }
+
+    /// Replaces the fixture reply with another chat's colliding reply followed
+    /// by the fixture reply, so natural order returns the wrong row first.
+    async fn insert_colliding_reply_first(
+        fixture: &ReplyTokenFixture,
+        reply_to_message_id: Option<String>,
+    ) -> ChannelMessage {
+        let messages = fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME);
+        messages
+            .delete_one(doc! { "_id": &fixture.outbound_message.id })
+            .await
+            .unwrap();
+        let colliding = ChannelMessage {
+            id: Uuid::new_v4().to_string(),
+            platform_conversation_id: Some("chat_a".into()),
+            reply_to_message_id,
+            ..fixture.outbound_message.clone()
+        };
+        messages.insert_one(&colliding).await.unwrap();
+        messages
+            .insert_one(&fixture.outbound_message)
+            .await
+            .unwrap();
+        colliding
+    }
+
+    #[tokio::test]
+    async fn api_key_edit_never_retargets_another_chats_colliding_reply() {
+        let Some(fixture) = setup_reply_token_fixture("edit_colliding_reply").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        // Telegram numbers messages per chat: customer A's earlier reply in
+        // chat_a shares the ID of customer B's reply in chat_123.
+        insert_colliding_reply_first(&fixture, None).await;
+        let auth = api_key_auth_user(&fixture.api_key);
+        let platform_message_id = "platform_reply_123";
+
+        let unpinned = resolve_edit_request_context(
+            &fixture.state,
+            &HeaderMap::new(),
+            Some(&auth),
+            &update_reply_request(platform_message_id),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(unpinned, AppError::Conflict(_)));
+
+        let request = UpdateReplyRequest {
+            outbound_message_id: Some(fixture.outbound_message.id.clone()),
+            reply: body(Some("Updated digest"), None),
+            ..update_reply_request(platform_message_id)
+        };
+        let context =
+            resolve_edit_request_context(&fixture.state, &HeaderMap::new(), Some(&auth), &request)
+                .await
+                .unwrap();
+        let adapter = RecordingSendAdapter {
+            edit_platform: Some("telegram"),
+            ..Default::default()
+        };
+        let response = edit_resolved_reply(
+            &fixture.state,
+            &HeaderMap::new(),
+            context,
+            request,
+            &adapter,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.upstream_message_id, platform_message_id);
+        assert_eq!(
+            *adapter.edit_calls.lock().unwrap(),
+            vec![("chat_123".into(), platform_message_id.into())]
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_token_edit_resolves_its_anchor_despite_colliding_replies() {
+        let Some(fixture) = setup_reply_token_fixture("token_edit_colliding_reply").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        insert_colliding_reply_first(&fixture, Some(Uuid::new_v4().to_string())).await;
+        let claims = valid_reply_claims(&fixture);
+        insert_reply_token_use(&fixture, &claims).await;
+
+        let context = resolve_edit_request_context(
+            &fixture.state,
+            &bearer_headers(&encode_reply_claims(&fixture.state, &claims)),
+            None,
+            &update_reply_request("platform_reply_123"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(context.outbound.id, fixture.outbound_message.id);
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_key_telegram_edit_requires_outbound_message_id() {
+        let Some(fixture) = setup_reply_token_fixture("telegram_edit_requires_pin").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        // The only matching row may be another chat's reply once the intended
+        // row has expired, so a unique unpinned match is still not enough.
+        let err = update_reply(
+            State(fixture.state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            Json(update_reply_request("platform_reply_123")),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::ValidationError(msg) if msg.contains("outbound_message_id is required"))
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn only_telegram_message_ids_are_chat_scoped() {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        for (platform, chat_scoped) in [
+            ("telegram", true),
+            ("telegram-new", true),
+            ("discord", false),
+            ("slack", false),
+            ("lark", false),
+            ("feishu", false),
+            ("whatsapp", false),
+        ] {
+            let adapter = resolve_adapter(platform, &cache).expect("registered adapter");
+            assert_eq!(
+                adapter.message_ids_are_chat_scoped(),
+                chat_scoped,
+                "{platform}"
+            );
+        }
     }
 
     #[test]
@@ -4598,15 +5180,33 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    async fn pinned_edit(
+        state: &AppState,
+        auth: Option<AuthUser>,
+        platform_message_id: &str,
+        outbound_message_id: &str,
+    ) -> AppResult<Json<UpdateReplyResponse>> {
+        update_reply(
+            State(state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(auth),
+            Json(UpdateReplyRequest {
+                outbound_message_id: Some(outbound_message_id.to_string()),
+                ..update_reply_request(platform_message_id)
+            }),
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn update_reply_rate_limits_per_platform_message_id() {
-        let Some(fixture) = setup_reply_token_fixture("update_reply_rate_limit").await else {
+    async fn update_reply_rate_limits_per_outbound_message() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_outbound_rate_limit").await
+        else {
             eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
             return;
         };
         let db = fixture.state.db.clone();
-        // Use a platform with no edit API so the first request cannot make an
-        // external call. Telegram now implements native editing.
+        // Use a platform with no edit API so no request can make an external call.
         for (collection, id) in [
             (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
             (CONVERSATIONS, &fixture.conversation.id),
@@ -4623,41 +5223,44 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // Another chat's reply shares the platform message ID, not the bucket.
+        let sibling = ChannelMessage {
+            id: Uuid::new_v4().to_string(),
+            platform: "whatsapp".into(),
+            platform_conversation_id: Some("chat_a".into()),
+            ..fixture.outbound_message.clone()
+        };
+        db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(&sibling)
+            .await
+            .unwrap();
 
         let mut state = fixture.state.clone();
         state.per_message_edit_limiter =
             std::sync::Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(1, 1));
+        let platform_message_id = "platform_reply_123";
+        let target = fixture.outbound_message.id.as_str();
+        let auth = || Some(api_key_auth_user(&fixture.api_key));
 
-        let platform_message_id = fixture
-            .outbound_message
-            .platform_message_id
-            .as_deref()
-            .expect("outbound platform message id")
-            .to_string();
-
-        let first = update_reply(
-            State(state.clone()),
-            HeaderMap::new(),
-            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
-            Json(update_reply_request(&platform_message_id)),
-        )
-        .await;
+        // Unauthenticated floods cannot drain an outbound row's bucket.
+        let anonymous = pinned_edit(&state, None, platform_message_id, target).await;
+        assert!(matches!(anonymous, Err(AppError::Unauthorized(_))));
+        let first = pinned_edit(&state, auth(), platform_message_id, target).await;
         assert!(matches!(
             first,
             Err(AppError::ChannelPlatformEditUnsupported)
         ));
-
-        let second = update_reply(
-            State(state),
-            HeaderMap::new(),
-            OptionalAuthUser(None),
-            Json(update_reply_request(&platform_message_id)),
-        )
-        .await;
+        let second = pinned_edit(&state, auth(), platform_message_id, target).await;
         assert!(matches!(second, Err(AppError::RateLimited)));
+        let sibling_edit = pinned_edit(&state, auth(), platform_message_id, &sibling.id).await;
+        assert!(matches!(
+            sibling_edit,
+            Err(AppError::ChannelPlatformEditUnsupported)
+        ));
 
         db.drop().await.unwrap();
     }
+
     fn media_body() -> AsyncReplyBody {
         AsyncReplyBody {
             text: None,
@@ -4672,6 +5275,76 @@ mod tests {
                 caption: Some("private caption".into()),
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn channel_telegram_photo_fallback_reply_exposes_and_persists_actual_kind() {
+        use tower::ServiceExt;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let fixture = setup_reply_token_fixture("channel_document_fallback")
+            .await
+            .expect("MongoDB required");
+        let server = MockServer::start().await;
+        Mock::given(path("/botbot-token/sendPhoto"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"PHOTO_INVALID_DIMENSIONS"})))
+            .expect(1).mount(&server).await;
+        Mock::given(path("/botbot-token/sendDocument"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok":true,"result":{"message_id":42}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        TEST_REPLY_ADAPTERS.lock().unwrap().insert(
+            fixture.bot.id.clone(),
+            std::sync::Arc::new(RecordingSendAdapter {
+                telegram_base: Some(server.uri()),
+                media: true,
+                ..Default::default()
+            }),
+        );
+        let request = serde_json::json!({"message_id":fixture.message.id,"reply":{"attachments":[{
+            "kind":"image", "source":{"type":"base64","data":"aW1hZ2U="}, "mime_type":"image/png"
+        }]}});
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/channel-relay/reply",
+                axum::routing::post(async_reply),
+            )
+            .with_state(fixture.state.clone());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/channel-relay/reply")
+                    .header("content-type", "application/json")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", valid_reply_token(&fixture)),
+                    )
+                    .body(axum::body::Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["delivered_as"], serde_json::json!(["file"]));
+        let row = channel_relay_service::get_message(
+            &fixture.state.db,
+            response["message_id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.content_type, "file");
+        assert!(row.attachments.is_empty());
+        TEST_REPLY_ADAPTERS.lock().unwrap().remove(&fixture.bot.id);
+        server.verify().await;
+        fixture.state.db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -4709,6 +5382,7 @@ mod tests {
                 &HeaderMap::new(),
                 context,
                 AsyncReplyRequest {
+                    thread_reply: false,
                     message_id: fixture.message.id.clone(),
                     reply: body(Some("reply"), None),
                 },
@@ -4763,6 +5437,7 @@ mod tests {
             Err(AppError::Conflict(_))
         ));
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: media_body(),
         };
@@ -4819,6 +5494,7 @@ mod tests {
                 OptionalAuthUser(Some(auth)),
                 Json(UpdateReplyRequest {
                     message_id: "platform".into(),
+                    outbound_message_id: None,
                     reply: media_body()
                 })
             )
@@ -4897,6 +5573,7 @@ mod tests {
                 .unwrap()
         );
         let body = AsyncReplyRequest {
+            thread_reply: false,
             message_id: fixture.message.id.clone(),
             reply: media_body(),
         };
@@ -5222,3 +5899,7 @@ mod tests {
 #[cfg(test)]
 #[path = "channel_x_public_tests.rs"]
 mod x_public_tests;
+
+#[cfg(test)]
+#[path = "channel_activity_tests.rs"]
+mod activity_tests;

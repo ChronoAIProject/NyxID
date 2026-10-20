@@ -146,7 +146,7 @@ export interface AdminAuditLogEntry {
   readonly service_name?: string | null;
   /** Canonical service slug resolved server-side. */
   readonly service_slug?: string | null;
-  /** Acting user's display name resolved server-side; absent for userless events or deleted users. */
+  /** Acting person, organization, or service-account name resolved server-side. */
   readonly user_display_name?: string | null;
   /** Acting user's email resolved server-side. */
   readonly user_email?: string | null;

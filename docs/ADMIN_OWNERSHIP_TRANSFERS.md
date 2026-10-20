@@ -1,6 +1,10 @@
 # Ownership transfers
 
-Owners can transfer their own custom catalog services and supported channel bots.
+Owners can transfer their own non-Tool custom catalog services and supported channel bots.
+Tool definitions require a live platform Admin using a first-party human session,
+even when the caller created or owns the Tool. Tools Managers and Agent Keys
+cannot transfer Tools. This rule applies to capability checks, preview, commit,
+and receipt replay; a revoked Admin cannot replay a Tool transfer.
 For organization assets, active organization admins with unrestricted management
 access can transfer them. Platform admins retain cross-owner transfer access and
 the **Admin → Ownership transfers** inventory.
@@ -55,7 +59,10 @@ A stale preview returns 409 and requires another review. MongoDB transactions
 commit the resource change, route retirement, and an `ownership_transfers` receipt
 together. The request UUID is the receipt ID. Receipts bind the acting user and
 Agent Key identity (if present). Retrying the same request with that identity returns
-the committed result; reusing its UUID with different inputs is rejected. The UI
+the committed result; reusing its UUID with different inputs is rejected.
+Non-Tool receipts remain replayable by the original authorized actor after the
+resource is inactive or deleted. Tool receipts retain their human/live-Admin gate;
+if a live resource has changed kind, the replay also checks its current kind. The UI
 retains this UUID after an uncertain network or server failure.
 
 The preview version includes the complete stored resource, the destination, and

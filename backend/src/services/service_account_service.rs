@@ -42,6 +42,7 @@ fn generate_client_secret() -> String {
 ///
 /// Note: Duplicate names are intentionally allowed. The `client_id` is the
 /// unique identifier; names are for human display only.
+#[cfg(test)]
 pub async fn create_service_account(
     db: &Database,
     name: &str,
@@ -67,6 +68,7 @@ pub async fn create_service_account(
 
 /// Create a service account with a caller-reserved UUID.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_service_account_with_id(
     db: &Database,
     id: &str,
@@ -76,6 +78,32 @@ pub async fn create_service_account_with_id(
     role_ids: &[String],
     rate_limit_override: Option<u64>,
     created_by: &str,
+) -> AppResult<(ServiceAccount, String)> {
+    create_service_account_with_authority(
+        db,
+        id,
+        name,
+        description,
+        allowed_scopes,
+        role_ids,
+        rate_limit_override,
+        created_by,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_service_account_with_authority(
+    db: &Database,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    allowed_scopes: &str,
+    role_ids: &[String],
+    rate_limit_override: Option<u64>,
+    created_by: &str,
+    platform_admin: bool,
 ) -> AppResult<(ServiceAccount, String)> {
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::ValidationError(
@@ -120,6 +148,11 @@ pub async fn create_service_account_with_id(
         }
     }
 
+    let catalog_editor =
+        platform_admin && super::catalog_editor_service::has_catalog_scopes(allowed_scopes);
+    if catalog_editor {
+        super::catalog_editor_service::validate_scopes(allowed_scopes)?;
+    }
     let client_id = generate_client_id();
     let raw_secret = generate_client_secret();
     let secret_hash = hash_token(&raw_secret);
@@ -132,8 +165,13 @@ pub async fn create_service_account_with_id(
         description: description.map(String::from),
         client_id,
         client_secret_hash: secret_hash,
-        platform_protected: false,
-        purpose: crate::models::service_account::ServiceAccountPurpose::General,
+        platform_protected: catalog_editor,
+        catalog_scope_authorized: catalog_editor,
+        purpose: if catalog_editor {
+            crate::models::service_account::ServiceAccountPurpose::CatalogEditor
+        } else {
+            crate::models::service_account::ServiceAccountPurpose::General
+        },
         curation_grant: None,
         credential_generation: 0,
         secret_prefix,
@@ -216,7 +254,18 @@ pub async fn get_service_account(db: &Database, sa_id: &str) -> AppResult<Servic
         .ok_or_else(|| AppError::ServiceAccountNotFound(sa_id.to_string()))
 }
 
-/// Update a service account's mutable fields.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedAccessState {
+    pub role_ids: Vec<String>,
+    pub allowed_scopes: String,
+    pub purpose: crate::models::service_account::ServiceAccountPurpose,
+    pub platform_protected: bool,
+    pub is_active: bool,
+    #[serde(default)]
+    pub catalog_scope_authorized: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_service_account(
     db: &Database,
@@ -228,10 +277,21 @@ pub async fn update_service_account(
     rate_limit_override: Option<Option<u64>>,
     is_active: Option<bool>,
     platform_admin: bool,
+    expected_access: Option<&ExpectedAccessState>,
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
     let existing = get_service_account(db, sa_id).await?;
+    let activate_editor = platform_admin
+        && allowed_scopes.is_some_and(super::catalog_editor_service::has_catalog_scopes);
+    if activate_editor
+        || existing.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor
+    {
+        super::catalog_editor_service::validate_scopes(
+            allowed_scopes.unwrap_or(&existing.allowed_scopes),
+        )?;
+    }
     if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        && !activate_editor
         && let Some(scopes) = allowed_scopes
     {
         super::curation_grant_service::validate_scopes(
@@ -278,7 +338,17 @@ pub async fn update_service_account(
         set_doc.insert("allowed_scopes", s);
     }
 
+    if activate_editor {
+        set_doc.insert("platform_protected", true);
+        set_doc.insert("purpose", "catalog_editor");
+        set_doc.insert("catalog_scope_authorized", true);
+    }
     if let Some(roles) = role_ids {
+        if !platform_admin {
+            return Err(AppError::Forbidden(
+                "Role assignment requires platform admin".into(),
+            ));
+        }
         if !roles.is_empty() {
             let existing_count = db
                 .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
@@ -319,12 +389,29 @@ pub async fn update_service_account(
     let mut filter = management_filter(sa_id, platform_admin);
     filter.insert(
         "purpose",
-        if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
-            bson::Bson::String("curation".into())
-        } else {
-            bson::Bson::Document(doc! {"$ne": "curation"})
+        match existing.purpose {
+            crate::models::service_account::ServiceAccountPurpose::Curation => {
+                bson::Bson::String("curation".into())
+            }
+            crate::models::service_account::ServiceAccountPurpose::CatalogEditor => {
+                bson::Bson::String("catalog_editor".into())
+            }
+            crate::models::service_account::ServiceAccountPurpose::General => {
+                bson::Bson::Document(doc! {"$nin": ["curation", "catalog_editor"]})
+            }
         },
     );
+    if let Some(expected) = expected_access {
+        // Missing fields on legacy accounts have the same defaults as serde.
+        filter.insert("$expr", doc! {"$and": [
+            {"$eq": [{"$ifNull": ["$role_ids", []]}, {"$literal": &expected.role_ids}]},
+            {"$eq": ["$allowed_scopes", {"$literal": &expected.allowed_scopes}]},
+            {"$eq": [{"$ifNull": ["$purpose", "general"]}, bson::to_bson(&expected.purpose).map_err(|e| AppError::Internal(e.to_string()))?]},
+            {"$eq": [{"$ifNull": ["$platform_protected", false]}, expected.platform_protected]},
+            {"$eq": ["$is_active", expected.is_active]},
+            {"$eq": [{"$ifNull": ["$catalog_scope_authorized", false]}, expected.catalog_scope_authorized]},
+        ]});
+    }
     let mut update = doc! {"$set": set_doc};
     if is_active == Some(false) {
         update.insert("$inc", doc! {"credential_generation": 1_i64});
@@ -333,6 +420,11 @@ pub async fn update_service_account(
         .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
         .update_one(filter, update)
         .await?;
+    if expected_access.is_some() && result.matched_count == 0 {
+        return Err(AppError::Conflict(
+            "Service account access changed; reload before applying catalog access".into(),
+        ));
+    }
     require_managed_match(result.matched_count)?;
 
     get_service_account(db, sa_id).await
@@ -406,7 +498,7 @@ fn management_filter(sa_id: &str, platform_admin: bool) -> bson::Document {
     let mut filter = doc! {"_id": sa_id};
     if !platform_admin {
         filter.insert("platform_protected", doc! {"$ne": true});
-        filter.insert("purpose", doc! {"$ne": "curation"});
+        filter.insert("purpose", doc! {"$nin": ["curation", "catalog_editor"]});
     }
     filter
 }
@@ -837,6 +929,7 @@ mod custom_scope_regression_tests {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap();

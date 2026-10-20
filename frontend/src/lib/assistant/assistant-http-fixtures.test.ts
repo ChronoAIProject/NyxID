@@ -27,6 +27,7 @@ async function request(
 describe("assistant HTTP fixture world", () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     useAssistantMockScenariosStore.getState().reset();
     globalThis.__nyxidAssistantHttpFaults = undefined;
     vi.useFakeTimers();
@@ -71,10 +72,22 @@ describe("assistant HTTP fixture world", () => {
     });
 
     expect(
-      (await request(world, "/assistant/conversations/conversation-stripe", "DELETE")).status,
+      (
+        await request(
+          world,
+          "/assistant/conversations/conversation-stripe",
+          "DELETE",
+        )
+      ).status,
     ).toBe(204);
     expect(
-      (await request(world, "/assistant/conversations/conversation-stripe", "DELETE")).status,
+      (
+        await request(
+          world,
+          "/assistant/conversations/conversation-stripe",
+          "DELETE",
+        )
+      ).status,
     ).toBe(204);
   });
 
@@ -95,8 +108,12 @@ describe("assistant HTTP fixture world", () => {
     )) {
       frames.push(frame);
     }
-    expect(frames.some((frame) => frame.event?.type === "RUN_STARTED")).toBe(true);
-    expect(frames.some((frame) => frame.event?.type === "RUN_FINISHED")).toBe(true);
+    expect(frames.some((frame) => frame.event?.type === "RUN_STARTED")).toBe(
+      true,
+    );
+    expect(frames.some((frame) => frame.event?.type === "RUN_FINISHED")).toBe(
+      true,
+    );
     expect(
       frames.some(
         (frame) =>
@@ -113,7 +130,10 @@ describe("assistant HTTP fixture world", () => {
     );
     expect(created?.messageCount).toBe(2);
     const transcript = (await (
-      await request(world, `/assistant/conversations/${created?.id ?? "missing"}`)
+      await request(
+        world,
+        `/assistant/conversations/${created?.id ?? "missing"}`,
+      )
     ).json()) as { messages: { content: string }[] };
     expect(transcript.messages.at(-1)?.content).toBe(FIXTURE_REPLY);
   });
@@ -148,12 +168,18 @@ describe("assistant HTTP fixture world", () => {
     globalThis.__nyxidAssistantHttpFaults = { stateEnvelopeSequence: sequence };
     expect(
       await (
-        await request(world, "/assistant/conversations/conversation-stripe/state")
+        await request(
+          world,
+          "/assistant/conversations/conversation-stripe/state",
+        )
       ).json(),
     ).toEqual(sequence[0]);
     expect(
       await (
-        await request(world, "/assistant/conversations/conversation-stripe/state")
+        await request(
+          world,
+          "/assistant/conversations/conversation-stripe/state",
+        )
       ).json(),
     ).toEqual(sequence[1]);
   });
@@ -176,7 +202,7 @@ describe("assistant HTTP fixture world", () => {
     ).toMatchObject({ error_code: 0 });
   });
 
-  it("matches enabled HTTP scenarios and updates their connected fixture world", async () => {
+  it("offers a pending connector without approving or connecting it", async () => {
     const world = new AssistantHttpFixtureWorld();
     useAssistantMockScenariosStore.setState({
       enabled: true,
@@ -190,11 +216,15 @@ describe("assistant HTTP fixture world", () => {
     });
     const consumed = response.text();
     await vi.advanceTimersByTimeAsync(10_000);
-    await consumed;
+    const stream = await consumed;
+
+    expect(stream).toContain("nyx_clk_fixture_");
+    expect(stream).not.toContain("nyxid.input.request");
+    expect(stream).not.toContain("nyxid.approval.request");
 
     expect(useAssistantMockScenariosStore.getState()).toMatchObject({
       lastActivity: { matched: true, scenarioId: "connect-github" },
-      world: { connected: ["api-github"] },
+      world: { connected: [] },
     });
   });
 });

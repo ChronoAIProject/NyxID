@@ -29,6 +29,8 @@ use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
+mod mongo_readiness;
+
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
 const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;
@@ -58,6 +60,42 @@ const STALE_TEST_DB_DROP_TIMEOUT: Duration = Duration::from_secs(3);
 const STALE_TEST_DB_DROP_CLAIM_LEASE: Duration = Duration::from_secs(30);
 const STALE_TEST_DB_SWEEP_BUDGET: Duration = Duration::from_secs(45);
 const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
+
+// Exact owned mock URLs only. This module and the caller's exception are absent
+// from production binaries; unrelated tests retain the public HTTPS guard.
+static LOOPBACK_REVOCATION_URLS: std::sync::LazyLock<dashmap::DashMap<String, ()>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+// Used only by the local-only Catalog E2E, which coverage builds exclude.
+#[cfg(not(coverage))]
+pub(crate) struct LoopbackRevocationGuard(String);
+
+#[cfg(not(coverage))]
+impl Drop for LoopbackRevocationGuard {
+    fn drop(&mut self) {
+        LOOPBACK_REVOCATION_URLS.remove(&self.0);
+    }
+}
+
+#[cfg(not(coverage))]
+pub(crate) fn register_loopback_revocation_url(url: &str) -> LoopbackRevocationGuard {
+    let parsed = url::Url::parse(url).expect("owned revocation mock URL");
+    assert_eq!(parsed.scheme(), "http");
+    assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+    assert!(parsed.port().is_some());
+    assert!(parsed.username().is_empty() && parsed.password().is_none());
+    assert!(parsed.query().is_none() && parsed.fragment().is_none());
+    assert!(
+        LOOPBACK_REVOCATION_URLS
+            .insert(url.to_owned(), ())
+            .is_none()
+    );
+    LoopbackRevocationGuard(url.to_owned())
+}
+
+pub(crate) fn is_registered_loopback_revocation_url(url: &str) -> bool {
+    LOOPBACK_REVOCATION_URLS.contains_key(url)
+}
 
 /// Shared DB-backed rate limiters (`RateWindowStore`) bin their windows to
 /// epoch-aligned `$dateTrunc` boundaries. A burst that straddles a boundary
@@ -166,12 +204,25 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// runtime-independent worker. A renewable process lease, process-exit retry,
 /// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
+    // Production initializes this before opening balances or billing admission.
+    crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+        crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+    ));
     let db_name = new_test_db_name(prefix);
     let client = probe_test_mongo_client(&db_name, None).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
     );
 
-    Some(client.database(&db_name))
+    let db = client.database(&db_name);
+    // Ordinary tests start after a fresh-install cutover. Migration tests remove
+    // this marker explicitly to exercise pending/legacy installations.
+    db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
+        mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
+    ).await.expect("initialize fresh test billing readiness");
+    crate::services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("initialize fresh test assistant cutover");
+    Some(db)
 }
 
 /// Connect to a fresh test database through a client with MongoDB command
@@ -182,11 +233,25 @@ pub(crate) async fn connect_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
+    // Same process-wide precondition as `connect_test_database`; nextest runs
+    // each test in its own process, so it cannot rely on another test.
+    crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+        crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+    ));
     let db_name = new_test_db_name(prefix);
     let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
     );
-    Some(client.database(&db_name))
+    let db = client.database(&db_name);
+    // Ordinary tests start after a fresh-install cutover. Migration tests remove
+    // this marker explicitly to exercise pending/legacy installations.
+    db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
+        mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
+    ).await.expect("initialize fresh test billing readiness");
+    crate::services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("initialize fresh test assistant cutover");
+    Some(db)
 }
 
 /// Connect to a fresh database and prove that it supports multi-document
@@ -204,6 +269,17 @@ pub(crate) async fn connect_transaction_test_database(prefix: &str) -> mongodb::
         )
     });
 
+    assert_transaction_test_topology(&db).await;
+    db
+}
+
+pub(crate) async fn connect_transaction_test_database_with_command_handler(
+    prefix: &str,
+    handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+) -> mongodb::Database {
+    let db = connect_test_database_with_command_handler(prefix, handler)
+        .await
+        .expect("MongoDB required");
     assert_transaction_test_topology(&db).await;
     db
 }
@@ -412,29 +488,28 @@ async fn probe_test_mongo_uri(
     let Ok(client) = mongodb::Client::with_options(options) else {
         return None;
     };
+    // A busy shared mongod can take longer than five seconds to accept a
+    // write. Keep the original operations in flight within one bounded budget.
+    let readiness = mongo_readiness::Readiness::new();
     let db = client.database(TEST_DB_PROBE_NAME);
-    if db.run_command(doc! { "ping": 1 }).await.is_err() {
-        return None;
-    }
+    readiness
+        .run("ping", db.run_command(doc! { "ping": 1 }).into_future())
+        .await
+        .ok()?;
 
     // Unique doc id per call so concurrent probes against the shared probe
     // database don't collide on a duplicate `_id`.
     let probe = db.collection::<mongodb::bson::Document>("__probe");
     let probe_id = Uuid::new_v4().to_string();
-    let write_ready = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.insert_one(doc! { "_id": probe_id.clone() }),
-    )
-    .await;
-    if !matches!(write_ready, Ok(Ok(_))) {
-        return None;
-    }
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        probe.delete_one(doc! { "_id": probe_id }),
-    )
-    .await;
-
+    readiness
+        .run(
+            "write probe",
+            probe
+                .insert_one(doc! { "_id": probe_id.clone() })
+                .into_future(),
+        )
+        .await
+        .ok()?;
     // Pin only after this candidate proves writable, but before publishing a
     // run lease or registering a destructive cleanup target. A concurrent
     // probe that loses the race may retry the URI that won; it must never
@@ -446,9 +521,9 @@ async fn probe_test_mongo_uri(
     // Register before sweeping. A process that cannot publish its own live
     // lease must never decide that another process's databases are abandoned.
     let process = test_db_process();
-    if !matches!(
-        tokio::time::timeout(
-            STALE_TEST_DB_METADATA_TIMEOUT,
+    let lease_ready = readiness
+        .run(
+            "run lease",
             renew_test_db_run_record(
                 &client,
                 &process.run_id,
@@ -456,11 +531,20 @@ async fn probe_test_mongo_uri(
                 unix_time_secs(),
             ),
         )
-        .await,
-        Ok(Ok(true))
-    ) {
+        .await
+        .ok()?;
+    if !lease_ready {
+        eprintln!(
+            "MongoDB test readiness: initial run lease was rejected after {:.3}s",
+            readiness.elapsed().as_secs_f64(),
+        );
         return None;
     }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe.delete_one(doc! { "_id": probe_id }),
+    )
+    .await;
     ensure_test_db_heartbeat(uri);
     sweep_stale_test_databases_once(&client, unix_time_secs()).await;
     register_test_db_for_cleanup(uri, db_name);
@@ -1671,6 +1755,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
+        auth_device_eight_char_codes: false,
         base_url: "http://localhost:3001".to_string(),
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],
@@ -1716,6 +1801,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
         billing_ledger_hmac_key: None,
+        billing_exact_cutover_drained: false,
         chain_verify_interval_secs: 0,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
@@ -1723,6 +1809,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         telegram_webhook_secret: None,
         telegram_webhook_url: None,
         telegram_bot_username: None,
+        openai_apps_challenge_token: None,
         approval_expiry_interval_secs: 5,
         connect_link_expiry_sweep_interval_secs: 60,
         agent_key_login_sweep_interval_secs: 60,
@@ -1799,6 +1886,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
         cloud_response_cache_max_entries: 256,
         billing_enabled: false,
+        billing_allocations_enabled: false,
         lago_api_url: None,
         lago_api_key: None,
         lago_plan_code: "starter".to_string(),
@@ -1810,7 +1898,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_default_overdraft_cap_credits: 0,
         billing_fail_closed: false,
         billing_resale_enabled: false,
-        invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
         telemetry_dsn: None,
@@ -1821,6 +1908,20 @@ pub(crate) fn test_app_config() -> AppConfig {
 
 pub(crate) fn test_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::from_config(&test_app_config())
+}
+
+/// Spec-sync fixtures model startup, which initializes the audit-chain key
+/// before any background catalog mutation. Keep isolated filters independent
+/// of which other test happened to initialize that process-wide key first.
+pub(crate) fn init_test_audit_chain_hmac_key() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if crate::services::audit_service::audit_chain_hmac_key().is_none() {
+            crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+                [2; 32],
+            ));
+        }
+    });
 }
 
 /// A throwaway 2048-bit RSA private key (PKCS#8 PEM) for GCP service-account
@@ -1873,11 +1974,20 @@ pub(crate) async fn spawn_mock_token_server(
 /// keys per test, so we share one 2048-bit pair across the entire test
 /// binary and clone the cheap `JwtKeys` handle for each caller.
 pub(crate) fn cached_test_jwt_keys() -> JwtKeys {
-    static CACHED: OnceLock<JwtKeys> = OnceLock::new();
-    CACHED.get_or_init(generate_test_jwt_keys).clone()
+    cached_test_jwt_material().0.clone()
 }
 
-fn generate_test_jwt_keys() -> JwtKeys {
+/// Public JWKS fixtures use the same generated pair as signed test assertions.
+pub(crate) fn cached_test_jwk() -> serde_json::Value {
+    cached_test_jwt_material().1.clone()
+}
+
+fn cached_test_jwt_material() -> &'static (JwtKeys, serde_json::Value) {
+    static CACHED: OnceLock<(JwtKeys, serde_json::Value)> = OnceLock::new();
+    CACHED.get_or_init(generate_test_jwt_material)
+}
+
+fn generate_test_jwt_material() -> (JwtKeys, serde_json::Value) {
     use jsonwebtoken::{DecodingKey, EncodingKey};
     use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
     use rsa::traits::PublicKeyParts;
@@ -1898,13 +2008,19 @@ fn generate_test_jwt_keys() -> JwtKeys {
     let n_bytes = public_key.n().to_bytes_be();
     let kid = hex::encode(&Sha256::digest(&n_bytes)[..8]);
 
-    JwtKeys {
-        encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
-            .expect("build test RSA encoding key"),
-        decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
-            .expect("build test RSA decoding key"),
-        kid,
-    }
+    let jwk = crate::crypto::jwt::public_key_jwk(&public_pem)
+        .expect("produce test public JWK from the generated signing pair");
+    assert_eq!(jwk["kid"], kid);
+    (
+        JwtKeys {
+            encoding: EncodingKey::from_rsa_pem(private_pem.as_bytes())
+                .expect("build test RSA encoding key"),
+            decoding: DecodingKey::from_rsa_pem(public_pem.as_bytes())
+                .expect("build test RSA decoding key"),
+            kid,
+        },
+        jwk,
+    )
 }
 
 /// Build a minimal `AppState` for handler tests.
@@ -1966,6 +2082,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
     );
 
     AppState {
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -1986,6 +2103,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         developer_webhook_dispatcher,
         encryption_keys,
+        managed_bootstrap_verifier: Arc::new(
+            crate::services::remote_machine_bootstrap::UnavailableBootstrapTicketVerifier,
+        ),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -2107,6 +2227,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
+        upload_retention: Default::default(),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.
@@ -2160,6 +2281,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         billing,
         audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
         telemetry: None,
     }
 }
@@ -2189,15 +2311,25 @@ pub(crate) async fn register_test_node_connection(
 
 /// Build an `AppState` for tests that never perform MongoDB operations.
 pub(crate) async fn test_app_state_no_db() -> AppState {
-    let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
-        .await
-        .expect("build inert test MongoDB client");
+    // An inert client must not monitor or accidentally write to a developer's
+    // default MongoDB. Any unexpected database operation fails on this endpoint.
+    let client = mongodb::Client::with_uri_str(
+        "mongodb://127.0.0.1:1/?directConnection=true&serverSelectionTimeoutMS=100",
+    )
+    .await
+    .expect("build inert test MongoDB client");
     test_app_state(client.database("nyxid_unit_unused"))
 }
 
 /// Build a permissive session-auth `AuthUser` for handler tests.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        org_agent_access: None,
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id: Uuid::parse_str(user_id).expect("valid uuid user id"),
         session_id: None,
         scope: String::new(),
@@ -2429,6 +2561,41 @@ pub(crate) fn test_membership(
     }
 }
 
+/// An active, published catalog operation without parameters or a body.
+pub(crate) fn test_service_endpoint(
+    service_id: &str,
+    name: &str,
+    method: &str,
+    path: &str,
+) -> crate::models::service_endpoint::ServiceEndpoint {
+    crate::models::service_endpoint::ServiceEndpoint {
+        async_operation: None,
+        id: Uuid::new_v4().to_string(),
+        service_id: service_id.to_string(),
+        name: name.to_string(),
+        description: Some(name.to_string()),
+        method: method.to_string(),
+        path: path.to_string(),
+        target_id: None,
+        parameters: None,
+        request_body_schema: None,
+        request_content_type: None,
+        request_body_required: false,
+        response_description: None,
+        response: Default::default(),
+        risk: None,
+        supports_idempotency_key: false,
+        data_scope: None,
+        cost_class: None,
+        execution: Default::default(),
+        publication: Default::default(),
+        is_active: true,
+        operation_generation: 1,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 pub(crate) fn test_user_endpoint(
     endpoint_id: &str,
     user_id: &str,
@@ -2471,6 +2638,7 @@ pub(crate) fn test_user_service(
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         catalog_service_id: catalog_service_id.map(str::to_string),
+        icon_url: None,
         node_id: node_id.map(str::to_string),
         node_priority: 0,
         service_type: "http".to_string(),
@@ -2567,6 +2735,10 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        offering_kind: Default::default(),
+        topics: Vec::new(),
+        supplier: None,
+        import_source: None,
         destination_targets: Default::default(),
         owner_user_id: None,
         id: uuid::Uuid::new_v4().to_string(),
@@ -2581,6 +2753,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         credential_encrypted: vec![],
         platform_key: None,
         auth_type: None,
+        auth_scheme: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
         streaming_supported: false,
@@ -2590,6 +2763,10 @@ pub(crate) fn test_auto_connected_catalog_service()
         requires_user_credential: false,
         is_active: true,
         created_by: "system".to_string(),
+        catalog_manager_created: false,
+        tools_manager_created: false,
+        icon_url: None,
+        tools_credential_frozen: false,
         identity_propagation_mode: "none".to_string(),
         identity_include_user_id: true,
         identity_include_email: true,
@@ -2604,6 +2781,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         issues_url: None,
         capabilities: None,
         inference: None,
+        git_http: None,
+        concurrency_policy: None,
         inference_admin_modified: false,
         billing: None,
         auth_notes: None,
@@ -2623,6 +2802,140 @@ pub(crate) fn test_auto_connected_catalog_service()
         proxy_operation_policy: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+/// Opt in explicitly; scope configuration must stay default-off in tests too.
+pub async fn set_agent_operation_scopes_enabled(
+    db: &mongodb::Database,
+    owner: &str,
+    enabled: bool,
+) {
+    crate::services::feature_flag_service::set_platform_override(
+        db,
+        crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        enabled,
+        owner,
+    )
+    .await
+    .unwrap();
+}
+
+/// Create a live specialist and read its mirrored scopes through real key auth.
+pub async fn scoped_specialist_auth(
+    state: &AppState,
+    owner: &str,
+    selections: &[(
+        String,
+        Vec<crate::models::downstream_service::ProxyOperationRule>,
+    )],
+) -> AuthUser {
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_nyxagent as engine,
+        assistant_team_service as team,
+    };
+    engine::ensure_indexes(&state.db).await.unwrap();
+    let (agent, home) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        owner,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "scoped-worker".into(),
+            description: "Exercise member operation permissions".into(),
+            display_name: None,
+            persona: None,
+            targets: team::GrantTargets {
+                service_ids: selections.iter().map(|(id, _)| id.clone()).collect(),
+                ..Default::default()
+            },
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = engine::begin_turn(
+        &state.db,
+        owner,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            agent_id: None,
+            conversation_id: Some(home.id),
+            text: "Exercise service operations".into(),
+            attachment_ids: Vec::new(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    set_agent_operation_scopes_enabled(&state.db, owner, true).await;
+    for (id, rules) in selections {
+        scopes::set(
+            &state.db,
+            owner,
+            &agent.id,
+            id,
+            &crate::models::agent_operation_scope::OperationSelection {
+                expected_revision: 0,
+                all_operations: false,
+                endpoint_ids: vec![],
+                rules: rules.clone(),
+                contract_digest: None,
+                inputs: Default::default(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let key = state
+        .db
+        .collection::<crate::models::api_key::ApiKey>("api_keys")
+        .find_one(doc! {"_id":row.credential_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+        .await
+        .unwrap()
+}
+
+/// Replaces unavailable local platform I/O configuration only. All owner auth,
+/// quote, funding, lifecycle, source fences and outbox code remains production.
+pub(crate) struct LocalMachinePlatform {
+    pub profile: crate::models::remote_machine::MachineProfileSpec,
+    pub readiness: crate::services::remote_machine_manager::PlatformReadiness,
+}
+
+/// Construct and poll the large native lifecycle journey futures on a scoped
+/// thread. The ordinary libtest/nextest thread only joins and propagates panic.
+pub(crate) fn run_native_journey_test<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let thread = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>> = Box::pin(test());
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("native journey runtime")
+                .block_on(future);
+        })
+        .expect("native journey thread");
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
     }
 }
 

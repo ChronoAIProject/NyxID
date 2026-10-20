@@ -145,6 +145,7 @@ pub(crate) async fn seed(db: &mongodb::Database) {
     provider_service::seed_default_services(db, &keys)
         .await
         .unwrap();
+    crate::test_utils::init_test_audit_chain_hmac_key();
     catalog_spec_sync::sync_seeded_service_endpoints(db)
         .await
         .unwrap();
@@ -178,6 +179,7 @@ pub(crate) async fn seed_legacy(db: &mongodb::Database) {
                 "destination_targets": {}, "description":description, "known_limitations":limitations,
             }}).await.unwrap();
     }
+    crate::test_utils::init_test_audit_chain_hmac_key();
     catalog_spec_sync::sync_seeded_service_endpoints(db)
         .await
         .unwrap();
@@ -206,6 +208,10 @@ pub(crate) async fn restore_historical_drive_endpoints(
         .into_iter()
         .map(
             |endpoint| crate::services::service_endpoint_service::EndpointInput {
+                data_scope: None,
+                cost_class: None,
+                execution: Default::default(),
+                async_operation: None,
                 name: endpoint.name,
                 description: endpoint.description,
                 method: endpoint.method,
@@ -222,9 +228,11 @@ pub(crate) async fn restore_historical_drive_endpoints(
             },
         )
         .collect();
-    crate::services::service_endpoint_service::upsert_endpoints_additive(db, service_id, inputs)
-        .await
-        .unwrap();
+    crate::services::service_endpoint_service::test_support::upsert_endpoints_additive(
+        db, service_id, inputs,
+    )
+    .await
+    .unwrap();
 }
 
 pub(crate) async fn connect(
@@ -519,6 +527,15 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            assistant_chat: None,
+            response_body_limit: None,
+            actor_user_id: None,
+            caller_token: None,
+            delegation_restrictions: Default::default(),
+            attribution: None,
+            org_agent_access: None,
+            agent_owner: None,
+            operation_scopes: None,
             api_key_id: None,
             allow_all_nodes: true,
             allowed_node_ids: &[],
@@ -847,6 +864,8 @@ async fn workspace_node_v2_reaches_target_and_refuses_legacy_capability() {
         "node",
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            proxy_upload_v1: true,
+            http_cancellation: false,
             ..Default::default()
         },
     );

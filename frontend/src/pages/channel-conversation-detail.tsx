@@ -1,3 +1,5 @@
+import { ChannelActivities, ActivityCallbackSettings } from "@/components/channels/channel-activities";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { useAppForm } from "@/components/ui/form";
@@ -112,8 +114,8 @@ const receiptLabels: Record<ChannelDeliveryStatus, string> = {
 function DeliveryDetails({ delivery }: { readonly delivery: ChannelDelivery }) {
   const failed = delivery.status === "failed";
   const uncertain = delivery.status === "partial" || delivery.status === "unknown";
-  return <div className="mt-2 min-w-0 space-y-2 text-[11px] text-muted-foreground">
-    <Badge variant={failed ? "destructive" : uncertain ? "warning" : "secondary"} className="max-w-full whitespace-normal text-[10px]">
+  return <div className="mt-2 min-w-0 space-y-2 text-11 text-muted-foreground">
+    <Badge variant={failed ? "destructive" : uncertain ? "warning" : "secondary"} className="max-w-full whitespace-normal text-10">
       {receiptLabels[delivery.status]}
     </Badge>
     {delivery.status === "legacy_final_only" && <p>Only the final component ID was recorded. Delivery of the whole reply cannot be confirmed.</p>}
@@ -152,7 +154,7 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
           "min-w-0 max-w-[90%] sm:max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
           isInbound
             ? "bg-muted text-foreground"
-            : "bg-white/[0.03] text-foreground",
+            : "bg-overlay text-foreground",
         )}
       >
         {/* Header */}
@@ -175,29 +177,29 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
 
         {/* Content type only — message bodies are no longer stored per ADR-013 */}
         <div className="mb-1">
-          <Badge variant="secondary" className="text-[10px]">
+          <Badge variant="secondary" className="text-10">
             {contentTypeLabel(message.content_type)}
           </Badge>
         </div>
-        <p className="text-[12px] italic text-muted-foreground">
+        <p className="text-12 italic text-muted-foreground">
           Content is not stored in NyxID. Ask the agent for the message body.
         </p>
 
         {/* Footer */}
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-10 text-muted-foreground">
           <span>{formatMessageTime(message.created_at)}</span>
           {isInbound && message.callback_status && (
             <Badge
               variant={deliveryBadgeVariant(message.callback_status)}
-              className="text-[10px]"
+              className="text-10"
             >
               {message.callback_status === "delivered" ? "Callback accepted" : message.callback_status === "pending" ? "Callback pending" : message.callback_status === "timeout" ? "Callback timed out" : "Callback failed"}
             </Badge>
           )}
-          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-[10px]">Platform accepted</Badge>}
+          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-10">Platform accepted</Badge>}
         </div>
         {!isInbound && message.delivery && <DeliveryDetails delivery={message.delivery} />}
-        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-[11px] text-muted-foreground break-all">Platform message ID: {message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
+        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-11 text-muted-foreground break-all">Platform message ID: {message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
       </div>
     </div>
   );
@@ -205,11 +207,19 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
 
 export function InitiatedMessageSettings({
   conversation,
+  botOwnerId,
+  botOwnerError = false,
+  onRetryBotOwner,
 }: {
   readonly conversation: ChannelConversationItem;
+  /** Owner of the backing bot, whose credits a send spends; required to send. */
+  readonly botOwnerId: string | undefined;
+  /** The bot could not be loaded, so its owner is unknown until a retry. */
+  readonly botOwnerError?: boolean;
+  readonly onRetryBotOwner?: () => void;
 }) {
   const update = useUpdateChannelConversation();
-  const send = useSendChannelMessage();
+  const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
   const attempt = useRef<{ text: string; key: string } | null>(null);
   const settings = useAppForm<ChannelInitiatedSettingsFormData>({
     resolver: zodResolver(channelInitiatedSettingsSchema),
@@ -261,7 +271,7 @@ export function InitiatedMessageSettings({
             </Label>
             <p
               id="initiated-warning"
-              className="text-[12px] text-muted-foreground"
+              className="text-12 text-muted-foreground"
             >
               This lets the assigned agent message this chat without anyone
               asking first, including alerts and scheduled updates.
@@ -278,7 +288,7 @@ export function InitiatedMessageSettings({
           />
         </div>
         {unavailable && (
-          <p className="text-[12px] text-muted-foreground">{unavailable}</p>
+          <p className="text-12 text-muted-foreground">{unavailable}</p>
         )}
         {update.error && <ErrorBanner message={update.error.message} />}
         <div className="flex justify-end">
@@ -297,6 +307,8 @@ export function InitiatedMessageSettings({
           className="space-y-3 p-5"
           onSubmit={(event) => {
             void message.handleSubmit(async ({ text }) => {
+              // Enter submits even while the button is disabled.
+              if (!botOwnerId) return;
               if (attempt.current?.text !== text)
                 attempt.current = { text, key: crypto.randomUUID() };
               try {
@@ -321,17 +333,29 @@ export function InitiatedMessageSettings({
             disabled={
               !conversation.allow_agent_initiated ||
               send.isPending ||
-              !conversation.is_active
+              !conversation.is_active ||
+              !botOwnerId
             }
             placeholder="Your test message"
           />
-          {!conversation.allow_agent_initiated && (
-            <p className="text-[12px] text-muted-foreground">
+          {!botOwnerId && botOwnerError ? (
+            <ErrorBanner
+              message="This bot's details could not be loaded, so test messages can't be sent."
+              onRetry={onRetryBotOwner}
+            />
+          ) : !conversation.allow_agent_initiated ? (
+            <p className="text-12 text-muted-foreground">
               Save the setting above before sending a test message.
             </p>
+          ) : (
+            !botOwnerId && (
+              <p className="text-12 text-muted-foreground">
+                Sending is available once this bot&apos;s details load.
+              </p>
+            )
           )}
           {message.formState.errors.text && (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {message.formState.errors.text.message}
             </p>
           )}
@@ -343,6 +367,7 @@ export function InitiatedMessageSettings({
               disabled={
                 !conversation.allow_agent_initiated ||
                 !conversation.is_active ||
+                !botOwnerId ||
                 !message.formState.isValid
               }
             >
@@ -367,10 +392,17 @@ export function ChannelConversationDetailPage() {
   const [page, setPage] = useState(1);
   const perPage = 50;
 
-  const { data: bot } = useChannelBot(botId);
+  const {
+    data: bot,
+    isError: botError,
+    refetch: refetchBot,
+  } = useChannelBot(botId);
+  const { getPlatform } = useChannelPlatformViews();
+  const activities = getPlatform(bot?.platform ?? "").activities;
   const { data: conversation, error: conversationError } =
     useChannelConversation(conversationId);
-  useBreadcrumbLabel(bot ? `${bot.label} messages` : "Messages");
+  useBreadcrumbLabel("Messages");
+  useBreadcrumbLabel(bot?.label, `/channel-bots/${botId}`);
   const { data, isLoading, error, refetch } = useChannelMessages(
     conversationId,
     page,
@@ -381,7 +413,7 @@ export function ChannelConversationDetailPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  if (isLoading) {
+  if (isLoading && activities.length === 0) {
     return (
       <div className="space-y-8">
         <Skeleton className="h-12 w-64" />
@@ -403,8 +435,8 @@ export function ChannelConversationDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Messages"
-        description={`Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
+        title={activities.length ? "Channel activity" : "Messages"}
+        description={activities.length ? `Conversation ${conversationId.slice(0, 12)}…` : `Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
         actions={
           <Button
             variant="outline"
@@ -419,7 +451,7 @@ export function ChannelConversationDetailPage() {
 
       {/* Conversation metadata */}
       {bot && (
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-12 text-muted-foreground">
           <Badge variant="secondary">{bot.platform}</Badge>
           <span>Conversation ID:</span>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
@@ -431,24 +463,35 @@ export function ChannelConversationDetailPage() {
       {conversationError && (
         <ErrorBanner message="Failed to load conversation settings." />
       )}
+      {activities.length > 0 && (
+        <>
+          <ChannelActivities scope="route" id={conversationId} descriptors={activities} />
+          <ActivityCallbackSettings id={conversationId} descriptors={activities} />
+        </>
+      )}
       {conversation && (
         <InitiatedMessageSettings
           key={conversation.id}
           conversation={conversation}
+          botOwnerId={bot?.user_id}
+          botOwnerError={botError && !bot}
+          onRetryBotOwner={() => void refetchBot()}
         />
       )}
-
+      {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
       {/* Message list */}
       {error ? (
         <ErrorBanner
           message="Failed to load messages. Please try again."
           onRetry={refetch}
         />
+      ) : isLoading ? <p className="text-xs text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
+        <p className="text-xs text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">
+            <p className="text-12 font-medium text-muted-foreground">
               No Messages
             </p>
             <p className="text-xs text-muted-foreground">
@@ -467,7 +510,7 @@ export function ChannelConversationDetailPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -479,7 +522,7 @@ export function ChannelConversationDetailPage() {
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-[11px] text-text-tertiary">
+                <span className="text-11 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

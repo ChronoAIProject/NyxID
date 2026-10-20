@@ -184,7 +184,7 @@ async fn pending_channel(
         &state.http_client,
         &TelegramAdapter::media_test_adapter(&server.uri()),
         actor,
-        "Manager channel",
+        Some("Manager channel"),
         &RegistrationValues([("bot_token", MANAGER)].into()),
     )
     .await
@@ -1010,7 +1010,7 @@ mod migration {
             &state.http_client,
             &adapter,
             actor,
-            "Ordinary Telegram",
+            Some("Ordinary Telegram"),
             &RegistrationValues([("bot_token", MANAGER)].into()),
         )
         .await

@@ -82,7 +82,9 @@ fn admin_node_info_from_model(
             is_connected: true,
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: NodeCapabilitiesFlags {
-                http_signature_v2: false,
+                http_signature_v2: owner.http_signature_v2,
+                proxy_upload_v1: owner.proxy_upload_v1,
+                http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -250,6 +252,12 @@ pub async fn admin_disconnect_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db,
+        &node_id,
+        "disconnect",
+    )
+    .await?;
 
     let was_connected = state
         .node_dispatch
@@ -295,6 +303,10 @@ pub async fn admin_delete_node(
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
+    crate::services::remote_machine_service::guard_legacy_node_mutation(
+        &state.db, &node_id, "delete",
+    )
+    .await?;
 
     node_service::admin_delete_node(&state.db, &node_id).await?;
     let _ = state
@@ -354,6 +366,9 @@ mod tests {
 
     fn make_test_node(user_id: &str) -> Node {
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             name: "test-node".to_string(),

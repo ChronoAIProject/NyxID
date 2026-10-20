@@ -6,6 +6,23 @@ import {
   type CreateApiKeyFormData,
 } from "./api-keys";
 
+export const effectiveLoginServiceSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  owner_id: z.string().optional(),
+  auto_connected: z.boolean().optional(),
+  credential_binding: z.string().optional(),
+  slug: z.string(),
+  catalog_service_slug: z.string().nullable(),
+  is_active: z.boolean(),
+  status: z.string(),
+  credential_missing: z.boolean().optional(),
+  connection_status: z.string().nullable().optional(),
+  expires_at: z.string().nullable(),
+  node_id: z.string().nullable(),
+  granted_scopes: z.array(z.string()).nullable().optional(),
+  permission_snapshot: z.string().optional(),
+});
 export const resourceSummarySchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -13,6 +30,8 @@ export const resourceSummarySchema = z.object({
   auto_connected: z.boolean().optional(),
 });
 export const agentKeySummarySchema = z.object({
+  effective_services: z.array(effectiveLoginServiceSchema).optional(),
+  permission_snapshot: z.string().optional(),
   id: z.string(),
   name: z.string(),
   key_prefix: z.string(),
@@ -34,6 +53,7 @@ export const agentKeySummarySchema = z.object({
   created_now: z.boolean(),
 });
 export const agentKeyOptionsSchema = z.object({
+  connections: z.array(effectiveLoginServiceSchema).optional(),
   keys: z.array(agentKeySummarySchema),
   services: z.array(resourceSummarySchema),
   nodes: z.array(resourceSummarySchema),
@@ -73,12 +93,21 @@ const newKeySelectionSchema = createApiKeySchema
     allow_auto_connected_services: z.boolean().optional(),
     allow_all_nodes: z.boolean().default(false),
     scope_plan_digest: z.string().optional(),
+    connection_snapshots: z
+      .array(
+        z.object({ service_id: z.string(), permission_snapshot: z.string() }),
+      )
+      .optional(),
   });
 export const agentKeyApproveSchema = z
   .object({
     user_code: userCodeSchema,
     selection: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("existing"), api_key_id: z.string().min(1) }),
+      z.object({
+        kind: z.literal("existing"),
+        api_key_id: z.string().min(1),
+        permission_snapshot: z.string().optional(),
+      }),
       newKeySelectionSchema,
     ]),
     credential_expires_at: createApiKeySchema.shape.expires_at,
@@ -126,12 +155,21 @@ export type AgentKeyPreview = z.infer<typeof agentKeyPreviewSchema>;
 export type AgentKeyApprove = z.infer<typeof agentKeyApproveSchema>;
 export type LoginCredential = z.infer<typeof loginCredentialSchema>;
 
+// Keep the login date picker and grant summary aligned with backend date-only parsing.
+export function loginKeyExpiry(
+  value: string | null | undefined,
+): string | null {
+  return value && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? `${value}T23:59:59.000Z`
+    : value || null;
+}
+
 export function newKeySelection(form: CreateApiKeyFormData) {
   return newKeySelectionSchema.safeParse({
     kind: "new",
     name: form.name,
     scopes: form.scopes.join(" "),
-    expires_at: form.expires_at || null,
+    expires_at: loginKeyExpiry(form.expires_at),
     allowed_service_ids: form.allow_all_services
       ? []
       : (form.allowed_service_ids ?? []),

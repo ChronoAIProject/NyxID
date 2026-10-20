@@ -1,6 +1,7 @@
 use super::*;
 use crate::errors::AppResult;
 use crate::models::billing_wallet::BillingWallet;
+use crate::models::credits::Credits;
 use crate::models::service_billing::{
     BillingMetric, LanePricing, PricingSyncStatus, ServiceBilling,
 };
@@ -14,7 +15,9 @@ use crate::services::channel_platform::{BotCredentials, OutboundReply};
 use futures::TryStreamExt;
 use std::sync::Arc;
 
-struct FakeLago;
+struct FakeLago {
+    entitlement: &'static str,
+}
 #[async_trait::async_trait]
 impl LagoApi for FakeLago {
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
@@ -28,7 +31,7 @@ impl LagoApi for FakeLago {
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         Ok(LagoWallet {
             id: format!("{customer_id}:wallet"),
-            balance_credits: 100,
+            balance_credits: crate::models::credits::Credits::from_whole(100),
         })
     }
 
@@ -65,18 +68,26 @@ impl LagoApi for FakeLago {
 
     async fn entitlements(&self, _subscription_id: &str) -> AppResult<Vec<Entitlement>> {
         Ok(vec![Entitlement {
-            code: "api-twitter".to_string(),
+            code: self.entitlement.to_string(),
             raw: serde_json::json!({}),
         }])
     }
 }
 
 pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String {
+    enable_billing_with_entitlement(state, owner, "api-twitter").await
+}
+
+pub(crate) async fn enable_billing_with_entitlement(
+    state: &mut AppState,
+    owner: &str,
+    entitlement: &'static str,
+) -> String {
     state.config.billing_enabled = true;
     state.billing = Arc::new(BillingService::new_with_lago(
         state.db.clone(),
         Arc::new(state.config.clone()),
-        Arc::new(FakeLago),
+        Arc::new(FakeLago { entitlement }),
     ));
     crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
         crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
@@ -88,9 +99,10 @@ pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String 
         .insert_one(doc! {
             "_id": uuid::Uuid::new_v4().to_string(), "owner_id": owner,
             "lago_customer_id": owner, "lago_wallet_id": "wallet", "lago_subscription_id": "plan",
-            "plan_kind": "prepaid", "balance_credits": 100_i64, "reserved_credits": 0_i64,
-            "pending_lago_debits": 0_i64, "has_payment_instrument": false,
-            "overdraft_cap_credits": 0_i64, "suspended": false, "collection_state": "good",
+            "plan_kind": "prepaid", "balance_credits": Credits::from_whole(100),
+            "reserved_credits": Credits::ZERO, "pending_lago_debits": Credits::ZERO,
+            "has_payment_instrument": false, "overdraft_cap_credits": Credits::ZERO,
+            "suspended": false, "collection_state": "good",
             "balance_synced_at": now, "created_at": now, "updated_at": now,
         })
         .await
@@ -105,6 +117,7 @@ pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String 
             sync_status: PricingSyncStatus::Synced,
             sync_error: None,
             components: vec![],
+            operations: vec![],
         }),
         // A very different master-key price proves shared OAuth picks its own lane.
         platform_key_pricing: Some(LanePricing {
@@ -114,6 +127,7 @@ pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String 
             sync_status: PricingSyncStatus::Synced,
             sync_error: None,
             components: vec![],
+            operations: vec![],
         }),
         ..Default::default()
     });
@@ -185,7 +199,7 @@ async fn balance(state: &AppState, owner: &str, amount: i64) {
         .collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
         .update_one(
             doc! {"owner_id": owner},
-            doc! {"$set": {"balance_credits": amount}},
+            doc! {"$set": {"balance_credits": Credits::from_whole(amount)}},
         )
         .await
         .unwrap();
@@ -238,8 +252,14 @@ async fn x_billing_incoming_duplicate_uses_owner_shared_oauth_price_and_one_ledg
             CredentialClass::NyxidPlatformOauthApp
         );
         assert_eq!(charged[0].lago_metric_code, "platform_svc_api-twitter_byok");
-        assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
-        assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+        assert_eq!(
+            wallet(&state, &owner).await.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(2)
+        );
+        assert_eq!(
+            wallet(&state, &owner).await.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while state
                 .db
@@ -248,6 +268,8 @@ async fn x_billing_incoming_duplicate_uses_owner_shared_oauth_price_and_one_ledg
                 .await
                 .unwrap()
                 != 1
+            // Admission no longer adds an opening for a directly seeded wallet;
+            // this is the single charged usage transaction.
             {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
@@ -323,8 +345,80 @@ async fn x_billing_split_reply_charges_each_success_and_releases_rejected_chunk(
         rows.iter()
             .all(|r| r.api_key_id.as_deref() == Some("reply-agent"))
     );
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+}
+
+#[tokio::test]
+async fn x_billing_preserves_picocredits_and_obeys_cutover_before_send() {
+    for pending_cutover in [false, true] {
+        let (mut state, _, server, owner, key) = fixture().await;
+        let service = enable_billing(&mut state, &owner).await;
+        let bot = registered(&state, &owner, &key).await;
+        state
+            .db
+            .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service },
+                doc! { "$set": {
+                    "billing.byok_pricing.credits_per_unit": "0.000000000001",
+                } },
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": "platform_svc_api-twitter_byok:*" },
+                doc! { "$set": {
+                    "credits_per_unit_pico": 1_i64, "credits_per_unit_micros": 0_i64,
+                } },
+            )
+            .await
+            .unwrap();
+        if pending_cutover {
+            state
+                .db
+                .collection::<bson::Document>("billing_migrations")
+                .delete_one(doc! { "_id": "exact-v2" })
+                .await
+                .unwrap();
+        }
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(if pending_cutover { 0 } else { 1 })
+            .mount(&server)
+            .await;
+        let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+        let result = billing.send(state.http_client.post(server.uri())).await;
+        if pending_cutover {
+            assert!(matches!(
+                result,
+                Err(AppError::BillingProviderUnavailable(_))
+            ));
+            assert!(server.received_requests().await.unwrap().is_empty());
+            assert!(rows(&state).await.is_empty());
+        } else {
+            assert!(result.unwrap().status().is_success());
+            let rows = settled(&state).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].quantity, Some(1));
+            let expected: Credits = "0.000000000001".parse().unwrap();
+            assert_eq!(
+                rows[0].funding.as_ref().unwrap().wallet_funded,
+                Some(expected)
+            );
+            assert_eq!(wallet(&state, &owner).await.pending_lago_debits, expected);
+            assert_eq!(wallet(&state, &owner).await.reserved_credits, Credits::ZERO);
+        }
+    }
 }
 
 #[tokio::test]
@@ -376,8 +470,14 @@ async fn x_billing_unknown_send_keeps_hold_without_charging_or_retrying() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, UsageStatus::Forwarded);
     assert_eq!(rows[0].quantity, None);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
 }
 
 #[tokio::test]
@@ -397,6 +497,17 @@ async fn x_billing_allowance_then_grant_then_wallet() {
         "scope": {"all_services": true}, "granted_by": "admin", "status": "active", "issued_ledgered_at": now,
         "created_at": now, "updated_at": now,
     }).await.unwrap();
+    // This fixture deliberately seeds the legacy grant shape. Remove the fresh
+    // test database's completion marker to exercise the actual cutover.
+    state
+        .db
+        .collection::<bson::Document>("billing_migrations")
+        .delete_one(doc! { "_id": "exact-v2" })
+        .await
+        .unwrap();
+    crate::services::billing::exact_migration::run(&state.db)
+        .await
+        .unwrap();
     let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
     for event in ["701", "702", "703"] {
         billing.received(event).await.unwrap();
@@ -404,7 +515,10 @@ async fn x_billing_allowance_then_grant_then_wallet() {
     }
     let rows = rows(&state).await;
     assert_eq!(rows.len(), 3);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     let grant = state
         .db
         .collection::<bson::Document>(crate::models::credit_grant::COLLECTION_NAME)
@@ -412,7 +526,10 @@ async fn x_billing_allowance_then_grant_then_wallet() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(grant.get_i64("remaining_micros").unwrap(), 0);
+    assert_eq!(
+        crate::models::credits::Credits::from_bson(grant["remaining"].clone(), 1_000_000).unwrap(),
+        crate::models::credits::Credits::ZERO
+    );
 }
 
 #[tokio::test]
@@ -434,7 +551,10 @@ async fn x_billing_no_agent_route_still_accounts_for_received_event() {
     .unwrap();
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     assert!(!format!("{rows:?}").contains("private content"));
 }
 
@@ -467,7 +587,7 @@ async fn x_billing_subscription_admission_checks_funding_before_x_setup() {
 }
 
 #[tokio::test]
-async fn x_billing_setup_lease_conflict_records_a_recoverable_channel_failure() {
+async fn x_billing_setup_lease_conflict_preserves_channel_state_without_provider_effects() {
     use crate::services::coordination_service::{LeaseStore, cluster_lease_runtime};
     let (mut state, adapter, server, owner, key) = fixture().await;
     enable_billing(&mut state, &owner).await;
@@ -492,9 +612,21 @@ async fn x_billing_setup_lease_conflict_records_a_recoverable_channel_failure() 
     let current = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
-    assert_eq!(current.status, "failed");
+    assert_eq!(current.status, bot.status);
     assert!(!current.webhook_registered);
-    assert!(current.error.as_deref().unwrap().contains("Verify"));
+    assert_eq!(current.error, bot.error);
+    assert_eq!(current.updated_at, bot.updated_at);
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(
+                doc! {"event_type": "channel_bot_failed", "event_data.bot_id": &bot.id}
+            )
+            .await
+            .unwrap(),
+        0,
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -585,7 +717,10 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         .unwrap();
     assert_eq!(active.status, "active");
     assert!(active.webhook_registered);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
 }
 
 #[tokio::test]
@@ -650,10 +785,10 @@ async fn x_billing_requires_provider_but_allows_explicit_zero_price() {
     let bot = registered(&state, &owner, &key).await;
     let no_provider = BillingService::new(state.db.clone(), Arc::new(state.config.clone()));
     let billing = ChannelBilling::for_bot(&state.db, &no_provider, &bot, None).unwrap();
-    assert!(matches!(
-        billing.send(state.http_client.post(server.uri())).await,
-        Err(AppError::BillingNotConfigured(_))
-    ));
+    assert_eq!(
+        configuration_message(billing.send(state.http_client.post(server.uri())).await),
+        "The billing provider (Lago) is not configured; configure Lago before enabling paid channels"
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
     balance(&state, &owner, 0).await;
     state
@@ -667,8 +802,14 @@ async fn x_billing_requires_provider_but_allows_explicit_zero_price() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].quantity, Some(1));
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
 }
 
 #[tokio::test]
@@ -691,7 +832,10 @@ async fn x_billing_account_verification_reserves_before_lookup() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].billing_request_id.starts_with("x-account-verify:"));
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     balance(&state, &owner, 0).await;
     assert!(matches!(
         adapter
@@ -722,5 +866,467 @@ async fn x_billing_rollout_disabled_meters_without_wallet_charge() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].wallet_id.is_none());
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+}
+
+fn configuration_message(result: AppResult<reqwest::Response>) -> String {
+    match result {
+        Err(AppError::BillingNotConfigured(message)) => message,
+        Ok(_) => panic!("expected BillingNotConfigured, got a provider response"),
+        Err(_) => panic!("expected BillingNotConfigured, got a different error"),
+    }
+}
+
+#[tokio::test]
+async fn x_billing_platform_key_only_price_preflights_before_owner_and_x_request() {
+    let (mut state, _, server, owner, key) = fixture().await;
+    let service = enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    state.db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(doc! {"_id": &service}, doc! {"$set": {"billing.platform_billable": true}, "$unset": {"billing.byok_pricing": ""}})
+        .await.unwrap();
+    let catalog = state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &service})
+        .await
+        .unwrap()
+        .unwrap();
+    let route = crate::services::billing::BillingRouteContext::new(
+        crate::services::billing::BillingIngress::ChannelOutbound,
+        "lane-preflight".into(),
+        owner.clone(),
+        owner.clone(),
+        None,
+        None,
+        Some(service.clone()),
+        Some(catalog.slug),
+        crate::services::billing::NodeIntent::Direct,
+        "oauth2".into(),
+        CredentialClass::NyxidPlatformOauthApp,
+        BillingMetric::Requests,
+        catalog.billing.as_ref(),
+        false,
+    );
+    let Err(AppError::BillingNotConfigured(message)) = state.billing.open_required(&route).await
+    else {
+        panic!("required billing must reject the missing BYOK lane");
+    };
+    assert!(message.contains("Your own key (BYOK)"));
+    // A missing owner must not hide the catalog configuration problem.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &owner})
+        .await
+        .unwrap();
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    let message = configuration_message(
+        billing
+            .verify_account(state.http_client.get(server.uri()))
+            .await,
+    );
+    assert!(message.contains("api-twitter"));
+    assert!(message.contains("Your own key (BYOK)"));
+    assert_eq!(
+        message,
+        "The X service (api-twitter) has no synced price on the Your own key (BYOK) lane that shared-app X channels bill through; configure a Requests price on that lane"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(rows(&state).await.is_empty());
+}
+
+#[tokio::test]
+async fn x_billing_grant_without_subscription_still_requires_provisioned_wallet() {
+    let (mut state, _, server, owner, key) = fixture().await;
+    enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+        .update_one(
+            doc! {"owner_id": &owner},
+            doc! {"$unset": {"lago_subscription_id": ""}},
+        )
+        .await
+        .unwrap();
+    let now = bson::DateTime::now();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::credit_grant::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": "grant", "batch_id": "batch", "recipient_user_id": &owner,
+            "target_kind": "selected_users", "amount_credits": 100_i64,
+            "amount": Credits::from_whole(100), "remaining": Credits::from_whole(100),
+            "reserved": Credits::ZERO, "scope": {"all_services": true},
+            "granted_by": "admin", "status": "active", "issued_ledgered_at": now,
+            "created_at": now, "updated_at": now,
+        })
+        .await
+        .unwrap();
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    let message = configuration_message(
+        billing
+            .verify_account(state.http_client.get(server.uri()))
+            .await,
+    );
+    assert_eq!(
+        message,
+        "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(rows(&state).await.is_empty());
+    let grant = state
+        .db
+        .collection::<crate::models::credit_grant::CreditGrant>(
+            crate::models::credit_grant::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": "grant"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.remaining, Credits::from_whole(100));
+    assert_eq!(grant.reserved, Credits::ZERO);
+}
+
+#[tokio::test]
+async fn x_billing_synced_byok_price_verification_still_succeeds() {
+    let (mut state, _, server, owner, key) = fixture().await;
+    enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    assert!(
+        billing
+            .verify_account(state.http_client.get(server.uri()))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let rows = settled(&state).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].quantity, Some(1));
+    assert_eq!(rows[0].lago_metric_code, "platform_svc_api-twitter_byok");
+}
+
+#[tokio::test]
+async fn x_billing_production_lane_remediation_uses_grant_before_wallet() {
+    let (mut state, _, server, owner, key) = fixture().await;
+    let service = enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &service},
+            doc! {"$unset": {"billing.byok_pricing": ""}},
+        )
+        .await
+        .unwrap();
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    let blocked = configuration_message(
+        billing
+            .verify_account(state.http_client.get(server.uri()))
+            .await,
+    );
+    assert_eq!(
+        blocked,
+        "The X service (api-twitter) has no synced price on the Your own key (BYOK) lane that shared-app X channels bill through; configure a Requests price on that lane"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    let now = bson::DateTime::now();
+    state.db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(doc! {"_id": &service}, doc! {"$set": {"billing.byok_pricing": {
+            "metric": "requests", "credits_per_unit": "2", "lago_metric_code": "platform_svc_api-twitter_byok",
+            "sync_status": "synced", "components": []
+        }}}).await.unwrap();
+    state.db.collection::<bson::Document>(crate::models::credit_grant::COLLECTION_NAME).insert_one(doc! {
+        "_id": "grant-remediation", "batch_id": "batch-remediation", "recipient_user_id": &owner,
+        "target_kind": "selected_users", "amount_credits": 100_i64,
+        "amount": Credits::from_whole(100), "remaining": Credits::from_whole(100),
+        "reserved": Credits::ZERO, "scope": {"all_services": true},
+        "granted_by": "admin", "status": "active", "issued_ledgered_at": now,
+        "created_at": now, "updated_at": now,
+    }).await.unwrap();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        billing
+            .verify_account(state.http_client.get(server.uri()))
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let settled_rows = settled(&state).await;
+    assert_eq!(settled_rows.len(), 1);
+    assert_eq!(
+        settled_rows[0].lago_metric_code,
+        "platform_svc_api-twitter_byok"
+    );
+    assert_eq!(
+        settled_rows[0].funding.as_ref().unwrap().grant_funded,
+        Some(Credits::from_whole(2))
+    );
+    let grant = state
+        .db
+        .collection::<crate::models::credit_grant::CreditGrant>(
+            crate::models::credit_grant::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": "grant-remediation"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.remaining, Credits::from_whole(98));
+    assert_eq!(
+        wallet(&state, &owner).await.balance_credits,
+        Credits::from_whole(100)
+    );
+}
+
+/// Prices X operations on the BYOK lane as synced, with fresh rates.
+async fn price_operations(
+    state: &AppState,
+    service: &str,
+    prices: &[(
+        crate::services::channel_billing_service::XChannelOperation,
+        i64,
+    )],
+) {
+    use crate::models::service_billing::OperationPrice;
+    let operations: Vec<OperationPrice> = prices
+        .iter()
+        .map(|(operation, credits)| OperationPrice {
+            operation: operation.key().into(),
+            credits_per_unit: credits.to_string(),
+            lago_metric_code: crate::services::billing::pricing::operation_metric_code(
+                "api-twitter",
+                "byok",
+                operation.key(),
+            )
+            .unwrap(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+        })
+        .collect();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": service},
+            doc! {"$set": {"billing.byok_pricing.operations": bson::to_bson(&operations).unwrap()}},
+        )
+        .await
+        .unwrap();
+    for (price, (_, credits)) in operations.iter().zip(prices) {
+        state
+            .db
+            .collection::<bson::Document>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": format!("{}:*", price.lago_metric_code),
+                "lago_metric_code": &price.lago_metric_code,
+                "credits_per_unit_micros": credits * 1_000_000, "synced_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn x_billing_each_operation_settles_at_its_own_price_and_unpriced_at_base() {
+    use crate::services::channel_billing_service::XChannelOperation as Op;
+    let (mut state, _, server, owner, key) = fixture().await;
+    let service = enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    let priced = [
+        (Op::AccountVerify, 3),
+        (Op::PostReply, 4),
+        (Op::DmSend, 5),
+        (Op::DmReceived, 6),
+        (Op::ChatReceived, 7),
+    ];
+    price_operations(&state, &service, &priced).await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    // This checks operation prices, not concurrent wallet settlement. Wait for
+    // each deferred settlement before starting the next: contention may defer
+    // a row to the production recovery worker, which this fixture does not run.
+    for operation in [Op::AccountVerify, Op::PostReply, Op::DmSend] {
+        let response = match operation {
+            Op::AccountVerify => {
+                billing
+                    .verify_account(state.http_client.get(server.uri()))
+                    .await
+            }
+            Op::PostReply => {
+                billing
+                    .send_post(state.http_client.post(server.uri()))
+                    .await
+            }
+            Op::DmSend => billing.send(state.http_client.post(server.uri())).await,
+            _ => unreachable!("outgoing operation fixture"),
+        };
+        assert!(response.unwrap().status().is_success());
+        settled(&state).await;
+    }
+    billing.received("901").await.unwrap();
+    settled(&state).await;
+    billing.received_chat("902").await.unwrap();
+    settled(&state).await;
+    billing.received_post("903").await.unwrap();
+
+    let rows = settled(&state).await;
+    assert_eq!(rows.len(), 6);
+    let expected = priced
+        .iter()
+        .map(|(operation, credits)| {
+            (
+                crate::services::billing::pricing::operation_metric_code(
+                    "api-twitter",
+                    "byok",
+                    operation.key(),
+                )
+                .unwrap(),
+                Some(operation.key()),
+                *credits,
+            )
+        })
+        .chain([("platform_svc_api-twitter_byok".to_string(), None, 2)]);
+    for (code, operation, credits) in expected {
+        let row = rows
+            .iter()
+            .find(|row| row.lago_metric_code == code)
+            .unwrap();
+        assert_eq!(row.operation.as_deref(), operation);
+        assert_eq!(row.quantity, Some(1));
+        assert_eq!(
+            row.funding.as_ref().unwrap().total_charge,
+            Some(Credits::from_whole(credits))
+        );
+    }
+    assert!(
+        rows.iter()
+            .any(|row| row.billing_request_id.starts_with("x-post-received:")
+                && row.lago_metric_code == "platform_svc_api-twitter_byok"),
+        "the unpriced received post keeps its request identity and base rate"
+    );
+    let wallet = wallet(&state, &owner).await;
+    assert_eq!(wallet.pending_lago_debits, Credits::from_whole(27));
+    assert_eq!(wallet.reserved_credits, Credits::ZERO);
+}
+
+#[tokio::test]
+async fn x_billing_admission_reserves_at_the_received_dm_price() {
+    use crate::services::channel_billing_service::XChannelOperation as Op;
+    let (mut state, _, _, owner, key) = fixture().await;
+    let service = enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    price_operations(&state, &service, &[(Op::DmReceived, 6)]).await;
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    billing.admit().await.unwrap();
+    let rows = rows(&state).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].operation.as_deref(), Some("channel_dm_received"));
+    assert_eq!(rows[0].reserved_credits, Credits::from_whole(6));
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        Credits::ZERO,
+        "the admission check releases its hold"
+    );
+    // Enough for the base rate (2), not for the received-DM price (6).
+    balance(&state, &owner, 5).await;
+    assert!(matches!(
+        billing.admit().await,
+        Err(AppError::InsufficientCredits)
+    ));
+}
+
+#[tokio::test]
+async fn x_billing_operation_price_is_funded_by_grants_before_the_wallet() {
+    use crate::services::channel_billing_service::XChannelOperation as Op;
+    let (mut state, _, _, owner, key) = fixture().await;
+    let service = enable_billing(&mut state, &owner).await;
+    let bot = registered(&state, &owner, &key).await;
+    price_operations(&state, &service, &[(Op::DmReceived, 6)]).await;
+    let now = bson::DateTime::now();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::credit_grant::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": "grant-operation", "batch_id": "batch-operation", "recipient_user_id": &owner,
+            "target_kind": "selected_users", "amount_credits": 100_i64,
+            "amount": Credits::from_whole(100), "remaining": Credits::from_whole(100),
+            "reserved": Credits::ZERO, "scope": {"all_services": true},
+            "granted_by": "admin", "status": "active", "issued_ledgered_at": now,
+            "created_at": now, "updated_at": now,
+        })
+        .await
+        .unwrap();
+    let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+    billing.received("911").await.unwrap();
+    let rows = settled(&state).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].operation.as_deref(), Some("channel_dm_received"));
+    assert_eq!(
+        rows[0].funding.as_ref().unwrap().grant_funded,
+        Some(Credits::from_whole(6))
+    );
+    let grant = state
+        .db
+        .collection::<crate::models::credit_grant::CreditGrant>(
+            crate::models::credit_grant::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": "grant-operation"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.remaining, Credits::from_whole(94));
+    let wallet = wallet(&state, &owner).await;
+    assert_eq!(wallet.balance_credits, Credits::from_whole(100));
+    assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+}
+
+#[test]
+fn x_channel_catalog_operations_match_the_calls_the_adapter_makes() {
+    use crate::services::channel_adapters::x::{X_ACCOUNT_PATH, X_API_BASE, X_POST_PATH};
+    use crate::services::channel_billing_service::XChannelOperation as Op;
+    let spec: serde_json::Value =
+        serde_json::from_str(include_str!("../../specs/catalog/twitter.openapi.json")).unwrap();
+    let server = spec["servers"][0]["url"].as_str().unwrap();
+    for (operation, method, adapter_path) in [
+        (Op::AccountVerify, "get", X_ACCOUNT_PATH),
+        (Op::PostReply, "post", X_POST_PATH),
+    ] {
+        let found: Vec<String> = spec["paths"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, operations)| operations[method]["operationId"] == operation.key())
+            .map(|(path, _)| format!("{server}{path}"))
+            .collect();
+        assert_eq!(
+            found,
+            vec![format!("{X_API_BASE}{adapter_path}")],
+            "{} must be the overlay operation the X adapter calls",
+            operation.key()
+        );
+    }
 }

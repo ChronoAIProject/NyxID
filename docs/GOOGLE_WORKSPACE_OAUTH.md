@@ -19,10 +19,12 @@ Drive, Gmail, Docs, Sheets, or Slides connections.
 
 The full API scope prefix is `https://www.googleapis.com/auth/`. All seven also
 request `openid email profile`. Workspace bundles Drive, Calendar, Gmail,
-Docs, Sheets, and Slides; Google does not have a single Workspace OAuth scope. Workspace and
-Gmail require `gmail.send` for sending and replying. It is selected and locked in
-the permission picker. Both custom and managed OAuth requests must include it,
-and Google must return it in the granted scopes before authorization completes.
+Docs, Sheets, and Slides; Google does not have a single Workspace OAuth scope.
+Workspace and Gmail request `gmail.send` by default because sending and replying
+need it, but users can deselect it in the permission picker. Both managed and
+custom OAuth connections may finish with a narrower grant. Every Workspace
+scope is optional at connection time; the user's actual grant determines which
+operations can succeed.
 Native Docs/Sheets/Slides editing is available through the three separate services
 and through both Drive and Workspace with automatic startup activation as described below.
 Drive includes the editor operations under its existing Drive permissions; Workspace
@@ -139,12 +141,20 @@ chosen service.
 
 Existing Workspace catalog defaults are upgraded at startup to publish Gmail
 operations and offer Gmail scopes. The migration updates the original seeded
-policy, metadata, and provider requirement scopes. Startup also adds the required
-`gmail.send` scope to Workspace and Gmail requirements while retaining other
-configured scopes and customized metadata. Existing tokens keep their grants:
-reconnect existing Workspace and Gmail connections and approve Gmail sending
-access. Adding scopes to Google Cloud's consent configuration alone does not
-upgrade an existing token.
+policy and metadata. Startup removes seeded required scopes from the catalog
+and provider requirements for all seven Google services, preserving unrelated
+custom requirements and customized metadata. It keeps `gmail.send` in the
+default Workspace and Gmail scope requests. Existing tokens keep their grants:
+users who want to send mail must reconnect and approve Gmail sending access.
+Adding scopes to Google Cloud's consent configuration alone does not upgrade an
+existing token. When Google returns a `scope` value, NyxID records it as
+`granted_scopes` in `GET /api/v1/keys/{id}/authorization` and shows it in the
+AI Service details. A token refresh can update this list; an absent scope
+response can leave the prior recorded list in place. This is the last reported
+grant, not a live Google check on every proxy call. A partial grant can still
+be an active connection; operations needing a missing scope fail at the Google
+API. Callers should compare `granted_scopes` with the scopes their intended
+operations need.
 
 ## Docs, Sheets, and Slides operations
 
@@ -285,7 +295,7 @@ rewritten to complete the rollout.
   Drive connection for the Docs, Sheets, and Slides paths listed above.
 - Gmail: list `/gmail/v1/users/me/messages?maxResults=1`, then read a returned
   message with `GET /gmail/v1/users/me/messages/{id}?format=full`. With the
-  required `gmail.send` permission and the user's intent to send, submit a
+  `gmail.send` permission and the user's intent to send, submit a
   base64url-encoded RFC 2822 MIME message as `{"raw":"..."}` to
   `POST /gmail/v1/users/me/messages/send`. To reply, also set `threadId` in the
   JSON body and include matching `Subject`, `In-Reply-To`, and `References`

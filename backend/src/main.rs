@@ -86,6 +86,8 @@ const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(test)]
+    pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
@@ -108,6 +110,10 @@ pub struct AppState {
         Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
+    /// Trusted workload-ticket verification for managed Node bootstrap. The
+    /// default remains closed until a real provider is integrated and accepted.
+    pub managed_bootstrap_verifier:
+        Arc<dyn services::remote_machine_bootstrap::BootstrapTicketVerifier>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Process and address identity used to fence node ownership.
@@ -168,6 +174,7 @@ pub struct AppState {
     /// settings writes. Enforcement reads this in-memory snapshot, never
     /// MongoDB, so broker checks do not add per-request database work.
     pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    pub upload_retention: services::assistant_upload_retention::Cache,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -209,6 +216,10 @@ pub struct AppState {
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
     pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
+    /// Live assistant changes from this process's MongoDB change stream:
+    /// resumes chats waiting on connect links and new bots at once, and
+    /// pushes thread changes to open browsers.
+    pub assistant_live: Arc<services::assistant_live::AssistantLive>,
 }
 
 impl AppState {
@@ -316,8 +327,16 @@ enum Commands {
     CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
+        services::attachment_extraction::worker();
+        return;
+    }
+    server_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn server_main() {
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
@@ -359,6 +378,8 @@ async fn main() {
         other => other,
     };
 
+    services::assistant_engine_worker::initialize();
+
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
@@ -374,6 +395,9 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
     services::assistant_nyxagent::warn_at_startup(&db).await;
+    services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("Failed to read the immutable assistant skill-routing cutover");
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -424,6 +448,12 @@ async fn main() {
         Some(&jwt_private_key_pem),
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
     let internal_dispatch_hmac_key = services::internal_auth::derive_key(
         config.internal_dispatch_hmac_key.as_deref(),
@@ -548,6 +578,9 @@ async fn main() {
     services::inference_service::backfill(&db)
         .await
         .expect("Failed to backfill inference metadata");
+    services::utility_inference_service::seed(&db)
+        .await
+        .expect("Failed to seed utility inference defaults");
 
     services::retired_service_service::retire_legacy_vendors(&db)
         .await
@@ -610,6 +643,20 @@ async fn main() {
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");
+    }
+
+    // Retire pre-upgrade owner asks in bounded pending-row batches. The sweep is
+    // idempotent; failures retry on policy writes or the next startup.
+    if services::assistant_acknowledgement_service::retire_full_access_confirmations(
+        &db, None, None,
+    )
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            code = "assistant_full_access_retirement_failed",
+            "Failed to retire obsolete Full-access confirmations; continuing startup"
+        );
     }
 
     // --- Server startup ---
@@ -788,6 +835,14 @@ async fn main() {
             encryption_keys.clone(),
         ),
     );
+    services::channel_bot_health::install_failure_notifier(
+        services::channel_bot_health::ChannelBotFailureNotifier::new(
+            Arc::new(config.clone()),
+            http_client.clone(),
+            fcm_auth.clone(),
+            apns_auth.clone(),
+        ),
+    );
     let connection_expiry_notifier = Arc::new(
         services::connection_expiry_service::ConnectionExpiryNotifier::new(
             Arc::new(config.clone()),
@@ -798,6 +853,8 @@ async fn main() {
         ),
     );
     let state = AppState {
+        #[cfg(test)]
+        local_machine_platform: None,
         db: db.clone(),
         config: config.clone(),
         jwt_keys,
@@ -810,6 +867,8 @@ async fn main() {
         connection_expiry_notifier,
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
+        managed_bootstrap_verifier:
+            services::remote_machine_bootstrap_verifier::configured_verifier(),
         node_ws_manager,
         replica_identity,
         node_dispatch,
@@ -936,6 +995,7 @@ async fn main() {
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        upload_retention: Default::default(),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
@@ -955,6 +1015,7 @@ async fn main() {
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
         audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
@@ -966,8 +1027,28 @@ async fn main() {
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
     );
+    state.billing.spawn_refresh_worker();
+    services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
+        .await
+        .expect("Upload retention policy");
+    services::assistant_upload_retention::spawn(state.clone());
+    services::assistant_agent_learning_review::start_publication_migration(&state).await;
+    services::assistant_agent_learning::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
 
+    let lifecycle_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_pool_service::cleanup_deleted_pools(&lifecycle_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle lifecycle cleanup pass failed");
+            }
+        }
+    });
     let login_cleanup_db = state.db.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -994,6 +1075,29 @@ async fn main() {
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
     );
+
+    // NyxBot: destroy idle subagents and retry deferred team wake-ups.
+    handlers::assistant_team::spawn_sweeps(state.clone());
+    services::call_channels::coordinator::spawn_sweep(state.clone());
+    services::platform_manager_transport::spawn_sweeps(
+        state.clone(),
+        services::platform_manager_transport::compose(
+            state.clone(),
+            handlers::assistant_team::owner_turn_settled_hook(state.clone()),
+        ),
+    );
+    handlers::trigger_scheduler::spawn(state.clone());
+    // Live assistant changes: one change stream for this process, and the
+    // NyxBot reaction to finished links and new bots.
+    handlers::nyxbot::spawn_live_dispatch(state.clone());
+    handlers::machine_update::spawn(state.clone());
+    services::machine_access_service::spawn(state.clone());
+    services::remote_machine_manager::spawn(state.clone());
+    {
+        let live = state.assistant_live.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { live.run(db).await });
+    }
 
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {
@@ -1046,6 +1150,95 @@ async fn main() {
             }
         });
     }
+
+    // Bot links use their own sweep so slow receivers cannot delay connector links.
+    if config.connect_link_expiry_sweep_interval_secs > 0 {
+        let bot_link_state = state.clone();
+        let interval_secs = config.connect_link_expiry_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::channel_connect_link_service::sweep(
+                    &bot_link_state.db,
+                    &bot_link_state.encryption_keys,
+                    &bot_link_state.developer_webhook_dispatcher,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Channel connect-link sweep failed");
+                }
+            }
+        });
+    }
+
+    // Budget holds must recover independently of external Telegram notice latency.
+    let platform_budget_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform budget recovery sweep failed"
+                );
+            }
+        }
+    });
+
+    let platform_cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform conversion cleanup sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_provisioning_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup provisioning sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup status notice sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Native platform recovery sweep failed"
+                );
+            }
+            if let Err(error) =
+                services::platform_setup_service::expire(&platform_cleanup_state.db).await
+            {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Platform setup expiry sweep failed"
+                );
+            }
+        }
+    });
 
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
@@ -1325,7 +1518,11 @@ async fn main() {
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
+        .expose_headers([axum::http::HeaderName::from_static(
+            mw::assistant_trace::TRACE_HEADER,
+        )])
         .allow_credentials(true);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
@@ -1383,7 +1580,8 @@ async fn main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http());
+    .layer(TraceLayer::new_for_http().make_span_with(mw::request_trace::span::<axum::body::Body>))
+    .layer(axum_mw::from_fn(mw::assistant_trace::assistant_trace));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

@@ -39,7 +39,7 @@ impl ProviderEndpoint {
     pub(super) fn new(address: &str) -> Result<Self> {
         let address = Self::parse_address(address)?;
         let local_http = address.scheme() == "http";
-        let mut builder = reqwest::Client::builder()
+        let mut builder = crate::tls::client_builder()?
             .https_only(!local_http)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30));

@@ -27,7 +27,7 @@ export function DirectModeBanner() {
   return (
     <div
       aria-label="Direct chat mode notice"
-      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-[11px] text-muted-foreground sm:px-6"
+      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-11 text-muted-foreground sm:px-6"
       role="status"
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
@@ -67,7 +67,7 @@ export function DirectChatControls({
       <div className="w-[150px] min-w-0">
         <label
           htmlFor="direct-chat-model"
-          className="mb-1 block text-[10px] font-medium text-text-tertiary"
+          className="mb-1 block text-10 font-medium text-text-tertiary"
         >
           Model
         </label>
@@ -91,7 +91,7 @@ export function DirectChatControls({
       <div className="w-[150px] min-w-0">
         <label
           htmlFor="direct-chat-effort"
-          className="mb-1 block text-[10px] font-medium text-text-tertiary"
+          className="mb-1 block text-10 font-medium text-text-tertiary"
         >
           Reasoning effort
         </label>
@@ -121,7 +121,7 @@ export function DirectChatControls({
       <div className="min-w-[190px] flex-1">
         <label
           htmlFor="direct-chat-skill"
-          className="mb-1 block text-[10px] font-medium text-text-tertiary"
+          className="mb-1 block text-10 font-medium text-text-tertiary"
         >
           NyxID knowledge
         </label>
@@ -142,7 +142,7 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-        <p className="mt-1 text-[10px] leading-4 text-text-tertiary">
+        <p className="mt-1 text-10 leading-4 text-text-tertiary">
           A skill teaches the model about NyxID; it cannot take actions here.
         </p>
       </div>

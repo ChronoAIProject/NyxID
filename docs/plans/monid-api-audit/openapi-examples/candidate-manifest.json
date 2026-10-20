@@ -1,0 +1,58 @@
+[
+  {
+    "file": "apollo-1.json",
+    "provider": "apollo",
+    "base_url": "https://api.apollo.io",
+    "auth_method": "header",
+    "auth_key_name": "x-api-key",
+    "credential_shape_field": "apiKey",
+    "default_request_headers": {},
+    "operation_ids": [
+      "apollo#organizations/enrich",
+      "apollo#organizations/job_postings",
+      "apollo#organizations/show",
+      "apollo#people/match",
+      "apollo#people/show"
+    ],
+    "activate": false
+  },
+  {
+    "file": "pdl-2.json",
+    "provider": "pdl",
+    "base_url": "https://api.peopledatalabs.com",
+    "auth_method": "header",
+    "auth_key_name": "X-Api-Key",
+    "credential_shape_field": "apiKey",
+    "default_request_headers": {},
+    "operation_ids": [
+      "pdl#v5/company/search"
+    ],
+    "activate": false
+  },
+  {
+    "file": "tinyfish-3.json",
+    "provider": "tinyfish",
+    "base_url": "https://api.fetch.tinyfish.ai",
+    "auth_method": "header",
+    "auth_key_name": "X-API-Key",
+    "credential_shape_field": "apiKey",
+    "default_request_headers": {},
+    "operation_ids": [
+      "tinyfish#fetch"
+    ],
+    "activate": false
+  },
+  {
+    "file": "tinyfish-4.json",
+    "provider": "tinyfish",
+    "base_url": "https://api.search.tinyfish.ai",
+    "auth_method": "header",
+    "auth_key_name": "X-API-Key",
+    "credential_shape_field": "apiKey",
+    "default_request_headers": {},
+    "operation_ids": [
+      "tinyfish#search"
+    ],
+    "activate": false
+  }
+]

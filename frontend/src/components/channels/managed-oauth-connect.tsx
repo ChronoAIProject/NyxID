@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
@@ -14,11 +15,13 @@ import {
   postOAuthAck,
 } from "@/lib/oauth-popup";
 import { isOAuthResultMessage } from "@/schemas/oauth-popup";
+import { currentCreditsActor } from "@/lib/credits-denial";
 import {
   startManagedOAuth,
   completeManagedOAuth,
   useManagedOnboarding,
 } from "@/hooks/use-channel-managed";
+import { ChannelBotHealthCard } from "./channel-bot-health-card";
 import type {
   ManagedFlowProps,
   ManagedDetailProps,
@@ -33,6 +36,7 @@ export function ManagedOAuthConnect({
   botId,
   fullPage = false,
 }: ManagedFlowProps) {
+  const link = useChannelConnectLinkContext();
   const [stage, setStage] = useState<
     "starting" | "authorizing" | "completing" | null
   >(null);
@@ -82,7 +86,7 @@ export function ManagedOAuthConnect({
     };
     cleanup.current = stop;
     setStage("starting");
-    void startManagedOAuth(platform, label, orgId, controller.signal)
+    void startManagedOAuth(platform, label, orgId, controller.signal, link?.token)
       .then(async (started) => {
         if (!active) return;
         channel = openOAuthChannel(started.attempt_nonce);
@@ -114,6 +118,8 @@ export function ManagedOAuthConnect({
             },
             controller.signal,
             botId,
+            orgId ?? currentCreditsActor(),
+            link?.token,
           )
             .then(async (bot) => {
               if (!active) return;
@@ -167,6 +173,16 @@ export function ManagedOAuthConnect({
           the connection.
         </p>
       )}
+      {link?.connectionId && stage === null && (
+        <Button type="button" variant="outline" onClick={() => {
+          setError(null);
+          setStage("completing");
+          void completeManagedOAuth(platform, { connection_id: link.connectionId!, label, ...(orgId ? { target_org_id: orgId } : {}) }, new AbortController().signal, undefined, orgId ?? currentCreditsActor(), link.token)
+            .then(onConnected)
+            .catch((error: unknown) => setError(error instanceof Error ? error.message : "Unable to finish authorization"))
+            .finally(() => setStage(null));
+        }}>Finish authorized connection</Button>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
@@ -215,6 +231,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
+      <ChannelBotHealthCard botId={bot.id} />
       <DetailRow label="Handle" value={bot.platform_bot_username} />
       <DetailRow
         label="Connection"

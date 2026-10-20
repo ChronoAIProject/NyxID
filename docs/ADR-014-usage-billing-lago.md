@@ -8,6 +8,8 @@
 > **Related:** ADR-013 (pure passthrough), CLAUDE.md §8 (streamlined services), CLAUDE.md §9 (agent isolation),
 > `backend/src/services/llm_usage_service.rs`, `docs/AI_SERVICES_ARCHITECTURE.md`.
 
+> Accounting/storage update: NyxID 0.31 uses [exact Credits and balanced v2 postings](BILLING_EXACT_ACCOUNTING.md). That normative document supersedes this draft’s integer wallet/rounding assumptions and defines the drained-writer cutover.
+
 ## Context
 
 NyxID proxies user/agent traffic to downstream services (OpenAI, Anthropic, custom APIs, SSH, MCP).
@@ -30,7 +32,7 @@ What exists today:
 
 Constraints (project fixed points):
 
-- FI-002 — host facts via config, not hardcoded: *which* services bill and *how* must be admin
+- FI-002 — host facts via config, not hardcoded: _which_ services bill and _how_ must be admin
   data, not code.
 - FI-003 — keep the stable core small: pricing/invoicing logic must not sink into the proxy core.
 - FI-004 — cross-process facts need an authoritative record: wallet balance must have a real SSOT;
@@ -42,11 +44,12 @@ Constraints (project fixed points):
 
 **D1 — Two charge layers: resale (catalog-level) and platform/proxy (plan-level).**
 NyxID can charge for two distinct things, and they live in different places:
-- *Resale charges* — the value of a downstream NyxID brokers (e.g. tokens on a **NyxID-provided**
+
+- _Resale charges_ — the value of a downstream NyxID brokers (e.g. tokens on a **NyxID-provided**
   key). Catalog-level: configured per `DownstreamService` via the `ServiceBilling` sub-struct
   (sibling to `ServiceCapabilities`), inherited by the `UserService` via `catalog_service_id`. Only
   services where NyxID supplies the credential carry resale charges.
-- *Platform / proxy charges* — the act of proxying itself (requests, bandwidth). These are
+- _Platform / proxy charges_ — the act of proxying itself (requests, bandwidth). These are
   **plan-level**, not per catalog service, and can apply to **any** `UserService` including a user's
   own **custom endpoints**. We never charge for a custom downstream's value, but using NyxID to proxy
   to it is chargeable when the owner's plan says so.
@@ -70,20 +73,20 @@ capture**, and the **node-routed and WS paths have no usage hook at all** (`prox
 a **single metering choke point** that every proxy path (direct HTTP, node HTTP, direct WS, node WS)
 passes through, emitting per-metric usage keyed by the billing owner. No service may be `billable`
 until its route flows through that choke point (see Hard requirements). Each metric maps to its own
-Lago billable-metric code; one primary metric per service in v1. Typically `tokens` is a *resale*
-metric and `requests` / `bytes` suit *platform* charges, but either layer may use any metric.
+Lago billable-metric code; one primary metric per service in v1. Typically `tokens` is a _resale_
+metric and `requests` / `bytes` suit _platform_ charges, but either layer may use any metric.
 
 **D4 — Billing model is plan-driven; the gate splits entitlement (always fail-closed) from funding (conditional fail-open), over cross-instance state.**
 The charging model is a Lago plan/wallet configuration, not a NyxID constant: an owner may be on a
 **subscription** (recurring fee + optional allowance/overage), **prepaid credit** (wallet burn-down),
 or a **hybrid**. NyxID does not encode which. Before forwarding a billable request the gate makes two
-*separate* decisions (pressure-test correction — these had different failure semantics conflated):
+_separate_ decisions (pressure-test correction — these had different failure semantics conflated):
 
 - **Entitlement** (does the owner's plan include this service?) — **always fails closed**. A cold
   cache or a Lago-unknown state denies a paid-tier service; a free user reaching a paid tier is pure
   leakage with no settlement path.
 - **Funding** (does the owner have balance/allowance?) — evaluated against **cross-instance** state
-  (MongoDB last-known balance, *not* per-process memory — the platform is stateless multi-instance,
+  (MongoDB last-known balance, _not_ per-process memory — the platform is stateless multi-instance,
   CLAUDE.md §11), with an atomic decrement on the shared store.
 
 Resolved usage is written to a durable `usage_meter` ledger keyed by a stable per-request, per-layer
@@ -94,7 +97,7 @@ requirements), not "Lago is the only record."
 
 **Funding uses reserve-then-true-up, not a bare balance check** (Rev 2 — both second-opinion reviewers
 showed a bare pre-flight balance check is unsafe under concurrency: N concurrent requests all observe
-balance > 0, all forward, all meter *after* the response). At the gate NyxID **reserves a pessimistic
+balance > 0, all forward, all meter _after_ the response). At the gate NyxID **reserves a pessimistic
 cost** for the request (estimated from the cached read-only Lago rate card, D5; e.g. a per-model
 max-token cost), atomically decrements the shared balance by the reservation, forwards, then
 **settles/true-ups** against actual metered usage post-response. The reservation row is written
@@ -105,7 +108,7 @@ NyxID already paid the provider for.
 is unreachable, NyxID fails open **only for accounts with a payment instrument on file**
 (postpaid/subscription with a card) and **only up to a hard, money-denominated overdraft cap** (priced
 via the cached rate card) that auto-suspends the wallet when breached. **Prepaid wallets at or near
-zero fail closed** (402) — and "near zero" now means *below the next reservation*, which the
+zero fail closed** (402) — and "near zero" now means _below the next reservation_, which the
 reserve-then-true-up model makes well-defined. The **cap**, enforced atomically on the shared store,
 is the real bound on exposure, not "the next request".
 
@@ -116,17 +119,17 @@ customer.
 
 **D5 — Price/cost is shown in NyxID, conditionally.**
 The per-service API response includes a `billing` block **only when** the service is `billable`
-*and* NyxID has a live Lago connection *and* a price is configured. Otherwise it is omitted and the
+_and_ NyxID has a live Lago connection _and_ a price is configured. Otherwise it is omitted and the
 UI falls back to raw usage counts (or nothing). Pricing values originate in Lago and are read back
-via Lago's `current_usage`. NyxID never stores its own *authoritative* rate card — but, **per Rev 2,
+via Lago's `current_usage`. NyxID never stores its own _authoritative_ rate card — but, **per Rev 2,
 it may cache Lago's rate card read-only** (clearly labeled approximate, never used for invoicing) for
 one purpose: estimating a reservation amount and bounding the overdraft cap in money/credit terms (see
 D4). Lago's `current_usage` is treated as provisional billing/display data, **not** a per-request
 authorization primitive.
 
-**D6 — A thin stateless Lago *client* + a NyxID-owned billing *service*.**
+**D6 — A thin stateless Lago _client_ + a NyxID-owned billing _service_.**
 Pressure-test correction: the original "thin `BillingProvider` trait mirroring `KeyProvider`" framing
-was withdrawn — `KeyProvider` is *pure/stateless*, whereas billing's hard parts (durable ledger,
+was withdrawn — `KeyProvider` is _pure/stateless_, whereas billing's hard parts (durable ledger,
 cross-instance balance, reconcile sweep, overdraft cap, gate decision) are stateful and cannot hide
 behind a swappable adapter without either leaking into NyxID core or being unsafe. So billing splits
 in two:
@@ -136,31 +139,31 @@ in two:
 - A **NyxID-owned, MongoDB-backed `BillingService`** that owns the `usage_meter` ledger, cross-instance
   balance state, the reconcile sweep, the overdraft cap, and the gate decision.
 
-NyxID implements *no* rating, proration, invoicing, tax, or dunning — those stay in Lago. But the
-gate, the ledger, and entitlement *evaluation* live in NyxID by necessity (D7). Boundary (FI-003/005):
+NyxID implements _no_ rating, proration, invoicing, tax, or dunning — those stay in Lago. But the
+gate, the ledger, and entitlement _evaluation_ live in NyxID by necessity (D7). Boundary (FI-003/005):
 NyxID owns "meter + gate + ledger + display", Lago owns "price + wallet + invoice", Stripe owns
 "collect".
 
-**D7 — Subscription, prepaid credit, and plan-based enable/disable are supported; charging *config* lives in Lago, but entitlement *evaluation* lives in NyxID.**
+**D7 — Subscription, prepaid credit, and plan-based enable/disable are supported; charging _config_ lives in Lago, but entitlement _evaluation_ lives in NyxID.**
 Enabling/disabling a service per plan is an **entitlement** decision the gate returns
 (`PlanEntitlementRequired`, 402, fail-closed per D4). **Rev 2 correction (verified):** Lago **does**
 have a first-class entitlements API (`GET /api/v1/subscriptions/{external_id}/entitlements`, plus a
 `subscription.updated` webhook) — the first-draft claim that it has none was wrong and is withdrawn.
 So NyxID reads entitlements from Lago as the **source of truth** (cached, webhook-invalidated) and
-still **enforces the gate locally** (fail-closed). Charging *configuration* (plan, prices, credit vs
-subscription) is Lago data and changes there without NyxID code; the entitlement *gate enforcement* is
+still **enforces the gate locally** (fail-closed). Charging _configuration_ (plan, prices, credit vs
+subscription) is Lago data and changes there without NyxID code; the entitlement _gate enforcement_ is
 NyxID code. The "no NyxID code change for new plan shapes" claim remains partly overstated — new plans
 need no code, but moving a service in/out of a tier still touches the gate's entitlement mapping.
 
 ## Hard requirements (gating — from the pressure-test)
 
 An adversarial review (billing-correctness, security, architecture; all code-grounded) found the
-first draft leaned on the existing best-effort, fire-and-forget *audit* pipeline as if it were a
+first draft leaned on the existing best-effort, fire-and-forget _audit_ pipeline as if it were a
 billing-grade meter. It is not. **No service may be marked `billable` until all of the following hold:**
 
 1. **Unified metering choke point — enumerate ALL entry points (Rev 2).** Beyond the four originally
    listed (direct HTTP, node HTTP, direct WS, node WS), the second-opinion review found more: the
-   **`/llm` gateway** (`handlers/llm_gateway.rs`) is a *complete parallel* metering path the first
+   **`/llm` gateway** (`handlers/llm_gateway.rs`) is a _complete parallel_ metering path the first
    draft omitted; **MCP transport** (`mcp_transport.rs`) and **SSH** (`ssh_tunnel.rs`,
    `ssh_web_terminal.rs`) are **connection-shaped, not request-shaped** (per-connection metering with
    periodic flush + settle on disconnect — distinct from per-request HTTP). The natural HTTP seam is
@@ -187,7 +190,7 @@ billing-grade meter. It is not. **No service may be marked `billable` until all 
    which are platform-metered (requests/bytes NyxID measures itself), never resale. A billable request
    with no parseable usage is a flagged exception, not a silent $0.
 7. **Integer metric counts to Lago, never computed money** for invoicing (Lago owns authoritative
-   pricing; no `f64` currency). The cached rate card (D5) is for reservation/cap *estimation* only.
+   pricing; no `f64` currency). The cached rate card (D5) is for reservation/cap _estimation_ only.
 8. **Resale keys on the FINAL resolved credential, not the catalog flag (Rev 2).** Per-agent bindings
    (`AgentServiceBinding`, `proxy.rs:1287`) and master-credential injection (`proxy_service.rs:1636`)
    change the credential at proxy time; resale charges only when a live `is_nyxid_managed` signal is
@@ -268,11 +271,11 @@ sequenceDiagram
   flag — then pushed to Lago (which dedups on that id). The ledger, not the audit row, is the replay
   source; the audit row id (random per write) must **not** serve as `transaction_id` (Hard req. 2).
 - A reconcile sweep selects `lago_acked = false AND created_at < now - grace` and re-pushes (Lago
-  dedups by id → no double-apply). **But a durable ledger alone does not guarantee Lago *applies* a
+  dedups by id → no double-apply). **But a durable ledger alone does not guarantee Lago _applies_ a
   replay** (terminated subscription / closed period / recreated customer can reject it), so the sweep
   also **reconciles bidirectionally** (`sum(usage_meter)` vs Lago `current_usage` per customer) and
   **dead-letters + alerts** persistently-rejected rows rather than retrying forever (Hard req. 11).
-- If Lago is **unreachable**: balance reads serve the last-known *shared-store* value; entitlement
+- If Lago is **unreachable**: balance reads serve the last-known _shared-store_ value; entitlement
   fails closed and prepaid-at-zero fails closed; card-backed funding fails open up to the overdraft
   cap (D4). Queued usage replays when Lago returns.
 
@@ -286,7 +289,7 @@ Reserve a new block **11300–11399 (billing/payments)**, mapping to **HTTP 402 
 - `11303 PlanEntitlementRequired` — owner's plan does not include this service (a 402 upgrade-gate, distinct from out-of-credits)
 
 (Follows the existing reserved-block convention in CLAUDE.md §6.) Per D4 fail-open,
-`InsufficientCredits` fires on the request *after* a wallet is known-negative — the request in flight
+`InsufficientCredits` fires on the request _after_ a wallet is known-negative — the request in flight
 during a Lago outage is allowed by design. `BillingProviderUnavailable` is reserved for an explicit
 fail-closed override, not the default path.
 
@@ -295,7 +298,7 @@ fail-closed override, not the default path.
 - **Admin:** `ServiceBilling` editable in the service edit page "Service Metadata" section;
   accepted by `POST/PUT /services`; shown by `nyxid catalog show <slug>`.
 - **User:** conditional `billing` block on `/keys` responses. Note (Rev 2): the existing
-  `api-key-usage-dashboard.tsx` is an *"Agent Activity"* request-count view backed by audit logs, not
+  `api-key-usage-dashboard.tsx` is an _"Agent Activity"_ request-count view backed by audit logs, not
   a billing surface — the billing UI (credits, invoices, per-service cost, Lago state) is **new work**,
   not a render tweak.
 - **Config (new env):** Lago base URL + API key, Stripe keys (under Lago), reconcile interval,
@@ -337,10 +340,10 @@ fail-closed override, not the default path.
 
 1. **Stripe Billing alone (no Lago).** Rejected as the primary engine: native metering is thin for
    our per-model × per-service cardinality, no first-class prepaid wallet/burn-down, and a billing
-   fee on managed revenue. Still used *underneath* Lago for collection.
+   fee on managed revenue. Still used _underneath_ Lago for collection.
 2. **Build metering + pricing + invoicing in NyxID.** Rejected: re-implements money-critical,
    edge-heavy logic (rate cards, proration, invoices, dunning, tax) and still needs Stripe. Violates
-   FI-003/FI-005. Exception: read-only usage *display* (no charging) could be built natively off the
+   FI-003/FI-005. Exception: read-only usage _display_ (no charging) could be built natively off the
    existing audit events — kept as a possible Phase 0.
 3. **Postpaid invoicing instead of prepaid.** Rejected for v1 per product decision (carries
    collection/default risk); prepaid credits chosen.
@@ -350,11 +353,11 @@ fail-closed override, not the default path.
 ## Resolved since first draft
 
 - **Charge trigger:** per-catalog-service admin choice (D1) — no separate global trigger.
-- **Lago outage behavior:** *conditional* fail-open (D4) — entitlement always fails closed; funding
+- **Lago outage behavior:** _conditional_ fail-open (D4) — entitlement always fails closed; funding
   fails open only for card-backed accounts up to a hard overdraft cap; prepaid-at-zero fails closed.
   (Revises the first draft's blanket fail-open after the security review.)
 - **Wallet granularity:** both org and per-member wallets (D4), each mapping to one Lago customer.
-- **v1 scope:** build the unified metering choke point across all proxy paths *before* any service is
+- **v1 scope:** build the unified metering choke point across all proxy paths _before_ any service is
   billable (Hard requirements).
 - **Fail-open safety mechanism (Rev 2):** a cached read-only Lago rate card (D5) bounds the cap in
   money terms + reserve-then-true-up funding (D4). A bare pre-flight balance check was rejected as

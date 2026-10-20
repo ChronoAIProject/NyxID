@@ -629,7 +629,7 @@ pub struct FindOrCreateUserResult {
 ///
 /// When `allow_new_users` is `false`, first-time social sign-ups are rejected
 /// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
-/// email/password registration — callers should pass `!config.invite_code_required`.
+/// email/password registration — callers should use the global invitation-code flag.
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
@@ -766,6 +766,7 @@ mod tests {
     ) -> AppConfig {
         AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
@@ -809,6 +810,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -819,6 +821,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
@@ -897,6 +900,7 @@ mod tests {
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,
             billing_enabled: false,
+            billing_allocations_enabled: false,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
@@ -908,7 +912,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }

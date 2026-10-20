@@ -45,6 +45,12 @@ const WS_WRITER_CHANNEL_SIZE: usize = 256;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum NodeMessage {
+    #[serde(rename = "managed_machine_usage")]
+    ManagedMachineUsage(nyxid_machine::managed::Usage),
+    #[serde(rename = "machine_service_call")]
+    MachineServiceCall(nyxid_machine::Request),
+    #[serde(rename = "machine_result")]
+    MachineResult(nyxid_machine::Response),
     #[serde(rename = "register")]
     Register {
         token: String,
@@ -52,7 +58,12 @@ enum NodeMessage {
         metadata: Option<NodeMetadata>,
     },
     #[serde(rename = "auth")]
-    Auth { node_id: String, token: String },
+    Auth {
+        node_id: String,
+        token: String,
+        #[serde(default)]
+        managed_runtime: Option<nyxid_machine::managed::Binding>,
+    },
     #[serde(rename = "heartbeat_pong")]
     HeartbeatPong {
         #[allow(dead_code)]
@@ -82,7 +93,7 @@ enum NodeMessage {
         /// (twenty-seventh-round Codex P2: capability negotiation so
         /// backend + node don't need a lockstep upgrade).
         #[serde(default)]
-        capabilities: Option<NodeCapabilitiesMsg>,
+        capabilities: Option<Box<NodeCapabilitiesMsg>>,
     },
     #[serde(rename = "ssh_tunnel_opened")]
     SshTunnelOpened(WsSshTunnelOpenedMsg),
@@ -482,11 +493,29 @@ async fn apply_status_update_capabilities(
     if let Some(fence) = owner_fence {
         let flags = state.node_ws_manager.session_info(node_id).capabilities;
         match crate::services::node_owner_service::record_capabilities(
-            &state.db, fence, flags, true,
+            &state.db,
+            fence,
+            flags,
+            true,
+            capabilities
+                .as_ref()
+                .and_then(|caps| caps.machine.as_ref())
+                .filter(|profile| profile.enabled()),
         )
         .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                if capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.machine.is_some())
+                    && let Err(error) = crate::services::machine_setup_service::complete_page_setup(
+                        &state.db, node_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(node_id, %error, "Machine setup grant completion deferred");
+                }
+            }
             Ok(false) => tracing::warn!(node_id, "Ignored capabilities from a fenced node socket"),
             Err(error) => tracing::warn!(node_id, %error, "Failed to persist node capabilities"),
         }
@@ -856,6 +885,25 @@ fn ws_extract_ip(
         .map(|resolved| resolved.ip.to_string())
 }
 
+async fn validate_managed_runtime_binding(
+    db: &mongodb::Database,
+    node_id: &str,
+    binding: &nyxid_machine::managed::Binding,
+) -> AppResult<()> {
+    binding.validate().map_err(|reason| {
+        AppError::Conflict(format!("managed runtime binding rejected: {reason}"))
+    })?;
+    let machine = crate::services::remote_machine_service::managed_machine_for_node(db, node_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("managed runtime is not registered".into()))?;
+    if node_id != binding.node_id
+        || !crate::services::remote_machine_manager::accepts_binding(&machine, binding)
+    {
+        return Err(AppError::Conflict("managed runtime fence is stale".into()));
+    }
+    Ok(())
+}
+
 fn normalize_legacy_ip_text(value: &str) -> String {
     let value = value.trim();
     value
@@ -955,7 +1003,7 @@ async fn handle_node_connection(
                                 },
                             );
 
-                            return Some((node.id, node.user_id, false));
+                            return Some((node.id, node.user_id, false, None));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Node registration failed");
@@ -981,13 +1029,62 @@ async fn handle_node_connection(
                         }
                     }
                 }
-                NodeMessage::Auth { node_id, token } => {
+                NodeMessage::Auth {
+                    node_id,
+                    token,
+                    managed_runtime,
+                } => {
                     match node_service::validate_auth_token(&state.db, &token).await {
                         Ok(node) if node.id == node_id => {
+                            let is_managed = node
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.provisioning_source.as_deref())
+                                .is_some_and(|source| {
+                                    matches!(
+                                        source,
+                                        "remote_machine" | "managed_machine" | "agent_sandbox"
+                                    )
+                                });
+                            if is_managed && managed_runtime.is_none() {
+                                let _ = ws_sink
+                                    .send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "auth_error",
+                                            "message": "Managed runtime binding is required"
+                                        })
+                                        .to_string()
+                                        .into(),
+                                    ))
+                                    .await;
+                                return None;
+                            }
+                            if let Some(binding) = managed_runtime.as_ref()
+                                && let Err(error) =
+                                    validate_managed_runtime_binding(&state.db, &node.id, binding)
+                                        .await
+                            {
+                                tracing::warn!(
+                                    node_id = %node.id,
+                                    error = %error,
+                                    "Managed runtime WSS fence rejected"
+                                );
+                                let _ = ws_sink
+                                    .send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "auth_error",
+                                            "message": "Managed runtime fence rejected"
+                                        })
+                                        .to_string()
+                                        .into(),
+                                    ))
+                                    .await;
+                                return None;
+                            }
                             // Success is acknowledged only after ownership and local
                             // publication. A rejected lease must fail the auth phase,
                             // including for older agents whose clean-close retry is immediate.
-                            return Some((node.id, node.user_id, true));
+                            return Some((node.id, node.user_id, true, managed_runtime));
                         }
                         Ok(_) => {
                             let err_msg = serde_json::json!({
@@ -1064,7 +1161,7 @@ async fn handle_node_connection(
     })
     .await;
 
-    let (node_id, owner_user_id, needs_auth_ok) = match auth_result {
+    let (node_id, owner_user_id, needs_auth_ok, managed_runtime) = match auth_result {
         Ok(Some(pair)) => pair,
         _ => {
             // Timeout or auth failure -- close connection
@@ -1084,6 +1181,7 @@ async fn handle_node_connection(
 
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
     let (tx, rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
+    let machine_gateway = super::machine_gateway::Session::new(tx.clone());
     let connection_id = uuid::Uuid::new_v4().to_string();
     let owner = match crate::services::node_owner_service::claim(
         &state.db,
@@ -1122,17 +1220,50 @@ async fn handle_node_connection(
     };
     let owner_fence =
         crate::services::node_owner_service::NodeOwnerFence::from_owner(&node_id, &owner);
+    if let Some(binding) = managed_runtime.as_ref()
+        && validate_managed_runtime_binding(&state.db, &node_id, binding)
+            .await
+            .is_err()
+    {
+        let _ = crate::services::node_owner_service::release(&state.db, &owner_fence).await;
+        return;
+    }
+    let managed_window_tx = tx.clone();
     let (_, mut close_rx) =
         state
             .node_ws_manager
             .register_connection_with_id(&node_id, connection_id.clone(), tx);
+
+    let managed_runtime_window = if let Some(binding) = managed_runtime.as_ref() {
+        match crate::services::remote_machine_runtime::signed_node_window(
+            &state.db,
+            &state.encryption_keys,
+            &node_id,
+            binding,
+        )
+        .await
+        {
+            Ok(window) => Some(window),
+            Err(_) => {
+                state
+                    .node_ws_manager
+                    .unregister_connection_if(&node_id, &connection_id);
+                let _ = crate::services::node_owner_service::release(&state.db, &owner_fence).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     if needs_auth_ok {
         let ok_msg = serde_json::json!({
             "type": "auth_ok",
             "node_id": &node_id,
             "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
-            "capabilities": { "proxy_binary_chunks": true }
+            "capabilities": { "proxy_binary_chunks": true },
+            "managed_runtime": managed_runtime,
+            "managed_runtime_window": managed_runtime_window
         });
         let acknowledged = tokio::select! {
             biased;
@@ -1189,9 +1320,29 @@ async fn handle_node_connection(
     // Track teardown reason for telemetry. Default assumes a clean client
     // close; any read error flips it to "error" before the loop breaks.
     let mut reason: &'static str = "client_close";
+    let mut managed_fence_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    managed_fence_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let msg = tokio::select! {
+            _ = managed_fence_tick.tick(), if managed_runtime.is_some() => {
+                let binding = managed_runtime.as_ref().expect("guarded managed binding");
+                if validate_managed_runtime_binding(&db, &node_id_reader, binding).await.is_err() {
+                    ws_manager.disconnect_connection_if(&node_id_reader, &connection_id, 4007, "managed runtime fence changed").await;
+                    reason = "managed_runtime_fenced";
+                    break;
+                }
+                let window = crate::services::remote_machine_runtime::signed_node_window(&db, &state.encryption_keys, &node_id_reader, binding).await;
+                let sent = if let Ok(window) = window {
+                    managed_window_tx.try_send(NodeOutboundMessage::Text(serde_json::json!({"type":"managed_runtime_window","window":window}).to_string())).is_ok()
+                } else { false };
+                if !sent {
+                    ws_manager.disconnect_connection_if(&node_id_reader, &connection_id, 4007, "managed runtime window unavailable").await;
+                    reason = "managed_runtime_fenced";
+                    break;
+                }
+                continue;
+            }
             msg = ws_stream.next() => {
                 let Some(msg) = msg else { break; };
                 msg
@@ -1211,6 +1362,20 @@ async fn handle_node_connection(
         // Binary frames carry streaming proxy data chunks:
         //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
         if let Ok(Message::Binary(data)) = &msg {
+            if nyxid_machine::binary::is_machine(data) {
+                if let Ok(frame) = nyxid_machine::binary::Frame::decode(data) {
+                    if matches!(
+                        frame.kind,
+                        nyxid_machine::binary::Kind::Desktop
+                            | nyxid_machine::binary::Kind::DesktopActivity
+                    ) {
+                        ws_manager.deliver_desktop_frame(&node_id_reader, &frame, data);
+                    } else {
+                        machine_gateway.receive(frame).await;
+                    }
+                }
+                continue;
+            }
             match decode_binary_stream_frame(data) {
                 Ok((request_id, chunk)) => {
                     ws_manager.deliver_stream_chunk(&node_id_reader, request_id, chunk.to_vec());
@@ -1360,15 +1525,61 @@ async fn handle_node_connection(
                 // flag's value (present vs. absent) is what they
                 // want to observe, and it's now final for this
                 // connection (twenty-ninth-round Codex P2).
+                if managed_runtime.is_some() {
+                    let accepted =
+                        match capabilities.as_ref().and_then(|caps| caps.machine.as_ref()) {
+                            Some(profile) => {
+                                crate::services::remote_machine_manager::accepts_node_profile(
+                                    &state.db,
+                                    &node_id_reader,
+                                    profile,
+                                )
+                                .await
+                                .unwrap_or(false)
+                            }
+                            None => false,
+                        };
+                    if !accepted {
+                        reason = "managed_profile_rejected";
+                        break;
+                    }
+                }
                 apply_status_update_capabilities(
                     &state,
                     &node_id_reader,
                     agent_version,
-                    capabilities,
+                    capabilities.map(|caps| *caps),
                     Some(&owner_fence),
                 )
                 .await;
+                if let Some(binding) = managed_runtime.as_ref()
+                    && crate::services::remote_machine_manager::mark_runtime_online_with_billing(
+                        &state.db,
+                        &node_id_reader,
+                        binding,
+                        &connection_id,
+                        state.billing.clone(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    reason = "managed_readiness_fenced";
+                    break;
+                }
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
+            }
+            NodeMessage::ManagedMachineUsage(usage) => {
+                if managed_runtime.as_ref() != Some(&usage.managed_runtime)
+                    || crate::services::remote_machine_usage::record(
+                        &state.db,
+                        &owner_fence,
+                        &usage,
+                    )
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!("Rejected stale or invalid managed usage observation");
+                }
             }
             NodeMessage::SshTunnelOpened(opened) => {
                 if !ws_manager.deliver_ssh_tunnel_opened(&node_id_reader, &opened.session_id) {
@@ -1431,6 +1642,14 @@ async fn handle_node_connection(
                     closed.error,
                     closed.error_code,
                 );
+            }
+            NodeMessage::MachineServiceCall(request) => {
+                machine_gateway
+                    .start(state.clone(), &node_id_reader, request)
+                    .await;
+            }
+            NodeMessage::MachineResult(result) => {
+                ws_manager.deliver_machine_result(&node_id_reader, result);
             }
             NodeMessage::SshExecResult(result) => {
                 let stdout = decode_base64_payload(
@@ -1638,6 +1857,7 @@ async fn handle_node_connection(
     writer_task.abort();
     ws_manager.unregister_connection_if(&node_id, &connection_id);
 
+    machine_gateway.close().await;
     if let Err(error) = crate::services::node_owner_service::release(&state.db, &owner_fence).await
     {
         tracing::warn!(node_id = %node_id, %error, "Failed to release node connection ownership");
@@ -1710,6 +1930,18 @@ async fn run_node_writer<S>(
                             tracing::debug!(node_id = %node_id, "WebSocket send failed, closing writer");
                             break;
                         }
+                    }
+                }
+            }
+            NodeOutboundMessage::Binary(bytes) => {
+                tokio::select! {
+                    biased;
+                    result = close_rx.changed() => {
+                        if result.is_err() { break; }
+                        continue;
+                    },
+                    result = ws_sink.send(Message::Binary(bytes.into())) => {
+                        if result.is_err() { break; }
                     }
                 }
             }
@@ -2169,6 +2401,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str, raw_auth_token: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -2840,6 +3075,8 @@ mod tests {
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2961,6 +3198,8 @@ mod tests {
             None,
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -3519,7 +3758,7 @@ mod tests {
         let json = r#"{"type": "auth", "node_id": "n-1", "token": "nyx_nauth_xyz"}"#;
         let msg: NodeMessage = serde_json::from_str(json).unwrap();
         match msg {
-            NodeMessage::Auth { node_id, token } => {
+            NodeMessage::Auth { node_id, token, .. } => {
                 assert_eq!(node_id, "n-1");
                 assert_eq!(token, "nyx_nauth_xyz");
             }

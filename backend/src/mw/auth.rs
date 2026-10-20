@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
-use crate::errors::AppError;
+use crate::errors::{AppError, AppResult, access_denial::CredentialType};
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
@@ -72,6 +72,17 @@ pub struct AuthUser {
     pub allow_all_nodes: bool,
     /// List of UserService IDs this key can access (only checked when allow_all_services is false).
     pub allowed_service_ids: Vec<String>,
+    pub org_agent_access: Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>,
+    pub assistant_agent_owner_id: Option<String>,
+    pub assistant_group_id: Option<String>,
+    pub assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
+    /// Conversation authority loaded only for a real nyxid-assistant thread
+    /// credential. Ordinary API keys never perform this lookup.
+    pub assistant_chat:
+        Option<std::sync::Arc<crate::services::assistant_acknowledgement_service::ChatAuthority>>,
+    /// Keep optional turn authority out of every ordinary request's inline storage.
+    pub assistant_turn_fence:
+        Option<Box<crate::services::assistant_acknowledgement_service::AssistantTurnFence>>,
     /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
     pub resource_uris: Option<Vec<String>>,
     /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
@@ -138,6 +149,96 @@ fn extract_request_user_agent(parts: &Parts) -> Option<String> {
 }
 
 impl AuthUser {
+    pub async fn ensure_live_assistant_turn(
+        &self,
+        db: &mongodb::Database,
+        route: &str,
+    ) -> AppResult<()> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
+        let Some(fence) = self.assistant_turn_fence.as_ref() else {
+            return Ok(());
+        };
+        let user_id = self.user_id.to_string();
+        crate::services::assistant_acknowledgement_service::enforce_turn_gate(
+            db,
+            fence,
+            &user_id,
+            self.api_key_id.as_deref(),
+            self.api_key_name.as_deref(),
+            self.ip_address.as_deref(),
+            self.user_agent.as_deref(),
+            route,
+        )
+        .await
+    }
+
+    /// Conversation-key route restrictions are part of the live-turn rollout.
+    /// Disabling the flag restores historical behavior for ordinary threads.
+    /// Invocation-controlled threads retain mandatory route restrictions;
+    /// unrelated ordinary keys take the no-read path.
+    /// Assistant management routes (agents, grants, skills, settings,
+    /// channels, groups) are refused to conversation keys regardless of the
+    /// flag: an agent must never widen its own or a peer's authority through
+    /// the REST API.
+    pub async fn ensure_conversation_key_route_if_enabled(
+        &self,
+        db: &mongodb::Database,
+        path: &str,
+    ) -> AppResult<()> {
+        if self.assistant_turn_fence.is_some()
+            && path
+                .strip_prefix("/api/v1")
+                .unwrap_or(path)
+                .starts_with("/assistant/")
+        {
+            return self.ensure_conversation_key_route(path);
+        }
+        if self.assistant_turn_fence.is_none()
+            || (!self
+                .assistant_turn_fence
+                .as_ref()
+                .is_some_and(|f| f.invocation_controlled)
+                && !crate::services::feature_flag_service::personal_flag_enabled(
+                    db,
+                    &self.user_id.to_string(),
+                    crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+                )
+                .await?)
+        {
+            return Ok(());
+        }
+        self.ensure_conversation_key_route(path)
+    }
+
+    pub fn ensure_conversation_key_route(&self, path: &str) -> AppResult<()> {
+        if self.assistant_turn_fence.is_none() {
+            return Ok(());
+        }
+        // Nested Axum routers may expose either the full request path or the
+        // path after `/api/v1` has been stripped at this extractor boundary.
+        let path = path.strip_prefix("/api/v1").unwrap_or(path);
+        let execution_route = path.starts_with("/proxy")
+            || path.starts_with("/llm/")
+            || matches!(path, "/mcp" | "/mcp/config")
+            || path.starts_with("/oracle/pools/")
+                && (path.ends_with("/tasks")
+                    || path.ends_with("/attach")
+                    || path.ends_with("/extract"))
+            || path == "/approvals/exact-service/requests"
+            || path.contains("/approvals/exact-service/requests/") && path.ends_with("/status")
+            || path.contains("/approvals/exact-service/requests/") && path.ends_with("/redeem")
+            || path.starts_with("/assistant-attachments/")
+            || (path.contains("/assistant/nyxagent/conversations/")
+                || path.contains("/assistant/nyxagent/groups/"))
+                && path.contains("/attachments/");
+        if execution_route {
+            return Ok(());
+        }
+        Err(AppError::Forbidden(
+            "Conversation keys cannot access human management routes".to_string(),
+        ))
+    }
+
     /// Effective service allowlist for restricted API-key inventory reads.
     /// Other authentication classes retain their existing inventory behavior.
     pub fn api_key_service_scope(&self) -> Option<&[String]> {
@@ -205,21 +306,23 @@ impl AuthUser {
     }
 
     pub fn ensure_rest_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_rest_proxy() {
             return Ok(());
         }
 
-        Err(AppError::Forbidden(format!(
+        Err(AppError::insufficient_scope(format!(
             "Missing required scope for proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}"
         )))
     }
 
     pub fn ensure_llm_proxy_access(&self) -> Result<(), AppError> {
+        crate::services::key_service::require_ordinary_purpose(self.api_key_purpose)?;
         if self.can_use_llm_proxy() {
             return Ok(());
         }
 
-        Err(AppError::Forbidden(format!(
+        Err(AppError::insufficient_scope(format!(
             "Missing required scope for LLM proxy access. Expected one of: {PROXY_SCOPE}, {WIDE_PROXY_SCOPE}, {LLM_PROXY_SCOPE}"
         )))
     }
@@ -234,8 +337,8 @@ impl AuthUser {
         if self.can_write() {
             return Ok(());
         }
-        Err(AppError::Forbidden(
-            "write or admin scope required for this operation".to_string(),
+        Err(AppError::insufficient_scope(
+            "write or admin scope required for this operation",
         ))
     }
 
@@ -346,7 +449,83 @@ fn ensure_service_account_purpose_route(
     ))
 }
 
-fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+async fn ensure_catalog_editor_route(
+    db: &mongodb::Database,
+    sa: &ServiceAccount,
+    scope: &str,
+    method: &Method,
+    path: &str,
+    websocket: bool,
+) -> Result<(), AppError> {
+    use crate::services::{
+        catalog_editor_proxy_service, catalog_editor_service, curation_grant_service,
+    };
+    if !sa.platform_protected || websocket {
+        return Err(AppError::Forbidden(
+            "Catalog editor requires protected ordinary HTTP access".into(),
+        ));
+    }
+    if *method == Method::GET
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        if !sa.catalog_scope_authorized {
+            curation_grant_service::require_scope(
+                sa,
+                scope,
+                crate::services::service_account_key_read_service::READ_SCOPE,
+            )?;
+        }
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::READ_SCOPE,
+        )
+        .await;
+    }
+    if *method == Method::PUT
+        && path != "/api/v1/keys"
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::WRITE_SCOPE,
+        )
+        .await;
+    }
+    if path_matches_prefix(path, "/api/v1/catalog-curation") {
+        return Ok(());
+    }
+    if path_matches_prefix(path, "/api/v1/proxy") {
+        let target = catalog_editor_proxy_service::authorized_target(db, sa, scope).await?;
+        if path_matches_prefix(path, &format!("/api/v1/proxy/{}", target.id))
+            || path_matches_prefix(path, &format!("/api/v1/proxy/s/{}", target.slug))
+        {
+            return Ok(());
+        }
+    }
+    Err(AppError::Forbidden(
+        "Catalog editors can only manage catalog skills and use the Ornn HTTP proxy".into(),
+    ))
+}
+
+pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+    // Public activation remains unavailable; no generic route, scope, child
+    // or feature flag may turn this purpose into ordinary execution authority.
+    crate::services::key_service::require_ordinary_purpose(api_key.purpose)?;
+    if api_key.purpose == ApiKeyPurpose::PermissionBound {
+        return if path == "/api/v1/permission-execution/mcp"
+            || path.starts_with("/api/v1/permission-execution/rest/")
+        {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(
+                "Permission-bound keys require the permission execution endpoints".into(),
+            ))
+        };
+    }
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
     }
@@ -381,6 +560,7 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/delegation",
         "/api/v1/llm",
         "/api/v1/proxy",
+        "/api/v1/permission-execution",
         "/api/v1/ssh",
         "/api/v1/approvals/exact-service",
     ]
@@ -457,10 +637,13 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.first().copied(),
         Some(
-            "admin"
+            "permission-execution"
+                | "permission-keys"
+                | "admin"
                 | "ownership"
                 | "ssh"
                 | "assistant"
+                | "assistant-attachments"
                 | "auth"
                 | "devices"
                 | "cli-pairings"
@@ -470,10 +653,22 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "integrations"
                 | "billing"
                 | "oracle"
+                | "channel-adapter-bindings"
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
+                | "channel-connect-links"
                 | "catalog-curation"
+                | "saved-logins"
+                | "machines"
+                | "remote-machines"
+                | "remote-machine-quotes"
+                | "remote-machine-entitlement"
+                | "remote-machine-operations"
+                | "machine-confirmations"
+                | "onboarding"
+                | "platform-personal-bindings"
+                | "platform-personal-links"
         )
     ) {
         return true;
@@ -483,6 +678,9 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["users", "me", "oauth-consent-requests", _]
+            | ["api-keys", _, "machine-grant"]
+            | ["users", "me", "consents", _, "machine-grant"]
     ) {
         return true;
     }
@@ -549,6 +747,16 @@ fn delegated_request_allowed(
         && !is_websocket_upgrade(headers)
 }
 
+// Distinguish a missing account:read scope from an excluded route/method.
+// Reuse the authorization predicate; this changes metadata, never admission.
+fn delegated_denial(method: &Method, path: &str, headers: &HeaderMap) -> AppError {
+    if delegated_request_allowed(method, path, headers, ACCOUNT_READ_SCOPE) {
+        AppError::insufficient_scope(DELEGATED_ENDPOINT_FORBIDDEN)
+    } else {
+        AppError::unsupported_credential(DELEGATED_ENDPOINT_FORBIDDEN, CredentialType::Delegated)
+    }
+}
+
 fn delegated_path_class(path: &str) -> String {
     api_v1_path_segments(path)
         .and_then(|segments| segments.first().map(|segment| (*segment).to_string()))
@@ -564,7 +772,7 @@ fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppErr
     Ok(())
 }
 
-async fn validate_dpop_bound_access(
+pub(crate) async fn validate_dpop_bound_access(
     parts: &Parts,
     state: &AppState,
     expected_jkt: &str,
@@ -586,7 +794,7 @@ async fn validate_dpop_bound_access(
     Ok(())
 }
 
-fn validate_mtls_bound_access(
+pub(crate) fn validate_mtls_bound_access(
     parts: &Parts,
     state: &AppState,
     expected_x5t: &str,
@@ -618,6 +826,199 @@ fn validate_mtls_bound_access(
     Ok(())
 }
 
+/// Construct identical execution authority for HTTP API keys and server-bound
+/// machine jobs. Callers authenticate the credential or durable job first.
+pub(crate) async fn api_key_auth_user(
+    db: &mongodb::Database,
+    key: &crate::models::api_key::ApiKey,
+    credential_id: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+) -> Result<AuthUser, AppError> {
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
+    if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
+        return Err(AppError::Unauthorized(
+            "API key is inactive or expired".into(),
+        ));
+    }
+    let user_id = Uuid::parse_str(&key.user_id)
+        .map_err(|_| AppError::Internal("Invalid user_id in API key".into()))?;
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &key.user_id })
+        .await?;
+    if !user.is_some_and(|user| user.is_active) {
+        return Err(AppError::Unauthorized("User account is inactive".into()));
+    }
+    let org_agent_access = crate::services::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    crate::services::org_group_service::validate_key(db, key, org_agent_access.as_ref()).await?;
+    let (allow_all_nodes, allowed_node_ids) =
+        crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
+    // Channel agent keys share the historical platform label but have no row
+    // in assistant_agent_credentials, so this lookup cleanly distinguishes
+    // them from real per-thread conversation credentials. The ordinary-key
+    // path does not read this collection.
+    let assistant_chat = if is_assistant_conversation_key_candidate(key) {
+        crate::services::assistant_acknowledgement_service::for_key_with_access(
+            db,
+            &key.user_id,
+            Some(&key.id),
+            org_agent_access.as_ref(),
+        )
+        .await
+        .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?
+        .map(std::sync::Arc::new)
+    } else {
+        None
+    };
+    Ok(AuthUser {
+        user_id,
+        session_id: None,
+        scope: key.scopes.clone(),
+        acting_client_id: None,
+        oauth_client_id: None,
+        token_jti: None,
+        approval_owner_user_id: None,
+        auth_method: AuthMethod::ApiKey,
+        allow_all_services: key.allow_all_services,
+        allow_all_nodes,
+        allowed_service_ids:
+            crate::services::key_service::effective_allowed_service_ids_with_access(
+                db,
+                key,
+                org_agent_access.as_deref(),
+            )
+            .await?,
+        org_agent_access,
+        assistant_group_id: key.assistant_group_id.clone(),
+        assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
+        assistant_operation_scopes: key.assistant_operation_scopes.clone(),
+        assistant_turn_fence: assistant_chat
+            .as_ref()
+            .map(|chat| Box::new(chat.turn_fence())),
+        assistant_chat,
+        resource_uris: None,
+        allowed_node_ids,
+        api_key_id: Some(key.id.clone()),
+        api_key_name: Some(key.name.clone()),
+        api_key_credential_id: credential_id,
+        api_key_purpose: key.purpose,
+        rate_limit_per_second: key.rate_limit_per_second,
+        rate_limit_burst: key.rate_limit_burst,
+        ip_address,
+        user_agent,
+    })
+}
+
+/// Reconstruct the real execution identity of a persisted external Machine job.
+/// The caller must first perform the source/grant/lease transaction fence. This
+/// creates no credential and cannot authorize token-forwarding operations.
+pub(crate) async fn machine_external_gateway_auth_user(
+    db: &mongodb::Database,
+    principal: &crate::models::machine_external_grant::ExternalPrincipalRef,
+    node_id: &str,
+    service_ids: &[String],
+) -> AppResult<AuthUser> {
+    use crate::models::machine_external_grant::ExternalPrincipalRef;
+    let mut auth = match principal {
+        ExternalPrincipalRef::ApiKey {
+            user_id,
+            api_key_id,
+            api_key_credential_id,
+        } => {
+            let key = db
+                .collection::<ApiKey>(API_KEYS)
+                .find_one(doc! {"_id":api_key_id,"user_id":user_id})
+                .await?
+                .ok_or(AppError::MachinePermissionRevoked)?;
+            // Repeat class checks; a durable job is never a route around a
+            // changed key purpose or the Assistant owner-turn branch.
+            crate::services::machine_external_grant_service::VerifiedExternalSource::from_verified_api_key(
+                &key, api_key_credential_id.as_deref())?;
+            let auth =
+                api_key_auth_user(db, &key, api_key_credential_id.clone(), None, None).await?;
+            if auth.assistant_chat.is_some() {
+                return Err(AppError::MachineNotAllowed);
+            }
+            auth
+        }
+        ExternalPrincipalRef::OAuth {
+            user_id,
+            oauth_client_id,
+        } => {
+            let user = db
+                .collection::<User>(USERS)
+                .find_one(doc! {"_id":user_id})
+                .await?
+                .filter(|user| {
+                    user.is_active && user.user_type == crate::models::user::UserType::Person
+                })
+                .ok_or(AppError::MachinePermissionRevoked)?;
+            AuthUser {
+                user_id: Uuid::parse_str(&user.id).map_err(|_| AppError::MachineNotAllowed)?,
+                session_id: None,
+                scope: "proxy machine".into(),
+                acting_client_id: None,
+                oauth_client_id: Some(oauth_client_id.clone()),
+                token_jti: None,
+                approval_owner_user_id: None,
+                auth_method: AuthMethod::AccessToken,
+                allow_all_services: false,
+                allow_all_nodes: false,
+                allowed_service_ids: service_ids.to_vec(),
+                allowed_node_ids: vec![node_id.into()],
+                org_agent_access: None,
+                assistant_agent_owner_id: None,
+                assistant_group_id: None,
+                assistant_operation_scopes: Default::default(),
+                assistant_chat: None,
+                assistant_turn_fence: None,
+                resource_uris: None,
+                api_key_id: None,
+                api_key_name: None,
+                api_key_credential_id: None,
+                api_key_purpose: ApiKeyPurpose::General,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                ip_address: None,
+                user_agent: None,
+            }
+        }
+    };
+    if !auth.allow_all_nodes && !auth.allowed_node_ids.iter().any(|id| id == node_id) {
+        return Err(AppError::MachinePermissionRevoked);
+    }
+    let effective = service_ids
+        .iter()
+        .filter(|id| auth.allow_all_services || auth.allowed_service_ids.contains(id))
+        .cloned()
+        .collect();
+    auth.allow_all_nodes = false;
+    auth.allowed_node_ids = vec![node_id.into()];
+    auth.allow_all_services = false;
+    auth.allowed_service_ids = effective;
+    Ok(auth)
+}
+
+/// Conversation credentials have a durable assistant platform plus one of the
+/// authority markers written by credential provisioning. This keeps ordinary
+/// keys on the zero-read path even if a legacy row happens to reuse the
+/// platform label.
+pub(crate) fn is_assistant_conversation_key_candidate(
+    key: &crate::models::api_key::ApiKey,
+) -> bool {
+    key.platform.as_deref()
+        == Some(crate::services::assistant_agent_credential_service::ASSISTANT_PLATFORM)
+        && (key.assistant_agent_owner_id.is_some()
+            || key.assistant_group_id.is_some()
+            || key.allow_auto_connected_services)
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -635,6 +1036,12 @@ impl FromRequestParts<AppState> for AuthUser {
             let authenticated = async {
             let request_ip = extract_request_ip(parts);
             let request_ua = extract_request_user_agent(parts);
+            // Nested routers strip their mount prefixes from `parts.uri`.
+            // Route authorization must use Axum's original request target.
+            let request_path = parts
+                .extensions
+                .get::<OriginalUri>()
+                .map_or_else(|| parts.uri.path(), |uri| uri.path());
             // Try Bearer token first
             if let Some(auth_header) = parts.headers.get("authorization") {
                 let auth_str = auth_header.to_str().map_err(|_| {
@@ -660,59 +1067,21 @@ impl FromRequestParts<AppState> for AuthUser {
                             match crate::services::key_service::validate_api_key(&state.db, token)
                                 .await
                             {
-                                Ok((api_user_id_str, api_key, credential_id)) => {
-                                    ensure_api_key_purpose_route(&api_key, parts.uri.path())?;
-                                    let user_id =
-                                        Uuid::parse_str(&api_user_id_str).map_err(|_| {
-                                            AppError::Internal(
-                                                "Invalid user_id in API key".to_string(),
-                                            )
-                                        })?;
-
-                                    let user_model = state
-                                        .db
-                                        .collection::<User>(USERS)
-                                        .find_one(doc! { "_id": &api_user_id_str })
-                                        .await
-                                        .map_err(|e| {
-                                            AppError::Internal(format!("User lookup failed: {e}"))
-                                        })?;
-
-                                    match user_model {
-                                        Some(u) if u.is_active => {}
-                                        _ => {
-                                            return Err(AppError::Unauthorized(
-                                                "User account is inactive".to_string(),
-                                            ));
-                                        }
-                                    }
-
-                                    let auth_user = AuthUser {
-                                        user_id,
-                                        session_id: None,
-                                        scope: api_key.scopes.clone(),
-                                        acting_client_id: None,
-                                        oauth_client_id: None,
-                                        token_jti: None,
-                                        approval_owner_user_id: None,
-                                        auth_method: AuthMethod::ApiKey,
-                                        allow_all_services: api_key.allow_all_services,
-                                        allow_all_nodes: api_key.allow_all_nodes,
-                                        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(&state.db, &api_key).await?,
-                                        resource_uris: None,
-                                        allowed_node_ids: api_key.allowed_node_ids.clone(),
-                                        api_key_id: Some(api_key.id.clone()),
-                                        api_key_name: Some(api_key.name.clone()),
-                                        api_key_credential_id: credential_id,
-                                        api_key_purpose: api_key.purpose,
-                                        rate_limit_per_second: api_key.rate_limit_per_second,
-                                        rate_limit_burst: api_key.rate_limit_burst,
-                                        ip_address: request_ip.clone(),
-                                        user_agent: request_ua.clone(),
-                                    };
+                                Ok((_api_user_id_str, api_key, credential_id)) => {
+                                    ensure_api_key_purpose_route(&api_key, request_path)?;
+                                    let auth_user = api_key_auth_user(
+                                        &state.db, &api_key, credential_id,
+                                        request_ip.clone(), request_ua.clone(),
+                                    ).await?;
+                                    auth_user
+                                        .ensure_conversation_key_route_if_enabled(
+                                            &state.db,
+                                            request_path,
+                                        )
+                                        .await?;
                                     auth_user.ensure_management_write_scope(
                                         &parts.method,
-                                        parts.uri.path(),
+                                        request_path,
                                     )?;
                                     return Ok(auth_user);
                                 }
@@ -778,19 +1147,32 @@ impl FromRequestParts<AppState> for AuthUser {
                             .extensions
                             .get::<OriginalUri>()
                             .map_or_else(|| parts.uri.path(), |uri| uri.path());
-                        ensure_service_account_purpose_route(
-                            &sa,
-                            &claims.scope,
-                            &parts.method,
-                            request_path,
-                            is_websocket_upgrade(&parts.headers),
-                        )?;
+                        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+                            ensure_catalog_editor_route(
+                                &state.db, &sa, &claims.scope, &parts.method, request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            ).await?;
+                        } else {
+                            ensure_service_account_purpose_route(
+                                &sa,
+                                &claims.scope,
+                                &parts.method,
+                                request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            )?;
+                        }
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
                             AppError::Unauthorized("Invalid service account ID".to_string())
                         })?;
 
                         return Ok(AuthUser {
+                            org_agent_access: None,
+                            assistant_group_id: None,
+                            assistant_agent_owner_id: None,
+                            assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
                             user_id: sa_uuid,
                             session_id: None,
                             scope: claims.scope.clone(),
@@ -866,9 +1248,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             &parts.headers,
                             &claims.scope,
                         ) {
-                            return Err(AppError::Forbidden(
-                                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
-                            ));
+                            return Err(delegated_denial(&parts.method, request_path, &parts.headers));
                         }
 
                         if !is_delegated_native_path(request_path) {
@@ -896,9 +1276,16 @@ impl FromRequestParts<AppState> for AuthUser {
                     // check is the revocation lever the relay branch previously
                     // lacked, so deleting/deactivating the agent key immediately
                     // kills its relay tokens (matching the ApiKey path).
-                    if auth_method == AuthMethod::Relay {
-                        ensure_relay_agent_key_active(&state.db, &claims).await?;
-                    }
+                    let relay_key = if auth_method == AuthMethod::Relay {
+                        let key = ensure_relay_agent_key_active(&state.db, &claims).await?;
+                        crate::services::org_agent_service::validate_key(&state.db, &key.user_id, key.assistant_agent_owner_id.as_deref()).await?;
+                        if key.assistant_agent_owner_id.as_deref().is_some_and(|owner| owner != key.user_id) {
+                            return Err(AppError::Forbidden("Organization agents do not support channel relay tokens".into()));
+                        }
+                        Some(key)
+                    } else { None };
+                    let assistant_operation_scopes = relay_key.as_ref().map(|k| k.assistant_operation_scopes.clone()).unwrap_or_default();
+                    let assistant_agent_owner_id = relay_key.as_ref().and_then(|k| k.assistant_agent_owner_id.clone());
 
                     // Relay tokens inherit the originating agent key's scope.
                     // OAuth access tokens, including delegated tokens, carry
@@ -912,7 +1299,26 @@ impl FromRequestParts<AppState> for AuthUser {
                         api_key_id,
                         api_key_name,
                     ) = if auth_method == AuthMethod::Relay {
-                        relay_scope_from_claims(&claims)
+                        let (claim_all, claim_nodes_all, claim_ids, claim_nodes, key_id, key_name) =
+                            relay_scope_from_claims(&claims);
+                        // The token's snapshot can only narrow the live parent:
+                        // a grant removed from the key stops working at once.
+                        let key = relay_key.as_ref().ok_or_else(|| {
+                            AppError::Unauthorized("Relay token's agent key is unavailable".into())
+                        })?;
+                        let key_ids = crate::services::key_service::effective_allowed_service_ids_with_access(
+                            &state.db, key, None,
+                        )
+                        .await?;
+                        let (all_services, service_ids) =
+                            intersect_allowlists(claim_all, claim_ids, key.allow_all_services, key_ids);
+                        let (all_nodes, node_ids) = intersect_allowlists(
+                            claim_nodes_all,
+                            claim_nodes,
+                            key.allow_all_nodes,
+                            key.allowed_node_ids.clone(),
+                        );
+                        (all_services, all_nodes, service_ids, node_ids, key_id, key_name)
                     } else if matches!(auth_method, AuthMethod::AccessToken | AuthMethod::Delegated)
                     {
                         (
@@ -949,7 +1355,26 @@ impl FromRequestParts<AppState> for AuthUser {
                     } else {
                         None
                     };
+                    let assistant_chat = if let Some(key) = relay_key.as_ref()
+                        && is_assistant_conversation_key_candidate(key)
+                    {
+                        crate::services::assistant_acknowledgement_service::for_key(
+                            &state.db,
+                            &key.user_id,
+                            Some(&key.id),
+                        )
+                        .await?
+                        .map(std::sync::Arc::new)
+                    } else {
+                        None
+                    };
                     return Ok(AuthUser {
+                        org_agent_access: None,
+                        assistant_group_id: None,
+                        assistant_agent_owner_id,
+                        assistant_operation_scopes,
+                        assistant_turn_fence: assistant_chat.as_ref().map(|chat| Box::new(chat.turn_fence())),
+                        assistant_chat,
                         user_id,
                         session_id,
                         scope: claims.scope.clone(),
@@ -1022,6 +1447,12 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
+                                    org_agent_access: None,
+                                    assistant_group_id: None,
+                                    assistant_agent_owner_id: None,
+                                    assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
                                     user_id,
                                     session_id: Some(session_id),
                                     scope: String::new(),
@@ -1077,56 +1508,17 @@ impl FromRequestParts<AppState> for AuthUser {
                     .to_str()
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
-                let (user_id_str, key, credential_id) =
+                let (_user_id_str, key, credential_id) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
-                ensure_api_key_purpose_route(&key, parts.uri.path())?;
+                ensure_api_key_purpose_route(&key, request_path)?;
 
-                let user_id = Uuid::parse_str(&user_id_str)
-                    .map_err(|_| AppError::Internal("Invalid user_id in API key".to_string()))?;
-
-                // Verify the user account is still active
-                let user_model = state
-                    .db
-                    .collection::<User>(USERS)
-                    .find_one(doc! { "_id": &user_id_str })
-                    .await
-                    .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
-
-                match user_model {
-                    Some(u) if u.is_active => {}
-                    _ => {
-                        return Err(AppError::Unauthorized(
-                            "User account is inactive".to_string(),
-                        ));
-                    }
-                }
-
-                let auth_user = AuthUser {
-                    user_id,
-                    session_id: None,
-                    scope: key.scopes.clone(),
-                    acting_client_id: None,
-                    oauth_client_id: None,
-                    token_jti: None,
-                    approval_owner_user_id: None,
-                    auth_method: AuthMethod::ApiKey,
-                    allow_all_services: key.allow_all_services,
-                    allow_all_nodes: key.allow_all_nodes,
-                    allowed_service_ids:
-                        crate::services::key_service::effective_allowed_service_ids(&state.db, &key)
-                            .await?,
-                    resource_uris: None,
-                    allowed_node_ids: key.allowed_node_ids.clone(),
-                    api_key_id: Some(key.id.clone()),
-                    api_key_name: Some(key.name.clone()),
-                    api_key_credential_id: credential_id,
-                    api_key_purpose: key.purpose,
-                    rate_limit_per_second: key.rate_limit_per_second,
-                    rate_limit_burst: key.rate_limit_burst,
-                    ip_address: request_ip,
-                    user_agent: request_ua,
-                };
-                auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
+                let auth_user = api_key_auth_user(
+                    &state.db, &key, credential_id, request_ip, request_ua,
+                ).await?;
+                auth_user
+                    .ensure_conversation_key_route_if_enabled(&state.db, request_path)
+                    .await?;
+                auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
             }
 
@@ -1169,6 +1561,24 @@ impl FromRequestParts<AppState> for AuthUser {
 /// without reading these claims, silently treating relay tokens as unrestricted
 /// (`allow_all_*` = true); routing both paths through this helper closes that
 /// divergence.
+/// Intersect two allow-all/allowlist pairs; either side can only narrow the other.
+fn intersect_allowlists(
+    left_all: bool,
+    left: Vec<String>,
+    right_all: bool,
+    right: Vec<String>,
+) -> (bool, Vec<String>) {
+    match (left_all, right_all) {
+        (true, true) => (true, Vec::new()),
+        (true, false) => (false, right),
+        (false, true) => (false, left),
+        (false, false) => (
+            false,
+            left.into_iter().filter(|id| right.contains(id)).collect(),
+        ),
+    }
+}
+
 pub fn relay_scope_from_claims(
     claims: &crate::crypto::jwt::Claims,
 ) -> (
@@ -1200,25 +1610,21 @@ pub fn relay_scope_from_claims(
 pub async fn ensure_relay_agent_key_active(
     db: &mongodb::Database,
     claims: &crate::crypto::jwt::Claims,
-) -> Result<(), AppError> {
+) -> Result<ApiKey, AppError> {
     let api_key_id = claims.relay_api_key_id.as_deref().ok_or_else(|| {
         AppError::Unauthorized("Relay token is missing its agent key binding".to_string())
     })?;
 
-    let active = db
+    let key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id, "is_active": true })
         .await
         .map_err(|e| AppError::Internal(format!("Relay agent key lookup failed: {e}")))?
-        .is_some();
-
-    if !active {
-        return Err(AppError::Unauthorized(
-            "Relay token's agent key is inactive or revoked".to_string(),
-        ));
-    }
-
-    Ok(())
+        .ok_or_else(|| {
+            AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
+        })?;
+    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
+    Ok(key)
 }
 
 /// Middleware that rejects relay access tokens from non-proxy endpoints.
@@ -1234,8 +1640,9 @@ pub async fn reject_relay_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_relay_request(&request) {
-        return Err(AppError::Forbidden(
-            "Relay tokens cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "Relay tokens cannot access this endpoint",
+            CredentialType::Relay,
         ));
     }
     Ok(next.run(request).await)
@@ -1296,8 +1703,10 @@ pub async fn reject_delegated_tokens(
             .get::<OriginalUri>()
             .map_or_else(|| request.uri().path(), |uri| uri.path());
         if !delegated_request_allowed(request.method(), request_path, request.headers(), &scope) {
-            return Err(AppError::Forbidden(
-                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
+            return Err(delegated_denial(
+                request.method(),
+                request_path,
+                request.headers(),
             ));
         }
     }
@@ -1358,8 +1767,43 @@ pub async fn reject_service_account_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_service_account_request(&request) {
-        return Err(AppError::Forbidden(
-            "Service accounts cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "Service accounts cannot access this endpoint",
+            CredentialType::ServiceAccount,
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+/// OAuth applications never inherit the owner's NyxAgent authority. Like the
+/// other rejection layers this is deny-only; the handler's verified extractor
+/// still authenticates every accepted request, including session revocation.
+pub async fn reject_oauth_client_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if request
+        .uri()
+        .path()
+        .split('/')
+        .any(|part| part == "nyxagent")
+        && let Some(token) = request
+            .headers()
+            .get("authorization")
+            .and_then(|header| header.to_str().ok())
+            .and_then(|header| {
+                header
+                    .strip_prefix("Bearer ")
+                    .or_else(|| header.strip_prefix("DPoP "))
+            })
+        && let Some(claims) = peek_jwt_claims(token)
+        && claims
+            .get("client_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::unsupported_credential(
+            "A first-party human account session is required",
+            CredentialType::OauthClient,
         ));
     }
     Ok(next.run(request).await)
@@ -1371,8 +1815,9 @@ pub async fn reject_api_key_tokens(
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
     if is_api_key_request(&request) {
-        return Err(AppError::Forbidden(
-            "API keys cannot access this endpoint".to_string(),
+        return Err(AppError::unsupported_credential(
+            "API keys cannot access this endpoint",
+            CredentialType::ApiKey,
         ));
     }
     Ok(next.run(request).await)
@@ -1455,7 +1900,8 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
-                Err(AppError::Forbidden(error)) => {
+                Err(AppError::Forbidden(error))
+                | Err(AppError::ForbiddenWithGuidance { message: error, .. }) => {
                     tracing::debug!(%error, "OptionalAuthUser rejected credentials");
                     Ok(OptionalAuthUser(None))
                 }
@@ -1484,9 +1930,33 @@ fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_allowlists_only_narrow_the_live_parent_key() {
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            intersect_allowlists(true, ids(&[]), true, ids(&[])),
+            (true, ids(&[]))
+        );
+        assert_eq!(
+            intersect_allowlists(true, ids(&[]), false, ids(&["a"])),
+            (false, ids(&["a"]))
+        );
+        assert_eq!(
+            intersect_allowlists(false, ids(&["a", "b"]), true, ids(&[])),
+            (false, ids(&["a", "b"]))
+        );
+        // A grant removed from the key stops working for an older relay token.
+        assert_eq!(
+            intersect_allowlists(false, ids(&["a", "b"]), false, ids(&["b"])),
+            (false, ids(&["b"]))
+        );
+    }
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use axum::{Router, middleware, routing::get};
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -1528,6 +1998,12 @@ mod tests {
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: scope.to_string(),
@@ -1650,6 +2126,19 @@ mod tests {
             "/api/v1/ssh/service-id/terminal",
             "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
             "/api/v1/assistant/wire-logs/7d6f176c-45c6-4efa-95b2-12dc58a7341f",
+            "/api/v1/assistant/nyxagent/machines/node-id/desktop",
+            "/api/v1/machines/setups/setup-id",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-quotes",
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations/confirmation-id/decision",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/setups/setup-id",
+            "//api/v1//onboarding/bindings/?page=2",
+            "/api/v1/remote-machines/?page=2",
+            "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
@@ -1773,6 +2262,8 @@ mod tests {
             "/api/v1/keys/",
             "/api/v1/keys?include=all",
             "/api/v1/nodesXYZ",
+            "/api/v1/onboardingXYZ",
+            "/api/v1/remote-machinesXYZ",
             "/api/v1/administer",
         ] {
             assert!(
@@ -1830,6 +2321,7 @@ mod tests {
     #[test]
     fn verified_delegated_claims_must_set_actor_and_flag_together() {
         let mut claims = jwt::Claims {
+            protected_consent: None,
             sub: Uuid::new_v4().to_string(),
             iss: "nyxid".to_string(),
             aud: "http://localhost:3001".to_string(),
@@ -2200,14 +2692,49 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
+        for path in [
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/remote-machines",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-operations/operation-id",
+            "/api/v1/machine-confirmations",
+            "/api/v1/api-keys/key-id/machine-grant",
+            "/api/v1/users/me/consents/consent-id/machine-grant",
+            "/api/v1/onboarding/bindings",
+            "/api/v1/onboarding/setups",
+        ] {
+            let response = delegated_router_response(&app, Method::GET, path, &delegated).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "GET {path}");
+        }
+        for path in [
+            "/api/v1/assistant/nyxagent/voice/options",
+            "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
+            "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
+            "/api/v1/assistant/nyxagent/conversations/id/dictation",
+        ] {
+            assert!(delegated_read_denied_path(path));
+        }
         assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
         assert!(delegated_read_denied_path(
             "/api/v1/channel-relay/messages/id/attachments/0"
         ));
+        assert!(delegated_read_denied_path(
+            "/api/v1/users/me/oauth-consent-requests/id"
+        ));
+        for path in [
+            "/api/v1/remote-machine-entitlement",
+            "/api/v1/machines/managed/bootstrap",
+            "/api/v1/remote-machine-quotes",
+            "/api/v1/remote-machines",
+            "/api/v1/remote-machines/machine-id",
+            "/api/v1/remote-machine-operations/operation-id",
+        ] {
+            assert!(delegated_read_denied_path(path));
+        }
         db.drop().await.unwrap();
     }
 
-    fn delegated_fixture_api_key(
+    pub(super) fn delegated_fixture_api_key(
         id: &str,
         user_id: &str,
         key_hash: &str,
@@ -2224,11 +2751,15 @@ mod tests {
             is_active: true,
             created_at: chrono::Utc::now(),
             rotation_predecessor_id: None,
+            machine_external_grants_present: false,
             state_version: 1,
             updated_at: Some(chrono::Utc::now()),
             description: None,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -2249,6 +2780,9 @@ mod tests {
         signing_hash: &str,
     ) -> crate::models::node::Node {
         crate::models::node::Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: "Delegated read fixture node".to_string(),
@@ -2350,7 +2884,8 @@ mod tests {
         };
         use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
         use crate::models::service_pool::{
-            COLLECTION_NAME as SERVICE_POOLS, PoolStrategy, ServicePool, ServicePoolMember,
+            COLLECTION_NAME as SERVICE_POOLS, PoolMemberContract, PoolStrategy, ServicePool,
+            ServicePoolMember,
         };
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
         use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -2463,6 +2998,7 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: actor_external_key_id.clone(),
                 user_id: actor_id.to_string(),
                 label: "Secret-bearing fixture".to_string(),
@@ -2607,6 +3143,7 @@ mod tests {
                 extra_auth_params: None,
                 device_code_format: "rfc8628".to_string(),
                 client_id_param_name: None,
+                authorization_nonce_required: false,
                 requires_gateway_url: false,
                 created_by: actor_id.to_string(),
                 revocation_seed_version: 0,
@@ -2694,12 +3231,23 @@ mod tests {
                 name: "Delegated pool fixture".to_string(),
                 description: None,
                 strategy: PoolStrategy::RoundRobin,
+                tier_balance: Default::default(),
+                member_contract: PoolMemberContract::SameApi,
+                failover: None,
                 members: vec![ServicePoolMember {
                     user_service_id: actor_service_id.clone(),
                     weight: 1,
                     enabled: true,
+                    priority: 0,
+                    model: None,
+                    same_api_compatible: false,
+                    health_reset_generation: 0,
                 }],
                 rr_counter: 0,
+                tier_counters: Default::default(),
+                config_revision: 0,
+                health_reset_generation: 0,
+                health_observation_sequence: 0,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -2948,6 +3496,233 @@ mod tests {
         assert!(matches!(err, AppError::Unauthorized(message) if message == "DPoP proof required"));
     }
 
+    #[tokio::test]
+    async fn ordinary_api_key_auth_does_not_read_assistant_credentials() {
+        let reads = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                recorded.lock().unwrap().push(collection.to_owned());
+            }
+        });
+        let Some(db) = crate::test_utils::connect_test_database_with_command_handler(
+            "auth_ordinary_key_no_fence_read",
+            handler,
+        )
+        .await
+        else {
+            return;
+        };
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let created = crate::services::key_service::create_api_key(
+            &db,
+            &user_id,
+            "ordinary-auth",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+        )
+        .await
+        .unwrap();
+        reads.lock().unwrap().clear();
+
+        let auth = crate::services::key_service::get_api_key(&db, &user_id, &created.id)
+            .await
+            .unwrap();
+        api_key_auth_user(&db, &auth, None, None, None)
+            .await
+            .expect("ordinary API key authentication");
+
+        {
+            let reads = reads.lock().unwrap();
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|collection| {
+                        collection.as_str()
+                            == crate::models::assistant_agent_credential::COLLECTION_NAME
+                    })
+                    .count(),
+                0,
+                "ordinary keys must keep the no-read assistant fence fast path"
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assistant_management_routes_refuse_conversation_keys_with_the_flag_off() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("auth_assistant_routes_flag_off").await
+        else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let auth = AuthUser {
+            assistant_turn_fence: Some(Box::new(
+                crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
+                    platform_thread: false,
+                    platform_origin: None,
+                    conversation_id: "conversation".into(),
+                    turn_id: Some("turn".into()),
+                    turn_live: true,
+                    turn_stopped: false,
+                },
+            )),
+            user_id: Uuid::parse_str(&user_id).unwrap(),
+            ..test_auth_user(AuthMethod::ApiKey, "proxy")
+        };
+        for path in [
+            "/api/v1/assistant/nyxagent/agents/a/grants",
+            "/api/v1/assistant/nyxagent/settings",
+            "/api/v1/assistant/nyxagent/channels",
+            "/assistant/nyxagent/agents/a/destroy",
+        ] {
+            assert!(
+                matches!(
+                    auth.ensure_conversation_key_route_if_enabled(&db, path)
+                        .await,
+                    Err(AppError::Forbidden(_))
+                ),
+                "{path}"
+            );
+        }
+        // Attachment reads stay available, and other routes keep their
+        // flag-off behavior.
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(
+                &db,
+                "/api/v1/assistant/nyxagent/conversations/c/attachments/a",
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
+                .await
+                .is_ok()
+        );
+        // Ordinary keys are not conversation keys.
+        let ordinary = test_auth_user(AuthMethod::ApiKey, "proxy");
+        assert!(
+            ordinary
+                .ensure_conversation_key_route_if_enabled(
+                    &db,
+                    "/api/v1/assistant/nyxagent/settings"
+                )
+                .await
+                .is_ok()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_turn_gate_flag_controls_fence_enforcement() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_live_turn_flag").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let mut auth = AuthUser {
+            assistant_turn_fence: Some(Box::new(
+                crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
+                    platform_thread: false,
+                    platform_origin: None,
+                    conversation_id: "conversation".into(),
+                    turn_id: None,
+                    turn_live: false,
+                    turn_stopped: false,
+                },
+            )),
+            user_id: Uuid::parse_str(&user_id).unwrap(),
+            ..test_auth_user(AuthMethod::ApiKey, "proxy")
+        };
+
+        assert!(
+            auth.ensure_live_assistant_turn(&db, "test").await.is_ok(),
+            "the rollout flag is off by default"
+        );
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
+                .await
+                .is_ok(),
+            "route restrictions must preserve legacy behavior while the flag is off"
+        );
+        crate::services::feature_flag_service::set_platform_override(
+            &db,
+            crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            &user_id,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            auth.ensure_conversation_key_route_if_enabled(&db, "/api/v1/users/me")
+                .await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(
+            auth.ensure_conversation_key_route_if_enabled(
+                &db,
+                "/api/v1/assistant-attachments/attachment/content",
+            )
+            .await
+            .is_ok(),
+            "NyxAgent image fetches must remain in the execution route set"
+        );
+        assert!(matches!(
+            auth.ensure_live_assistant_turn(&db, "test").await,
+            Err(AppError::AssistantTurnRequired)
+        ));
+        auth.assistant_turn_fence.as_mut().unwrap().turn_live = true;
+        for path in [
+            "/api/v1/llm/provider-a/v1/responses",
+            "/api/v1/proxy/s/provider-b/v1/responses/compact",
+            "/api/v1/mcp",
+            "/api/v1/assistant-attachments/attachment/content",
+        ] {
+            assert!(
+                auth.ensure_conversation_key_route_if_enabled(&db, path)
+                    .await
+                    .is_ok(),
+                "NyxAgent endpoint must remain reachable with a live turn: {path}"
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn parse_cookie_single() {
         assert_eq!(
@@ -3002,6 +3777,12 @@ mod tests {
     #[test]
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "read proxy".to_string(),
@@ -3033,6 +3814,131 @@ mod tests {
         let user = test_auth_user(AuthMethod::Session, "");
         assert!(user.api_key_id.is_none());
         assert!(user.api_key_name.is_none());
+    }
+
+    #[test]
+    fn conversation_keys_are_restricted_to_execution_routes() {
+        let mut user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        user.assistant_turn_fence = Some(Box::new(
+            crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                channel_adapter_origin: None,
+                invocation_id: None,
+                invocation_controlled: false,
+                platform_thread: false,
+                platform_origin: None,
+                conversation_id: "conversation".into(),
+                turn_id: Some("turn".into()),
+                turn_live: true,
+                turn_stopped: false,
+            },
+        ));
+
+        for path in [
+            "/api/v1/proxy/service/path",
+            "/api/v1/llm/provider",
+            "/api/v1/oracle/pools/pool/tasks",
+            "/api/v1/approvals/exact-service/requests/request/redeem",
+            "/api/v1/assistant-attachments/attachment/content",
+            "/api/v1/assistant/nyxagent/conversations/conversation/attachments/id",
+            "/api/v1/assistant/nyxagent/groups/group/attachments/id",
+            "/api/v1/mcp/config",
+            "/mcp",
+        ] {
+            assert!(
+                user.ensure_conversation_key_route(path).is_ok(),
+                "execution route should remain available: {path}"
+            );
+        }
+        for path in [
+            "/api/v1/users/me",
+            "/api/v1/assistant/agents",
+            "/api/v1/channel-relay/conversations",
+            "/api/v1/channel-relay/reply",
+            "/api/v1/channel-events",
+        ] {
+            assert!(
+                user.ensure_conversation_key_route(path).is_err(),
+                "management/channel route must reject conversation keys: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_keys_have_no_conversation_route_restriction() {
+        let user = test_auth_user(AuthMethod::ApiKey, "proxy");
+        assert!(
+            user.ensure_conversation_key_route("/api/v1/users/me")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn conversation_fence_requires_a_live_non_stopped_turn() {
+        let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+            channel_adapter_origin: None,
+            invocation_id: None,
+            invocation_controlled: false,
+            platform_thread: false,
+            platform_origin: None,
+            conversation_id: "conversation".into(),
+            turn_id: Some("turn".into()),
+            turn_live: true,
+            turn_stopped: false,
+        };
+        assert!(base.require_live().is_ok());
+        for fence in [
+            crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
+                turn_live: false,
+                ..base.clone()
+            },
+            crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
+                turn_stopped: true,
+                ..base.clone()
+            },
+        ] {
+            assert!(matches!(
+                fence.require_live(),
+                Err(AppError::AssistantTurnRequired)
+            ));
+        }
+        assert_eq!(
+            (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
+                turn_id: None,
+                turn_live: false,
+                turn_stopped: true,
+                ..base.clone()
+            })
+            .refusal_reason(),
+            "idle"
+        );
+        assert_eq!(
+            (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
+                turn_live: false,
+                turn_stopped: true,
+                ..base.clone()
+            })
+            .refusal_reason(),
+            "stopped"
+        );
+        assert_eq!(
+            (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
+                turn_live: false,
+                turn_stopped: false,
+                ..base
+            })
+            .refusal_reason(),
+            "expired"
+        );
     }
 
     #[test]
@@ -3442,6 +4348,48 @@ mod tests {
     }
 
     #[test]
+    fn public_keys_cannot_enter_any_ordinary_route_even_with_wide_scopes() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PublicNyxbot;
+        key.scopes = "proxy proxy:all llm:proxy account:read admin".into();
+        for path in [
+            "/mcp",
+            "/api/v1/mcp",
+            "/api/v1/proxy/s/llm-openai/v1/responses",
+            "/api/v1/llm/openai/v1/responses",
+            "/api/v1/llm/gateway/v1/responses",
+            "/api/v1/llm/status",
+            "/api/v1/llm/pools",
+            "/api/v1/api-keys",
+            "/api/v1/assistant/nyxagent/turns",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_err(), "{path}");
+        }
+        let mut auth = test_auth_user(AuthMethod::ApiKey, "proxy proxy:all llm:proxy");
+        auth.api_key_purpose = ApiKeyPurpose::PublicNyxbot;
+        assert!(auth.ensure_rest_proxy_access().is_err());
+        assert!(auth.ensure_llm_proxy_access().is_err());
+    }
+
+    #[test]
+    fn personal_binding_and_link_protocol_reads_are_human_only() {
+        for path in [
+            "/api/v1/platform-personal-bindings",
+            "/api/v1/platform-personal-bindings/id",
+            "/api/v1/platform-personal-links",
+            "/api/v1/platform-personal-links/id/status",
+        ] {
+            assert!(delegated_read_denied_path(path), "{path}");
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &HeaderMap::new(),
+                "account:read"
+            ));
+        }
+    }
+
+    #[test]
     fn scheduled_keys_are_confined_to_concrete_proxy_execution_routes() {
         let mut key = delegated_fixture_api_key("key-1", "user-1", "hash-1");
         key.purpose = crate::models::api_key::ApiKeyPurpose::ScheduledInvocation;
@@ -3455,6 +4403,32 @@ mod tests {
 
         key.purpose = crate::models::api_key::ApiKeyPurpose::General;
         assert!(ensure_api_key_purpose_route(&key, "/api/v1/llm/chat/completions").is_ok());
+    }
+
+    #[test]
+    fn permission_keys_routes_require_exact_execution_namespace() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PermissionBound;
+        for path in [
+            "/api/v1/permission-execution/mcp",
+            "/api/v1/permission-execution/rest/drive/v3/files/x",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_ok());
+            assert!(!api_key_management_write_requires_scope(
+                &Method::POST,
+                path
+            ));
+            assert!(delegated_read_denied_path(path));
+        }
+        for path in [
+            "/api/v1/proxy/a/b",
+            "/api/v1/permission-execution/mcp/extra",
+            "/api/v1/permission-execution/restish",
+            "/api/v1/permission-keys",
+            "/api/v1/auth/agent-key/self",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_err());
+        }
     }
 
     // -- approval_requester_type --
@@ -3704,6 +4678,75 @@ mod tests {
             "/api/v1/api-keys"
         ));
     }
+    mod storage_size_tests {
+        use super::*;
+
+        fn field_size<T>(_: impl FnOnce(&AuthUser) -> &T) -> usize {
+            std::mem::size_of::<T>()
+        }
+
+        fn future_size<Args, F: std::future::Future>(_: impl FnOnce(Args) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+
+        #[test]
+        fn optional_turn_fence_keeps_auth_user_storage_bounded() {
+            use crate::handlers::providers::{UpdateProviderRequest, update_provider};
+
+            type UpdateProviderArgs = (AppState, AuthUser, String, UpdateProviderRequest);
+
+            let auth_bytes = std::mem::size_of::<AuthUser>();
+            let fence_slot_bytes = field_size(|auth| &auth.assistant_turn_fence);
+            let provider_future_bytes =
+                future_size(|(state, auth, provider_id, body): UpdateProviderArgs| {
+                    update_provider(
+                        axum::extract::State(state),
+                        auth,
+                        axum::extract::Path(provider_id),
+                        axum::Json(body),
+                    )
+                });
+            eprintln!(
+                "AuthUser={auth_bytes} bytes, optional turn fence={fence_slot_bytes} bytes, \
+                 ordinary update_provider future={provider_future_bytes} bytes"
+            );
+            assert!(auth_bytes <= 1024, "AuthUser grew to {auth_bytes} bytes");
+            assert_eq!(
+                fence_slot_bytes,
+                std::mem::size_of::<usize>(),
+                "optional turn fence must occupy one pointer in AuthUser"
+            );
+        }
+
+        #[test]
+        fn cloned_auth_user_keeps_independent_mutable_turn_fence() {
+            let mut original = test_auth_user(AuthMethod::ApiKey, "proxy");
+            original.assistant_turn_fence = Some(Box::new(
+                crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                    channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
+                    platform_thread: false,
+                    platform_origin: None,
+                    conversation_id: "conversation".into(),
+                    turn_id: Some("turn".into()),
+                    turn_live: true,
+                    turn_stopped: false,
+                },
+            ));
+            let mut cloned = original.clone();
+            let cloned_fence = cloned.assistant_turn_fence.as_mut().unwrap();
+            cloned_fence.turn_live = false;
+            cloned_fence.turn_id = Some("other-turn".into());
+
+            let original_fence = original.assistant_turn_fence.as_ref().unwrap();
+            assert!(original_fence.turn_live);
+            assert_eq!(original_fence.turn_id.as_deref(), Some("turn"));
+            let cloned_fence = cloned.assistant_turn_fence.as_ref().unwrap();
+            assert!(!cloned_fence.turn_live);
+            assert_eq!(cloned_fence.turn_id.as_deref(), Some("other-turn"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3740,3 +4783,7 @@ mod curation_purpose_regressions {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "auth_denial_tests.rs"]
+mod denial_tests;

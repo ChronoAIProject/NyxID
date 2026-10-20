@@ -72,7 +72,10 @@ vi.mock("@/lib/navigation", () => ({
   openExternal: redirect,
 }));
 vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: (selector: (s: typeof auth) => unknown) => selector(auth),
+  useAuthStore: Object.assign(
+    (selector: (s: typeof auth) => unknown) => selector(auth),
+    { getState: () => auth },
+  ),
 }));
 vi.mock("@/components/auth/web-device-login", () => ({
   WebDeviceLogin: ({ returnTo }: { returnTo: string }) => (
@@ -418,7 +421,10 @@ describe("Nyxbot onboarding", () => {
     await mount();
     await screen.findByText("Google Workspace connected");
     await waitFor(() => expect(client.isFetching()).toBe(0));
-    for (const path of ["/keys", "/catalog/api-google", "/keys/google-1"])
+    expect(get).toHaveBeenCalledWith("/keys", {
+      authorityGuard: expect.any(Function),
+    });
+    for (const path of ["/catalog/api-google", "/keys/google-1"])
       expect(get).toHaveBeenCalledWith(path);
     await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
@@ -442,7 +448,10 @@ describe("Nyxbot onboarding", () => {
     expect(authorizer).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByText("Google Workspace connected");
-    for (const path of ["/keys", "/catalog/api-google", "/keys/google-1"])
+    expect(get).toHaveBeenCalledWith("/keys", {
+      authorityGuard: expect.any(Function),
+    });
+    for (const path of ["/catalog/api-google", "/keys/google-1"])
       expect(get).toHaveBeenCalledWith(path);
     expect(router.state.location.search.step).toBe("source");
   });

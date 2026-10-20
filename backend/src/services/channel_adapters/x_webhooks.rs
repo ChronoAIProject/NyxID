@@ -7,11 +7,19 @@ pub(super) fn verification_error() -> AppError {
     AppError::ChannelWebhookVerificationFailed("Invalid X webhook".into())
 }
 
+pub(super) fn rejected(bot_id: Option<&str>, reason: &'static str) -> AppError {
+    tracing::warn!(platform = "x", bot_id, reason, "X webhook rejected");
+    verification_error()
+}
+
 pub(super) fn crc_token(query: &std::collections::HashMap<String, String>) -> AppResult<&str> {
     query
         .get("crc_token")
         .map(String::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 256)
+        // CRC and event signatures share a key. Never sign a JSON object that
+        // could be replayed as an authenticated webhook body.
+        .filter(|s| !serde_json::from_str::<Value>(s).is_ok_and(|value| value.is_object()))
         .ok_or_else(verification_error)
 }
 
@@ -19,16 +27,21 @@ pub(super) fn handshake(
     credentials: &PlatformVerifySecrets,
     query: &std::collections::HashMap<String, String>,
 ) -> AppResult<String> {
-    let mut mac = mac(credentials)?;
+    let secret = credentials
+        .get("client_secret")
+        .filter(|secret| !secret.is_empty())
+        .or_else(|| {
+            credentials
+                .get("consumer_secret")
+                .filter(|secret| !secret.is_empty())
+        })
+        .ok_or_else(verification_error)?;
+    let mut mac = mac(secret)?;
     mac.update(crc_token(query)?.as_bytes());
     Ok(json!({"response_token": format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))}).to_string())
 }
 
-fn mac(credentials: &PlatformVerifySecrets) -> AppResult<Hmac<Sha256>> {
-    let secret = credentials
-        .get("consumer_secret")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(verification_error)?;
+fn mac(secret: &str) -> AppResult<Hmac<Sha256>> {
     Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| verification_error())
 }
 
@@ -37,26 +50,41 @@ pub(super) fn verify(
     headers: &HeaderMap,
     body: &[u8],
 ) -> AppResult<()> {
+    let (header, field) = if headers.contains_key("x-twitter-webhooks-signature-oauth2") {
+        ("x-twitter-webhooks-signature-oauth2", "client_secret")
+    } else {
+        ("x-twitter-webhooks-signature", "consumer_secret")
+    };
     let signature = headers
-        .get("x-twitter-webhooks-signature")
+        .get(header)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("sha256="))
         .filter(|v| v.len() == 44)
-        .ok_or_else(verification_error)?;
+        .ok_or_else(|| rejected(None, "signature_missing_or_malformed"))?;
     let signature = STANDARD
         .decode(signature)
-        .map_err(|_| verification_error())?;
-    let mut mac = mac(credentials)?;
+        .map_err(|_| rejected(None, "signature_encoding_invalid"))?;
+    let secret = credentials
+        .get(field)
+        .filter(|secret| !secret.is_empty())
+        .ok_or_else(|| rejected(None, "signing_secret_missing"))?;
+    let mut mac = mac(secret)?;
     mac.update(body);
     mac.verify_slice(&signature)
-        .map_err(|_| verification_error())
+        .map_err(|_| rejected(None, "signature_mismatch"))
 }
 
 pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
     if !matches!(
         body["data"]["event_type"].as_str(),
-        Some("dm.received" | "post.mention.create" | "post.reply.create")
+        Some(
+            "dm.received"
+                | "chat.received"
+                | "post.mention.create"
+                | "post.reply.create"
+                | "post.create"
+        )
     ) {
         return Ok(None);
     }
@@ -74,6 +102,12 @@ pub(super) fn parse(body: &[u8]) -> AppResult<Vec<InboundMessage>> {
         return Ok(vec![]);
     };
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+    if body["data"]["event_type"] == "chat.received" {
+        return activity::parse_chat(&body, &own_id);
+    }
+    if body["data"]["event_type"] == "post.create" {
+        return activity::parse_own_post(&body, &own_id);
+    }
     if body["data"]["event_type"] != "dm.received" {
         return parse_post(&body, &own_id);
     }
@@ -292,6 +326,7 @@ pub(super) async fn setup(
     bot_id: &str,
     events: &[XChannelEvent],
     webhook_url: &str,
+    progress: &super::super::super::channel_platform::WebhookSetupProgress,
 ) -> AppResult<()> {
     validate_events("x", events)?;
     let app = app_token(credentials.platform_secrets.ok_or_else(protocol_error)?)?;
@@ -368,6 +403,7 @@ pub(super) async fn setup(
             .iter()
             .any(|keep| keep["subscription_id"] == row["subscription_id"])
         {
+            progress.mark_mutation_started();
             remove_subscription(http, api, app, row).await?;
         }
     }
@@ -388,6 +424,7 @@ pub(super) async fn setup(
                 .as_str()
                 .filter(|id| numeric_id(id))
                 .ok_or_else(protocol_error)?;
+            progress.mark_mutation_started();
             let body = response_json(
                 send(
                     http.put(format!("{api}/2/activity/subscriptions/{id}"))
@@ -402,6 +439,7 @@ pub(super) async fn setup(
                 return Err(protocol_error());
             }
         } else {
+            progress.mark_mutation_started();
             let body = response_json(send(http.post(format!("{api}/2/activity/subscriptions"))
                 .bearer_auth(credentials.token)
                 .json(&json!({"event_type": name, "filter": {"user_id": own_id}, "webhook_id": webhook_id, "tag": tag}))).await?).await?;
@@ -409,6 +447,52 @@ pub(super) async fn setup(
         }
     }
     Ok(())
+}
+
+/// Read-only live check: NyxID's callback is a valid X webhook and every
+/// selected event of this bot's account is subscribed to it with its tag.
+pub(super) async fn status(
+    adapter: &XAdapter,
+    http: &reqwest::Client,
+    platform: &PlatformVerifySecrets,
+    bot: &ChannelBot,
+    webhook_url: &str,
+) -> AppResult<crate::services::channel_platform::LiveWebhookStatus> {
+    use crate::services::channel_bot_health::codes;
+    use crate::services::channel_platform::LiveWebhookStatus;
+    let app = app_token(platform)?;
+    let credentials = BotCredentials::from(app);
+    let api = base(adapter, &credentials);
+    let webhooks = response_json(
+        send(
+            http.get(format!("{api}/2/webhooks"))
+                .bearer_auth(app)
+                .query(&[("webhook_config.fields", "id,url,valid")]),
+        )
+        .await?,
+    )
+    .await?;
+    let Some(webhook) = list_data(&webhooks)?
+        .iter()
+        .find(|row| row["url"] == webhook_url && row["valid"] == true)
+    else {
+        return Ok(LiveWebhookStatus::missing(codes::WEBHOOK_MISSING));
+    };
+    let tag = format!("nyxid:{}", bot.id);
+    let rows = subscriptions(adapter, http, app).await?;
+    let subscribed = selected_events(bot).iter().all(|event| {
+        rows.iter().any(|row| {
+            row["tag"] == tag
+                && row["event_type"] == event_name(*event)
+                && row["filter"]["user_id"] == bot.platform_bot_id.as_str()
+                && row["webhook_id"] == webhook["id"]
+        })
+    });
+    Ok(if subscribed {
+        LiveWebhookStatus::registered()
+    } else {
+        LiveWebhookStatus::missing(codes::SUBSCRIPTION_MISSING)
+    })
 }
 
 pub(super) async fn remove(

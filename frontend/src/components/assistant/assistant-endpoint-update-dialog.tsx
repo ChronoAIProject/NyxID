@@ -229,7 +229,7 @@ export function AssistantEndpointUpdateDialog({
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Endpoint</span>
               <Badge
@@ -248,7 +248,7 @@ export function AssistantEndpointUpdateDialog({
             {params.endpointUrl ? (
               <div className="flex items-center justify-between gap-4">
                 <span className="text-muted-foreground">URL</span>
-                <span className="max-w-[70%] truncate font-mono text-[11px]">
+                <span className="max-w-[70%] truncate font-mono text-11">
                   {params.endpointUrl}
                 </span>
               </div>
@@ -257,13 +257,13 @@ export function AssistantEndpointUpdateDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-[11px] text-success">
+          <p className="text-11 text-success">
             Endpoint update verified.
           </p>
         ) : null}

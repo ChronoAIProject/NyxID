@@ -1,5 +1,16 @@
 import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
+import { extendTailwindMerge } from "tailwind-merge";
+
+// `text-12` etc. are the custom font-size tokens in app.css (`--text-*`).
+// Without registering them, tailwind-merge reads them as text *colours* and
+// drops one of `text-12 text-foreground`.
+const twMerge = extendTailwindMerge({
+  extend: {
+    theme: {
+      text: ["9", "10", "11", "12", "13", "14", "15", "17", "20", "22", "24", "28", "36"],
+    },
+  },
+});
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));

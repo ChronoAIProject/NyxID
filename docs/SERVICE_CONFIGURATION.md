@@ -51,6 +51,23 @@ Linking never silently changes an
 unrelated requirement. Requirement mutations and linking serialize through the
 service row to prevent conflicting concurrent writes.
 
+## PostHog regional connections
+
+The Add Service dialog presents one PostHog card when the visible catalog has
+exactly one US and one EU OAuth service. It recognizes PostHog-named entries
+with HTTPS base URLs on `us.posthog.com` and `eu.posthog.com`, regardless of their
+slugs. Selecting the card asks where the user's existing project is hosted and
+then continues with that region's original catalog entry and provider. Search
+matches both regional names and slugs. A single regional entry remains directly
+selectable; multiple configurations for a region remain separate.
+
+This groups discovery only. Regional service IDs, endpoints, provider credentials,
+permissions, and existing connections remain intact. No database migration runs.
+PostHog's shared OAuth host (`oauth.posthog.com`) can authorize both regions, but
+consolidating the admin provider records is a separate configuration change and
+must preserve regional API destinations. See the
+[PostHog OAuth guide](https://posthog.com/docs/api/oauth).
+
 ## Retirement
 
 Platform Operations is removed, including its user/admin routes, named MCP

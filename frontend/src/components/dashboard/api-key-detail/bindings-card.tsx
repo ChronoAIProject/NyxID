@@ -37,6 +37,7 @@ import { ServiceIcon } from "@/components/service-icon";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
+import { connectionIconUrl } from "@/lib/connection-icon";
 
 /// True iff two credential sources point at the same owner. Used by the
 /// binding / scope pickers to filter the service list to options the
@@ -157,16 +158,16 @@ export function BindingsCard({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Link2 className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Service Bindings</CardTitle>
+            <Link2 className="h-4 w-4 text-primary-text" />
+            <CardTitle className="text-15">Service Bindings</CardTitle>
           </div>
           <button
             type="button"
             onClick={() => setAdding(true)}
             disabled={adding || availableServices.length === 0}
-            className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-2.5 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground disabled:pointer-events-none disabled:opacity-40"
+            className="flex h-8 items-center gap-2 rounded-lg border border-hairline px-2.5 text-12 text-text-tertiary transition-all duration-300 hover:border-hairline-strong hover:text-muted-foreground disabled:pointer-events-none disabled:opacity-40"
           >
-            <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-white/[0.08] bg-white/[0.04]">
+            <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-hairline bg-overlay">
               <Plus className="h-2.5 w-2.5" />
             </span>
             Add Binding
@@ -192,7 +193,7 @@ export function BindingsCard({
                   {availableServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
                       <span className="inline-flex items-center gap-2">
-                        <ServiceIcon slug={s.catalog_service_slug} size="2xs" />
+                        <ServiceIcon slug={s.catalog_service_slug} iconUrl={connectionIconUrl(s)} size="2xs" />
                         <span>
                           {s.label}
                           {s.slug !== s.label ? ` (${s.slug})` : ""}
@@ -243,9 +244,13 @@ export function BindingsCard({
                 }
               >
                 <div className="flex items-center gap-2.5">
-                  <ServiceIcon slug={boundKey?.catalog_service_slug} size="sm" />
+                  <ServiceIcon
+                    slug={boundKey?.catalog_service_slug}
+                    iconUrl={connectionIconUrl(boundKey)}
+                    size="sm"
+                  />
                   <div className="space-y-0.5">
-                  <p className="text-[12px] font-medium flex items-center gap-1.5">
+                  <p className="text-12 font-medium flex items-center gap-1.5">
                     {b.is_invalid && (
                       <AlertTriangle
                         className="h-3.5 w-3.5 text-destructive shrink-0"
@@ -284,7 +289,7 @@ export function BindingsCard({
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <CrystalLatticeIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-xs text-muted-foreground/30">
+            <p className="text-xs text-muted-foreground">
               No credential overrides. This agent uses default credentials for
               all services.
             </p>

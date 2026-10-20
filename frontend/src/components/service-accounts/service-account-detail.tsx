@@ -3,6 +3,7 @@ import {
   describeChanges,
   hasFieldConflicts,
   normalizedSet,
+  sameValue,
 } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
@@ -22,9 +23,15 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { useAuthStore } from "@/stores/auth-store";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
-import type { RotateSecretResponse } from "@/types/service-accounts";
+import type {
+  RotateSecretResponse,
+  ServiceAccount,
+  UpdateServiceAccountRequest,
+} from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
@@ -62,11 +69,33 @@ import { toast } from "sonner";
 import { CurationGrantSection } from "./curation-grant-section";
 import { KeyReadGrantSection } from "./key-read-grant-section";
 
+type AccessState = NonNullable<UpdateServiceAccountRequest["expected_access"]>;
+
+function accessState(account: ServiceAccount): AccessState {
+  return {
+    role_ids: [...account.role_ids],
+    allowed_scopes: account.allowed_scopes,
+    purpose: account.purpose ?? "general",
+    platform_protected: account.platform_protected ?? false,
+    catalog_scope_authorized: account.catalog_scope_authorized ?? false,
+    is_active: account.is_active,
+  };
+}
+
+function hasCatalogScopes(scopes: string): boolean {
+  return scopes
+    .split(/\s+/)
+    .some(
+      (scope) =>
+        scope === "catalog:skills:read" || scope === "catalog:skills:write",
+    );
+}
+
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
 interface ServiceAccountDetailProps {
   readonly saId: string;
-  readonly backTo: { readonly to: string; readonly label: string };
+  readonly backTo: { readonly to: string; readonly label: string; readonly search?: { tab: string } };
   readonly showProviderSections?: boolean;
   readonly showKeyReadGrantSection?: boolean;
 }
@@ -84,6 +113,9 @@ function ServiceAccountDetailEditor({
   const navigate = useNavigate();
 
   const { data: sa, isLoading } = useServiceAccount(saId);
+  useBreadcrumbLabel(sa?.name);
+  const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
+  const [editAccess, setEditAccess] = useState<AccessState | null>(null);
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -151,33 +183,78 @@ function ServiceAccountDetailEditor({
   function openEditDialog() {
     if (!sa) return;
     form.reset(editValues());
+    setEditAccess(accessState(sa));
     editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+    Parameters<typeof updateMutation.mutateAsync>[0] & {
+      before: object;
+      grantsCatalog: boolean;
+    }
   >(
-    async ({ before: _before, ...variables }) => {
+    async ({ before: _before, grantsCatalog, ...variables }) => {
       void _before;
-      await updateMutation.mutateAsync(variables);
+      const result = await updateMutation.mutateAsync(variables);
+      if (grantsCatalog && !result.catalog_scope_authorized) {
+        throw new Error(
+          "Catalog access was not granted. Reload the account and verify the backend supports catalog scope grants.",
+        );
+      }
       toast.success("Service account updated");
       setEditOpen(false);
     },
     (pending) =>
       !sa ||
-      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+      hasFieldConflicts(
+        pending.before,
+        normalize(editValues()),
+        pending.data,
+      ) ||
+      (pending.data.expected_access !== undefined &&
+        !sameValue(pending.data.expected_access, accessState(sa))),
     saId,
   );
+
+  const grantsCatalog =
+    isAdmin &&
+    editAccess !== null &&
+    !editAccess.catalog_scope_authorized &&
+    hasCatalogScopes(form.watch("allowed_scopes"));
 
   function handleEdit(formData: UpdateServiceAccountFormData) {
     const before = normalize(
       form.formState.defaultValues as UpdateServiceAccountFormData,
     );
     const patch = changedFields(before, normalize(formData));
+    const changes = describeChanges(before, patch);
+    if (grantsCatalog) {
+      patch.allowed_scopes = formData.allowed_scopes;
+      changes.push({
+        field: "Catalog access",
+        before: "Not granted through scopes",
+        after:
+          "Selected catalog scopes authorize all current and future catalog services; managed by platform administrators",
+      });
+    }
+    const changesAccess =
+      patch.allowed_scopes !== undefined ||
+      patch.role_ids !== undefined ||
+      patch.is_active !== undefined;
     editReview.review(
-      { saId, data: patch, before },
-      describeChanges(before, patch),
+      {
+        saId,
+        data: {
+          ...patch,
+          ...(changesAccess && editAccess
+            ? { expected_access: editAccess }
+            : {}),
+        },
+        before,
+        grantsCatalog,
+      },
+      changes,
     );
   }
 
@@ -214,7 +291,7 @@ function ServiceAccountDetailEditor({
     try {
       await deleteMutation.mutateAsync(saId);
       toast.success("Service account deleted");
-      void navigate({ to: backTo.to });
+      void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (err) {
       toast.error(
         err instanceof ApiError
@@ -243,13 +320,13 @@ function ServiceAccountDetailEditor({
         <h3 className="mb-2 text-lg font-semibold">
           Service account not found
         </h3>
-        <p className="mb-4 text-[12px] text-muted-foreground">
+        <p className="mb-4 text-12 text-muted-foreground">
           The service account you are looking for does not exist or has been
           deleted.
         </p>
         <Button
           variant="outline"
-          onClick={() => void navigate({ to: backTo.to })}
+          onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
         >
           Back to {backTo.label}
         </Button>
@@ -317,14 +394,34 @@ function ServiceAccountDetailEditor({
 
       <Separator />
 
-      {showProviderSections && <CurationGrantSection account={sa} />}
-      {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+      {sa.purpose === "catalog_editor" && (
+        <DetailSection title="Catalog access">
+          <DetailRow
+            label="Catalog coverage"
+            value="All current and future catalog services"
+          />
+          <p className="px-4 py-3 text-12 text-muted-foreground">
+            {sa.catalog_scope_authorized
+              ? "Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit."
+              : "This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes."}
+          </p>
+        </DetailSection>
+      )}
+
+      {sa.purpose !== "catalog_editor" && (
+        <>
+          {showProviderSections && sa.purpose === "curation" && (
+            <CurationGrantSection account={sa} />
+          )}
+          {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+        </>
+      )}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
       ) : (
         <DetailSection title="Provider Connections">
-          <p className="px-4 py-3 text-[12px] text-muted-foreground">
+          <p className="px-4 py-3 text-12 text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
             <code className="rounded bg-muted px-1 font-mono text-xs">
@@ -373,7 +470,7 @@ function ServiceAccountDetailEditor({
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -456,7 +553,7 @@ function ServiceAccountDetailEditor({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel className="text-[12px] font-medium">
+                      <FormLabel className="text-12 font-medium">
                         Active
                       </FormLabel>
                       <p className="text-xs text-muted-foreground">
@@ -484,7 +581,10 @@ function ServiceAccountDetailEditor({
                   variant="primary"
                   type="submit"
                   isLoading={updateMutation.isPending}
-                  disabled={!form.formState.isDirty || updateMutation.isPending}
+                  disabled={
+                    (!form.formState.isDirty && !grantsCatalog) ||
+                    updateMutation.isPending
+                  }
                 >
                   Save Changes
                 </Button>
@@ -519,7 +619,7 @@ function ServiceAccountDetailEditor({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-[12px] text-amber-700 dark:text-amber-400">
+                  <p className="text-12 text-amber-700 dark:text-amber-400">
                     Save this secret now. It cannot be retrieved later.
                   </p>
                 </div>
@@ -530,7 +630,7 @@ function ServiceAccountDetailEditor({
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 rounded bg-muted px-2 py-1 text-[12px] font-mono break-all">
+                  <code className="flex-1 rounded bg-muted px-2 py-1 text-12 font-mono break-all">
                     {rotateResult.client_secret}
                   </code>
                   <Button

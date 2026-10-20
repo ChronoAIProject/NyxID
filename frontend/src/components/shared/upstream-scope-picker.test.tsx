@@ -57,29 +57,29 @@ describe("UpstreamScopePicker", () => {
         catalog={[
           ...CATALOG,
           {
-            scope: "gmail.send",
-            label: "Gmail (send)",
-            description: "Send email.",
+            scope: "required.action",
+            label: "Required action",
+            description: "Use this service.",
             required: true,
           },
         ]}
         onChangeSpy={onChange}
       />,
     );
-    const send = screen.getByRole("button", { name: /Gmail \(send\)/ });
+    const send = screen.getByRole("button", { name: /Required action/ });
     expect(send).toHaveAttribute("aria-pressed", "true");
     expect(send).toBeDisabled();
     expect(send).toHaveTextContent("required");
     await user.click(send);
     expect(onChange).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /Read posts/ }));
-    expect(onChange).toHaveBeenLastCalledWith(["gmail.send"]);
+    expect(onChange).toHaveBeenLastCalledWith(["required.action"]);
     await user.type(
       screen.getByPlaceholderText(/custom.scope/),
       "another.scope",
     );
     await user.click(screen.getByRole("button", { name: /^Add$/ }));
-    expect(onChange).toHaveBeenLastCalledWith(["gmail.send", "another.scope"]);
+    expect(onChange).toHaveBeenLastCalledWith(["required.action", "another.scope"]);
   });
 
   it("renders catalog scopes as pills, defaults marked and pre-selected", () => {

@@ -227,6 +227,110 @@ pub async fn send_connection_expired_notification(
     user_id: &str,
     context: &ConnectionExpiredNotificationContext,
 ) -> AppResult<NotificationResult> {
+    let rendered = render_connection_expired_notification(config, context);
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "connection expiry",
+    )
+    .await
+}
+
+/// Metadata-only notice that a channel bot stopped working.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelBotFailedNotificationContext {
+    pub bot_id: String,
+    pub bot_label: String,
+    pub platform_name: String,
+    /// Stable recovery action (`reconnect`, `resubscribe`, ...).
+    pub recommended_action: String,
+    pub recommended_action_text: String,
+}
+
+/// Send a channel-bot failure notice through the recipient's enabled
+/// channels. Missing channels and delivery failures are a no-op.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_channel_bot_failed_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    context: &ChannelBotFailedNotificationContext,
+) -> AppResult<NotificationResult> {
+    let rendered = render_channel_bot_failed_notification(config, context);
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "channel bot failure",
+    )
+    .await
+}
+
+/// Deliver metadata-only lifecycle notices through existing configured channels.
+/// The durable in-site timeline remains the authoritative owner notification.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_machine_lifecycle_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    machine_id: &str,
+    operation_id: &str,
+    message: &str,
+) -> AppResult<NotificationResult> {
+    let url = format!(
+        "{}/machines?machine={}",
+        config.frontend_url.trim_end_matches('/'),
+        machine_id
+    );
+    let mut data = HashMap::new();
+    data.insert("type".into(), "machine_lifecycle".into());
+    data.insert("machine_id".into(), machine_id.into());
+    data.insert("operation_id".into(), operation_id.into());
+    data.insert("url".into(), url.clone());
+    let rendered = RenderedConnectionExpiredNotification {
+        title: "Machine lifecycle update".into(),
+        body: format!("{message} Open {url}."),
+        data,
+    };
+    deliver_best_effort(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        user_id,
+        &rendered,
+        "machine lifecycle",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_best_effort(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    rendered: &RenderedConnectionExpiredNotification,
+    kind: &str,
+) -> AppResult<NotificationResult> {
     let Some(channel) = db
         .collection::<NotificationChannel>(COLLECTION_NAME)
         .find_one(doc! { "user_id": user_id })
@@ -238,7 +342,6 @@ pub async fn send_connection_expired_notification(
             telegram_message_id: None,
         });
     };
-    let rendered = render_connection_expired_notification(config, context);
     let mut channels_used = Vec::new();
     let mut telegram_chat_id = None;
     let mut tokens_to_remove = Vec::new();
@@ -261,8 +364,9 @@ pub async fn send_connection_expired_notification(
             }
             Err(error) => tracing::warn!(
                 user_id = %user_id,
+                kind,
                 error = %error,
-                "Telegram connection expiry notification failed"
+                "Telegram best-effort notification failed"
             ),
         }
     }
@@ -302,7 +406,7 @@ pub async fn send_connection_expired_notification(
                     user_id = %user_id,
                     device_id = %unique_devices[index].device_id,
                     error = %error,
-                    "Push connection expiry notification failed"
+                    "Push best-effort notification failed"
                 ),
             }
         }
@@ -399,6 +503,58 @@ pub async fn send_trigger_notification(
         Err(AppError::TriggerDeliveryFailed)
     } else {
         Err(AppError::TriggerDeliveryUnsupported)
+    }
+}
+
+/// Automation result delivery explicitly selects push, independent of Telegram.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_automation_push(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    label: &str,
+    text: &str,
+    thread_id: &str,
+) -> AppResult<()> {
+    let channel = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":user_id,"push_enabled":true})
+        .await?
+        .ok_or(AppError::TriggerDeliveryUnsupported)?;
+    if channel.push_devices.is_empty() {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    }
+    let body: String = text.chars().take(200).collect();
+    let data = std::collections::HashMap::from([
+        ("type".to_string(), "automation_result".to_string()),
+        ("conversation_id".to_string(), thread_id.to_string()),
+    ]);
+    let mut delivered = false;
+    for device in unique_devices_by_token(&channel.push_devices) {
+        if matches!(
+            send_push_to_device(
+                http_client,
+                fcm_auth,
+                apns_auth,
+                config,
+                device,
+                label,
+                &body,
+                &data,
+            )
+            .await,
+            Ok(PushResult::Success)
+        ) {
+            delivered = true;
+        }
+    }
+    if delivered {
+        Ok(())
+    } else {
+        Err(AppError::TriggerDeliveryFailed)
     }
 }
 
@@ -866,6 +1022,33 @@ fn render_connection_expired_notification(
     }
 }
 
+fn render_channel_bot_failed_notification(
+    config: &AppConfig,
+    context: &ChannelBotFailedNotificationContext,
+) -> RenderedConnectionExpiredNotification {
+    let bots_url = format!(
+        "{}/channel-bots/{}",
+        config.frontend_url.trim_end_matches('/'),
+        context.bot_id
+    );
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "channel_bot_failed".to_string());
+    data.insert("bot_id".to_string(), context.bot_id.clone());
+    data.insert(
+        "recommended_action".to_string(),
+        context.recommended_action.clone(),
+    );
+    data.insert("url".to_string(), bots_url.clone());
+    RenderedConnectionExpiredNotification {
+        title: format!("{} channel needs attention", context.platform_name),
+        body: format!(
+            "{} stopped working. {} Open {}.",
+            context.bot_label, context.recommended_action_text, bots_url
+        ),
+        data,
+    }
+}
+
 fn html_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -1074,6 +1257,37 @@ fn unique_devices_by_token(devices: &[DeviceToken]) -> Vec<&DeviceToken> {
     }
 
     unique
+}
+
+/// A human-control request carries only a machine label and authenticated page link.
+pub async fn machine_control_requested(
+    state: &crate::AppState,
+    owner: &str,
+    label: &str,
+    link: &str,
+) -> AppResult<()> {
+    let channel = get_or_create_channel(&state.db, owner).await?;
+    if !channel.push_enabled {
+        return Ok(());
+    }
+    let data = HashMap::from([
+        ("type".into(), "machine_control".into()),
+        ("url".into(), link.into()),
+    ]);
+    for device in unique_devices_by_token(&channel.push_devices) {
+        let _ = send_push_to_device(
+            &state.http_client,
+            state.fcm_auth.as_deref(),
+            state.apns_auth.as_deref(),
+            &state.config,
+            device,
+            "NyxBot needs you",
+            &format!("Take control of {label}"),
+            &data,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

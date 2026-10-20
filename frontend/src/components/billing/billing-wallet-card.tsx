@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
+import { useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ExternalLink,
@@ -33,6 +34,7 @@ const DEFAULT_TOP_UP_CREDITS = 100;
 const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 interface BillingWalletCardProps {
+  readonly titleHelp?: ReactNode;
   readonly wallet: BillingWalletResponse | undefined;
   readonly loading: boolean;
   readonly unavailable: boolean;
@@ -43,9 +45,13 @@ interface BillingWalletCardProps {
   readonly billingReady: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
   readonly topUpPending: boolean;
+  /** Controls the Add credits dialog when set (e.g. a top-up deep link). */
+  readonly topUpOpen?: boolean;
+  readonly onTopUpOpenChange?: (open: boolean) => void;
 }
 
 export function BillingWalletCard({
+  titleHelp,
   wallet,
   loading,
   unavailable,
@@ -56,6 +62,8 @@ export function BillingWalletCard({
   billingReady,
   onTopUp,
   topUpPending,
+  topUpOpen,
+  onTopUpOpenChange,
 }: BillingWalletCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
 
@@ -66,7 +74,7 @@ export function BillingWalletCard({
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>Wallet</CardTitle>
-            <p className="mt-1 text-[12px] text-muted-foreground">
+            <p className="mt-1 text-12 text-muted-foreground">
               No wallet provisioned.
             </p>
           </div>
@@ -101,46 +109,50 @@ export function BillingWalletCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
-        <CardTitle>Wallet</CardTitle>
+        <CardTitle className="flex items-center gap-1.5">
+          Wallet{titleHelp}
+        </CardTitle>
         {wallet.suspended && <Badge variant="destructive">Suspended</Badge>}
       </CardHeader>
       <CardContent>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-11 text-muted-foreground">
                 Available
               </span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="What available credits means"
-                    className="text-text-tertiary transition-colors hover:text-foreground"
+              {!titleHelp && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="What available credits means"
+                      className="text-text-tertiary transition-colors hover:text-foreground"
+                    >
+                      <Info className="h-3 w-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="top"
+                    className="max-w-[260px] leading-relaxed"
                   >
-                    <Info className="h-3 w-3" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="top"
-                  className="max-w-[260px] leading-relaxed"
-                >
-                  Credits spendable now after in-flight requests, unsettled
-                  usage, and purchased-credit expiry holds. 1 credit is 1 USD.
-                </TooltipContent>
-              </Tooltip>
+                    Credits spendable now after in-flight requests, unsettled
+                    usage, and purchased-credit expiry holds. 1 credit is 1 USD.
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
-            <div className="mt-1 truncate text-[28px] font-semibold leading-tight">
-              {formatCredits(wallet.available_credits)}
+            <div className="mt-1 truncate text-28 font-semibold leading-tight">
+              {formatCredits(wallet.available ?? wallet.available_credits)}
             </div>
-            <div className="mt-1 text-[11px] text-muted-foreground">
+            <div className="mt-1 text-11 text-muted-foreground">
               Updated {formatRelativeTime(wallet.balance_synced_at)}
             </div>
             <button
               type="button"
               aria-expanded={showBreakdown}
               aria-controls="wallet-breakdown"
-              className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+              className="mt-2 flex items-center gap-1 text-11 text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setShowBreakdown((current) => !current)}
             >
               {showBreakdown ? "Hide breakdown" : "View breakdown"}
@@ -153,13 +165,15 @@ export function BillingWalletCard({
             billingReady={billingReady}
             pending={topUpPending}
             onTopUp={onTopUp}
+            open={topUpOpen}
+            onOpenChange={onTopUpOpenChange}
           />
         </div>
 
         {showBreakdown && (
           <div id="wallet-breakdown">
             <hr className="my-4 border-border" />
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               Not all of your balance is spendable at any moment — requests in
               flight hold credits until they finish.
             </p>
@@ -167,41 +181,54 @@ export function BillingWalletCard({
               <BreakdownRow
                 label="Balance"
                 hint="Last provider-synced balance"
-                value={formatCredits(wallet.balance_credits)}
+                value={formatCredits(wallet.balance ?? wallet.balance_credits)}
               />
               <BreakdownRow
                 label="Reserved"
                 hint="Held for requests in flight"
-                value={formatCredits(wallet.reserved_credits)}
+                value={formatCredits(
+                  wallet.reserved ?? wallet.reserved_credits,
+                )}
               />
               <BreakdownRow
                 label="Pending"
                 hint="Charged, awaiting provider sync"
-                value={formatCredits(wallet.pending_lago_debits)}
+                value={formatCredits(
+                  wallet.pending_debits ?? wallet.pending_lago_debits,
+                )}
               />
-              {wallet.pending_topup_expiry_credits > 0 && (
+              {hasCredits(
+                wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
+              ) && (
                 <BreakdownRow
                   label="Expiring"
                   hint="Held while expired purchases are removed"
-                  value={formatCredits(wallet.pending_topup_expiry_credits)}
+                  value={formatCredits(
+                    wallet.pending_expiry ??
+                      wallet.pending_topup_expiry_credits,
+                  )}
                 />
               )}
-              {wallet.overdraft_cap_credits > 0 && (
+              {hasCredits(
+                wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
+              ) && (
                 <BreakdownRow
                   label="Overdraft"
                   hint="Extra capacity beyond your balance"
-                  value={formatCredits(wallet.overdraft_cap_credits)}
+                  value={formatCredits(
+                    wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
+                  )}
                 />
               )}
             </div>
             <hr className="my-3 border-border" />
-            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+            <div className="flex items-center justify-between text-11 text-muted-foreground">
               <span>Plan</span>
               <span className="text-foreground">
                 {labelize(wallet.plan_kind)}
               </span>
             </div>
-            <p className="mt-2 text-[11px] text-muted-foreground">
+            <p className="mt-2 text-11 text-muted-foreground">
               Available = Balance - Reserved - Pending - Expiring.
             </p>
           </div>
@@ -215,12 +242,21 @@ function AddCreditsDialog({
   billingReady,
   pending,
   onTopUp,
+  open: controlledOpen,
+  onOpenChange,
 }: {
   readonly billingReady: boolean;
   readonly pending: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
+  readonly open?: boolean;
+  readonly onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
   const amount = Number(credits);
   const amountValid =
@@ -259,7 +295,7 @@ function AddCreditsDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <span className="text-[12px] font-medium">Amount</span>
+            <span className="text-12 font-medium">Amount</span>
             <div className="flex flex-wrap gap-2">
               {TOP_UP_PRESETS.map((preset) => (
                 <Button
@@ -275,7 +311,7 @@ function AddCreditsDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-[12px] font-medium" htmlFor="topup-credits">
+            <label className="text-12 font-medium" htmlFor="topup-credits">
               Or enter an amount
             </label>
             <div className="flex items-center gap-3">
@@ -292,13 +328,13 @@ function AddCreditsDialog({
               />
               <span
                 id="topup-total"
-                className="shrink-0 text-[13px] text-muted-foreground"
+                className="shrink-0 text-13 text-muted-foreground"
               >
                 {formatUsd(amount)}
               </span>
             </div>
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             We&apos;ll hand you to Stripe to pay, then bring you back here.
             Credits land once the payment clears.
           </p>
@@ -336,16 +372,16 @@ function BreakdownRow({
   return (
     <div className="flex items-baseline justify-between gap-3">
       <div className="min-w-0">
-        <div className="text-[12px]">{label}</div>
-        <div className="text-[11px] text-muted-foreground">{hint}</div>
+        <div className="text-12">{label}</div>
+        <div className="text-11 text-muted-foreground">{hint}</div>
       </div>
-      <div className="shrink-0 text-[13px] text-muted-foreground">{value}</div>
+      <div className="shrink-0 text-13 text-muted-foreground">{value}</div>
     </div>
   );
 }
 
-function formatCredits(value: number): string {
-  return `${new Intl.NumberFormat().format(value)} credits`;
+function formatCredits(value: string | number): string {
+  return `${formatExactCredits(typeof value === "string" ? value : legacyCredits(value, "whole"))} credits`;
 }
 
 function formatNumber(value: number): string {

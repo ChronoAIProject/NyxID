@@ -16,7 +16,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::oracle_session::OracleSession;
 use crate::models::oracle_task::OracleTask;
 use crate::mw::auth::AuthUser;
@@ -24,8 +24,10 @@ use crate::services::{
     audit_service, oracle_pool_service, oracle_session_service, oracle_task_service,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SubmitOracleTaskRequest {
+    #[serde(default)]
+    pub acknowledgement_id: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -68,8 +70,10 @@ pub struct SubmitOracleTaskResponse {
     pub deduplicated: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AttachConversationRequest {
+    #[serde(default)]
+    pub acknowledgement_id: Option<String>,
     pub chatgpt_url: String,
     #[serde(default)]
     pub tag: Option<String>,
@@ -82,8 +86,10 @@ pub struct AttachConversationResponse {
     pub status: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ExtractRequest {
+    #[serde(default)]
+    pub acknowledgement_id: Option<String>,
     pub url: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -286,16 +292,69 @@ fn submitter_identity(auth_user: &AuthUser) -> oracle_task_service::SubmitterIde
     }
 }
 
+/// Oracle pools have no operation identity, so operation-scoped keys cannot
+/// spend them; their limits would otherwise not apply.
+fn refuse_operation_scoped(auth_user: &AuthUser) -> AppResult<()> {
+    if auth_user.assistant_operation_scopes.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::ApiKeyScopeForbidden(
+            "Oracle is not available to operation-scoped keys".into(),
+        ))
+    }
+}
+
 pub async fn submit_task(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<SubmitOracleTaskRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.submit")
+        .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
 
+    oracle_task_service::validate_submit_input(&oracle_task_service::SubmitTaskInput {
+        prompt: body.prompt.clone(),
+        model_label: body.model.clone(),
+        require_model_match: body.require_model_match,
+        project_url: body.project_url.clone(),
+        tag: body.tag.clone(),
+        conversation_id: body.conversation_id.clone(),
+        pdf_base64: body.pdf_base64.clone(),
+        pdf_name: body.pdf_name.clone(),
+        attachment_base64: body.attachment_base64.clone(),
+        attachment_name: body.attachment_name.clone(),
+        client_ref: body.client_ref.clone(),
+    })?;
+    let admission = match crate::services::assistant_native_execution::resource(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
+        "nyx__oracle_ask",
+        &serde_json::to_value(&body)
+            .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,
+        crate::services::assistant_acknowledgement_service::ActionFacts::of(
+            crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+        ),
+        "Submit the approved Oracle prompt",
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(refusal) => return Err(AppError::Conflict(refusal.to_string())),
+    };
+    if let Some(admission) = &admission {
+        admission.revalidate(&state.db).await?;
+    }
     let outcome = oracle_task_service::submit_task(
         &state.db,
         &pool,
@@ -316,6 +375,9 @@ pub async fn submit_task(
     )
     .await?;
 
+    if let Some(admission) = &admission {
+        admission.receipt(&state.db).await;
+    }
     // Metadata only — never the prompt body.
     audit_service::log_for_user(
         state.db.clone(),
@@ -355,10 +417,39 @@ pub async fn attach_conversation(
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<AttachConversationRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.attach")
+        .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
 
+    oracle_task_service::validate_attach_url(&body.chatgpt_url)?;
+    let admission = match crate::services::assistant_native_execution::resource(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
+        "nyx__oracle_attach",
+        &serde_json::to_value(&body)
+            .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,
+        crate::services::assistant_acknowledgement_service::ActionFacts::of(
+            crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+        ),
+        "Attach the approved Oracle conversation",
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(refusal) => return Err(AppError::Conflict(refusal.to_string())),
+    };
+    if let Some(admission) = &admission {
+        admission.revalidate(&state.db).await?;
+    }
     let (session, task) = oracle_task_service::attach_conversation(
         &state.db,
         &pool,
@@ -368,6 +459,9 @@ pub async fn attach_conversation(
     )
     .await?;
 
+    if let Some(admission) = &admission {
+        admission.receipt(&state.db).await;
+    }
     // Metadata only — never transcript text.
     audit_service::log_for_user(
         state.db.clone(),
@@ -396,10 +490,39 @@ pub async fn extract_url(
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<ExtractRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.extract")
+        .await?;
+    refuse_operation_scoped(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
 
+    oracle_task_service::validate_extract_url(&body.url)?;
+    let admission = match crate::services::assistant_native_execution::resource(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        crate::services::assistant_native_execution::NativeResource {
+            collection: "oracle_pools",
+            id: &pool.id,
+            owner: &pool.user_id,
+        },
+        "nyx__oracle_extract",
+        &serde_json::to_value(&body)
+            .map_err(|_| AppError::Internal("Oracle operation binding failed".into()))?,
+        crate::services::assistant_acknowledgement_service::ActionFacts::of(
+            crate::services::assistant_acknowledgement_service::OwnerActionClass::Change,
+        ),
+        "Extract the approved URL with Oracle",
+    )
+    .await?
+    {
+        Ok(value) => value,
+        Err(refusal) => return Err(AppError::Conflict(refusal.to_string())),
+    };
+    if let Some(admission) = &admission {
+        admission.revalidate(&state.db).await?;
+    }
     let host = url::Url::parse(&body.url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string));
@@ -413,6 +536,9 @@ pub async fn extract_url(
     .await?;
 
     // Metadata only — never extracted content or full URL path/query.
+    if let Some(admission) = &admission {
+        admission.receipt(&state.db).await;
+    }
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,

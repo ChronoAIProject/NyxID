@@ -17,6 +17,9 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::sct::{HashAlgorithm, SignatureAlgorithm, SignedCertificateTimestamp};
 use x509_cert::ext::pkix::{SignedCertificateTimestampList, SubjectAltName};
 
+#[path = "update_attestation/trust.rs"]
+mod trust;
+
 const GITHUB_API_URL: &str = "https://api.github.com";
 const MAX_ATTESTATIONS: usize = 30;
 
@@ -37,7 +40,7 @@ pub(crate) async fn verify_release_attestation(
         anyhow::bail!("No GitHub artifact attestations found for sha256:{expected_digest}");
     }
 
-    let trust_root = SigstoreTrustRoot::new(None)
+    let trust_root = trust::load()
         .await
         .context("Failed to load Sigstore public-good trust root")?;
     let mut failures = Vec::new();
@@ -60,6 +63,41 @@ pub(crate) async fn verify_release_attestation(
     );
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ImageVerificationError {
+    #[error("attestation_unavailable")]
+    AttestationUnavailable,
+    #[error("trust_root_unavailable")]
+    TrustRootUnavailable,
+    #[error("attestation_invalid")]
+    AttestationInvalid,
+}
+
+/// Image updates use the same certificate, Rekor, DSSE and digest verifier as
+/// CLI releases, with TUF metadata mirrored on GitHub (no third-party egress).
+pub(crate) async fn verify_image_attestation(
+    client: &reqwest::Client,
+    digest: &str,
+    version: &str,
+    datastore: Option<&std::path::Path>,
+) -> Result<(), ImageVerificationError> {
+    let attestations = fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest)
+        .await
+        .map_err(|_| ImageVerificationError::AttestationUnavailable)?;
+    let root = trust::load_github(client.clone(), datastore)
+        .await
+        .map_err(|_| ImageVerificationError::TrustRootUnavailable)?;
+    let identity = format!(
+        "https://github.com/ChronoAIProject/NyxID/.github/workflows/publish-images.yml@refs/tags/v{version}"
+    );
+    for attestation in attestations {
+        if verify_single_attestation(&attestation, &root, digest, &identity).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(ImageVerificationError::AttestationInvalid)
+}
+
 async fn fetch_github_attestations(
     client: &reqwest::Client,
     owner: &str,
@@ -67,9 +105,14 @@ async fn fetch_github_attestations(
     digest: &str,
 ) -> Result<Vec<Attestation>> {
     let url = format!("{GITHUB_API_URL}/repos/{owner}/{repo}/attestations/sha256:{digest}");
-    let response = client
+    let mut request = client
         .get(&url)
-        .query(&[("per_page", MAX_ATTESTATIONS.to_string())])
+        .query(&[("per_page", MAX_ATTESTATIONS.to_string())]);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let token = zeroize::Zeroizing::new(token);
+        request = request.bearer_auth(token.as_str());
+    }
+    let response = request
         .send()
         .await
         .with_context(|| format!("Failed to query GitHub attestation API: {url}"))?;
@@ -103,6 +146,21 @@ async fn fetch_github_attestations(
 }
 
 async fn fetch_bundle_url(client: &reqwest::Client, bundle_url: &str) -> Result<SigstoreBundle> {
+    let parsed = url::Url::parse(bundle_url)?;
+    anyhow::ensure!(
+        parsed.scheme() == "https"
+            && parsed.port_or_known_default() == Some(443)
+            && matches!(
+                parsed.host_str(),
+                Some(
+                    "api.github.com"
+                        | "github.com"
+                        | "objects.githubusercontent.com"
+                        | "release-assets.githubusercontent.com"
+                )
+            ),
+        "Untrusted attestation bundle URL"
+    );
     let response = client
         .get(bundle_url)
         .send()

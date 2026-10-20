@@ -230,9 +230,9 @@ The build scripts only remove old artifacts (`.ipa`, `.xcarchive`) per run and l
 
 ## Legal documents (Privacy + Terms)
 
-Privacy Policy and Terms of Service are **markdown files served by the frontend** (`frontend/public/legal/privacy.md`, `frontend/public/legal/terms.md`). Both the web dashboard and the mobile app render the same source — edit once, both surfaces update on next visit (web) / next launch (mobile).
+Privacy Policy and Terms of Service share the markdown sources in `frontend/public/legal/privacy.md` and `frontend/public/legal/terms.md`. The frontend build renders static `/privacy` and `/terms` HTML from those files; the mobile app reads the markdown directly.
 
-Mobile fetches them at runtime from `${LEGAL_BASE_URL}/legal/{privacy,terms}.md` and renders with `react-native-markdown-display`, styled to match the mobile theme. Web fetches from the same `/legal/*.md` path and renders with `react-markdown` + `remark-gfm`.
+Mobile fetches them at runtime from `${LEGAL_BASE_URL}/legal/{privacy,terms}.md` and renders with `react-native-markdown-display`, styled to match the mobile theme. The web build uses `react-markdown` + `remark-gfm` to compile the pages; nginx caches the HTML for 24 hours and revalidates unchanged pages by content hash afterward.
 
 To update the text:
 
@@ -240,7 +240,7 @@ To update the text:
 2. Update the `effective_date` in the YAML frontmatter.
 3. Redeploy the frontend.
 
-No mobile rebuild required — the next time someone opens the screen, they get the new text.
+No mobile rebuild is required. The web pages can remain in a browser cache for up to 24 hours after a frontend deploy; mobile fetches the source on the next screen open.
 
 OSS forks: set `*_LEGAL_BASE_URL` in your `.env.*` to your own deploy origin (or a different host hosting the same `/legal/*.md` files).
 

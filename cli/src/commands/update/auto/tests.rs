@@ -60,7 +60,7 @@ async fn disabled_held_and_not_due_runs_never_require_a_binary_or_network() {
 fn scheduler_definitions_preserve_literal_paths_and_do_not_use_a_shell() {
     let root = Path::new("/tmp/space $dollar %percent \\\"quote/versions");
     let bin = Path::new("/tmp/space $dollar %percent \\\"quote/nyxid");
-    let definition = launchd_plist(root, bin);
+    let definition = launchd_plist(root, bin, &[]);
     let plist = plist::Value::from_reader_xml(definition.as_bytes()).unwrap();
     let values = plist.as_dictionary().unwrap();
     assert_eq!(
@@ -71,7 +71,7 @@ fn scheduler_definitions_preserve_literal_paths_and_do_not_use_a_shell() {
         values["EnvironmentVariables"].as_dictionary().unwrap()["NYXID_INSTALL_ROOT"].as_string(),
         root.to_str()
     );
-    let unit = systemd_service(root, bin);
+    let unit = systemd_service(root, bin, &[]);
     let env = unit
         .lines()
         .find_map(|line| line.strip_prefix("Environment="))
@@ -406,4 +406,45 @@ fn activation_intent_before_failed_switch_does_not_claim_installation() {
     assert!(!pending_phases(&policy));
     assert!(policy.last_result.unwrap().contains("did not complete"));
     assert_eq!(fs::read(active).unwrap(), b"old working binary");
+}
+
+#[test]
+fn scheduler_persists_current_absolute_ca_paths_in_both_formats() {
+    use crate::tls::environment::absolute_ca_environment;
+    let ca = absolute_ca_environment(|name| match name {
+        "NYXID_CA_CERT" => Some("relative & <ca> \"quote\" %n $x \\path.pem".into()),
+        "SSL_CERT_FILE" => Some("bundle.pem".into()),
+        "SSL_CERT_DIR" => Some(std::env::join_paths(["one", "two"]).unwrap()),
+        _ => panic!("proxy variables must never be read"),
+    })
+    .unwrap();
+    let root = Path::new("/versions");
+    let binary = Path::new("/bin/nyxid");
+    let xml = launchd_plist(root, binary, &ca);
+    let value = plist::Value::from_reader_xml(xml.as_bytes()).unwrap();
+    let env = value.as_dictionary().unwrap()["EnvironmentVariables"]
+        .as_dictionary()
+        .unwrap();
+    let unit = systemd_service(root, binary, &ca);
+    for (name, path) in &ca {
+        assert_eq!(env[*name].as_string(), Some(path.as_str()));
+        let line = unit
+            .lines()
+            .find(|line| line.starts_with(&format!("Environment=\"{name}=")))
+            .unwrap();
+        let parsed = shlex::split(line.strip_prefix("Environment=").unwrap()).unwrap();
+        assert_eq!(parsed[0].replace("%%", "%"), format!("{name}={path}"));
+    }
+    assert!(!xml.contains("HTTPS_PROXY"));
+    assert!(!unit.contains("HTTPS_PROXY"));
+    let empty = absolute_ca_environment(|_| Some("".into())).unwrap();
+    assert!(empty.is_empty());
+    for definition in [
+        launchd_plist(root, binary, &empty),
+        systemd_service(root, binary, &empty),
+    ] {
+        for variable in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            assert!(!definition.contains(variable));
+        }
+    }
 }

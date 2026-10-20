@@ -166,7 +166,12 @@ async fn handle_callback_query(
         .map(|m| m.chat.id)
         .unwrap_or(callback.from.id);
 
-    if request.telegram_chat_id != Some(chat_id) {
+    if !callback_can_decide(
+        request.telegram_chat_id,
+        chat_id,
+        callback.from.id,
+        request.assistant_group.is_some(),
+    ) {
         tracing::warn!(
             "Chat ID mismatch: expected {:?}, got {}",
             request.telegram_chat_id,
@@ -229,6 +234,12 @@ async fn handle_callback_query(
             answer_callback(state, &callback.id, callback_message).await;
         }
     }
+}
+
+fn callback_can_decide(expected: Option<i64>, chat: i64, sender: i64, org_group: bool) -> bool {
+    // A notification channel may be a shared Telegram chat. Group cards belong
+    // to one person: only that person's private-chat callback can decide them.
+    expected == Some(chat) && (!org_group || sender == chat)
 }
 
 /// Handle a Telegram /start link message.
@@ -410,6 +421,17 @@ fn decision_callback_message(error: &AppError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn org_group_approval_telegram_requires_the_notified_person() {
+        assert!(callback_can_decide(Some(42), 42, 42, true));
+        assert!(!callback_can_decide(Some(42), 42, 99, true));
+        assert!(!callback_can_decide(Some(-42), -42, 42, true));
+        assert!(!callback_can_decide(Some(42), 99, 99, true));
+        assert!(!callback_can_decide(None, 42, 42, true));
+        // Existing non-group notification behavior is unchanged.
+        assert!(callback_can_decide(Some(-42), -42, 42, false));
+    }
 
     fn notification_channel(approval_required: bool) -> NotificationChannel {
         NotificationChannel {

@@ -98,7 +98,7 @@ export function ApiKeyCreateDialog({
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
 
-  const { data: services } = useKeys();
+  const { data: services } = useKeys({ includeTools: true });
   const { data: nodes } = useNodes();
   const { data: orgs } = useOrgs();
 
@@ -146,7 +146,9 @@ export function ApiKeyCreateDialog({
 
     initializedSetupRef.current = true;
     const initialService = (services ?? []).find(
-      (service) => service.id === initialServiceId,
+      (service) =>
+        service.id === initialServiceId ||
+        service.catalog_service_id === initialServiceId,
     );
     const serviceSource = initialService?.credential_source;
     const targetOrgId =
@@ -226,7 +228,7 @@ export function ApiKeyCreateDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all">
                 {createdKey}
               </code>
               <Button
@@ -277,7 +279,7 @@ export function ApiKeyCreateDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}

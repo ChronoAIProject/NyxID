@@ -82,6 +82,9 @@ async fn setup_benefits(prefix: &str) -> Option<BenefitFixture> {
 fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> CreditGrant {
     let now = Utc::now();
     CreditGrant {
+        service_limits: Vec::new(),
+        revoke_requested_at: None,
+        revoke_requested_by: None,
         id: Uuid::new_v4().to_string(),
         batch_id: Uuid::new_v4().to_string(),
         schedule_origin: None,
@@ -90,9 +93,9 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
         target_org_ids: Vec::new(),
         target_group_ids: Vec::new(),
         amount_credits: 5,
-        amount_micros: 5_000_000,
-        remaining_micros: 5_000_000,
-        reserved_micros: 0,
+        amount: crate::models::credits::Credits::from_micros(5_000_000),
+        remaining: crate::models::credits::Credits::from_micros(5_000_000),
+        reserved: crate::models::credits::Credits::from_micros(0),
         scope: BillingServiceScope {
             all_services: true,
             service_ids: Vec::new(),
@@ -104,7 +107,7 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
         status: CreditGrantStatus::Active,
         issued_ledgered_at,
         terminal_ledgered_at: None,
-        terminal_amount_micros: 0,
+        terminal_amount: crate::models::credits::Credits::from_micros(0),
         active_settlement: None,
         created_at: now,
         updated_at: now,
@@ -240,6 +243,9 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         State(fixture.state.clone()),
         test_auth_user(&fixture.platform_admin_id),
         Json(IssueGrantRequest {
+            amount: None,
+            service_limits: Vec::new(),
+            request_id: None,
             amount_credits: 10,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec![fixture.personal_id.clone(), fixture.non_member_id.clone()],

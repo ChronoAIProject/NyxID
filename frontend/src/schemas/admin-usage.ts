@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { BILLING_METRICS } from "./billing-metrics";
 
@@ -11,10 +12,20 @@ export const usageStatsSchema = z.object({
   completion_tokens: count,
   cached_tokens: count,
   cache_creation_tokens: count,
+  // Audio subsets of input/output; absent from older servers.
+  audio_input_tokens: count.default(0),
+  audio_output_tokens: count.default(0),
+  // Image subsets are absent from older servers and historical records.
+  image_input_tokens: count.default(0),
+  image_output_tokens: count.default(0),
   total_tokens: count,
+  gross_cost: creditsSchema.nullable().optional(),
   gross_cost_micros: count.nullable(),
+  wallet_cost: creditsSchema.nullable().optional(),
   wallet_cost_micros: count.nullable(),
+  grant_cost: creditsSchema.nullable().optional(),
   grant_cost_micros: count.nullable(),
+  allowance_cost: creditsSchema.nullable().optional(),
   allowance_cost_micros: count.nullable(),
   exact_cost_events: count,
   legacy_cost_events: count,
@@ -36,9 +47,14 @@ export const usageServiceIdentitySchema = z.object({
 export const usageCredentialSchema = usageStatsSchema.extend({
   credential_class: z.string(),
 });
+export const usageOperationSchema = usageStatsSchema.extend({
+  operation: z.string(),
+});
 export const usageServiceSchema = usageStatsSchema.extend({
   ...usageServiceIdentitySchema.shape,
   by_credential_class: z.array(usageCredentialSchema),
+  // Usage charged at operation prices; absent from older servers.
+  by_operation: z.array(usageOperationSchema).default([]),
 });
 export const usageRankingSchema = usageStatsSchema.extend({
   ...usageServiceIdentitySchema.shape,
@@ -78,6 +94,8 @@ export const USAGE_SORTS = [
   "completion_tokens",
   "cached_tokens",
   "cache_creation_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
 ] as const;
 export const adminUsageSearchSchema = z.object({
   period: z.enum(["24h", "7d", "30d", "custom"]).catch("24h"),

@@ -1,3 +1,4 @@
+import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ViewToggle, useViewMode } from "@/components/shared/view-toggle";
@@ -166,7 +167,7 @@ function RegisterNodeDialog({
                   Run on your node
                 </p>
                 <div>
-                  <p className="text-[10px] text-muted-foreground mb-0.5">
+                  <p className="text-10 text-muted-foreground mb-0.5">
                     File-based storage (default, works on servers)
                   </p>
                   <code className="text-xs text-foreground break-all">
@@ -175,7 +176,7 @@ function RegisterNodeDialog({
                   </code>
                 </div>
                 <div>
-                  <p className="text-[10px] text-muted-foreground mb-0.5">
+                  <p className="text-10 text-muted-foreground mb-0.5">
                     OS keychain storage (macOS Keychain, Windows Credential
                     Manager)
                   </p>
@@ -204,7 +205,7 @@ function RegisterNodeDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -335,8 +336,8 @@ export function NodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Credential Nodes"
-        description="Manage your credential nodes for self-hosted proxy routing."
+        title="Nodes"
+        description="Manage credential routing and machines your agents may use."
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
@@ -361,16 +362,16 @@ export function NodesPage() {
               <>
                 <div className="flex items-center justify-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <p className="text-[12px] font-medium text-foreground">Waiting for your node to connect…</p>
+                  <p className="text-12 font-medium text-foreground">Waiting for your node to connect…</p>
                 </div>
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   Run the registration command on the node. We&apos;ll take you to its page automatically.
                 </p>
               </>
             ) : (
               <>
-                <p className="text-[12px] font-medium text-foreground">No Credential Nodes</p>
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 font-medium text-foreground">No Credential Nodes</p>
+                <p className="text-12 text-muted-foreground">
                   Create a registration token to get started.
                 </p>
               </>
@@ -388,7 +389,7 @@ export function NodesPage() {
                 tabIndex={0}
                 onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
                 onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } }); }}
-                className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
               >
                 {canManageNode(node, currentUserId, adminOrgIds) && (
                   <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
@@ -402,10 +403,10 @@ export function NodesPage() {
                     </Button>
                   </div>
                 )}
-                <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                <p className="pr-10 text-13 font-semibold text-foreground truncate">
                   {node.name}
                   {node.metadata?.agent_version && (
-                    <span className="ml-2 text-[11px] font-normal text-muted-foreground">
+                    <span className="ml-2 text-11 font-normal text-muted-foreground">
                       v{node.metadata.agent_version}
                     </span>
                   )}
@@ -413,8 +414,9 @@ export function NodesPage() {
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                   <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
+                  {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                   <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
                   <span>Created {formatRelativeTime(node.created_at)}</span>
                 </div>
@@ -430,7 +432,7 @@ export function NodesPage() {
                   key={node.id}
                   to="/nodes/$nodeId"
                   params={{ nodeId: node.id }}
-                  className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]"
+                  className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay"
                 >
                   {canManageNode(node, currentUserId, adminOrgIds) && (
                     <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
@@ -447,10 +449,10 @@ export function NodesPage() {
                       </Button>
                     </div>
                   )}
-                  <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                  <p className="pr-10 text-13 font-semibold text-foreground truncate">
                     {node.name}
                     {node.metadata?.agent_version && (
-                      <span className="ml-2 text-[11px] font-normal text-muted-foreground">
+                      <span className="ml-2 text-11 font-normal text-muted-foreground">
                         v{node.metadata.agent_version}
                       </span>
                     )}
@@ -458,8 +460,9 @@ export function NodesPage() {
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                     <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
+                  {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                     <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
                     <span>Created {formatRelativeTime(node.created_at)}</span>
                   </div>
@@ -488,7 +491,7 @@ export function NodesPage() {
                   {nodes.map((node) => (
                     <TableRow
                       key={node.id}
-                      className="cursor-pointer hover:bg-white/[0.03]"
+                      className="cursor-pointer hover:bg-overlay"
                       onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
                     >
                       <TableCell>
@@ -511,6 +514,7 @@ export function NodesPage() {
                           status={node.status}
                           isConnected={node.is_connected}
                         />
+                        {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}

@@ -394,6 +394,32 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             credential,
             auth,
         } => bind_credential(&auth, &id, &service, credential.as_deref()).await,
+        ApiKeyCommands::Operations {
+            id,
+            service,
+            allow_endpoints,
+            allow_rules,
+            all,
+            deny_all,
+            inputs,
+            auth,
+        } => {
+            let inputs = inputs
+                .map(|file| -> Result<Value> {
+                    let text = std::fs::read_to_string(&file)?;
+                    Ok(serde_json::from_str(&text)?)
+                })
+                .transpose()?;
+            let change = service.map(|service| OperationChange {
+                service,
+                allow_endpoints,
+                allow_rules,
+                all,
+                deny_all,
+                inputs,
+            });
+            key_operations(&auth, &id, change).await
+        }
         ApiKeyCommands::DurablePlan { file, auth } => {
             let body = read_json_contract(&file)?;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -554,6 +580,194 @@ async fn find_key_by_name(api: &mut ApiClient, name: &str) -> Result<Value> {
 }
 
 /// Resolve an API key identifier (ID or name) to a key ID string.
+struct OperationChange {
+    service: String,
+    allow_endpoints: Vec<String>,
+    allow_rules: Vec<String>,
+    all: bool,
+    deny_all: bool,
+    /// Value limits keyed by operation ID; None keeps saved limits.
+    inputs: Option<Value>,
+}
+
+/// Parse `METHOD:/path` into an explicit operation rule.
+fn parse_operation_rule(spec: &str) -> Result<Value> {
+    let (method, path) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("Rule '{spec}' must look like GET:/items/{{id}}"))?;
+    let method = method.trim().to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "PATCH" | "DELETE"
+    ) || !path.starts_with('/')
+    {
+        anyhow::bail!("Rule '{spec}' must look like GET:/items/{{id}}");
+    }
+    Ok(serde_json::json!({"method": method, "path_template": path}))
+}
+
+/// Build the selection body for one service, pinned to its current revision.
+fn operation_selection(current: &Value, change: &OperationChange) -> Result<Value> {
+    if !change.all
+        && !change.deny_all
+        && change.allow_endpoints.is_empty()
+        && change.allow_rules.is_empty()
+    {
+        anyhow::bail!("Choose --all, --deny-all, --allow-endpoint or --allow");
+    }
+    let rules = change
+        .allow_rules
+        .iter()
+        .map(|spec| parse_operation_rule(spec))
+        .collect::<Result<Vec<_>>>()?;
+    // Keep saved limits for operations that stay selected unless replaced.
+    let inputs: serde_json::Map<String, Value> = match &change.inputs {
+        Some(Value::Object(map)) => map.clone(),
+        Some(_) => anyhow::bail!("--inputs must be a JSON object keyed by operation ID"),
+        None => current["inputs"]
+            .as_object()
+            .map(|saved| {
+                saved
+                    .iter()
+                    .filter(|(id, _)| change.allow_endpoints.contains(id))
+                    .map(|(id, value)| (id.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut selection = serde_json::json!({
+        "expected_revision": current["revision"].as_i64().unwrap_or(0),
+        "all_operations": change.all,
+        "endpoint_ids": change.allow_endpoints,
+        "rules": rules,
+    });
+    if !change.all && !inputs.is_empty() {
+        selection["inputs"] = Value::Object(inputs);
+    }
+    Ok(selection)
+}
+
+async fn key_operations(auth: &AuthArgs, id: &str, change: Option<OperationChange>) -> Result<()> {
+    let mut api = ApiClient::from_auth_checked(auth).await?;
+    let key_id = resolve_key_id(&mut api, id).await?;
+    let services: Vec<Value> = api.get(&format!("/api-keys/{key_id}/operations")).await?;
+    let Some(change) = change else {
+        match auth.output {
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&services)?),
+            OutputFormat::Table => print_operations(&services),
+        }
+        return Ok(());
+    };
+    let current = services
+        .iter()
+        .find(|row| {
+            row["service_id"].as_str() == Some(change.service.as_str())
+                || row["service_slug"].as_str() == Some(change.service.as_str())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("Service '{}' is not available to this key", change.service)
+        })?;
+    let service_id = current["service_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let body = operation_selection(current, &change)?;
+    let result: Value = api
+        .put(
+            &format!("/api-keys/{key_id}/operations/{service_id}"),
+            &body,
+        )
+        .await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Table => {
+            let name = current["service_name"].as_str().unwrap_or(&change.service);
+            if result["all_operations"].as_bool().unwrap_or(false) {
+                eprintln!("{name}: all operations allowed.");
+            } else {
+                let count = change.allow_endpoints.len() + change.allow_rules.len();
+                eprintln!(
+                    "{name}: limited to {count} operation(s) (revision {}).",
+                    result["revision"].as_i64().unwrap_or(0)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_operations(services: &[Value]) {
+    if services.is_empty() {
+        eprintln!("This key has no services to limit.");
+        return;
+    }
+    for service in services {
+        let name = service["service_name"].as_str().unwrap_or("-");
+        let slug = service["service_slug"].as_str().unwrap_or("-");
+        let selected: Vec<&str> = service["endpoint_ids"]
+            .as_array()
+            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let all = service["all_operations"].as_bool().unwrap_or(true);
+        eprintln!(
+            "\n{name} ({slug}) · revision {} · {}",
+            service["revision"].as_i64().unwrap_or(0),
+            if all {
+                "all operations".to_owned()
+            } else {
+                format!(
+                    "{} selected",
+                    selected.len() + service["rules"].as_array().map_or(0, Vec::len)
+                )
+            }
+        );
+        let limited = |id: &str| service["inputs"].get(id).is_some();
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL_CONDENSED);
+        table.set_header(vec![
+            "Allowed",
+            "Operation ID",
+            "Method",
+            "Path",
+            "Effect",
+            "Limits",
+        ]);
+        for op in service["operations"].as_array().into_iter().flatten() {
+            let op_id = op["endpoint_id"].as_str().unwrap_or("-");
+            let effect = if op["read_only"].as_bool().unwrap_or(false) {
+                "read"
+            } else if op["changes_existing"].as_bool().unwrap_or(false) {
+                "changes existing"
+            } else {
+                "write"
+            };
+            table.add_row(vec![
+                if all || selected.contains(&op_id) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                op_id,
+                op["method"].as_str().unwrap_or("-"),
+                op["path"].as_str().unwrap_or("-"),
+                effect,
+                if limited(op_id) { "values" } else { "" },
+            ]);
+        }
+        for rule in service["rules"].as_array().into_iter().flatten() {
+            table.add_row(vec![
+                "yes",
+                "(rule)",
+                rule["method"].as_str().unwrap_or("-"),
+                rule["path_template"].as_str().unwrap_or("-"),
+                "-",
+                "",
+            ]);
+        }
+        eprintln!("{table}");
+    }
+}
+
 async fn resolve_key_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
     // Try as a direct ID first (GET /api-keys/{id})
     if let Ok(key) = api.get::<Value>(&format!("/api-keys/{id_or_name}")).await
@@ -1620,5 +1834,75 @@ mod option_tests {
         })
         .await
         .expect("bind with label should succeed");
+    }
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+
+    fn change(all: bool, deny_all: bool, endpoints: &[&str], rules: &[&str]) -> OperationChange {
+        OperationChange {
+            service: "calendar".into(),
+            allow_endpoints: endpoints.iter().map(|s| (*s).to_owned()).collect(),
+            allow_rules: rules.iter().map(|s| (*s).to_owned()).collect(),
+            all,
+            deny_all,
+            inputs: None,
+        }
+    }
+
+    #[test]
+    fn saved_limits_follow_operations_that_stay_selected() {
+        let current = serde_json::json!({"revision": 2, "inputs": {
+            "e1": {"query": {}}, "e2": {"path": {}}}});
+        let selection = operation_selection(&current, &change(false, false, &["e1"], &[])).unwrap();
+        assert_eq!(
+            selection["inputs"],
+            serde_json::json!({"e1": {"query": {}}})
+        );
+        let mut replaced = change(false, false, &["e1"], &[]);
+        replaced.inputs = Some(serde_json::json!({"e1": {"path": {}}}));
+        assert_eq!(
+            operation_selection(&current, &replaced).unwrap()["inputs"],
+            serde_json::json!({"e1": {"path": {}}})
+        );
+        assert!(
+            operation_selection(&current, &change(true, false, &[], &[]))
+                .unwrap()
+                .get("inputs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rules_parse_method_and_path() {
+        assert_eq!(
+            parse_operation_rule("get:/items/{id}").unwrap(),
+            serde_json::json!({"method": "GET", "path_template": "/items/{id}"})
+        );
+        assert!(parse_operation_rule("FETCH:/items").is_err());
+        assert!(parse_operation_rule("GET:items").is_err());
+        assert!(parse_operation_rule("/items").is_err());
+    }
+
+    #[test]
+    fn selections_pin_the_listed_revision() {
+        let current = serde_json::json!({"revision": 3});
+        assert_eq!(
+            operation_selection(&current, &change(false, false, &["e1"], &[])).unwrap(),
+            serde_json::json!({"expected_revision": 3, "all_operations": false,
+                "endpoint_ids": ["e1"], "rules": []})
+        );
+        assert_eq!(
+            operation_selection(&current, &change(false, true, &[], &[])).unwrap(),
+            serde_json::json!({"expected_revision": 3, "all_operations": false,
+                "endpoint_ids": [], "rules": []})
+        );
+        assert_eq!(
+            operation_selection(&current, &change(true, false, &[], &[])).unwrap()["all_operations"],
+            serde_json::json!(true)
+        );
+        assert!(operation_selection(&current, &change(false, false, &[], &[])).is_err());
     }
 }

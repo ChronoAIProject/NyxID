@@ -1,5 +1,5 @@
 //! Billing units and exact unit-price validation shared by CLI surfaces.
-pub const METRICS: [&str; 8] = [
+pub const METRICS: [&str; 9] = [
     "tokens",
     "requests",
     "bytes",
@@ -8,6 +8,7 @@ pub const METRICS: [&str; 8] = [
     "cache_read_tokens",
     "cache_write_tokens",
     "images",
+    "voice_seconds",
 ];
 pub const PRICE_FRACTIONAL_DIGITS: usize = 12;
 
@@ -24,6 +25,8 @@ pub fn label(metric: &str, singular: bool) -> &str {
         ("cache_read_tokens", true) => "cache-read token",
         ("cache_write_tokens", false) => "cache-write tokens",
         ("cache_write_tokens", true) => "cache-write token",
+        ("voice_seconds", true) => "voice second",
+        ("voice_seconds", false) => "voice seconds",
         ("images", true) => "image",
         _ => metric,
     }
@@ -65,11 +68,27 @@ pub fn component(raw: &str) -> Result<String, String> {
     Ok(format!("{metric}={}", price(value)?))
 }
 
+/// `<operation>=<price>`, where the operation is an endpoint name or a
+/// declared channel operation; the server validates that it exists.
+pub fn operation(raw: &str) -> Result<String, String> {
+    let (operation, value) = raw.split_once('=').ok_or("Use <operation>=<price>")?;
+    let operation = operation.trim();
+    if operation.is_empty() {
+        return Err("Operation name must not be empty".into());
+    }
+    Ok(format!("{operation}={}", price(value)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn prices_are_exact_and_components_are_validated() {
+        assert_eq!(
+            component("voice_seconds=0.000000123456").unwrap(),
+            "voice_seconds=0.000000123456"
+        );
+        assert_eq!(label("voice_seconds", true), "voice second");
         assert_eq!(
             component("cache_read_tokens=0.000000250001").unwrap(),
             "cache_read_tokens=0.000000250001"

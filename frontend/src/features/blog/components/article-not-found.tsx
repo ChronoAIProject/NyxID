@@ -4,7 +4,7 @@ export function ArticleNotFound() {
   return (
     <div className="px-6 pt-20 pb-24">
       <div className="border-landing-border-subtle bg-landing-surface mx-auto max-w-md rounded-2xl border p-10 text-center">
-        <p className="font-mono text-xs tracking-widest text-primary uppercase">
+        <p className="font-mono text-xs tracking-widest text-primary-text uppercase">
           Not found
         </p>
         <p className="mt-3 font-serif text-2xl text-white">

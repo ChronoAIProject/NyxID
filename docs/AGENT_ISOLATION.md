@@ -1,5 +1,20 @@
 # Agent Isolation
 
+Per-thread `nyxid-assistant` credentials carry an `AssistantTurnFence`. With
+the default-off `assistant:live-turn-gate` rollout flag enabled, execution
+requires a live, non-stopped turn; dedicated channel-agent credentials remain
+separate and idle-capable. Deploy all replicas before enabling the flag, and
+disable it before rollback.
+
+NyxBot service ordering does not enable this rollout flag. While it is off,
+personal service calls and existing personal/platform model inference remain
+available to keys first authenticated without a live turn, subject to their
+current grants, ACLs, operation scopes and permission mode. Actions that need
+confirmation and organization connection use require a real live turn. Turn
+selection and organization model consent cannot be borrowed by an idle request.
+An admission captured in a live turn always retains its same-turn and Stop
+fence through final dispatch, independently of the rollout flag.
+
 ## Login Credentials Bound to a Key
 
 `nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.
@@ -9,6 +24,14 @@ Authentication resolves the live parent key for scopes, service/node restriction
 `whoami` and `status` identify Agent Key authentication. `logout` revokes only the calling child and clears the profile; individual credentials can also be revoked in the key detail page's Login credentials section. The profile holds a protected `token`, an `auth_kind` marker, and safe `agent_key.json` metadata, with no human refresh token. Rejected credentials never refresh or prompt for account login. Abandoned approved exchanges are revoked after their 60-second delivery window by poll/preview cleanup or the configured background sweep.
 
 Login credential labels combine the sanitized client hostname and requested profile (up to 96 characters), so separate profiles on one machine remain identifiable. Public preview exposes request context and status only; key metadata is available through authenticated selection and self routes or credential delivery. Approval, denial, and delivery audits retain the actor's IP and user agent, with the request ID linking the events. A failed expiry cleanup is logged and retained for retry while the sweep continues processing other exchanges.
+
+### Channel list credential boundaries
+
+An Agent Key login does not authorize the human management commands `nyxid channel-bot list` or `nyxid channel-event channel list`. These require human account access (session cookie or account access token): personal lists are owner-scoped and `--org` requires org-admin access. Their existing OAuth-client account policy is unchanged; first-party-only routes separately reject OAuth-client tokens. To use a management list, ask a human to run `nyxid login` and choose account access, or explicitly select an existing human profile. Never fall back to another identity, create credentials or widen permissions automatically.
+
+Agents already have a narrower read-only discovery path: `GET /api/v1/channel-relay/conversations?page=1&per_page=50`, authenticated with the assigned active API key. It lists only that exact key's active conversation assignments, including device channels (`platform=device`). It does not list all bots, grant management access or discover other keys' assignments. There is no separate channel-event discovery endpoint. No assignments means an empty list.
+
+Unsupported credential types return the same 403, `forbidden` / `1002` and message as before, with additive `details.reason = credential_type_unsupported`, `credential_type`, `accepted: ["user_session"]` and a safe hint. The accepted value describes human account recovery, not a scope or resource grant. CLI text and JSON expose that reason plus manual guidance; the two list commands also point to the assigned-conversation route. Scope failures use `insufficient_scope`; resource permission failures are not mislabelled as credential-type failures. Authentication failures use 401 with `authentication_failed` or `credential_expired` when expiry is reported. Deny-only route guards run before credential verification, so their type-based 403 makes no claim about validity (even an expired API-key-shaped token is rejected there before authentication). See [Error Format](API.md#error-format).
 
 ## Asset ownership transfer
 
@@ -410,3 +433,7 @@ connections or widen service scopes. Restricted scheduled-invocation keys remain
 ineligible. Invalid, revoked, expired and out-of-scope keys return `active: false`;
 unexpected database failures in agent-key verification return 503 so consumers
 can distinguish an outage from revocation.
+
+### NyxBot access authority
+
+Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.

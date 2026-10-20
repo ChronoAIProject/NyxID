@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Channel bot lifecycle management service.
 //!
 //! Handles bot registration, webhook setup, token encryption/decryption,
@@ -134,7 +136,8 @@ async fn write_registration_fields(
 
 /// Register a channel bot or recover the owner's existing manager connection.
 ///
-/// Verifies the token with the platform, encrypts it, generates a webhook
+/// A `None` label uses the platform-reported bot name (display name, then
+/// username). Verifies the token with the platform, encrypts it, generates a webhook
 /// secret, and inserts a new bot in `pending` status. The caller must follow up
 /// with [`register_webhook`] for a new bot or [`verify_telegram_bot`] for a reused
 /// manager connection to activate it.
@@ -146,8 +149,34 @@ pub async fn create_bot(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     user_id: &str,
-    label: &str,
+    label: Option<&str>,
     fields: &RegistrationValues<'_>,
+) -> AppResult<CreateBotResult> {
+    create_bot_linked(
+        db,
+        config,
+        encryption_keys,
+        http_client,
+        adapter,
+        user_id,
+        label,
+        fields,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_bot_linked(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    encryption_keys: &EncryptionKeys,
+    http_client: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    user_id: &str,
+    label: Option<&str>,
+    fields: &RegistrationValues<'_>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     if descriptor.managed_only {
@@ -156,11 +185,10 @@ pub async fn create_bot(
         ));
     }
     descriptor.validate(fields, false)?;
-    // Validate label
-    if label.is_empty() || label.len() > 200 {
-        return Err(AppError::ValidationError(
-            "Label must be between 1 and 200 characters".to_string(),
-        ));
+    let label_error =
+        || AppError::ValidationError("Label must be between 1 and 200 characters".to_string());
+    if label.is_some_and(|label| label.is_empty() || label.len() > 200) {
+        return Err(label_error());
     }
 
     let effective_token = adapter.registration_token(fields)?;
@@ -175,6 +203,10 @@ pub async fn create_bot(
             },
         )
         .await?;
+    let label = match label {
+        Some(label) => label.to_string(),
+        None => default_label(&identity).ok_or_else(label_error)?,
+    };
 
     persist_verified_bot(
         db,
@@ -182,14 +214,32 @@ pub async fn create_bot(
         encryption_keys,
         adapter,
         user_id,
-        label,
+        &label,
         fields,
         &effective_token,
         identity,
         None,
         None,
+        link_claim,
     )
     .await
+}
+
+/// Label derived from the platform's bot identity, bounded to the API limit.
+pub(crate) fn default_label(identity: &BotIdentity) -> Option<String> {
+    let name = identity
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| Some(identity.platform_bot_username.trim()).filter(|name| !name.is_empty()))?;
+    let end = name
+        .char_indices()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| *end <= 128)
+        .last()
+        .unwrap_or(0);
+    Some(name[..end].to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -205,11 +255,13 @@ async fn persist_verified_bot(
     identity: BotIdentity,
     managed: Option<(&str, &crate::models::channel_bot::ManagedBotSetup)>,
     connection: Option<(&str, &super::channel_platform::PollOutcome)>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     let BotIdentity {
         platform_bot_id,
         platform_bot_username,
+        ..
     } = identity;
 
     // Check for duplicate platform bot
@@ -223,7 +275,9 @@ async fn persist_verified_bot(
         .await?;
 
     if let Some(existing) = existing {
-        if managed.is_none()
+        super::platform_bot_authority::require_personal_routes(db, &existing.id).await?;
+        if link_claim.is_none()
+            && managed.is_none()
             && connection.is_none()
             && adapter.platform_id() == "telegram"
             && existing.user_id == user_id
@@ -273,10 +327,13 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        diagnostics: Default::default(),
         x_events: None,
         last_verification: None,
         ownership_version: 0,
-        id: uuid::Uuid::new_v4().to_string(),
+        id: link_claim
+            .map(|claim| claim.link.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
@@ -343,7 +400,14 @@ async fn persist_verified_bot(
     .await?;
     let bot: ChannelBot = bson::from_document(document)
         .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
-    insert_registered_bot(db, &bot, config.channel_relay_max_bots_per_user, None).await?;
+    insert_registered_bot_linked(
+        db,
+        &bot,
+        config.channel_relay_max_bots_per_user,
+        None,
+        link_claim,
+    )
+    .await?;
     let bot = get_bot(db, &bot.id).await?;
 
     Ok(CreateBotResult {
@@ -369,6 +433,26 @@ pub async fn create_managed_bot(
     label: &str,
     input: &super::channel_managed::ManagedOnboardingInput,
     progress: &super::channel_managed::ManagedProgress,
+) -> AppResult<CreateBotResult> {
+    create_managed_bot_linked(
+        db, billing, config, keys, http, adapter, owner, label, input, progress, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_managed_bot_linked(
+    db: &mongodb::Database,
+    billing: &super::billing::BillingService,
+    config: &AppConfig,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    owner: &str,
+    label: &str,
+    input: &super::channel_managed::ManagedOnboardingInput,
+    progress: &super::channel_managed::ManagedProgress,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<CreateBotResult> {
     let managed = adapter
         .managed_onboarding()
@@ -471,6 +555,7 @@ pub async fn create_managed_bot(
             identity,
             None,
             Some((connection_id, &outcome)),
+            link_claim,
         )
         .await?;
         progress.stage("subscribing");
@@ -524,6 +609,7 @@ pub async fn create_managed_bot(
         result.identity,
         Some((&result.registration_pin, &result.setup)),
         None,
+        link_claim,
     )
     .await?;
     let webhook_url = format!(
@@ -565,16 +651,62 @@ pub(crate) async fn insert_registered_bot(
     capacity: u32,
     telegram_request_revision: Option<i64>,
 ) -> AppResult<()> {
+    insert_registered_bot_linked(db, bot, capacity, telegram_request_revision, None).await
+}
+
+pub(crate) async fn insert_registered_bot_linked(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    telegram_request_revision: Option<i64>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
+) -> AppResult<()> {
     if matches!(bot.platform.as_str(), "telegram" | "telegram-new") {
         super::telegram_new_service::with_operation(
             db,
             &format!("telegram-manager-identity:{}", bot.platform_bot_id),
-            insert_registered_bot_inner(db, bot, capacity, telegram_request_revision),
+            insert_registered_bot_inner(
+                db,
+                bot,
+                capacity,
+                telegram_request_revision,
+                link_claim,
+                None,
+            ),
         )
         .await
     } else {
-        insert_registered_bot_inner(db, bot, capacity, telegram_request_revision).await
+        insert_registered_bot_inner(
+            db,
+            bot,
+            capacity,
+            telegram_request_revision,
+            link_claim,
+            None,
+        )
+        .await
     }
+}
+
+pub(crate) async fn insert_approved_telegram_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    request: &crate::models::telegram_bot_request::TelegramBotRequest,
+) -> AppResult<()> {
+    super::telegram_new_service::with_operation(
+        db,
+        &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+        insert_registered_bot_inner(
+            db,
+            bot,
+            capacity,
+            Some(request.revision),
+            None,
+            Some(request),
+        ),
+    )
+    .await
 }
 
 async fn insert_registered_bot_inner(
@@ -582,6 +714,8 @@ async fn insert_registered_bot_inner(
     bot: &ChannelBot,
     capacity: u32,
     telegram_request_revision: Option<i64>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
+    captured_request: Option<&crate::models::telegram_bot_request::TelegramBotRequest>,
 ) -> AppResult<()> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
@@ -596,9 +730,20 @@ async fn insert_registered_bot_inner(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let mut bot = bot.clone();
+    let link_claim = link_claim.cloned();
+    let captured_request = captured_request.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
             db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
+            let approved_setup = if let Some(request) = &captured_request {
+                super::platform_provisioning_service::fence_request(&db, request, true, session).await?
+            } else {
+                if db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
+                    .find_one(super::platform_bot_authority::installation_filter(&bot.id, &bot.platform, &bot.platform_bot_id)).session(&mut *session).await?.is_some() {
+                    return Err(AppError::Forbidden("This bot requires its reviewed setup authority".into()));
+                }
+                None
+            };
             let bots = db.collection::<ChannelBot>(COLLECTION_NAME);
             if let Some(existing) = bots.find_one(doc! {"_id": &bot.id}).session(&mut *session).await? {
                 if telegram_request_revision.is_some() && existing.is_active && existing.user_id == bot.user_id && existing.platform_bot_id == bot.platform_bot_id { return Ok(()); }
@@ -607,6 +752,10 @@ async fn insert_registered_bot_inner(
             let platform = if matches!(bot.platform.as_str(), "telegram" | "telegram-new") { bson::Bson::Document(doc! {"$in": ["telegram", "telegram-new"]}) } else { bson::Bson::String(bot.platform.clone()) };
             if bots.find_one(doc! {"platform": platform, "platform_bot_id": &bot.platform_bot_id, "is_active": true}).session(&mut *session).await?.is_some() {
                 return Err(AppError::Conflict("This bot is already connected. Open its existing connection in Channel Bots to complete setup. Check Personal and organization scopes, or ask the connection owner for access.".into()));
+            }
+            if db.collection::<bson::Document>(crate::models::platform_bot_config::COLLECTION_NAME)
+                .find_one(super::platform_bot_authority::profile_filter(&bot.id, &bot.platform, &bot.platform_bot_id)).session(&mut *session).await?.is_some() {
+                return Err(AppError::Forbidden("Platform manager registration is controlled through platform configuration".into()));
             }
             if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && let Some(manager) = db.collection::<crate::models::platform_credential::PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await? {
                 if bot.platform != "telegram" || manager.fields.get("webhook_ready").map(String::as_str) != Some("true") {
@@ -650,7 +799,19 @@ async fn insert_registered_bot_inner(
                     ));
                 }
             }
+            if let Some(claim) = &link_claim {
+                super::channel_connect_link_service::associate(&db, &mut *session, claim, &bot).await?;
+            } else if telegram_request_revision.is_some() {
+                super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
+            }
             bots.insert_one(&bot).session(&mut *session).await?;
+            if let Some(setup) = approved_setup {
+                let installation = db.collection::<bson::Document>(crate::models::platform_installation::COLLECTION_NAME)
+                    .find_one(doc! {"setup_id": &setup.id, "channel_bot_id": &bot.id}).session(&mut *session).await?
+                    .ok_or_else(|| AppError::Conflict("Installation authority disappeared".into()))?;
+                db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id": &bot.id},
+                    doc! {"$set": {"platform_installation_id": installation.get_str("_id").map_err(|_| AppError::Conflict("Installation authority is invalid".into()))?}}).session(&mut *session).await?;
+            }
             Ok(())
         }.await;
         transaction_result(operation)
@@ -737,7 +898,7 @@ async fn reconnect_bot_inner(
     let (cursor, backoff, last_polled_at) = if bot.webhook_registered
         || (bot.platform == "x"
             && (billing.billing_enabled()
-                || super::channel_adapters::x::public_events_enabled(bot)))
+                || super::channel_adapters::x::webhook_events_enabled(bot)))
     {
         (
             bot.poll_cursor.clone(),
@@ -1065,6 +1226,19 @@ async fn update_bot_inner(
             bson::to_bson(events)
                 .map_err(|_| AppError::Internal("Unable to encode X events".into()))?,
         );
+        let previous = super::channel_adapters::x::selected_events(&bot);
+        if bot.webhook_registered
+            && (previous.len() != events.len()
+                || events.iter().any(|event| !previous.contains(event)))
+        {
+            // Selection is durable before remote reconciliation. Keep interrupted
+            // changes eligible for subscription cleanup, including chat -> DM.
+            set_doc.insert("status", "failed");
+            set_doc.insert(
+                "error",
+                super::channel_connection_webhook_service::SETUP_PENDING_ERROR,
+            );
+        }
     }
 
     if let Some(label) = params.label {
@@ -1124,6 +1298,8 @@ pub fn webhook_url(base_url: &str, bot: &ChannelBot) -> String {
     let base = base_url.trim_end_matches('/');
     if bot.credential_source == "telegram_manager" {
         format!("{base}/api/v1/webhooks/channel/telegram-new/manager")
+    } else if bot.platform == "x" && bot.credential_source == "connection" {
+        super::channel_connection_webhook_service::callback_url(base, &bot.platform)
     } else {
         format!("{base}/api/v1/webhooks/channel/{}/{}", bot.platform, bot.id)
     }
@@ -1226,6 +1402,7 @@ pub(crate) async fn register_webhook_with_telegram_api(
             &format!("telegram-manager-identity:{}", bot.platform_bot_id),
             async {
                 let bot = get_bot(db, bot_id).await?;
+                super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
                 ensure_telegram_webhook_owner(db, &bot).await?;
                 if bot.credential_source != "telegram_manager" {
                     verify_telegram_token_identity(telegram_api.http, adapter, &bot, bot_token)
@@ -1543,8 +1720,9 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
     Ok(bots)
 }
 
-/// List active personal and administered-org bots in one newest-first list.
-pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+/// The actor and every organization they administer: the owners whose
+/// channel bots and routes the actor manages.
+pub async fn managed_owner_ids(db: &mongodb::Database, actor: &str) -> AppResult<Vec<String>> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
 
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
@@ -1564,7 +1742,12 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
             .await?;
         owner_ids.extend(orgs.into_iter().map(|org| org.id));
     }
+    Ok(owner_ids)
+}
 
+/// List active personal and administered-org bots in one newest-first list.
+pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+    let owner_ids = managed_owner_ids(db, actor).await?;
     Ok(db
         .collection::<ChannelBot>(COLLECTION_NAME)
         .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })
@@ -1575,6 +1758,212 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
 }
 
 /// Get a bot by ID regardless of ownership.
+pub async fn find_active_webhook_bot(
+    db: &mongodb::Database,
+    platform: &str,
+    credential_source: &str,
+    target: &str,
+) -> AppResult<Option<ChannelBot>> {
+    Ok(db
+        .collection(COLLECTION_NAME)
+        .find_one(doc! {
+            "platform": platform, "credential_source": credential_source,
+            "platform_bot_id": target, "is_active": true,
+            "status": { "$in": ["active", "pending_webhook"] }
+        })
+        .await?)
+}
+
+/// Persist a subscription check. A missing subscription records its stable
+/// code as the failure reason; a registered one clears webhook failures.
+pub async fn record_subscription_state(
+    db: &mongodb::Database,
+    bot_id: &str,
+    registered: bool,
+    error: Option<&str>,
+) -> AppResult<()> {
+    let mut set = doc! {
+        "diagnostics.subscription_state": { "registered": registered, "checked_at": mongodb::bson::DateTime::now(), "last_error": error },
+    };
+    if registered {
+        set.insert("diagnostics.failure_reason", mongodb::bson::Bson::Null);
+        set.insert("diagnostics.last_webhook_error", mongodb::bson::Bson::Null);
+    } else {
+        set.insert(
+            "diagnostics.failure_reason",
+            error.unwrap_or(super::channel_bot_health::codes::SUBSCRIPTION_MISSING),
+        );
+    }
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(doc! { "_id": bot_id }, doc! { "$set": set })
+        .await?;
+    Ok(())
+}
+
+/// Record an unsuccessful post-write read-back without changing the durable
+/// fact that the provider write succeeded.
+pub async fn record_subscription_check_failure(
+    db: &mongodb::Database,
+    bot_id: &str,
+) -> AppResult<()> {
+    let code = super::channel_bot_health::codes::SUBSCRIPTION_CHECK_FAILED;
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": bot_id },
+            doc! { "$set": {
+                "diagnostics.subscription_state": {
+                    "registered": false,
+                    "checked_at": mongodb::bson::DateTime::now(),
+                    "last_error": code,
+                },
+                "diagnostics.failure_reason": code,
+            } },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Best-effort record of one outbound send. Never fails the send path: the
+/// platform outcome is already final when this runs.
+pub async fn record_outbound_outcome(
+    db: &mongodb::Database,
+    bot_id: &str,
+    error: Option<&crate::errors::AppError>,
+) {
+    let update = match error {
+        Some(error) => doc! { "$set": {
+            "diagnostics.last_outbound_error": {
+                "code": error.error_code().to_string(),
+                "reason": super::channel_bot_health::failure_code(error),
+                "at": mongodb::bson::DateTime::now(),
+            },
+        } },
+        None => doc! { "$set": {
+            "diagnostics.last_outbound_at": mongodb::bson::DateTime::now(),
+            "diagnostics.last_outbound_error": mongodb::bson::Bson::Null,
+        } },
+    };
+    if let Err(error) = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(doc! { "_id": bot_id }, update)
+        .await
+    {
+        tracing::warn!(%error, bot_id, "channel bot outbound diagnostics write failed");
+    }
+}
+
+/// Records a delivery problem found after the bot was authenticated.
+/// Unauthenticated rejections go to `channel_bot_health::record_webhook_rejection`.
+pub async fn record_webhook_error(
+    db: &mongodb::Database,
+    bot_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    db.collection::<mongodb::bson::Document>(COLLECTION_NAME).update_one(
+        doc! { "_id": bot_id },
+        doc! { "$set": {
+            "diagnostics.last_webhook_error": { "code": reason, "reason": reason, "at": mongodb::bson::DateTime::now() },
+            "diagnostics.failure_reason": reason
+        } },
+    ).await?;
+    Ok(())
+}
+
+/// Best-effort liveness stamp after an authenticated, admitted inbound batch.
+/// Clears webhook and failure diagnostics that the delivery disproves.
+pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
+    let now = mongodb::bson::DateTime::now();
+    let mut set = doc! {
+        "diagnostics.last_inbound_at": now,
+        "diagnostics.last_inbound_source": if bot.webhook_registered { "webhook" } else { "poll" },
+        "diagnostics.consecutive_errors": 0,
+        "diagnostics.last_webhook_error": mongodb::bson::Bson::Null,
+    };
+    if bot.webhook_registered {
+        set.insert("diagnostics.last_webhook_at", now);
+    }
+    // Only delivery-shaped reasons are disproved by a successful delivery.
+    let filter = doc! { "_id": &bot.id };
+    let clear_reason = doc! {
+        "_id": &bot.id,
+        "diagnostics.failure_reason": { "$in": [
+            super::channel_bot_health::codes::UNREGISTERED,
+            super::channel_bot_health::codes::SUBSCRIPTION_MISSING,
+            super::channel_bot_health::codes::WEBHOOK_MISSING,
+            super::channel_bot_health::codes::RATE_LIMITED,
+            super::channel_bot_health::codes::PROVIDER_UNAVAILABLE,
+            super::channel_bot_health::codes::PROVIDER_ERROR,
+        ] },
+    };
+    let collection = db.collection::<mongodb::bson::Document>(COLLECTION_NAME);
+    let result = async {
+        collection.update_one(filter, doc! { "$set": set }).await?;
+        collection
+            .update_one(
+                clear_reason,
+                doc! { "$set": { "diagnostics.failure_reason": mongodb::bson::Bson::Null } },
+            )
+            .await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, bot_id = %bot.id, "channel bot inbound diagnostics write failed");
+    }
+}
+
+/// Bots whose NyxBot link is delivered by the Agent Event Gateway.
+pub async fn gateway_linked_ids(
+    db: &mongodb::Database,
+    bot_ids: &[String],
+) -> AppResult<std::collections::HashSet<String>> {
+    if bot_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find(doc! { "channel_bot_id": { "$in": bot_ids.to_vec() }, "transport": "gateway", "status": "active" })
+        .projection(doc! { "channel_bot_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get_str("channel_bot_id").ok().map(str::to_string))
+        .collect())
+}
+
+pub async fn gateway_linked(db: &mongodb::Database, bot_id: &str) -> AppResult<bool> {
+    Ok(gateway_linked_ids(db, &[bot_id.to_string()])
+        .await?
+        .contains(bot_id))
+}
+
+/// Admin listing across owners, ordered by id for stable pagination.
+pub async fn list_all_filtered(
+    db: &mongodb::Database,
+    platform: Option<&str>,
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<ChannelBot>> {
+    let mut filter = doc! {};
+    if let Some(platform) = platform {
+        filter.insert("platform", platform);
+    }
+    if let Some(status) = status {
+        filter.insert("status", status);
+    }
+    Ok(db
+        .collection(COLLECTION_NAME)
+        .find(filter)
+        .sort(doc! { "_id": 1 })
+        .skip(offset as u64)
+        .limit(limit)
+        .await?
+        .try_collect()
+        .await?)
+}
+
 pub async fn get_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<ChannelBot> {
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .find_one(doc! { "_id": bot_id })
@@ -1588,10 +1977,13 @@ pub async fn get_bot_for_user(
     bot_id: &str,
     user_id: &str,
 ) -> AppResult<ChannelBot> {
-    db.collection::<ChannelBot>(COLLECTION_NAME)
+    let bot = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
         .find_one(doc! { "_id": bot_id, "user_id": user_id })
         .await?
-        .ok_or_else(|| AppError::ChannelBotNotFound(bot_id.to_string()))
+        .ok_or_else(|| AppError::ChannelBotNotFound(bot_id.to_string()))?;
+    super::platform_bot_authority::require_personal_routes(db, bot_id).await?;
+    Ok(bot)
 }
 
 /// Decrypt the encrypted bot token.
@@ -2009,6 +2401,7 @@ mod tests {
             self.seen_tokens.lock().unwrap().push(bot_token.to_string());
             Ok(BotIdentity {
                 platform_bot_id: "cli_test".to_string(),
+                display_name: None,
                 platform_bot_username: "testbot".to_string(),
             })
         }
@@ -2020,6 +2413,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

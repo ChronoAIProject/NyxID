@@ -3,12 +3,86 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
+/// Tracks safe read-only failures and subscription effects across interrupted setup.
+#[derive(Default)]
+pub struct WebhookSetupProgress {
+    read_only_safe: std::sync::atomic::AtomicBool,
+    mutation_started: std::sync::atomic::AtomicBool,
+}
+
+impl WebhookSetupProgress {
+    pub fn mark_mutation_started(&self) {
+        self.mutation_started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn mutation_started(&self) -> bool {
+        self.mutation_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn mark_read_only_safe(&self) {
+        self.read_only_safe
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn read_only_safe(&self) -> bool {
+        self.read_only_safe
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// NyxBot channel family; managed Telegram keeps its raw provider slug on
+/// bot/route rows while the channel uses Telegram's runtime contract.
+pub(crate) fn canonical_platform(platform: &str) -> &str {
+    match platform {
+        "telegram-new" => "telegram",
+        other => other,
+    }
+}
+
+/// The platform name used in model instructions and delivery notices.
+pub fn platform_name(platform: &str) -> String {
+    match platform {
+        "telegram-new" => "Telegram".into(),
+        "whatsapp" => "WhatsApp".into(),
+        "x" | "twitter" => "X".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+tokio::task_local! {
+    static PROVIDER_ATTEMPT: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+
+pub(crate) async fn track_provider_attempt<F: std::future::Future>(
+    progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    send: F,
+) -> F::Output {
+    PROVIDER_ATTEMPT.scope(progress, send).await
+}
+
+/// Called immediately before provider I/O; the enclosing image attempt keeps
+/// this evidence even if its send future is cancelled or times out.
+pub(crate) fn mark_provider_attempt() {
+    let _ = PROVIDER_ATTEMPT.try_with(|progress| {
+        progress.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 /// Adapter send evidence. WhatsApp returns `Err` only when no message could
 /// have been accepted. Once acceptance is possible, the outcome retains IDs
 /// and an optional failure; callers persist that evidence before returning it.
 /// Default hooks retain the legacy error semantics of other adapters.
 pub struct SendOutcome {
     pub final_id: Option<String>,
+    pub delivered_kinds: Option<Vec<MediaKind>>,
     pub observation: Option<crate::models::channel_delivery::PlatformSendRecord>,
     pub error: Option<crate::errors::AppError>,
 }
@@ -16,6 +90,7 @@ impl SendOutcome {
     pub fn legacy(final_id: Option<String>) -> Self {
         Self {
             final_id,
+            delivered_kinds: None,
             observation: None,
             error: None,
         }
@@ -66,6 +141,9 @@ impl std::fmt::Debug for PollOutcome {
 pub struct BotIdentity {
     pub platform_bot_id: String,
     pub platform_bot_username: String,
+    /// Human-readable bot name when the platform reports one (Telegram's
+    /// `first_name`); used as the default label when none is supplied.
+    pub display_name: Option<String>,
 }
 
 /// A normalized inbound message parsed from any platform's webhook payload.
@@ -215,6 +293,26 @@ pub struct ChannelCapabilities {
     #[serde(flatten)]
     pub outbound: OutboundCapabilities,
     pub media: MediaCapabilities,
+    #[serde(flatten)]
+    pub threads: ThreadCapabilities,
+}
+
+/// Implemented thread operations, independent of legacy outbound flags.
+/// Missing declarations fail closed for old clients and unsupported adapters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThreadCapabilities {
+    pub thread_reply: bool,
+    pub thread_follow: bool,
+    pub thread_history: bool,
+    /// The platform classifies the thread as private while still exposing a
+    /// durable shared thread (Aurinko mailbox threads).
+    #[serde(skip_serializing_if = "is_false")]
+    pub private_thread: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
@@ -296,6 +394,30 @@ impl std::fmt::Debug for OutboundEdit {
     }
 }
 
+/// Result of a live webhook subscription check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveWebhookStatus {
+    pub registered: bool,
+    /// Stable `channel_bot_health::codes` value when not registered.
+    pub error: Option<&'static str>,
+}
+
+impl LiveWebhookStatus {
+    pub fn registered() -> Self {
+        Self {
+            registered: true,
+            error: None,
+        }
+    }
+
+    pub fn missing(code: &'static str) -> Self {
+        Self {
+            registered: false,
+            error: Some(code),
+        }
+    }
+}
+
 /// Decrypted, platform-specific webhook verification material prepared by the
 /// handler. Secrets never live on persisted model structs.
 #[derive(Clone, Default)]
@@ -371,6 +493,25 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn supports_text_reply(&self) -> bool {
+        true
+    }
+    fn supports_text_ingress(&self) -> bool {
+        self.registration().webhook_ingestion || matches!(self.ingestion(), Ingestion::Poll { .. })
+    }
+
+    fn activity_descriptors(
+        &self,
+    ) -> &'static [super::channel_activity_service::ActivityDescriptor] {
+        &[]
+    }
+    fn activity_metadata(
+        &self,
+        _inbound: &InboundMessage,
+    ) -> Option<crate::models::channel_activity::ActivityMetadata> {
+        None
+    }
+
     fn atomic_inbound_admission(&self) -> bool {
         false
     }
@@ -396,7 +537,27 @@ pub trait PlatformAdapter: Send + Sync {
         credentials: &BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
+        thread_target: Option<&super::channel_thread_service::ThreadReplyTarget>,
     ) -> AppResult<SendOutcome> {
+        if let Some(target) = thread_target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation_id)
+            {
+                return Err(super::channel_thread_service::unavailable());
+            }
+            return self
+                .send_bound_thread_reply(
+                    db,
+                    http,
+                    bot,
+                    original,
+                    credentials,
+                    conversation_id,
+                    target,
+                    reply,
+                )
+                .await
+                .map(SendOutcome::legacy);
+        }
         // Preserve adapter-specific send_bound_reply fences and persisted attempts.
         self.send_bound_reply(db, http, bot, original, credentials, conversation_id, reply)
             .await
@@ -418,6 +579,77 @@ pub trait PlatformAdapter: Send + Sync {
     fn outbound_capabilities(&self) -> OutboundCapabilities;
     fn media_capabilities(&self) -> MediaCapabilities;
 
+    fn thread_follow_guidance(&self) -> &'static str {
+        "Following needs access to ordinary messages and replies in this chat. Earlier message bodies may be unavailable; NyxID never requests extra permissions automatically."
+    }
+
+    fn thread_capabilities(&self) -> ThreadCapabilities {
+        ThreadCapabilities::default()
+    }
+
+    /// Dormant hooks: only the thread service may supply a bound target.
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _facts: &crate::models::channel_thread::ChannelThreadFacts,
+        _ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(None)
+    }
+
+    async fn send_thread_reply(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _target: &super::channel_thread_service::ThreadReplyTarget,
+        _reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        Err(super::channel_thread_service::unavailable())
+    }
+
+    /// Bound replies may need adapter-owned persistence barriers in addition
+    /// to native thread targeting. The default preserves the PR C path.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_thread_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+        target: &super::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.send_thread_reply(http, credentials, target, reply)
+            .await
+    }
+
+    async fn thread_history(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _target: &super::channel_thread_service::ThreadReplyTarget,
+        _before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<super::channel_thread_service::ThreadHistory> {
+        Ok(super::channel_thread_service::ThreadHistory {
+            messages: Vec::new(),
+            partial: true,
+        })
+    }
+
+    /// Positive platform evidence only; unknown addressing never means a mention.
+    /// Root resolution and sender authorization happen after this pure extraction.
+    fn thread_facts(
+        &self,
+        _inbound: &InboundMessage,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        None
+    }
+
     fn display_name(&self) -> &str {
         self.platform_id()
     }
@@ -430,6 +662,28 @@ pub trait PlatformAdapter: Send + Sync {
         _max_bytes: u64,
     ) -> AppResult<FetchedMedia> {
         Err(crate::errors::AppError::ChannelMediaUnsupported)
+    }
+
+    /// The bot's own user ID on the platform when it differs from
+    /// `platform_bot_id` and the platform can tell it (Lark: the bot's
+    /// `open_id`, which mentions of it carry). Best effort.
+    async fn bot_user_id(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+    ) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// The display name of a group or channel the bot is in, when the
+    /// platform can tell it (best effort; `None` when unknown).
+    async fn chat_title(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        Ok(None)
     }
 
     fn ingestion(&self) -> Ingestion {
@@ -454,6 +708,12 @@ pub trait PlatformAdapter: Send + Sync {
     }
 
     fn persists_reply_attempt(&self) -> bool {
+        false
+    }
+
+    /// Whether upstream message IDs repeat across chats (Telegram numbers each
+    /// chat from 1), so a platform message ID alone cannot identify a message.
+    fn message_ids_are_chat_scoped(&self) -> bool {
         false
     }
 
@@ -535,6 +795,7 @@ pub trait PlatformAdapter: Send + Sync {
         _credentials: &BotCredentials<'_>,
         _bot: &crate::models::channel_bot::ChannelBot,
         _webhook_url: &str,
+        _progress: &WebhookSetupProgress,
     ) -> AppResult<()> {
         Err(super::channel_managed::unavailable())
     }
@@ -546,6 +807,18 @@ pub trait PlatformAdapter: Send + Sync {
         _bot_id: &str,
     ) -> AppResult<()> {
         Err(super::channel_managed::unavailable())
+    }
+
+    /// Read-only check of the platform's live webhook subscription for this
+    /// bot. `None` means the platform has no such check.
+    async fn connection_webhook_status(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &PlatformVerifySecrets,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _webhook_url: &str,
+    ) -> AppResult<Option<LiveWebhookStatus>> {
+        Ok(None)
     }
 
     fn platform_subscription_handshake(

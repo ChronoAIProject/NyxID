@@ -237,6 +237,7 @@ async fn curation_exact_refs_and_explicit_names_transition() {
         version: "1.5".into(),
         sha256: "a".repeat(64),
         dependencies: vec![],
+        disabled: false,
     };
     let input = SkillUpdate {
         recommended_skill_refs: Some(vec![reference.clone()]),
@@ -314,6 +315,47 @@ async fn curation_exact_refs_and_explicit_names_transition() {
     mutable.recommended_skill_refs.as_mut().unwrap()[0].version = "latest".into();
     assert!(resolve_update(&SkillState::default(), &mutable).is_err());
     assert!(resolve_update(&SkillState::default(), &names(&["same", "same"])).is_err());
+}
+
+#[tokio::test]
+async fn catalog_write_rejects_disabled_recommended_refs_without_writing() {
+    let (db, _, actor, services) = fixture("disabled_catalog_ref", 10).await;
+    let before = db
+        .collection::<Document>(SERVICES)
+        .find_one(doc! {"_id": &services[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    let input = SkillUpdate {
+        recommended_skill_refs: Some(vec![SkillReference {
+            source: "ornn".into(),
+            skill_id: Uuid::new_v4().to_string(),
+            name: "disabled".into(),
+            version: "1.0".into(),
+            sha256: "a".repeat(64),
+            dependencies: vec![],
+            disabled: true,
+        }]),
+        ..Default::default()
+    };
+    let err = write(
+        &db,
+        &services[0].id,
+        &actor,
+        &input,
+        0,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::BadRequest(_)));
+    let after = db
+        .collection::<Document>(SERVICES)
+        .find_one(doc! {"_id": &services[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
 }
 
 #[tokio::test]
@@ -719,4 +761,234 @@ async fn curation_revoke_after_transaction_reads_fences_token_and_grant() {
             assert_eq!(used(&db, &sa.id).await, 0);
         }
     }
+}
+
+#[tokio::test]
+async fn catalog_editor_concurrent_role_revocation_fences_write() {
+    let (db, mut sa, actor, services) = fixture("editor_role_revoke_race", 10).await;
+    let role_id = Uuid::new_v4().to_string();
+    let roles = db.collection::<Document>(crate::models::role::COLLECTION_NAME);
+    roles.insert_one(doc! {"_id": &role_id, "client_id": null, "permissions": [super::super::catalog_editor_service::WRITE_PERMISSION]}).await.unwrap();
+    sa.purpose = ServiceAccountPurpose::CatalogEditor;
+    sa.role_ids = vec![role_id.clone()];
+    db.collection::<ServiceAccount>(ACCOUNTS)
+        .replace_one(doc! {"_id": &sa.id}, &sa)
+        .await
+        .unwrap();
+    let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = names(&["must-not-commit"]);
+    let request = Uuid::new_v4().to_string();
+    let writer = AUTHORITY_PAUSE.scope(
+        (reached.clone(), resume.clone(), once),
+        write(&db, &services[0].id, &actor, &input, 0, &request),
+    );
+    let revoker = async {
+        reached.wait().await;
+        roles
+            .update_one(doc! {"_id": &role_id}, doc! {"$set": {"permissions": []}})
+            .await
+            .unwrap();
+        resume.wait().await;
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(writer, revoker)
+    })
+    .await
+    .expect("role revocation race must finish");
+    assert!(
+        matches!(result, Err(AppError::Forbidden(_))),
+        "unexpected result: {:?}",
+        result.err()
+    );
+    assert_eq!(stored(&db, &services[0].id).await.skills_revision, 0);
+    for collection in [HISTORY, OPERATIONS] {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalog_editor_noop_and_replay_do_not_mutate_role_fence() {
+    let (db, mut sa, actor, services) = fixture("editor_noop_role_fence", 10).await;
+    let role_id = Uuid::new_v4().to_string();
+    let roles = db.collection::<Document>(crate::models::role::COLLECTION_NAME);
+    roles.insert_one(doc! {"_id": &role_id, "client_id": null, "permissions": [super::super::catalog_editor_service::WRITE_PERMISSION]}).await.unwrap();
+    sa.purpose = ServiceAccountPurpose::CatalogEditor;
+    sa.role_ids = vec![role_id.clone()];
+    sa.rate_limit_override = Some(1);
+    db.collection::<ServiceAccount>(ACCOUNTS)
+        .replace_one(doc! {"_id": &sa.id}, &sa)
+        .await
+        .unwrap();
+    let input = names(&["stable"]);
+    let request = Uuid::new_v4().to_string();
+    write(&db, &services[0].id, &actor, &input, 0, &request)
+        .await
+        .unwrap();
+    let before = roles
+        .find_one(doc! {"_id": &role_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.get_i64("catalog_editor_write_fence").unwrap(), 1);
+    let replay = write(&db, &services[0].id, &actor, &input, 0, &request)
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    let noop = write(
+        &db,
+        &services[0].id,
+        &actor,
+        &input,
+        1,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(!noop.mutated);
+    assert_eq!(
+        roles
+            .find_one(doc! {"_id": &role_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    // Freeze the test window in the future so machine speed cannot reset it.
+    db.collection::<Document>(ACCOUNTS).update_one(doc! {"_id": &sa.id}, doc! {"$set": {"catalog_editor_write_window": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::minutes(1))}}).await.unwrap();
+    let next = names(&["changed"]);
+    let next_request = Uuid::new_v4().to_string();
+    assert!(matches!(
+        write(&db, &services[0].id, &actor, &next, 1, &next_request).await,
+        Err(AppError::RateLimited)
+    ));
+    assert_eq!(stored(&db, &services[0].id).await.skills_revision, 1);
+    assert_eq!(
+        roles
+            .find_one(doc! {"_id": &role_id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    db.collection::<Document>(ACCOUNTS).update_one(doc! {"_id": &sa.id}, doc! {"$set": {"catalog_editor_write_window": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(2))}}).await.unwrap();
+    assert!(
+        write(&db, &services[0].id, &actor, &next, 1, &next_request)
+            .await
+            .unwrap()
+            .changed
+    );
+    let account = db
+        .collection::<Document>(ACCOUNTS)
+        .find_one(doc! {"_id": &sa.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.get_i64("catalog_editor_writes_used").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn catalog_editor_legacy_generation_writes_and_rotation_rejects_old_token() {
+    let (db, mut sa, actor, services) = fixture("editor_legacy_generation", 10).await;
+    let role_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .insert_one(doc! {"_id": &role_id, "client_id": null, "permissions": [super::super::catalog_editor_service::WRITE_PERMISSION]})
+        .await.unwrap();
+    sa.purpose = ServiceAccountPurpose::CatalogEditor;
+    sa.role_ids = vec![role_id];
+    let mut legacy = bson::to_document(&sa).unwrap();
+    legacy.remove("credential_generation");
+    db.collection::<Document>(ACCOUNTS)
+        .replace_one(doc! {"_id": &sa.id}, legacy)
+        .await
+        .unwrap();
+    let result = write(
+        &db,
+        &services[0].id,
+        &actor,
+        &names(&["legacy-write"]),
+        0,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(result.changed);
+    assert_eq!(result.revision, 1);
+    let (rotated, _) = super::super::service_account_service::rotate_secret(&db, &sa.id, true)
+        .await
+        .unwrap();
+    assert_eq!(rotated.credential_generation, 1);
+    let result = write(
+        &db,
+        &services[0].id,
+        &actor,
+        &names(&["stale-token-write"]),
+        1,
+        &Uuid::new_v4().to_string(),
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    assert_eq!(stored(&db, &services[0].id).await.skills_revision, 1);
+    for collection in [HISTORY, OPERATIONS] {
+        assert_eq!(
+            db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn direct_scope_revocation_during_write_is_fenced() {
+    let (db, mut sa, actor, services) = fixture("direct_scope_revoke_race", 10).await;
+    sa.purpose = ServiceAccountPurpose::CatalogEditor;
+    sa.catalog_scope_authorized = true;
+    sa.role_ids.clear();
+    db.collection::<ServiceAccount>(ACCOUNTS)
+        .replace_one(doc! {"_id": &sa.id}, &sa)
+        .await
+        .unwrap();
+    let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = names(&["must-not-commit"]);
+    let operation = Uuid::new_v4().to_string();
+    let writer = AUTHORITY_PAUSE.scope(
+        (reached.clone(), resume.clone(), once),
+        write(&db, &services[0].id, &actor, &input, 0, &operation),
+    );
+    let revoker = async {
+        reached.wait().await;
+        db.collection::<Document>(ACCOUNTS)
+            .update_one(
+                doc! {"_id":&sa.id},
+                doc! {"$set":{"allowed_scopes":"catalog:skills:read"}},
+            )
+            .await
+            .unwrap();
+        resume.wait().await;
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(writer, revoker)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(AppError::Forbidden(_))));
+    assert_eq!(stored(&db, &services[0].id).await.skills_revision, 0);
+    assert_eq!(
+        db.collection::<Document>(HISTORY)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
 }

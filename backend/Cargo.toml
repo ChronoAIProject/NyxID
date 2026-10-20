@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.30.2"
+version = "0.73.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,12 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
+lopdf = { version = "0.38", default-features = false }
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.41"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+csv = "1"
+libc = "0.2"
 mime = "0.3.17"
 axum = { workspace = true }
 tower = "0.5.3"
@@ -27,9 +33,11 @@ mongodb = { workspace = true }
 bson = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = "0.10"
+croner = "4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
@@ -38,6 +46,7 @@ aes-gcm = "0.10.3"
 aes = "0.8.4"
 cbc = "0.1.2"
 sha2 = "0.10.9"
+sha1 = "0.10"
 siphasher = "1"
 rand = "0.8.5"
 hex = "0.4.3"
@@ -66,6 +75,8 @@ async-trait = "0.1"
 regex = "1.12.3"
 globset = "0.4.18"
 serde_bytes = "0.11"
+# YAML OpenAPI/AsyncAPI specs; maintained, pure Rust, with alias-expansion budgets.
+serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
@@ -77,8 +88,12 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
+nyxid-machine = { path = "../machine" }
+nyxid-permissions = { path = "../permissions" }
+nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"
+httpdate = "1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
 # Feature unification picks up BOTH `ring` (via google-cloud-kms ->
 # google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled
@@ -96,6 +111,8 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
+flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
 rcgen = "0.14"
 tokio-rustls = "0.26"
@@ -103,10 +120,6 @@ tokio-rustls = "0.26"
 tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
-# Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
-# `atexit` hook that drops the per-test databases at process exit. Already in
-# the dependency tree transitively, so this adds no new compilation.
-libc = "0.2"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
 
 [features]
@@ -116,3 +129,7 @@ gcp-kms = ["google-cloud-kms"]
 
 [package.metadata.dist]
 dist = false
+
+[lints.rust]
+# cargo-llvm-cov builds with `--cfg coverage`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }

@@ -33,6 +33,9 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn supports_text_reply(&self) -> bool {
+        false
+    }
     fn display_name(&self) -> &str {
         "OpenClaw"
     }
@@ -149,6 +152,7 @@ impl PlatformAdapter for OpenClawAdapter {
         let _bot_token = credentials.token;
         Ok(BotIdentity {
             platform_bot_id: "openclaw".to_string(),
+            display_name: None,
             platform_bot_username: "openclaw".to_string(),
         })
     }
@@ -307,6 +311,7 @@ mod tests {
 
     fn make_test_bot() -> ChannelBot {
         ChannelBot {
+            diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,

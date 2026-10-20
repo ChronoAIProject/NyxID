@@ -141,10 +141,10 @@ function KeyRotationResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-[13px] font-medium">
+            <p className="text-13 font-medium">
               {result.replayed ? "Existing replacement key" : "Assistant key rotated"}
             </p>
-            <p className="break-all font-mono text-[12px] text-muted-foreground">
+            <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
             </p>
           </div>
@@ -152,7 +152,7 @@ function KeyRotationResult({
       ) : (
         <div className="space-y-4 border-y border-border py-4">
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-[12px]">
+            <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-12">
               {!result.replayed ? result.fullKey : null}
             </code>
             <Button
@@ -166,7 +166,7 @@ function KeyRotationResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-[12px]">
+          <label className="flex cursor-pointer items-start gap-2 text-12">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
@@ -176,7 +176,7 @@ function KeyRotationResult({
         </div>
       )}
       {verified ? (
-        <p className="text-[11px] text-success">
+        <p className="text-11 text-success">
           Exact rotation lineage verified.
         </p>
       ) : null}
@@ -354,7 +354,7 @@ export function AssistantKeyRotateDialog({
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Predecessor</span>
               <Badge
@@ -364,7 +364,7 @@ export function AssistantKeyRotateDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               NyxID preserves the key's authority and disables this exact
               predecessor atomically.
             </p>
@@ -372,7 +372,7 @@ export function AssistantKeyRotateDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-[11px] text-destructive">
+          <p role="alert" className="text-11 text-destructive">
             {error}
           </p>
         ) : null}

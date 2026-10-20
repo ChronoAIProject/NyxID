@@ -10,6 +10,7 @@ import {
   useDeleteChannelBot,
   useUpdateChannelBot,
   useVerifyChannelBot,
+  useResubscribeChannelBot,
   channelBotsQueryKeys,
 } from "./use-channel-bots";
 
@@ -26,6 +27,13 @@ vi.mock("@/lib/api-client", () => ({
     get: mockGet,
     patch: mockPatch,
     post: mockPost,
+  },
+  // Credit-gated mutations use apiClient for the out-of-credits opt-in;
+  // route them to the same per-method spies.
+  apiClient: (endpoint: string, options: { method?: string; body?: unknown } = {}) => {
+    const call = { POST: mockPost, PATCH: mockPatch }[options.method ?? ""];
+    if (!call) throw new Error(`unexpected apiClient ${options.method}`);
+    return options.body === undefined ? call(endpoint) : call(endpoint, options.body);
   },
 }));
 
@@ -49,6 +57,12 @@ beforeEach(() => {
 });
 
 describe("useChannelBots", () => {
+  it("resubscribes through the recovery endpoint", async () => {
+    mockPost.mockResolvedValue({ mode: "webhook", recommended_action: "verify" });
+    const { result } = renderHook(() => useResubscribeChannelBot(), { wrapper: createWrapper() });
+    result.current.mutate("bot-1");
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/channel-bots/bot-1/resubscribe", {}));
+  });
   it("keeps all-scope, personal and organization results separate when switching", async () => {
     mockGet.mockImplementation(async (path: string) => ({ bots: [{ id: path }] }));
     const { result, rerender } = renderHook(

@@ -47,6 +47,43 @@ describe("constants", () => {
 });
 
 describe("createServiceSchema", () => {
+  it("accepts vendor bearer schemes and rejects invalid tokens or other auth methods", () => {
+    const base = {
+      name: "Mail",
+      service_type: "http",
+      base_url: "https://mail.example.test",
+      auth_type: "bearer",
+    };
+    for (const auth_scheme of [
+      undefined,
+      "",
+      "Bearer",
+      "Zoho-oauthtoken",
+      "a".repeat(64),
+    ]) {
+      expect(
+        createServiceSchema.safeParse({ ...base, auth_scheme }).success,
+      ).toBe(true);
+    }
+    for (const auth_scheme of [
+      "two words",
+      "Bearer\r\n",
+      "é",
+      "a".repeat(65),
+    ]) {
+      expect(
+        createServiceSchema.safeParse({ ...base, auth_scheme }).success,
+      ).toBe(false);
+    }
+    expect(
+      createServiceSchema.safeParse({
+        ...base,
+        auth_type: "api_key",
+        auth_scheme: "Zoho-oauthtoken",
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts a write-only credential for an internal HTTP service", () => {
     const result = createServiceSchema.safeParse({
       name: "Platform X",

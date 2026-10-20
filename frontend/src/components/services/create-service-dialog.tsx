@@ -69,6 +69,7 @@ export function CreateServiceDialog({
       base_url: "",
       auth_type: "api_key",
       auth_key_name: "",
+      auth_scheme: "",
       credential: "",
       platform_key: {
         enabled: false,
@@ -120,6 +121,7 @@ export function CreateServiceDialog({
               base_url: data.base_url ?? "",
               auth_type: data.auth_type ?? "api_key",
               auth_key_name: data.auth_key_name || undefined,
+              auth_scheme: data.auth_scheme || undefined,
               provider_config_id: provider?.id,
               inference: data.inference,
               platform_key:
@@ -228,7 +230,7 @@ export function CreateServiceDialog({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -276,7 +278,7 @@ export function CreateServiceDialog({
                 <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="create-ssh-cert-auth"
-                    className="text-[12px] font-normal"
+                    className="text-12 font-normal"
                   >
                     Enable short-lived SSH certificates
                   </Label>
@@ -369,6 +371,9 @@ export function CreateServiceDialog({
                           if (value !== "body") {
                             form.setValue("auth_key_name", "");
                           }
+                          if (!["bearer", "oauth2"].includes(value)) {
+                            form.setValue("auth_scheme", "");
+                          }
                           if (value === "oidc" || value === "none") {
                             form.setValue("credential", "");
                           }
@@ -411,6 +416,31 @@ export function CreateServiceDialog({
                     </FormItem>
                   )}
                 />
+
+                {(authType === "bearer" || authType === "oauth2") && (
+                  <FormField
+                    control={form.control}
+                    name="auth_scheme"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Authorization scheme</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            value={field.value ?? ""}
+                            placeholder="Bearer"
+                            maxLength={64}
+                          />
+                        </FormControl>
+                        <p className="text-12 text-muted-foreground">
+                          Leave blank for Bearer. Use the scheme documented by
+                          the vendor.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 {authType === "body" && (
                   <FormField

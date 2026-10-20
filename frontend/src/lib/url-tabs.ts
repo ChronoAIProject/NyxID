@@ -9,6 +9,7 @@ export const SETTINGS_TABS = [
   "security",
   "sessions",
   "mcp",
+  "display",
   "privacy",
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
@@ -37,6 +38,16 @@ export const ORG_DETAIL_TAB_DEFAULT: OrgDetailTab = "members";
 export const KEYS_TABS = ["services", "pools", "nyxid"] as const;
 export type KeysTab = (typeof KEYS_TABS)[number];
 export const KEYS_TAB_DEFAULT: KeysTab = "services";
+
+export const KEY_DETAIL_TABS = ["overview", "advanced", "history"] as const;
+export const KEY_DETAIL_TAB_DEFAULT = "overview";
+
+export const ADMIN_CREDITS_TABS = ["grants", "allowances", "schedules"] as const;
+export const ADMIN_CREDITS_TAB_DEFAULT = "grants";
+
+export const ADMIN_BILLING_TABS = ["overview", "rates", "settings"] as const;
+export type AdminBillingTab = (typeof ADMIN_BILLING_TABS)[number];
+export const ADMIN_BILLING_TAB_DEFAULT: AdminBillingTab = "overview";
 
 export const KEYS_ACTIONS = ["add-service", "create-key", "setup-agent"] as const;
 export type KeysAction = (typeof KEYS_ACTIONS)[number];
