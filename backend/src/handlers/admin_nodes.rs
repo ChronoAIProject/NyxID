@@ -260,6 +260,7 @@ pub async fn admin_disconnect_node(
     .await?;
     let actor = auth_user.user_id.to_string();
     let audit = match node_service::NodeMutationAudit::new(&state.audit_runtime, &actor)
+        .with_verified_principal(crate::services::token_service::audit_principal(&auth_user)?)
         .with_disconnect(&state.db, &node_id)
         .await
     {
@@ -268,7 +269,7 @@ pub async fn admin_disconnect_node(
         Err(error) => return Err(error),
     };
     audit.admin_disconnect_node(&state.db, &node_id).await?;
-    let was_connected = audit
+    let disconnect_result = audit
         .disconnect_after_commit(
             &state.db,
             &state.node_dispatch,
@@ -276,7 +277,8 @@ pub async fn admin_disconnect_node(
             4000,
             "admin disconnected node",
         )
-        .await?;
+        .await;
+    let was_connected = audit.report_disconnect_result(&node_id, disconnect_result);
     // Only emit when a real disconnect actually happened. Posting to
     // /disconnect for an already-offline node (or a typo / nonexistent
     // id) is idempotent and should not fabricate disconnect activity
@@ -312,10 +314,11 @@ pub async fn admin_delete_node(
     .await?;
     let actor = auth_user.user_id.to_string();
     let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &actor)
+        .with_verified_principal(crate::services::token_service::audit_principal(&auth_user)?)
         .with_disconnect(&state.db, &node_id)
         .await?;
     audit.admin_delete_node(&state.db, &node_id).await?;
-    let _ = audit
+    let disconnect_result = audit
         .disconnect_after_commit(
             &state.db,
             &state.node_dispatch,
@@ -323,7 +326,8 @@ pub async fn admin_delete_node(
             4006,
             "node deleted by admin",
         )
-        .await?;
+        .await;
+    audit.report_disconnect_result(&node_id, disconnect_result);
 
     emit_event(
         state.telemetry.as_deref(),

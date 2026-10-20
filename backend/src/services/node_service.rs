@@ -29,7 +29,7 @@ use crate::redaction::RedactedLen;
 use crate::services::org_service::{self, OwnerAccess};
 use crate::services::{
     audit_outbox_service::{self, AuditEvent},
-    audit_runtime::{AuditRuntime, intent::EffectReservation, policy::AuditTier},
+    audit_runtime::{AuditRuntime, policy::AuditTier},
 };
 
 /// A verified actor's logical mutation. Keep this context across transaction
@@ -42,9 +42,9 @@ pub struct NodeMutationAudit {
     operation_id: uuid::Uuid,
     event_id: uuid::Uuid,
     destination_event_id: uuid::Uuid,
-    intent_id: uuid::Uuid,
     terminal_id: uuid::Uuid,
     disconnect: bool,
+    disconnect_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     disconnect_owner: Option<super::node_owner_service::InvalidatedNodeOwner>,
 }
 
@@ -59,9 +59,9 @@ impl NodeMutationAudit {
             operation_id: uuid::Uuid::new_v4(),
             event_id: uuid::Uuid::new_v4(),
             destination_event_id: uuid::Uuid::new_v4(),
-            intent_id: uuid::Uuid::new_v4(),
             terminal_id: uuid::Uuid::new_v4(),
             disconnect: false,
+            disconnect_started: Default::default(),
             disconnect_owner: None,
         }
     }
@@ -159,29 +159,12 @@ impl NodeMutationAudit {
                 return Err(AppError::Conflict("node_connection_changed".into()));
             }
         }
-        if self.disconnect_owner.is_some() {
-            self.runtime
-                .begin_effect_in_session(
-                    db,
-                    session,
-                    tier,
-                    &EffectReservation {
-                        event_id: self.intent_id,
-                        terminal_event_id: self.terminal_id,
-                        event: AuditEvent {
-                            stage: AuditStage::Intent,
-                            action: "node_disconnect",
-                            ..event
-                        },
-                    },
-                )
-                .await?;
-        }
         Ok(())
     }
 
-    /// Local revocation has already committed. Witness refusal leaves its
-    /// durable disconnect intent pending; it cannot undo that revocation.
+    /// Enforce a confirmed revocation without witness admission or an Effect
+    /// claim. Closing the captured connection only removes authority. The
+    /// mutation's durable event supplies the outcome's committed owner snapshot.
     pub async fn disconnect_after_commit(
         &self,
         db: &mongodb::Database,
@@ -199,33 +182,85 @@ impl NodeMutationAudit {
         if owner.fence.node_id != node_id {
             return Err(AppError::AuditIntegrityConflict);
         }
-        let operation = self.operation_id.to_string();
-        let permit = match self.runtime.authorize_effect(db, &operation).await {
-            Ok(permit) => permit,
-            Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged) => {
-                tracing::warn!(operation_id = %operation, "node_disconnect_deferred");
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        };
-        let result = permit
-            .run(|| dispatch.disconnect_invalidated(owner.clone(), code, reason))
-            .await?;
+        // Clones share this one-shot guard. An uncertain close is not resent;
+        // the normal connection-owner sweeps independently enforce revocation.
+        if self
+            .disconnect_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(false);
+        }
+        // No database read or audit admission may delay this security close.
+        let result = dispatch
+            .disconnect_invalidated(owner.clone(), code, reason)
+            .await;
         let stage = if result.is_ok() {
             AuditStage::Succeeded
         } else {
             AuditStage::Uncertain
         };
-        let context = (db, &self.runtime, &operation, stage);
+        let context = (db, self, node_id, stage);
         super::audit_runtime::transaction::run(
             db,
             &context,
-            |session, (db, runtime, operation, stage)| {
-                Box::pin(runtime.finish_effect_in_session(db, session, operation, stage.clone()))
+            |session, (db, audit, node_id, stage)| {
+                Box::pin(async move {
+                    let committed = db
+                        .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+                            crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": audit.event_id.to_string()})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or(AppError::AuditIntegrityConflict)?;
+                    if committed.event.operation_id != audit.operation_id.to_string()
+                        || committed.event.stage != AuditStage::Committed
+                        || committed.event.principal != audit.principal
+                        || committed.event.target_id.as_deref() != Some(*node_id)
+                    {
+                        return Err(AppError::AuditIntegrityConflict);
+                    }
+                    let event = AuditEvent {
+                        operation_id: committed.event.operation_id,
+                        stage: stage.clone(),
+                        principal: committed.event.principal,
+                        owner: committed.event.owner,
+                        action: "node_disconnect",
+                        target_id: Some((*node_id).to_owned()),
+                    };
+                    audit_outbox_service::enqueue_admitted_in_session(
+                        db,
+                        session,
+                        &audit.runtime,
+                        AuditTier::Narrowing,
+                        &audit.terminal_id,
+                        &event,
+                    )
+                    .await?;
+                    Ok(())
+                })
             },
         )
         .await?;
         result
+    }
+
+    /// The business revocation is already committed. Report close/outcome
+    /// failures without losing the rotation response or inviting mutation retry.
+    /// Never include transport errors, credentials or caller-provided reasons.
+    pub fn report_disconnect_result(&self, node_id: &str, result: AppResult<bool>) -> bool {
+        match result {
+            Ok(disconnected) => disconnected,
+            Err(_) => {
+                tracing::warn!(
+                    operation_id = %self.operation_id,
+                    node_id,
+                    code = "node_invalidation_disconnect_failed",
+                    "Committed node invalidation disconnect or audit outcome failed",
+                );
+                false
+            }
+        }
     }
 
     pub async fn create_registration_token(
@@ -3781,19 +3816,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w8_node_disconnect_defers_effect_after_local_revocation_and_consumes_once() {
-        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
+    async fn w8_node_disconnect_closes_before_materialization_and_records_once() {
         let db = crate::test_utils::connect_transaction_test_database("w8_node_disconnect").await;
         let f = seed_acl_fixture(&db, AccessCase::Direct).await;
         let state = crate::test_utils::test_app_state(db.clone());
-        state
-            .audit_runtime
-            .bind_effects(
-                Uuid::new_v4(),
-                std::sync::Arc::new(Zeroizing::new([2; 32])),
-                None,
-            )
-            .unwrap();
         let connection = node_audit_connected_fixture(&db, &f, &state).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         state
@@ -3815,68 +3841,50 @@ mod tests {
                 .is_none()
         );
         assert!(
-            !audit
-                .disconnect_after_commit(
-                    &db,
-                    &state.node_dispatch,
-                    &f.node.id,
-                    4002,
-                    "node credentials rotated"
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "unmaterialized intent sends nothing"
-        );
-        assert_eq!(
-            crate::services::audit_state_service::load(&db)
-                .await
-                .unwrap()
-                .pending_count,
-            3
-        );
-        while audit_outbox_service::materialize_one(&db, &[2; 32])
-            .await
-            .unwrap()
-        {}
-        assert!(
             audit
                 .disconnect_after_commit(
                     &db,
                     &state.node_dispatch,
                     &f.node.id,
                     4002,
-                    "node credentials rotated"
+                    "node credentials rotated",
                 )
                 .await
                 .unwrap()
         );
-        assert!(rx.recv().await.is_some());
+        assert!(matches!(
+            rx.recv().await,
+            Some(crate::services::node_ws_manager::NodeOutboundMessage::Close { code: 4002, .. })
+        ));
+        assert!(rx.recv().await.is_none(), "captured connection is closed");
         assert!(
             !audit
+                .clone()
                 .disconnect_after_commit(
                     &db,
                     &state.node_dispatch,
                     &f.node.id,
                     4002,
-                    "node credentials rotated"
+                    "node credentials rotated",
                 )
                 .await
                 .unwrap()
         );
-        let intent = db
-            .collection::<AuditEffectIntent>(INTENTS)
-            .find_one(doc! {"_id": audit.operation_id.to_string()})
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event.stage, AuditStage::Committed);
+        assert_eq!(rows[1].event.stage, AuditStage::Succeeded);
+        assert!(rows.iter().all(|row| row.materialized_seq.is_none()));
+        while audit_outbox_service::materialize_one(&db, &[2; 32])
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(intent.terminal_stage, Some(AuditStage::Succeeded));
-        let rows = node_audit_events(&db).await;
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].event.stage, AuditStage::Intent);
-        assert_eq!(rows[2].event.stage, AuditStage::Succeeded);
+        {}
+        assert!(
+            node_audit_events(&db)
+                .await
+                .iter()
+                .all(|row| row.materialized_seq.is_some())
+        );
     }
 
     #[tokio::test]
@@ -3926,83 +3934,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w8_node_claimed_disconnect_is_uncertain_on_recovery_never_resent() {
-        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
+    async fn w8_node_disconnect_error_records_uncertainty_without_resending() {
         let db =
-            crate::test_utils::connect_transaction_test_database("w8_node_disconnect_recovery")
+            crate::test_utils::connect_transaction_test_database("w8_node_disconnect_uncertain")
                 .await;
         let f = seed_acl_fixture(&db, AccessCase::Direct).await;
         let state = crate::test_utils::test_app_state(db.clone());
-        state
-            .audit_runtime
-            .bind_effects(
-                Uuid::new_v4(),
-                std::sync::Arc::new(Zeroizing::new([2; 32])),
-                None,
-            )
-            .unwrap();
         let connection = node_audit_connected_fixture(&db, &f, &state).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         state
             .node_ws_manager
             .register_connection_with_id(&f.node.id, connection, tx);
+        db.collection::<bson::Document>(NODES).update_one(
+            doc! {"_id": &f.node.id},
+            doc! {"$set": {"connection_owner.instance_name": "unavailable-replica", "connection_owner.internal_base_url": "ftp://invalid.example"}},
+        ).await.unwrap();
         let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
             .with_disconnect(&db, &f.node.id)
             .await
             .unwrap();
         audit.delete_node(&db, &f.node.id, None).await.unwrap();
-        while audit_outbox_service::materialize_one(&db, &[2; 32])
-            .await
-            .unwrap()
-        {}
-        let paused = state
-            .audit_runtime
-            .authorize_effect(&db, &audit.operation_id.to_string())
-            .await
-            .unwrap();
-        let recovered = node_audit_runtime(false);
-        recovered
-            .bind_effects(
-                Uuid::new_v4(),
-                std::sync::Arc::new(Zeroizing::new([2; 32])),
-                None,
-            )
-            .unwrap();
-        let mut recovered_audit = audit.clone();
-        recovered_audit.runtime = recovered;
         assert!(
-            !recovered_audit
+            audit
                 .disconnect_after_commit(
                     &db,
                     &state.node_dispatch,
                     &f.node.id,
                     4006,
-                    "node deleted"
+                    "node deleted",
+                )
+                .await
+                .is_err()
+        );
+        let mut replay = audit.clone();
+        let owner = replay.disconnect_owner.as_mut().unwrap();
+        owner.fence.instance_name = state.replica_identity.instance_name.clone();
+        owner.fence.generation_id = state.replica_identity.generation_id.clone();
+        assert!(
+            !replay
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4006,
+                    "node deleted",
                 )
                 .await
                 .unwrap()
         );
         assert!(
-            paused
-                .run(|| state.node_dispatch.disconnect_invalidated(
-                    audit.disconnect_owner.clone().unwrap(),
-                    4006,
-                    "node deleted"
-                ))
-                .await
-                .is_err()
-        );
-        assert!(
             rx.try_recv().is_err(),
-            "recovered/paused attempts cannot close twice"
+            "an uncertain attempt is never resent"
         );
-        let intent = db
-            .collection::<AuditEffectIntent>(INTENTS)
-            .find_one(doc! {"_id": audit.operation_id.to_string()})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(intent.terminal_stage, Some(AuditStage::Uncertain));
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].event.stage, AuditStage::Uncertain);
+        assert_eq!(rows[1].event.action, "node_disconnect");
+        // Independent lease enforcement closes even when the relay failed.
+        crate::handlers::node_ws::node_ws_manager_owner_lease_sweep(
+            &db,
+            &state.node_ws_manager,
+            &state.replica_identity,
+            30,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(crate::services::node_ws_manager::NodeOutboundMessage::Close { code: 4007, .. })
+        ));
+        assert!(rx.recv().await.is_none());
     }
 
     #[tokio::test]
@@ -4354,19 +4354,10 @@ mod tests {
 
     #[tokio::test]
     async fn w8_node_online_transfer_preserves_destination_event_and_disconnect_terminal() {
-        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
         let db =
             crate::test_utils::connect_transaction_test_database("w8_node_transfer_close").await;
         let f = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
         let state = crate::test_utils::test_app_state(db.clone());
-        state
-            .audit_runtime
-            .bind_effects(
-                Uuid::new_v4(),
-                std::sync::Arc::new(Zeroizing::new([2; 32])),
-                None,
-            )
-            .unwrap();
         let connection = node_audit_connected_fixture(&db, &f, &state).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         state
@@ -4385,14 +4376,8 @@ mod tests {
             .into_iter()
             .find(|row| row.event.action == "node_transfer_received")
             .unwrap();
-        let intent = db
-            .collection::<AuditEffectIntent>(INTENTS)
-            .find_one(doc! {"_id": audit.operation_id.to_string()})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(received.id, intent.terminal_event_id);
-        assert_ne!(received.event.operation_id, intent.id);
+        assert_ne!(received.id, audit.terminal_id.to_string());
+        assert_ne!(received.event.operation_id, audit.operation_id.to_string());
         assert_eq!(received.event.stage, AuditStage::Committed);
         assert_eq!(received.event.owner, AuditOwner::Person { id: f.actor_id });
         while audit_outbox_service::materialize_one(&db, &[2; 32])
@@ -4417,77 +4402,168 @@ mod tests {
             .unwrap()
         {}
         let rows = node_audit_events(&db).await;
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.materialized_seq.is_some()));
         assert!(
             rows.iter()
                 .any(|row| { row.id == received.id && row.event == received.event })
         );
         assert!(rows.iter().any(|row| {
-            row.id == intent.terminal_event_id
+            row.id == audit.terminal_id.to_string()
                 && row.event.action == "node_disconnect"
                 && row.event.stage == AuditStage::Succeeded
+                && row.event.owner
+                    == AuditOwner::Org {
+                        id: f.owner_id.clone(),
+                    }
         }));
     }
 
     #[tokio::test]
-    async fn w8_node_delete_narrows_with_three_reserved_slots_while_close_defers() {
-        let db =
-            crate::test_utils::connect_transaction_test_database("w8_node_delete_deferred").await;
-        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
-        let mut state = crate::test_utils::test_app_state(db.clone());
-        state.audit_runtime = node_audit_runtime(true);
-        state
-            .audit_runtime
-            .bind_effects(
-                Uuid::new_v4(),
-                std::sync::Arc::new(Zeroizing::new([2; 32])),
-                None,
-            )
-            .unwrap();
-        let connection = node_audit_connected_fixture(&db, &f, &state).await;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        state
-            .node_ws_manager
-            .register_connection_with_id(&f.node.id, connection, tx);
-        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
-            .with_disconnect(&db, &f.node.id)
-            .await
-            .unwrap();
-        node_audit_backlog(&db, 1_000_000, 86_400).await;
-        audit.delete_node(&db, &f.node.id, None).await.unwrap();
-        assert!(
-            !audit
-                .disconnect_after_commit(
+    async fn w8_node_delete_and_rotation_close_under_backlog_and_divergence_spare_successors() {
+        for diverged in [false, true] {
+            for rotate in [false, true] {
+                let db = crate::test_utils::connect_transaction_test_database(&format!(
+                    "w8_node_close_{diverged}_{rotate}"
+                ))
+                .await;
+                let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+                let mut state = crate::test_utils::test_app_state(db.clone());
+                state.audit_runtime = node_audit_runtime(true);
+                let connection = node_audit_connected_fixture(&db, &f, &state).await;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+                state
+                    .node_ws_manager
+                    .register_connection_with_id(&f.node.id, connection, tx);
+                let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+                    .with_disconnect(&db, &f.node.id)
+                    .await
+                    .unwrap();
+                // Rotation itself remains Standard. Close admission only after
+                // its confirmed commit; deletion also commits while closed.
+                if rotate {
+                    audit
+                        .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
+                        .await
+                        .unwrap();
+                }
+                node_audit_backlog(&db, 1_000_000, 86_400).await;
+                if diverged {
+                    let audit_state = crate::services::audit_state_service::load(&db)
+                        .await
+                        .unwrap();
+                    db.collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME)
+                        .insert_one(doc! {"_id": audit_state.id, "divergence": {"seq": 1_i64, "local_hash": "a".repeat(64), "witnessed_hash": "b".repeat(64)}})
+                        .await.unwrap();
+                }
+                let context = (&db, &state.audit_runtime);
+                let admission = crate::services::audit_runtime::transaction::run(
                     &db,
-                    &state.node_dispatch,
-                    &f.node.id,
-                    4006,
-                    "node deleted"
+                    &context,
+                    |session, (db, runtime)| {
+                        Box::pin(runtime.require_new_in_session(
+                            db,
+                            session,
+                            AuditTier::Standard,
+                            1,
+                        ))
+                    },
                 )
-                .await
-                .unwrap()
-        );
-        assert!(rx.try_recv().is_err());
-        let node = db
-            .collection::<Node>(NODES)
-            .find_one(doc! {"_id": &f.node.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!node.is_active);
-        assert!(node.connection_owner.is_none());
-        assert_eq!(
-            node_audit_events(&db).await.len(),
-            2,
-            "terminal slot is reserved without inventing a terminal outcome"
-        );
-        assert_eq!(
-            crate::services::audit_state_service::load(&db)
-                .await
-                .unwrap()
-                .pending_count,
-            1_000_003
-        );
+                .await;
+                if diverged {
+                    assert!(matches!(admission, Err(AppError::AuditWitnessDiverged)));
+                } else {
+                    assert!(matches!(
+                        admission,
+                        Err(AppError::AuditAdmissionClosed { .. })
+                    ));
+                }
+                let audit_state = crate::services::audit_state_service::load(&db)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    state
+                        .audit_runtime
+                        .diagnostics(Some(&audit_state), Utc::now())
+                        .witness,
+                    if diverged {
+                        crate::services::audit_runtime::policy::WitnessState::Diverged
+                    } else {
+                        crate::services::audit_runtime::policy::WitnessState::Backlogged
+                    }
+                );
+                if !rotate {
+                    audit.delete_node(&db, &f.node.id, None).await.unwrap();
+                }
+                assert!(
+                    audit
+                        .disconnect_after_commit(
+                            &db,
+                            &state.node_dispatch,
+                            &f.node.id,
+                            4006,
+                            "node invalidated",
+                        )
+                        .await
+                        .unwrap(),
+                    "diverged={diverged}, rotate={rotate}"
+                );
+                assert!(matches!(
+                    rx.recv().await,
+                    Some(
+                        crate::services::node_ws_manager::NodeOutboundMessage::Close {
+                            code: 4006,
+                            ..
+                        }
+                    )
+                ));
+                assert!(rx.recv().await.is_none(), "captured socket closed");
+                let node = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {"_id": &f.node.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(node.is_active, rotate);
+                assert!(node.connection_owner.is_none());
+                let rows = node_audit_events(&db).await;
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[1].event.stage, AuditStage::Succeeded);
+                assert_eq!(rows[1].event.action, "node_disconnect");
+                assert_eq!(
+                    rows[1].event.owner,
+                    AuditOwner::Person {
+                        id: f.owner_id.clone()
+                    }
+                );
+                assert_eq!(
+                    rows[1].event.principal,
+                    AuditPrincipal::Person {
+                        id: f.actor_id.clone()
+                    }
+                );
+                // A reconnect after invalidation is a different connection.
+                let successor = node_audit_connected_fixture(&db, &f, &state).await;
+                let (next_tx, mut next_rx) = tokio::sync::mpsc::channel(8);
+                state.node_ws_manager.register_connection_with_id(
+                    &f.node.id,
+                    successor.clone(),
+                    next_tx,
+                );
+                assert!(
+                    !state
+                        .node_dispatch
+                        .disconnect_invalidated(
+                            audit.disconnect_owner.clone().unwrap(),
+                            4006,
+                            "stale invalidation",
+                        )
+                        .await
+                        .unwrap()
+                );
+                assert!(state.node_ws_manager.has_connection(&f.node.id, &successor));
+                assert!(next_rx.try_recv().is_err(), "successor is untouched");
+            }
+        }
     }
 }

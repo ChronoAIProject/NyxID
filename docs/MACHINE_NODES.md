@@ -904,8 +904,12 @@ fails setup; it never falls back to another installed browser. Resolved package
 metadata still selects the policy directory: Debian Chromium uses
 `/etc/chromium/policies/managed`, Ubuntu Snap Chromium uses
 `/etc/chromium-browser/policies/managed`, and Google Chrome deb uses
-`/etc/opt/chrome/policies/managed`. This selection does not bypass the live
-policy-effectiveness or renderer-sandbox checks.
+`/etc/opt/chrome/policies/managed`. The privileged installer resolves and
+validates the executable again against these recognized layouts and trusted
+package metadata before installing policies. The override cannot select an
+arbitrary executable or redirect privileged installation to an arbitrary path.
+This selection does not bypass the live policy-effectiveness or
+renderer-sandbox checks.
 
 Native acceptance (`bash cli/tests/machine_native_acceptance.sh --disposable`)
 defaults explicitly to `/usr/bin/google-chrome`, regardless of installed Chromium

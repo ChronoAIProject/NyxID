@@ -2315,6 +2315,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn w8_node_revocation_closes_real_websocket_when_audit_admission_is_closed() {
+        use crate::models::audit_outbox::{AuditStage, PENDING_COLLECTION_NAME, PendingAuditEvent};
+        use crate::services::{
+            audit_runtime::{AuditRuntime, policy::AuditTier},
+            node_service::NodeMutationAudit,
+        };
+        use futures::StreamExt;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            for diverged in [false, true] {
+                for rotate in [false, true] {
+                    let db = crate::test_utils::connect_transaction_test_database(
+                        &format!("w8_node_socket_{diverged}_{rotate}")
+                    ).await;
+                    let node = test_node(&uuid::Uuid::new_v4().to_string(), "revoked", "auth-token");
+                    insert_user_and_node(&db, &node.user_id, &node).await;
+                    let mut state = test_app_state(db.clone());
+                    state.audit_runtime = std::sync::Arc::new(AuditRuntime::new(Default::default(), true));
+                    let (url, server) = start_node_ws_test_server(state.clone()).await;
+                    let mut old = auth_test_socket(&url, &node.id, "auth-token").await;
+                    let message = old.next().await.unwrap().unwrap();
+                    assert_eq!(serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap()["type"], "auth_ok");
+                    let audit = NodeMutationAudit::new(&state.audit_runtime, &node.user_id)
+                        .with_disconnect(&db, &node.id).await.unwrap();
+                    let next_token = if rotate {
+                        Some(audit.rotate_auth_token(&db, &state.encryption_keys, &node.id).await.unwrap().0)
+                    } else { None };
+                    let audit_state = crate::services::audit_state_service::load(&db).await.unwrap();
+                    db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+                        .update_one(doc! {}, doc! {"$set": {"pending_count": 1_000_000_i64,
+                            "oldest_pending_at": bson::DateTime::from_chrono(Utc::now() - Duration::days(1))},
+                            "$max": {"next_order": 1_000_000_i64}}).await.unwrap();
+                    if diverged {
+                        db.collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME)
+                            .insert_one(doc! {"_id": audit_state.id, "divergence": {"seq": 1_i64,
+                                "local_hash": "a".repeat(64), "witnessed_hash": "b".repeat(64)}}).await.unwrap();
+                    }
+                    let context = (&db, &state.audit_runtime);
+                    let admission = crate::services::audit_runtime::transaction::run(
+                        &db, &context, |session, (db, runtime)| {
+                            Box::pin(runtime.require_new_in_session(db, session, AuditTier::Standard, 1))
+                        },
+                    ).await;
+                    assert!(if diverged { matches!(admission, Err(crate::errors::AppError::AuditWitnessDiverged)) }
+                        else { matches!(admission, Err(crate::errors::AppError::AuditAdmissionClosed { .. })) });
+                    if !rotate { audit.delete_node(&db, &node.id, None).await.unwrap(); }
+                    assert!(audit.disconnect_after_commit(&db, &state.node_dispatch, &node.id, 4006, "node invalidated").await.unwrap());
+                    let close = old.next().await.unwrap().unwrap();
+                    assert!(matches!(close, tokio_tungstenite::tungstenite::Message::Close(Some(ref frame)) if u16::from(frame.code) == 4006), "{close:?}");
+                    wait_for_socket_count(&state.node_ws_manager, 0).await;
+                    let outcome = db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                        .find_one(doc! {"event.action": "node_disconnect", "event.target_id": &node.id}).await.unwrap().unwrap();
+                    assert_eq!(outcome.event.stage, AuditStage::Succeeded);
+                    if let Some(token) = next_token {
+                        let mut successor = auth_test_socket(&url, &node.id, &token).await;
+                        let message = successor.next().await.unwrap().unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap()["type"], "auth_ok");
+                        let successor_id = state.node_ws_manager.connection_id(&node.id).unwrap();
+                        assert!(!audit.disconnect_after_commit(&db, &state.node_dispatch, &node.id, 4006, "stale invalidation").await.unwrap());
+                        state.node_ws_manager.send_heartbeat_ping(&node.id).unwrap();
+                        let message = successor.next().await.unwrap().unwrap();
+                        assert_eq!(serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap()["type"], "heartbeat_ping");
+                        assert!(state.node_ws_manager.has_connection(&node.id, &successor_id));
+                        successor.close(None).await.unwrap();
+                        wait_for_socket_count(&state.node_ws_manager, 0).await;
+                    }
+                    server.abort();
+                }
+            }
+        }).await.expect("revocation socket acceptance timed out");
+    }
+
+    #[tokio::test]
     async fn reconnect_replacement_and_admin_close_release_idle_readers_with_fenced_cleanup() {
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             use futures::StreamExt;
