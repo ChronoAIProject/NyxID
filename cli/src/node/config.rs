@@ -685,7 +685,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, header_value)?;
+        let encrypted = backend.store_field(
+            super::secret_fields::SecretField::Credential {
+                slug: service_slug.into(),
+                part: super::secret_fields::CredentialPart::Header,
+            },
+            header_value,
+        )?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
@@ -708,7 +714,13 @@ impl NodeConfig {
             .unwrap_or_else(|| ifttt::BASE_URL.to_string());
         ifttt::validate_destination(&target)
             .map_err(|error| Error::Validation(error.to_string()))?;
-        let encrypted = backend.store_credential_value(service_slug, key)?;
+        let encrypted = backend.store_field(
+            super::secret_fields::SecretField::Credential {
+                slug: service_slug.into(),
+                part: super::secret_fields::CredentialPart::Header,
+            },
+            key,
+        )?;
         let mut config = CredentialConfig::new_header(String::new(), encrypted, Some(target));
         config.injection_method = ifttt::AUTH_METHOD.to_string();
         self.credentials.insert(service_slug.to_string(), config);
@@ -724,7 +736,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, param_value)?;
+        let encrypted = backend.store_field(
+            super::secret_fields::SecretField::Credential {
+                slug: service_slug.into(),
+                part: super::secret_fields::CredentialPart::Parameter,
+            },
+            param_value,
+        )?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
@@ -746,7 +764,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, credential)?;
+        let encrypted = backend.store_field(
+            super::secret_fields::SecretField::Credential {
+                slug: service_slug.into(),
+                part: super::secret_fields::CredentialPart::Header,
+            },
+            credential,
+        )?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
@@ -781,7 +805,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
+        let encrypted = backend.store_field(
+            super::secret_fields::SecretField::Credential {
+                slug: service_slug.into(),
+                part: super::secret_fields::CredentialPart::Header,
+            },
+            credential_json,
+        )?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),

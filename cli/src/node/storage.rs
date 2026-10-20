@@ -24,6 +24,10 @@ fn invalid() -> Error {
 pub(crate) struct Directory(File);
 
 impl Directory {
+    pub(crate) fn sync(&self) -> Result<()> {
+        self.0.sync_all().map_err(Error::StorageDurabilityUncertain)
+    }
+
     pub(crate) fn try_clone(&self) -> Result<Self> {
         Ok(Self(self.0.try_clone()?))
     }
@@ -633,10 +637,6 @@ impl Publication {
         Self(Mutex::new(Some(Sha256::digest(bytes).into())))
     }
 
-    pub(crate) fn save(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        self.save_with_sync(path, bytes, File::sync_all)
-    }
-
     pub(crate) fn save_validated_in(
         &self,
         directory: &Directory,
@@ -645,37 +645,6 @@ impl Publication {
         validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
     ) -> Result<()> {
         self.save_inner_in(directory, name, bytes, File::sync_all, validate)
-    }
-
-    fn save_with_sync(
-        &self,
-        path: &Path,
-        bytes: &[u8],
-        sync: impl FnOnce(&File) -> std::io::Result<()>,
-    ) -> Result<()> {
-        self.save_inner(path, bytes, sync, |_, _| Ok(()))
-    }
-
-    fn save_inner(
-        &self,
-        path: &Path,
-        bytes: &[u8],
-        sync: impl FnOnce(&File) -> std::io::Result<()>,
-        validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
-    ) -> Result<()> {
-        // Enforce the reader's bound before even creating a writer-lock file.
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err(Error::Config(
-                "Node configuration exceeds its size limit".into(),
-            ));
-        }
-        let directory = Directory::open(
-            path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-        )?;
-        let name = path.file_name().ok_or_else(invalid)?;
-        self.save_inner_in(&directory, name, bytes, sync, validate)
     }
 
     fn save_inner_in(
@@ -720,6 +689,43 @@ impl Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Raw byte publication and fault injection belong only to storage tests.
+    impl Publication {
+        pub(crate) fn save(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+            self.save_with_sync(path, bytes, File::sync_all)
+        }
+
+        fn save_with_sync(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            sync: impl FnOnce(&File) -> std::io::Result<()>,
+        ) -> Result<()> {
+            self.save_inner(path, bytes, sync, |_, _| Ok(()))
+        }
+
+        fn save_inner(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+            sync: impl FnOnce(&File) -> std::io::Result<()>,
+            validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
+        ) -> Result<()> {
+            // Enforce the reader's bound before even creating a writer-lock file.
+            if bytes.len() as u64 > MAX_CONFIG_BYTES {
+                return Err(Error::Config(
+                    "Node configuration exceeds its size limit".into(),
+                ));
+            }
+            let directory = Directory::open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )?;
+            let name = path.file_name().ok_or_else(invalid)?;
+            self.save_inner_in(&directory, name, bytes, sync, validate)
+        }
+    }
 
     #[cfg(unix)]
     #[test]

@@ -220,10 +220,6 @@ impl Attempt {
         }
         Ok(())
     }
-    pub(crate) fn begin(path: &Path, observed: Option<[u8; 32]>, node_id: &str) -> Result<Self> {
-        Self::begin_with_purpose(path, observed, node_id, Purpose::Ordinary)
-    }
-
     pub(crate) fn begin_in(
         directory: &Directory,
         path: &Path,
@@ -232,30 +228,6 @@ impl Attempt {
     ) -> Result<Self> {
         Self::begin_in_with_purpose(directory, path, observed, node_id, Purpose::Ordinary)
     }
-    /// A provider may already have rotated the remote token while the original
-    /// config became stale. Retention must still succeed; this journal purpose
-    /// cannot authorize publication without a separately checked recovery step.
-    pub(crate) fn returned_rotation(
-        path: &Path,
-        observed: Option<[u8; 32]>,
-        node_id: &str,
-    ) -> Result<Self> {
-        Self::begin_with_purpose(path, observed, node_id, Purpose::ReturnedRotationRecovery)
-    }
-    fn begin_with_purpose(
-        path: &Path,
-        observed: Option<[u8; 32]>,
-        node_id: &str,
-        purpose: Purpose,
-    ) -> Result<Self> {
-        let directory = Directory::open(
-            path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-        )?;
-        Self::begin_in_with_purpose(&directory, path, observed, node_id, purpose)
-    }
-
     fn begin_in_with_purpose(
         directory: &Directory,
         path: &Path,
@@ -483,12 +455,12 @@ pub(crate) fn read_ready_references(
 /// Reconcile one owned manifest. Current config is authoritative even if an
 /// earlier publish returned installed/uncertain. Live ownership is retained
 /// durably so a later metadata removal can still retire those exact objects.
-pub(crate) fn collect_one(path: &Path, id: Uuid, store: &impl ObjectStore) -> Result<Cleanup> {
-    let directory = Directory::open(
-        path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    )?;
+pub(crate) fn collect_one_in(
+    directory: &Directory,
+    path: &Path,
+    id: Uuid,
+    store: &impl ObjectStore,
+) -> Result<Cleanup> {
     let name = path.file_name().ok_or_else(invalid)?;
     let _writer = directory.writer_lock()?;
     let Some(_lease) = directory.try_existing_lease(OsStr::new(&lease_name(id)))? else {
@@ -497,11 +469,55 @@ pub(crate) fn collect_one(path: &Path, id: Uuid, store: &impl ObjectStore) -> Re
             ..Default::default()
         });
     };
+    let authority = cleanup_authority(directory, name, store)?;
+    collect_locked(directory, name, id, store, &authority)
+}
+
+struct CleanupAuthority {
+    config: NodeConfig,
+    live: BTreeMap<ObjectRef, SecretField>,
+}
+
+fn cleanup_authority(
+    directory: &Directory,
+    name: &OsStr,
+    store: &impl ObjectStore,
+) -> Result<CleanupAuthority> {
     // Missing/corrupt authority never authorizes object deletion.
-    let bytes = current_bytes(&directory, name)?.ok_or_else(invalid)?;
+    let bytes = current_bytes(directory, name)?.ok_or_else(invalid)?;
     let current = config(&bytes)?;
-    let live = authoritative_references(&directory, name, &current, store)?;
-    let mut journal = Journal::read(&directory, id)?;
+    let live = authoritative_references(directory, name, &current, store)?;
+    if current.storage_backend == "file" {
+        let file = super::encryption::LocalEncryption::open_in(directory)?;
+        for (field, required) in secret_fields::fields(&current)? {
+            match field.encoded(&current)? {
+                Some(encoded) => {
+                    let _value = Zeroizing::new(file.decrypt(encoded)?);
+                }
+                None if required => return Err(invalid()),
+                None => {}
+            }
+        }
+    }
+    // Resolve any earlier parent-sync uncertainty before destructive effects.
+    directory.sync()?;
+    Ok(CleanupAuthority {
+        config: current,
+        live,
+    })
+}
+
+/// The caller retains both the writer lock and this attempt's existing lease.
+fn collect_locked(
+    directory: &Directory,
+    name: &OsStr,
+    id: Uuid,
+    store: &impl ObjectStore,
+    authority: &CleanupAuthority,
+) -> Result<Cleanup> {
+    let current = &authority.config;
+    let live = &authority.live;
+    let mut journal = Journal::read(directory, id)?;
     if journal.node_id != current.node.id || Some(journal.config_name.as_str()) != name.to_str() {
         return Err(invalid());
     }
@@ -540,7 +556,7 @@ pub(crate) fn collect_one(path: &Path, id: Uuid, store: &impl ObjectStore) -> Re
     for index in retire {
         store.delete(journal.objects[index].reference)?;
         journal.objects[index].phase = Phase::Retired;
-        journal.persist(&directory, true)?;
+        journal.persist(directory, true)?;
         result.retired += 1;
     }
     if result.retained == 0 {
@@ -553,9 +569,65 @@ pub(crate) fn collect_one(path: &Path, id: Uuid, store: &impl ObjectStore) -> Re
     Ok(result)
 }
 
+/// Bounded recovery also visits old owners after a replacement/removal. A live
+/// attempt is left alone, and returned rotations retain their recovery purpose.
+pub(crate) fn collect_all_in(
+    directory: &Directory,
+    path: &Path,
+    store: &impl ObjectStore,
+) -> Result<()> {
+    let _writer = directory.writer_lock()?;
+    let config_name = path.file_name().ok_or_else(invalid)?;
+    let mut authority = None;
+    for name in directory.names()? {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name
+            .strip_prefix(".secret-intent-")
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+        if journal_name(id) != name {
+            return Err(invalid());
+        }
+        let Some(_lease) = directory.try_existing_lease(OsStr::new(&lease_name(id)))? else {
+            continue;
+        };
+        if authority.is_none() {
+            authority = Some(cleanup_authority(directory, config_name, store)?);
+        }
+        // Reuse the complete graph/key-health read throughout this locked pass.
+        collect_locked(
+            directory,
+            config_name,
+            id,
+            store,
+            authority.as_ref().ok_or_else(invalid)?,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn collect_one(path: &Path, id: Uuid, store: &impl ObjectStore) -> Result<Cleanup> {
+        let directory = Directory::open(path.parent().unwrap()).unwrap();
+        collect_one_in(&directory, path, id, store)
+    }
+    fn begin(
+        path: &Path,
+        observed: Option<[u8; 32]>,
+        node_id: &str,
+        purpose: Purpose,
+    ) -> Result<Attempt> {
+        let directory = Directory::open(path.parent().unwrap()).unwrap();
+        Attempt::begin_in_with_purpose(&directory, path, observed, node_id, purpose)
+    }
+
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Store {
@@ -637,7 +709,13 @@ mod tests {
         config.save(&path).unwrap();
         let mut config = NodeConfig::load(&path).unwrap();
         let store = Store::new(dir.path());
-        let initial = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let initial = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         config.node.auth_token_encrypted = initial
             .stage(SecretField::AuthToken, "synthetic-initial-auth", &store)
             .unwrap();
@@ -655,7 +733,13 @@ mod tests {
     #[test]
     fn intent_precedes_effect_and_ready_reference_binds_publication() {
         let (dir, path, mut config, store) = fixture();
-        let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let attempt = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         let encoded = attempt
             .stage(SecretField::AuthToken, "synthetic-auth-value", &store)
             .unwrap();
@@ -683,10 +767,10 @@ mod tests {
     fn stale_staging_refuses_before_any_key_service_effect() {
         let (_dir, path, config, store) = fixture();
         let snapshot = config.publication.snapshot();
-        let attempt = Attempt::begin(&path, snapshot, "node").unwrap();
+        let attempt = begin(&path, snapshot, "node", Purpose::Ordinary).unwrap();
         let newer = NodeConfig::load(&path).unwrap();
         newer.save(&path).unwrap();
-        assert!(Attempt::begin(&path, snapshot, "node").is_err());
+        assert!(begin(&path, snapshot, "node", Purpose::Ordinary).is_err());
         assert!(
             attempt
                 .stage(SecretField::AuthToken, "synthetic-stale-value", &store)
@@ -721,7 +805,13 @@ mod tests {
     #[test]
     fn active_and_committed_objects_survive_gc_until_metadata_retires_them() {
         let (dir, path, mut config, store) = fixture();
-        let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let attempt = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         let encoded = attempt
             .stage(SecretField::SigningSecret, "synthetic-live-value", &store)
             .unwrap();
@@ -757,8 +847,20 @@ mod tests {
     fn two_observed_writers_keep_winner_and_collect_only_loser_objects() {
         let (_dir, path, mut winner, store) = fixture();
         let mut loser = winner.clone();
-        let first = Attempt::begin(&path, winner.publication.snapshot(), "node").unwrap();
-        let second = Attempt::begin(&path, loser.publication.snapshot(), "node").unwrap();
+        let first = begin(
+            &path,
+            winner.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
+        let second = begin(
+            &path,
+            loser.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         winner.node.auth_token_encrypted = first
             .stage(SecretField::AuthToken, "synthetic-winner", &store)
             .unwrap();
@@ -790,7 +892,13 @@ mod tests {
     fn stage_failure_and_bad_readback_never_authorize_partial_publication() {
         for bad_readback in [false, true] {
             let (_dir, path, mut config, store) = fixture();
-            let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+            let attempt = begin(
+                &path,
+                config.publication.snapshot(),
+                "node",
+                Purpose::Ordinary,
+            )
+            .unwrap();
             let good = attempt
                 .stage(SecretField::AuthToken, "synthetic-ready", &store)
                 .unwrap();
@@ -814,7 +922,13 @@ mod tests {
     fn missing_or_corrupt_authority_refuses_all_gc_effects() {
         for missing in [true, false] {
             let (_dir, path, config, store) = fixture();
-            let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+            let attempt = begin(
+                &path,
+                config.publication.snapshot(),
+                "node",
+                Purpose::Ordinary,
+            )
+            .unwrap();
             let encoded = attempt
                 .stage(SecretField::AuthToken, "synthetic-preserved", &store)
                 .unwrap();
@@ -832,7 +946,13 @@ mod tests {
     #[test]
     fn missing_lease_is_unready_without_deletion_or_inode_recreation() {
         let (dir, path, config, store) = fixture();
-        let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let attempt = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         let owned = reference(
             &attempt
                 .stage(SecretField::AuthToken, "synthetic-owned", &store)
@@ -860,7 +980,13 @@ mod tests {
             "missing-object",
         ] {
             let (dir, path, mut config, store) = fixture();
-            let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+            let attempt = begin(
+                &path,
+                config.publication.snapshot(),
+                "node",
+                Purpose::Ordinary,
+            )
+            .unwrap();
             let orphan = reference(
                 &attempt
                     .stage(SecretField::AuthToken, "synthetic-first-orphan", &store)
@@ -910,13 +1036,25 @@ mod tests {
             "missing", "corrupt", "owner", "path", "field", "phase", "purpose", "unowned", "lease",
         ] {
             let (dir, path, mut config, store) = fixture();
-            let abandoned = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+            let abandoned = begin(
+                &path,
+                config.publication.snapshot(),
+                "node",
+                Purpose::Ordinary,
+            )
+            .unwrap();
             let orphan = reference(
                 &abandoned
                     .stage(SecretField::AuthToken, "synthetic-owned-orphan", &store)
                     .unwrap(),
             );
-            let committed = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+            let committed = begin(
+                &path,
+                config.publication.snapshot(),
+                "node",
+                Purpose::Ordinary,
+            )
+            .unwrap();
             let encoded = committed
                 .stage(SecretField::AuthToken, "synthetic-foreign-live", &store)
                 .unwrap();
@@ -965,14 +1103,82 @@ mod tests {
     }
 
     #[test]
+    fn file_cleanup_refuses_missing_or_corrupt_selected_custody_before_retiring_objects() {
+        use super::super::encryption::LocalEncryption;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let file = LocalEncryption::initialize(dir.path()).unwrap();
+        let mut current =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        current
+            .set_auth_token("synthetic-live-file-auth", &file)
+            .unwrap();
+        current.save(&path).unwrap();
+        let current = NodeConfig::load(&path).unwrap();
+        let store = Store::new(dir.path());
+        let attempt = begin(
+            &path,
+            current.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
+        let orphan = reference(
+            &attempt
+                .stage(
+                    SecretField::AuthToken,
+                    "synthetic-unpublished-object",
+                    &store,
+                )
+                .unwrap(),
+        );
+        drop(attempt);
+        let directory = Directory::open(dir.path()).unwrap();
+        let key = Zeroizing::new(std::fs::read(dir.path().join(".keyfile")).unwrap());
+        std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
+        assert!(collect_all_in(&directory, &path, &store).is_err());
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+        assert!(store.get(orphan).unwrap().is_some());
+        directory
+            .publish(OsStr::new(".keyfile"), &key, false)
+            .unwrap();
+        let mut damaged = NodeConfig::load(&path).unwrap();
+        damaged.node.auth_token_encrypted = "invalid-ciphertext".into();
+        damaged.save(&path).unwrap();
+        assert!(collect_all_in(&directory, &path, &store).is_err());
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+        assert!(store.get(orphan).unwrap().is_some());
+        let mut repaired = NodeConfig::load(&path).unwrap();
+        repaired
+            .set_auth_token("synthetic-live-file-auth", &file)
+            .unwrap();
+        repaired.save(&path).unwrap();
+        collect_all_in(&directory, &path, &store).unwrap();
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 1);
+        assert!(store.get(orphan).unwrap().is_none());
+        assert_eq!(
+            NodeConfig::load(&path)
+                .unwrap()
+                .decrypt_auth_token(&file)
+                .unwrap(),
+            "synthetic-live-file-auth"
+        );
+    }
+
+    #[test]
     fn returned_rotation_is_retained_after_stale_await_without_authorizing_publish() {
         let (_dir, path, old, store) = fixture();
         let mut current = NodeConfig::load(&path).unwrap();
         current.server.proxy_max_body_size += 1;
         current.save(&path).unwrap();
-        assert!(Attempt::begin(&path, old.publication.snapshot(), "node").is_err());
-        let recovery =
-            Attempt::returned_rotation(&path, old.publication.snapshot(), "node").unwrap();
+        assert!(begin(&path, old.publication.snapshot(), "node", Purpose::Ordinary).is_err());
+        let recovery = begin(
+            &path,
+            old.publication.snapshot(),
+            "node",
+            Purpose::ReturnedRotationRecovery,
+        )
+        .unwrap();
         let encoded = recovery
             .stage(
                 SecretField::AuthToken,
@@ -993,7 +1199,13 @@ mod tests {
     #[test]
     fn references_cannot_move_fields_or_cross_nodes_and_debug_redacts() {
         let (_dir, path, mut config, store) = fixture();
-        let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let attempt = begin(
+            &path,
+            config.publication.snapshot(),
+            "node",
+            Purpose::Ordinary,
+        )
+        .unwrap();
         let encoded = attempt
             .stage(SecretField::AuthToken, "synthetic-value", &store)
             .unwrap();

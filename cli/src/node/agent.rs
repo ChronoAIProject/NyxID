@@ -184,11 +184,11 @@ pub fn cmd_rekey(auth_token: &str, signing_secret: &str, config_path: Option<&st
     let config_file = config_dir.join("config.toml");
 
     let mut node_config = NodeConfig::load(&config_file)?;
-    let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+    let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
 
     backend.store_auth_token(&mut node_config, auth_token)?;
     backend.store_signing_secret(&mut node_config, signing_secret)?;
-    node_config.save(&config_file)?;
+    backend.publish(&node_config, &config_file)?;
 
     println!("Node credentials updated.");
     println!("Restart the agent to reconnect with the rotated credentials.");
@@ -259,7 +259,7 @@ pub async fn cmd_credentials(
         } => {
             let service = raw_service.to_lowercase();
             let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
 
             if let Some(header_name) = header {
                 // Support legacy inline format "Name: value" for backwards compat
@@ -406,7 +406,7 @@ pub async fn cmd_credentials(
                 }
             }
 
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
             println!("Credential added for service '{service}'.");
             Ok(())
         }
@@ -430,7 +430,7 @@ pub async fn cmd_credentials(
 
         NodeCredentialCommands::List => {
             let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::reader(&node_config, &config_dir)?;
             let creds = CredentialStore::from_config_with_backend(&node_config, &backend)?;
 
             if creds.count() == 0 {
@@ -451,7 +451,7 @@ pub async fn cmd_credentials(
         }
         NodeCredentialCommands::Pending => {
             let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::reader(&node_config, &config_dir)?;
             let pending = fetch_pending_credentials_for_node(&node_config, &backend).await?;
 
             if pending.is_empty() {
@@ -481,7 +481,7 @@ pub async fn cmd_credentials(
         NodeCredentialCommands::Accept { slug, value_env } => {
             let service = slug.to_lowercase();
             let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             let pending = find_pending_credential(&node_config, &backend, &service).await?;
 
             if let Some(url) = pending.target_url.as_deref().filter(|url| !url.is_empty()) {
@@ -501,7 +501,7 @@ pub async fn cmd_credentials(
             };
 
             store_pending_credential_locally(&mut node_config, &backend, &pending, &secret)?;
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
 
             let mut api = node_agent_api_client(&node_config, &backend)?;
             api.post_empty(
@@ -522,7 +522,7 @@ pub async fn cmd_credentials(
         NodeCredentialCommands::Decline { slug, reason } => {
             let service = slug.to_lowercase();
             let node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::reader(&node_config, &config_dir)?;
             let pending = find_pending_credential(&node_config, &backend, &service).await?;
             let mut api = node_agent_api_client(&node_config, &backend)?;
             api.post_empty(
@@ -576,9 +576,9 @@ pub async fn cmd_credentials(
         } => {
             let service = raw_service.to_lowercase();
             let mut node_config = load_node_config_for_credentials(&config_file, &config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             node_config.remove_credential_via(&service, &backend)?;
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
             println!("Credential removed for service '{service}'.");
             Ok(())
         }
@@ -667,7 +667,7 @@ pub async fn cmd_ssh_credentials(
             };
 
             let mut node_config = NodeConfig::load(&config_file)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             ssh_keys::add_entry(
                 &mut node_config,
                 &backend,
@@ -682,7 +682,7 @@ pub async fn cmd_ssh_credentials(
                     algorithms,
                 },
             )?;
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
 
             println!("SSH key added for service '{service}' principal '{principal}'.");
             if let Some(fingerprint) = host_key_sha256 {
@@ -719,6 +719,7 @@ pub async fn cmd_ssh_credentials(
 
             let service = service.to_lowercase();
             let mut node_config = NodeConfig::load(&config_file)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             let entry = node_config
                 .ssh_keys
                 .iter_mut()
@@ -761,7 +762,7 @@ pub async fn cmd_ssh_credentials(
             }
 
             let algorithms = entry.algorithms.clone();
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
             println!(
                 "SSH algorithm allowlists updated for service '{service}' principal '{principal}'."
             );
@@ -825,15 +826,15 @@ pub async fn cmd_ssh_credentials(
         }
         NodeSshCredentialCommands::Remove { service, principal } => {
             let mut node_config = NodeConfig::load(&config_file)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             ssh_keys::remove_entry(&mut node_config, &backend, &service, &principal)?;
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
             println!("SSH key removed for service '{service}' principal '{principal}'.");
             Ok(())
         }
         NodeSshCredentialCommands::Test { service, principal } => {
             let node_config = NodeConfig::load(&config_file)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::reader(&node_config, &config_dir)?;
             let stored =
                 ssh_keys::config_find(&node_config, &service, &principal).ok_or_else(|| {
                     super::error::Error::Config(format!(
@@ -859,7 +860,7 @@ pub async fn cmd_ssh_credentials(
                 ));
             }
             let mut node_config = NodeConfig::load(&config_file)?;
-            let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, &config_dir)?;
             let mut api = crate::api::ApiClient::from_auth_checked(&auth)
                 .await
                 .map_err(|error| super::error::Error::Config(error.to_string()))?;
@@ -892,7 +893,7 @@ pub async fn cmd_ssh_credentials(
             for (service, principal) in &stale_entries {
                 let _ = ssh_keys::remove_entry(&mut node_config, &backend, service, principal)?;
             }
-            node_config.save(&config_file)?;
+            backend.publish(&node_config, &config_file)?;
             println!("Pruned {} stale SSH key entries.", stale_entries.len());
             Ok(())
         }
@@ -1820,7 +1821,7 @@ async fn cmd_openclaw_connect(
 
     // 1. Store credential locally on the node
     let mut node_config = NodeConfig::load(config_file)?;
-    let backend = SecretBackend::from_config(&node_config, config_dir)?;
+    let backend = SecretBackend::writer(&mut node_config, config_dir)?;
 
     let header_value = format!("Bearer {bearer_token}");
     node_config.add_header_credential_via(
@@ -1830,7 +1831,7 @@ async fn cmd_openclaw_connect(
         Some(gateway_url),
         &backend,
     )?;
-    node_config.save(config_file)?;
+    backend.publish(&node_config, config_file)?;
     println!("Local credential stored for '{OPENCLAW_SERVICE_SLUG}'.");
 
     // 2. Create the NyxID-side node-routed AI Service (if an access token is available).
@@ -1909,7 +1910,7 @@ async fn cmd_openclaw_connect(
 
 fn cmd_openclaw_status(config_file: &Path, config_dir: &Path) -> Result<()> {
     let node_config = NodeConfig::load(config_file)?;
-    let backend = SecretBackend::from_config(&node_config, config_dir)?;
+    let backend = SecretBackend::reader(&node_config, config_dir)?;
     let creds = CredentialStore::from_config_with_backend(&node_config, &backend)?;
 
     if let Some(cred) = creds.get(OPENCLAW_SERVICE_SLUG) {
@@ -1929,9 +1930,9 @@ fn cmd_openclaw_status(config_file: &Path, config_dir: &Path) -> Result<()> {
 
 fn cmd_openclaw_disconnect(config_file: &Path, config_dir: &Path) -> Result<()> {
     let mut node_config = NodeConfig::load(config_file)?;
-    let backend = SecretBackend::from_config(&node_config, config_dir)?;
+    let backend = SecretBackend::writer(&mut node_config, config_dir)?;
     node_config.remove_credential_via(OPENCLAW_SERVICE_SLUG, &backend)?;
-    node_config.save(config_file)?;
+    backend.publish(&node_config, config_file)?;
     println!("OpenClaw credentials removed from node.");
     println!("Note: To fully disconnect, also remove the binding in the NyxID web UI.");
     Ok(())
@@ -2396,7 +2397,7 @@ async fn cmd_credentials_setup(
             }
 
             let mut node_config = load_node_config_for_credentials(config_file, config_dir)?;
-            let backend = SecretBackend::from_config(&node_config, config_dir)?;
+            let backend = SecretBackend::writer(&mut node_config, config_dir)?;
 
             // Store credential using the injection method matching the auth method
             if auth_method == "ifttt_webhook" {
@@ -2445,7 +2446,7 @@ async fn cmd_credentials_setup(
                 )?;
             }
 
-            node_config.save(config_file)?;
+            backend.publish(&node_config, config_file)?;
             println!("Credential added for service '{service}'.");
             if let Some(url) = target_url {
                 println!("  Target URL: {url}");
@@ -2640,6 +2641,18 @@ async fn cmd_credentials_add_oauth(
 
 #[cfg(test)]
 mod tests {
+    fn read_snapshot(
+        config: &super::super::config::NodeConfig,
+        path: &std::path::Path,
+        keychain: Option<&super::super::keychain::KeychainBackend>,
+        previous: Option<&super::super::legacy_secrets::LegacySnapshot>,
+    ) -> super::super::error::Result<super::super::secret_snapshot::SecretSnapshot> {
+        let directory = super::super::storage::Directory::open(path.parent().unwrap())?;
+        super::super::secret_snapshot::SecretSnapshot::read_in(
+            &directory, config, path, keychain, previous, None,
+        )
+    }
+
     use serde_json::json;
 
     use super::super::encryption::LocalEncryption;
@@ -2655,7 +2668,6 @@ mod tests {
     use super::super::credentials::{pending_key_store::PendingCredentialKeyStore, ssh_keys};
     use super::super::keychain::KeychainBackend;
     use super::super::secret_fields::{self, CredentialPart, SecretField};
-    use super::super::secret_snapshot::SecretSnapshot;
     use super::super::secret_transaction::Attempt;
     use super::super::storage::Directory;
 
@@ -2735,9 +2747,15 @@ mod tests {
         }
         config.save(&path).unwrap();
         let source = NodeConfig::load(&path).unwrap();
-        let snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let snapshot = read_snapshot(&source, &path, None, None).unwrap();
         let store = KeychainBackend::new_mock("node");
-        let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+        let attempt = Attempt::begin_in(
+            &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+            &path,
+            source.publication.snapshot(),
+            "node",
+        )
+        .unwrap();
         let modern = snapshot
             .project_keychain(&source, &attempt, &store)
             .unwrap();
@@ -2749,6 +2767,338 @@ mod tests {
             store,
             expected,
         }
+    }
+
+    #[test]
+    fn typed_writer_replaces_and_retires_only_the_removed_objects() {
+        use super::super::secret_transaction::{ObjectRef, ObjectStore};
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let mut config = fixture.config.clone();
+        let field = SecretField::Credential {
+            slug: "oauth".into(),
+            part: CredentialPart::Header,
+        };
+        let original = ObjectRef::parse(field.encoded(&config).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        // A logical name cannot masquerade as a typed field, including slugs
+        // that happen to resemble an OAuth or SSH suffix.
+        assert!(
+            writer
+                .store_credential_value("oauth:oauth_refresh", "never-staged")
+                .is_err()
+        );
+        config
+            .credentials
+            .get_mut("oauth")
+            .unwrap()
+            .header_value_encrypted = writer
+            .store_field(field.clone(), "synthetic-replacement")
+            .unwrap();
+        assert_eq!(
+            writer.require_field(&config, &field).unwrap().as_str(),
+            "synthetic-replacement"
+        );
+        assert!(
+            ObjectStore::get(&fixture.store, original)
+                .unwrap()
+                .is_some()
+        );
+        writer.publish(&config, &path).unwrap();
+        assert!(
+            ObjectStore::get(&fixture.store, original)
+                .unwrap()
+                .is_none()
+        );
+        assert!(writer.publish(&config, &path).is_err());
+        let mut loaded = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(
+            &loaded,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        for (location, expected) in &fixture.expected {
+            if location != &field {
+                assert!(reader.load_field(&loaded, location).unwrap() == *expected);
+            }
+        }
+        assert_eq!(
+            reader.require_field(&loaded, &field).unwrap().as_str(),
+            "synthetic-replacement"
+        );
+        let replacement = ObjectRef::parse(field.encoded(&loaded).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        let remover = SecretBackend::writer_with_keychain(
+            &mut loaded,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        loaded.remove_credential_via("oauth", &remover).unwrap();
+        assert!(
+            ObjectStore::get(&fixture.store, replacement)
+                .unwrap()
+                .is_some()
+        );
+        remover.publish(&loaded, &path).unwrap();
+        assert!(
+            ObjectStore::get(&fixture.store, replacement)
+                .unwrap()
+                .is_none()
+        );
+        let loaded = NodeConfig::load(&path).unwrap();
+        let reader =
+            SecretBackend::reader_with_keychain(&loaded, fixture.directory.path(), fixture.store)
+                .unwrap();
+        for (location, expected) in &fixture.expected {
+            if !matches!(location, SecretField::Credential { slug, .. } if slug == "oauth") {
+                assert!(reader.load_field(&loaded, location).unwrap() == *expected);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_writer_never_retires_winner_or_loser_before_durable_recovery() {
+        use super::super::secret_transaction::{ObjectRef, ObjectStore};
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let mut loser = fixture.config.clone();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut loser,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        writer
+            .store_auth_token(&mut loser, "synthetic-losing-auth")
+            .unwrap();
+        let staged = ObjectRef::parse(&loser.node.auth_token_encrypted)
+            .unwrap()
+            .unwrap();
+        let mut winner = fixture.config.clone();
+        winner.server.url = "wss://metadata-winner.invalid".into();
+        winner.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(writer.publish(&loser, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(ObjectStore::get(&fixture.store, staged).unwrap().is_some());
+        drop(writer);
+        let mut current = NodeConfig::load(&path).unwrap();
+        let next = SecretBackend::writer_with_keychain(
+            &mut current,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        next.publish(&current, &path).unwrap();
+        assert!(ObjectStore::get(&fixture.store, staged).unwrap().is_none());
+        let current = NodeConfig::load(&path).unwrap();
+        let reader =
+            SecretBackend::reader_with_keychain(&current, fixture.directory.path(), fixture.store)
+                .unwrap();
+        for (field, expected) in &fixture.expected {
+            assert!(reader.load_field(&current, field).unwrap() == *expected);
+        }
+    }
+
+    #[test]
+    fn ordinary_writer_refuses_legacy_keychain_before_conversion_or_key_service_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node".into(),
+            "keychain".into(),
+        )
+        .save(&path)
+        .unwrap();
+        let mut config = NodeConfig::load(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let names = Directory::open(directory.path()).unwrap().names().unwrap();
+        let store = KeychainBackend::new_failing_mock("node", "key service must not be touched");
+        let error = SecretBackend::writer_with_keychain(&mut config, directory.path(), store)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("stopped-daemon migration"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            Directory::open(directory.path()).unwrap().names().unwrap(),
+            names
+        );
+    }
+
+    #[test]
+    fn ssh_and_pending_writers_keep_typed_locations_until_publication() {
+        use super::super::credentials::crypto::PendingCredentialCryptoMetadata;
+        use super::super::secret_transaction::{ObjectRef, ObjectStore};
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let mut config = fixture.config.clone();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        ssh_keys::add_entry(
+            &mut config,
+            &writer,
+            NewSshKeyEntry {
+                service_slug: "other-ssh".into(),
+                principal: "bob".into(),
+                private_key_pem: Zeroizing::new("synthetic-private-key".into()),
+                passphrase: Some(Zeroizing::new("synthetic-passphrase".into())),
+                target_host: "example.invalid".into(),
+                target_port: 2222,
+                host_key_sha256: None,
+                algorithms: None,
+            },
+        )
+        .unwrap();
+        let loaded = ssh_keys::load_entry(
+            &config,
+            ssh_keys::config_find(&config, "other-ssh", "bob").unwrap(),
+            &writer,
+        )
+        .unwrap();
+        assert_eq!(loaded.private_key_pem.as_str(), "synthetic-private-key");
+        assert_eq!(loaded.passphrase.unwrap().as_str(), "synthetic-passphrase");
+        let metadata = PendingCredentialCryptoMetadata {
+            pending_id: "new-pending".into(),
+            node_id: "node".into(),
+            service_slug: "oauth".into(),
+            injection_method: "header".into(),
+            field_name: "Authorization".into(),
+            target_url: None,
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            version: nyxid_crypto::VERSION_V1.into(),
+        };
+        let mut pending = PendingCredentialKeyStore::new(&mut config, &writer);
+        let first = pending.create_or_load(&metadata).unwrap();
+        let private = pending.load_private_key("new-pending").unwrap();
+        assert_eq!(pending.create_or_load(&metadata).unwrap(), first);
+        writer.publish(&config, &path).unwrap();
+        let mut config = NodeConfig::load(&path).unwrap();
+        let private_ref = ObjectRef::parse(
+            config.pending_crypto_keys["new-pending"]
+                .private_key_encrypted
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let mut pending = PendingCredentialKeyStore::new(&mut config, &writer);
+        assert!(*pending.load_private_key("new-pending").unwrap() == *private);
+        assert!(pending.delete("new-pending").unwrap());
+        ssh_keys::remove_entry(&mut config, &writer, "other-ssh", "bob").unwrap();
+        assert!(
+            ObjectStore::get(&fixture.store, private_ref)
+                .unwrap()
+                .is_some()
+        );
+        writer.publish(&config, &path).unwrap();
+        assert!(
+            ObjectStore::get(&fixture.store, private_ref)
+                .unwrap()
+                .is_none()
+        );
+        let config = NodeConfig::load(&path).unwrap();
+        let reader =
+            SecretBackend::reader_with_keychain(&config, fixture.directory.path(), fixture.store)
+                .unwrap();
+        for (field, expected) in &fixture.expected {
+            assert!(reader.load_field(&config, field).unwrap() == *expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn file_command_writers_rekey_add_replace_remove_and_refuse_missing_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let custom = directory.path().to_str();
+        let file = LocalEncryption::initialize(directory.path()).unwrap();
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        config.set_auth_token("synthetic-old-auth", &file).unwrap();
+        config.save(&path).unwrap();
+        cmd_rekey("synthetic-new-auth", "synthetic-new-signing", custom).unwrap();
+        for query in [false, true] {
+            cmd_credentials(
+                crate::cli::NodeCredentialCommands::Add {
+                    service: "new-service".into(),
+                    url: Some("https://example.invalid".into()),
+                    header: if query {
+                        None
+                    } else {
+                        Some("Authorization".into())
+                    },
+                    query_param: if query { Some("api_key".into()) } else { None },
+                    secret_format: CredentialSecretFormat::Raw,
+                    value: Some("synthetic-command-value".into()),
+                },
+                custom,
+            )
+            .await
+            .unwrap();
+            let loaded = NodeConfig::load(&path).unwrap();
+            let reader = SecretBackend::reader(&loaded, directory.path()).unwrap();
+            assert_eq!(
+                reader.load_auth_token(&loaded).unwrap(),
+                "synthetic-new-auth"
+            );
+            assert_eq!(
+                reader.load_signing_secret(&loaded).unwrap().as_deref(),
+                Some("synthetic-new-signing")
+            );
+            let field = SecretField::Credential {
+                slug: "new-service".into(),
+                part: if query {
+                    CredentialPart::Parameter
+                } else {
+                    CredentialPart::Header
+                },
+            };
+            assert_eq!(
+                reader.require_field(&loaded, &field).unwrap().as_str(),
+                "synthetic-command-value"
+            );
+        }
+        cmd_credentials(
+            crate::cli::NodeCredentialCommands::Remove {
+                service: "new-service".into(),
+            },
+            custom,
+        )
+        .await
+        .unwrap();
+        assert!(NodeConfig::load(&path).unwrap().credentials.is_empty());
+        let before = std::fs::read(&path).unwrap();
+        std::fs::remove_file(directory.path().join(".keyfile")).unwrap();
+        assert!(
+            cmd_rekey(
+                "synthetic-must-not-publish",
+                "synthetic-must-not-publish",
+                custom
+            )
+            .is_err()
+        );
+        assert!(!directory.path().join(".keyfile").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

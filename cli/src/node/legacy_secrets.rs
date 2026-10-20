@@ -452,7 +452,13 @@ mod tests {
         config.save(&path).unwrap();
         let mut config = NodeConfig::load(&path).unwrap();
         let legacy = LegacySnapshot::read(&config, &backend).unwrap();
-        let attempt = Attempt::begin(&path, config.publication.snapshot(), "node").unwrap();
+        let attempt = Attempt::begin_in(
+            &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+            &path,
+            config.publication.snapshot(),
+            "node",
+        )
+        .unwrap();
         let mut present = 0;
         for (field, _) in secret_fields::fields(&config).unwrap() {
             let value = legacy.get(&field).unwrap();

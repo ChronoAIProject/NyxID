@@ -49,20 +49,6 @@ impl std::fmt::Debug for SecretSnapshot {
     }
 }
 impl SecretSnapshot {
-    pub(crate) fn read(
-        config: &NodeConfig,
-        path: &Path,
-        keychain: Option<&KeychainBackend>,
-        previous_legacy: Option<&LegacySnapshot>,
-    ) -> Result<Self> {
-        let directory = super::storage::Directory::open(
-            path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-        )?;
-        Self::read_in(&directory, config, path, keychain, previous_legacy, None)
-    }
-
     pub(crate) fn read_in(
         directory: &super::storage::Directory,
         config: &NodeConfig,
@@ -236,6 +222,18 @@ impl SecretSnapshot {
 
 #[cfg(test)]
 mod tests {
+    fn read_snapshot(
+        config: &super::super::config::NodeConfig,
+        path: &std::path::Path,
+        keychain: Option<&super::super::keychain::KeychainBackend>,
+        previous: Option<&super::super::legacy_secrets::LegacySnapshot>,
+    ) -> super::super::error::Result<super::super::secret_snapshot::SecretSnapshot> {
+        let directory = super::super::storage::Directory::open(path.parent().unwrap())?;
+        super::super::secret_snapshot::SecretSnapshot::read_in(
+            &directory, config, path, keychain, previous, None,
+        )
+    }
+
     use super::super::config::{CredentialConfig, PendingCryptoKeyConfig, SshKeyConfig};
     use super::super::secret_transaction::ObjectRef;
     use super::*;
@@ -346,9 +344,15 @@ mod tests {
     fn complete_round_trip_preserves_all_secret_fields_and_explicit_optional_presence() {
         let (dir, path, source) = source();
         let before = std::fs::read(&path).unwrap();
-        let snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let snapshot = read_snapshot(&source, &path, None, None).unwrap();
         let store = RecordingStore::new(usize::MAX);
-        let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+        let attempt = Attempt::begin_in(
+            &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+            &path,
+            source.publication.snapshot(),
+            "node",
+        )
+        .unwrap();
         let projected = snapshot
             .project_keychain(&source, &attempt, &store)
             .unwrap();
@@ -357,7 +361,7 @@ mod tests {
         projected.save(&path).unwrap();
         drop(attempt);
         let modern = NodeConfig::load(&path).unwrap();
-        let readback = SecretSnapshot::read(&modern, &path, Some(&store.inner), None).unwrap();
+        let readback = read_snapshot(&modern, &path, Some(&store.inner), None).unwrap();
         for (field, _) in secret_fields::fields(&source).unwrap() {
             assert!(snapshot.get(&field).unwrap() == readback.get(&field).unwrap());
         }
@@ -369,7 +373,7 @@ mod tests {
             .unwrap();
         file.save(&path).unwrap();
         let reloaded = NodeConfig::load(&path).unwrap();
-        let final_read = SecretSnapshot::read(&reloaded, &path, None, None).unwrap();
+        let final_read = read_snapshot(&reloaded, &path, None, None).unwrap();
         for (field, _) in secret_fields::fields(&source).unwrap() {
             assert!(snapshot.get(&field).unwrap() == final_read.get(&field).unwrap());
         }
@@ -378,12 +382,18 @@ mod tests {
     #[test]
     fn each_target_stage_failure_keeps_source_and_live_values_and_has_owned_recovery() {
         let (_dir, path, source) = source();
-        let snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let snapshot = read_snapshot(&source, &path, None, None).unwrap();
         let count = snapshot.values.values().filter(|v| v.is_some()).count();
         let before = std::fs::read(&path).unwrap();
         for fail_at in 1..=count {
             let store = RecordingStore::new(fail_at);
-            let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+            let attempt = Attempt::begin_in(
+                &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+                &path,
+                source.publication.snapshot(),
+                "node",
+            )
+            .unwrap();
             let id = attempt.id().unwrap();
             assert!(
                 snapshot
@@ -391,10 +401,16 @@ mod tests {
                     .is_err()
             );
             assert_eq!(std::fs::read(&path).unwrap(), before);
-            assert!(SecretSnapshot::read(&source, &path, None, None).is_ok());
+            assert!(read_snapshot(&source, &path, None, None).is_ok());
             assert_eq!(store.puts.load(Ordering::SeqCst), fail_at);
             drop(attempt);
-            let cleanup = secret_transaction::collect_one(&path, id, &store).unwrap();
+            let cleanup = secret_transaction::collect_one_in(
+                &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+                &path,
+                id,
+                &store,
+            )
+            .unwrap();
             assert_eq!(cleanup.retired, fail_at);
             assert_eq!(cleanup.retained, 0);
         }
@@ -403,9 +419,15 @@ mod tests {
     #[test]
     fn full_projection_preflight_refuses_late_missing_or_modified_fields_before_target_effects() {
         let (_dir, path, source) = source();
-        let mut snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let mut snapshot = read_snapshot(&source, &path, None, None).unwrap();
         let store = RecordingStore::new(usize::MAX);
-        let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+        let attempt = Attempt::begin_in(
+            &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+            &path,
+            source.publication.snapshot(),
+            "node",
+        )
+        .unwrap();
         let mut changed = source.clone();
         changed.ssh_keys.clear();
         assert!(
@@ -432,9 +454,15 @@ mod tests {
     #[test]
     fn stale_observation_and_source_read_failure_cannot_stage_or_initialize_target() {
         let (_dir, path, source) = source();
-        let snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let snapshot = read_snapshot(&source, &path, None, None).unwrap();
         let store = RecordingStore::new(usize::MAX);
-        let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+        let attempt = Attempt::begin_in(
+            &super::super::storage::Directory::open(path.parent().unwrap()).unwrap(),
+            &path,
+            source.publication.snapshot(),
+            "node",
+        )
+        .unwrap();
         let mut changed = source.clone();
         changed.server.url = "wss://changed.invalid".into();
         changed.save(&path).unwrap();
@@ -443,7 +471,7 @@ mod tests {
                 .project_keychain(&source, &attempt, &store)
                 .is_err()
         );
-        assert!(SecretSnapshot::read(&source, &path, None, None).is_err());
+        assert!(read_snapshot(&source, &path, None, None).is_err());
         assert_eq!(store.puts.load(Ordering::SeqCst), 0);
         let mut changed = NodeConfig::load(&path).unwrap();
         changed
@@ -454,7 +482,7 @@ mod tests {
             .private_key_encrypted = Some("invalid".into());
         changed.save(&path).unwrap();
         let changed = NodeConfig::load(&path).unwrap();
-        assert!(SecretSnapshot::read(&changed, &path, None, None).is_err());
+        assert!(read_snapshot(&changed, &path, None, None).is_err());
         assert_eq!(store.puts.load(Ordering::SeqCst), 0);
     }
 }

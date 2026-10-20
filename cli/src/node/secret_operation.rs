@@ -61,17 +61,19 @@ impl SecretOperation {
         {
             return Err(invalid());
         }
-        let source =
-            SecretSnapshot::read_in(&directory, &baseline, path, Some(&keychain), None, None)?;
-        Self::build(
-            &baseline,
+        let mut operation = Self::build(&baseline, path, directory, keychain, None, false, None)?;
+        // Retain the exact selected file key through source reads and target
+        // projection. Reopening between them could accidentally re-encrypt a
+        // captured source under a concurrently replaced keyfile.
+        operation.source = Some(SecretSnapshot::read_in(
+            &operation.directory,
+            &operation.baseline,
             path,
-            directory,
-            keychain,
-            Some(source),
-            false,
+            Some(&operation.keychain),
             None,
-        )
+            operation.file.as_ref(),
+        )?);
+        Ok(operation)
     }
 
     /// Registration uses a missing-config observation and explicit target
@@ -165,6 +167,19 @@ impl SecretOperation {
                     &self.path,
                     self.baseline.publication.snapshot(),
                 )?;
+            }
+            if let (Some(file), Some(source)) = (&self.file, &self.source) {
+                let _writer = self.directory.writer_lock()?;
+                secret_transaction::check_observed(
+                    &self.directory,
+                    &self.path,
+                    self.baseline.publication.snapshot(),
+                )?;
+                file.check_available()?;
+                let projected = source.project_file(&self.baseline, file)?;
+                for (field, _) in secret_fields::fields(&self.baseline)? {
+                    field.replace(config, field.encoded(&projected)?.map(str::to_owned))?;
+                }
             }
             if config.storage_backend == "keychain" {
                 state.attempt = Some(Attempt::begin_in(
@@ -260,6 +275,77 @@ impl SecretOperation {
         snapshot.get(field)
     }
 
+    /// A writer can read its private prepared projection before publication.
+    /// Validate the full graph under the same pinned lock; an ordinary reader
+    /// must continue to require the installed projection instead.
+    pub(crate) fn load_projection(
+        &self,
+        config: &NodeConfig,
+        field: &SecretField,
+    ) -> Result<Option<Zeroizing<String>>> {
+        let state = self.state.lock().map_err(|_| invalid())?;
+        if state.failed
+            || !state.prepared
+            || config.node.id != self.baseline.node.id
+            || config.storage_backend != self.baseline.storage_backend
+        {
+            return Err(invalid());
+        }
+        let _writer = self.directory.writer_lock()?;
+        secret_transaction::check_observed(
+            &self.directory,
+            &self.path,
+            config.publication.snapshot(),
+        )?;
+        let bytes = self.directory.read(
+            self.path.file_name().ok_or_else(invalid)?,
+            super::storage::MAX_CONFIG_BYTES,
+        )?;
+        secret_transaction::validate_publication(
+            &self.directory,
+            self.path.file_name().ok_or_else(invalid)?,
+            Some(&bytes),
+            config,
+        )?;
+        match &self.file {
+            Some(file) => {
+                file.check_available()?;
+                let mut selected = None;
+                for (location, required) in secret_fields::fields(config)? {
+                    let value = location
+                        .encoded(config)?
+                        .map(|value| file.decrypt(value).map(Zeroizing::new))
+                        .transpose()?;
+                    if required && value.is_none() {
+                        return Err(invalid());
+                    }
+                    if &location == field {
+                        selected = Some(value);
+                    }
+                }
+                if matches!(field, SecretField::SigningSecret)
+                    && config.signing.shared_secret_encrypted.is_none()
+                {
+                    Ok(None)
+                } else {
+                    selected.ok_or_else(invalid)
+                }
+            }
+            None => {
+                let values = secret_transaction::read_ready_references(
+                    &self.directory,
+                    &self.path,
+                    config,
+                    &self.keychain,
+                )?;
+                // Enumerating the typed projection also distinguishes an absent
+                // optional field from a location that no longer exists.
+                field.encoded(config)?;
+                Ok(values.get(field).cloned())
+            }
+        }
+    }
+
     pub(crate) fn health(&self, config: &NodeConfig) -> Result<()> {
         if config.node.id != self.baseline.node.id
             || config.storage_backend != self.baseline.storage_backend
@@ -326,6 +412,20 @@ impl SecretOperation {
         // No rollback or key-service deletion follows an ambiguous publication.
         if result.is_ok() || matches!(result, Err(Error::StorageDurabilityUncertain(_))) {
             state.published = true;
+        }
+        if result.is_ok() {
+            let attempt_id = state.attempt.as_ref().map(Attempt::id).transpose()?;
+            drop(state.attempt.take());
+            drop(state);
+            let cleanup = (|| {
+                if let Some(id) = attempt_id {
+                    secret_transaction::collect_one_in(&self.directory, path, id, &self.keychain)?;
+                }
+                secret_transaction::collect_all_in(&self.directory, path, &self.keychain)
+            })();
+            cleanup.map_err(|_| Error::Config(
+                "Node configuration was saved; old secret cleanup is incomplete and will retry on the next update".into()
+            ))?;
         }
         result
     }
@@ -439,6 +539,39 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "synthetic-original-header"
+        );
+    }
+
+    #[test]
+    fn complete_file_projection_refuses_replaced_key_before_preparing_or_publishing() {
+        let (dir, path, mut config, store) = fixture();
+        let before = std::fs::read(&path).unwrap();
+        let original = Zeroizing::new(std::fs::read(dir.path().join(".keyfile")).unwrap());
+        let operation = SecretOperation::open(&config, &path, store).unwrap();
+        let directory = Directory::open(dir.path()).unwrap();
+        let replacement = Zeroizing::new([129u8; 32]);
+        directory
+            .publish(
+                std::ffi::OsStr::new(".keyfile"),
+                replacement.as_slice(),
+                true,
+            )
+            .unwrap();
+        assert!(operation.prepare(&mut config).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(std::fs::read(dir.path().join(".keyfile")).unwrap() == replacement.as_slice());
+        directory
+            .publish(std::ffi::OsStr::new(".keyfile"), &original, true)
+            .unwrap();
+        assert!(operation.prepare(&mut config).is_err());
+        assert!(operation.publish(&config, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            !directory
+                .names()
+                .unwrap()
+                .iter()
+                .any(|name| name.to_string_lossy().starts_with(".secret-intent-"))
         );
     }
 

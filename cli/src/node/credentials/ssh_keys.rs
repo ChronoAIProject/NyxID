@@ -184,23 +184,27 @@ pub fn add_entry(
         )));
     }
 
-    let private_key_pem_encrypted = backend.store_credential_value(
-        &secret_key_name(
-            &entry.service_slug,
-            &entry.principal,
-            SSH_PRIVATE_KEY_SUFFIX,
-        ),
+    let private_key_pem_encrypted = backend.store_field(
+        SecretField::SshPrivate {
+            service: entry.service_slug.clone(),
+            principal: entry.principal.clone(),
+        },
         entry.private_key_pem.as_str(),
     )?;
-
-    let passphrase_encrypted = match entry.passphrase.as_ref() {
-        Some(passphrase) => Some(backend.store_credential_value(
-            &secret_key_name(&entry.service_slug, &entry.principal, SSH_PASSPHRASE_SUFFIX),
-            passphrase.as_str(),
-        )?),
-        None => None,
-    }
-    .flatten();
+    let passphrase_encrypted = entry
+        .passphrase
+        .as_ref()
+        .map(|passphrase| {
+            backend.store_field(
+                SecretField::SshPassphrase {
+                    service: entry.service_slug.clone(),
+                    principal: entry.principal.clone(),
+                },
+                passphrase.as_str(),
+            )
+        })
+        .transpose()?
+        .flatten();
 
     config.ssh_keys.push(SshKeyConfig {
         service_slug: entry.service_slug,

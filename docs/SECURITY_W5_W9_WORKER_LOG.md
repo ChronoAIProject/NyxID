@@ -1624,3 +1624,16 @@ Executed cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-
 All four reported needless borrows are fixed. Initial Clippy also found snapshot test-module ordering; unchanged tests were moved after production items and the final diagnostic is gone. No tests/bounds/denial assertions removed or weakened.
 Runtime startup/reload and ordinary writers still use the legacy factory and refuse immutable configs. OAuth returned-token recovery/redaction, all writers, resumable migration and enforced old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not closed.
 Artifacts additionally include .registration.lock and .storage-writer.lock; keychain namespaces unchanged. Mock key service/native file controls only; Linux and actual OS/separate-UID custody remain unverified. Logs:/tmp/nyxid-w5w9-codex-b0.SPJwrX/w96-reader-*.log. No push.
+
+## W9.6 checkpoint 2 — guarded command writers and owned cleanup, 2026-10-20 (awaiting PM review)
+
+PM accepted foundation/readers3b2b27459 and shared docsfa4f09ac3; EXECUTION/REVIEW remain local/untracked.
+Wired rekey, credential add/remove/accept/setup, SSH mutations and OpenClaw writers to typed, pinned snapshot/operation/publication; read-only commands use strict readers.
+Post-publication cleanup retains active/live/recovery objects, validates complete graph and selected key health under the pinned lock, fsyncs before retirement, and reports saved-but-cleanup-incomplete distinctly.
+File preparation retains the selected encryption instance across source reads/projection; key replacement poisons the operation. Legacy keychain writers refuse implicit conversion pending daemon cutover.
+Removed obsolete path-reopening snapshot/attempt constructors, including returned_rotation; recovery purpose/denial tests remain on pinned primitives. Raw byte/fault-injection Publication helpers now belong only to storage tests.
+Shared Cargo policy throughout: /tmp/nyxid-shared-target, jobs4, incremental0, dev/test debug0, no profile overrides; target locks honored.
+Executed initial cargo check --locked -p nyxid-cli --all-targets --features node-proxy-test:exit0. Node test command with --features node-proxy-test --bin nyxid node:: -- --test-threads=2:523 passed/0 failed/3 existing ignored,39.93s,zero warnings.
+Seven new command/writer/custody controls pass; every existing test is preserved. cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics. Owned rustfmt/diff checks pass.
+Startup/reload, WebSocket writers, managed registration, OAuth retention/redaction, resumable migration and old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not complete.
+Artifact/keychain namespace contract unchanged. Native file/mock object-service tests only; Linux and actual OS custody unverified. Logs:/tmp/nyxid-w96-writers-{check,tests,clippy}.log. No push.
