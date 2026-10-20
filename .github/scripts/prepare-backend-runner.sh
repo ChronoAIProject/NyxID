@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # A measured backend test compile used 2.4 GiB of the runner's 3 GiB swap;
-# by October 2026 a single nyxid rustc exhausted 16 GiB RAM plus 8 GiB swap.
+# by October 2026 a single nyxid rustc exhausted 16 GiB RAM plus 8 GiB swap,
+# and later that month the test-binary compile peaked at 29.7-31.5 GiB of
+# RAM plus swap, against 32 GiB with a 16 GiB reserve (main: 28.7 GiB).
 # Preserve compiler concurrency and provide headroom for short memory peaks.
-minimum_swap_kib=$((16 * 1024 * 1024))
+minimum_swap_kib=$((24 * 1024 * 1024))
 current_swap_kib="$(awk '$1 == "SwapTotal:" { print $2 }' /proc/meminfo)"
 [[ "$current_swap_kib" =~ ^[0-9]+$ ]]
 echo 'Backend memory capacity before preparation:'
@@ -41,5 +43,5 @@ if ((actual_swap_kib < minimum_swap_kib)); then
   echo 'Backend swap reserve was not established.' >&2
   exit 1
 fi
-echo 'Backend runner has at least 16 GiB total swap; concurrency is unchanged.'
+echo 'Backend runner has at least 24 GiB total swap; concurrency is unchanged.'
 free -m
