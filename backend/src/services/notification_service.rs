@@ -12,6 +12,370 @@ use crate::models::notification_channel::{COLLECTION_NAME, DeviceToken, Notifica
 use crate::services::push_service::{self, ApnsAuth, ApnsSendResult, FcmAuth, FcmSendResult};
 use crate::services::telegram_service;
 
+/// Shared product-delivery boundary. Provider adapters adopt this API in CORE-B-1.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Published delivery API precedes the caller/sink conversions"
+    )
+)]
+pub mod delivery {
+    use mongodb::{ClientSession, Database, IndexModel, bson::doc, options::IndexOptions};
+    use serde::{Deserialize, Serialize};
+    use uuid::Uuid;
+
+    use crate::{
+        errors::{AppError, AppResult},
+        models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage, SafeAuditEvent},
+        services::{
+            audit_outbox_service,
+            audit_runtime::{
+                AuditRuntime,
+                intent::{DispatchPermit, EffectReservation},
+                policy::AuditTier,
+            },
+        },
+    };
+
+    pub const COLLECTION_NAME: &str = "notification_deliveries_v1";
+    const DEDUPE_INDEX: &str = "notification_delivery_product_destination";
+
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum Channel {
+        Email,
+        Fcm,
+        Apns,
+        Telegram,
+        Webhook,
+    }
+
+    #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PayloadSource {
+        Account,
+        Device,
+        Approval,
+        Machine,
+        Oracle,
+        Connection,
+        ConnectLink,
+        OauthBroker,
+        Channel,
+        Trigger,
+        Automation,
+        DeveloperApp,
+        Cae,
+    }
+
+    /// Reference to a producer-owned, access-controlled immutable payload version.
+    /// There is deliberately no URL, token, template argument or arbitrary JSON.
+    #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct PayloadRef {
+        source: PayloadSource,
+        record_id: String,
+        revision_id: String,
+    }
+
+    impl PayloadRef {
+        pub fn new(source: PayloadSource, record_id: Uuid, revision_id: Uuid) -> AppResult<Self> {
+            require_v4(record_id)?;
+            require_v4(revision_id)?;
+            Ok(Self {
+                source,
+                record_id: record_id.to_string(),
+                revision_id: revision_id.to_string(),
+            })
+        }
+
+        pub fn source(&self) -> PayloadSource {
+            self.source
+        }
+
+        pub fn record_id(&self) -> &str {
+            &self.record_id
+        }
+
+        pub fn revision_id(&self) -> &str {
+            &self.revision_id
+        }
+    }
+
+    /// Allocate/persist these identities outside retries. Each destination/channel
+    /// is one effect; a business event can have several independently claimed sends.
+    #[derive(Clone, Copy)]
+    pub struct DeliveryKey {
+        pub operation_id: Uuid,
+        pub product_event_id: Uuid,
+        pub destination_id: Uuid,
+        pub channel: Channel,
+    }
+
+    pub struct DeliveryRequest {
+        record: QueuedDelivery,
+        effect: EffectReservation,
+    }
+
+    impl DeliveryRequest {
+        pub fn new(
+            key: DeliveryKey,
+            payload: PayloadRef,
+            effect: EffectReservation,
+        ) -> AppResult<Self> {
+            require_v4(key.operation_id)?;
+            require_v4(key.product_event_id)?;
+            require_v4(key.destination_id)?;
+            require_v4(effect.event_id)?;
+            require_v4(effect.terminal_event_id)?;
+            if effect.event.operation_id != key.operation_id.to_string()
+                || effect.event.stage != AuditStage::Intent
+                || effect.event_id == effect.terminal_event_id
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            let record = QueuedDelivery {
+                operation_id: key.operation_id.to_string(),
+                product_event_id: key.product_event_id.to_string(),
+                destination_id: key.destination_id.to_string(),
+                channel: key.channel,
+                payload,
+                event: effect.event.safe_projection(),
+            };
+            record.validate()?;
+            Ok(Self { record, effect })
+        }
+    }
+
+    /// Immutable product queue record, separate from the core's safe audit event.
+    /// Terminal/claim state belongs exclusively to the existing audit runtime.
+    #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct QueuedDelivery {
+        #[serde(rename = "_id")]
+        operation_id: String,
+        product_event_id: String,
+        destination_id: String,
+        channel: Channel,
+        payload: PayloadRef,
+        event: SafeAuditEvent,
+    }
+
+    impl QueuedDelivery {
+        fn validate(&self) -> AppResult<()> {
+            for value in [
+                &self.operation_id,
+                &self.product_event_id,
+                &self.destination_id,
+                &self.payload.record_id,
+                &self.payload.revision_id,
+            ] {
+                let id = Uuid::parse_str(value).map_err(|_| AppError::AuditIntegrityConflict)?;
+                require_v4(id)?;
+                if id.to_string() != *value {
+                    return Err(AppError::AuditIntegrityConflict);
+                }
+            }
+            audit_outbox_service::validate(&self.event)?;
+            if self.event.operation_id != self.operation_id
+                || self.event.stage != AuditStage::Intent
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            Ok(())
+        }
+
+        pub fn operation_id(&self) -> &str {
+            &self.operation_id
+        }
+
+        pub fn product_event_id(&self) -> &str {
+            &self.product_event_id
+        }
+
+        pub fn destination_id(&self) -> &str {
+            &self.destination_id
+        }
+
+        pub fn channel(&self) -> Channel {
+            self.channel
+        }
+
+        pub fn payload(&self) -> &PayloadRef {
+            &self.payload
+        }
+
+        pub fn principal(&self) -> &AuditPrincipal {
+            &self.event.principal
+        }
+
+        pub fn owner(&self) -> &AuditOwner {
+            &self.event.owner
+        }
+
+        /// Call only after a confirmed business commit and live domain checks.
+        /// A loaded/recovered record by itself never authorizes a send.
+        pub async fn authorize(
+            self,
+            db: &Database,
+            runtime: &AuditRuntime,
+        ) -> AppResult<DeliveryPermit> {
+            let current = load(
+                db,
+                Uuid::parse_str(&self.operation_id)
+                    .map_err(|_| AppError::AuditIntegrityConflict)?,
+            )
+            .await?;
+            if current != self {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            let permit = runtime.authorize_effect(db, &self.operation_id).await?;
+            Ok(DeliveryPermit {
+                delivery: self,
+                permit,
+            })
+        }
+    }
+
+    /// Contains the core permit, without exposing, cloning or serializing it.
+    pub struct DeliveryPermit {
+        delivery: QueuedDelivery,
+        permit: DispatchPermit,
+    }
+
+    impl DeliveryPermit {
+        pub async fn run<F, Fut, T>(self, effect: F) -> AppResult<T>
+        where
+            F: FnOnce(QueuedDelivery) -> Fut,
+            Fut: std::future::Future<Output = T>,
+        {
+            self.permit.run(|| effect(self.delivery)).await
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub enum DeliveryOutcome {
+        Succeeded,
+        /// Positive evidence of rejection/non-delivery; never an ambiguous timeout.
+        DefinitiveFailure,
+        /// Only before any dispatch claim, as enforced by the core runtime.
+        Cancelled,
+        Uncertain,
+    }
+
+    /// Startup DDL, outside business transactions and before enabling producers.
+    pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
+        db.collection::<QueuedDelivery>(COLLECTION_NAME)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"product_event_id": 1, "destination_id": 1, "channel": 1})
+                    .options(
+                        IndexOptions::builder()
+                            .name(DEDUPE_INDEX.to_owned())
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Joins the owning mutation and payload-version write. Never commits, retries,
+    /// spawns or sends. Both core slots and the product record roll back together.
+    pub async fn enqueue_in_session(
+        db: &Database,
+        session: &mut ClientSession,
+        runtime: &AuditRuntime,
+        tier: AuditTier,
+        request: &DeliveryRequest,
+    ) -> AppResult<QueuedDelivery> {
+        if matches!(tier, AuditTier::Effect) {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        let queue = db.collection::<QueuedDelivery>(COLLECTION_NAME);
+        let record = &request.record;
+        // The hint fails closed if startup did not install the dedupe index.
+        let existing_key = queue.find_one(doc! {
+            "product_event_id": &record.product_event_id,
+            "destination_id": &record.destination_id,
+            "channel": bson::to_bson(&record.channel).map_err(|_| AppError::AuditIntegrityConflict)?,
+        }).hint(mongodb::options::Hint::Name(DEDUPE_INDEX.to_owned()))
+            .session(&mut *session).await?;
+        let existing_operation = queue
+            .find_one(doc! {"_id": &record.operation_id})
+            .session(&mut *session)
+            .await?;
+        for existing in [&existing_key, &existing_operation].into_iter().flatten() {
+            if existing != record {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+        }
+        if existing_key.is_some() != existing_operation.is_some() {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        runtime
+            .begin_effect_in_session(db, session, tier, &request.effect)
+            .await?;
+        if existing_operation.is_none() {
+            queue.insert_one(record).session(session).await?;
+        }
+        Ok(record.clone())
+    }
+
+    pub async fn load(db: &Database, operation_id: Uuid) -> AppResult<QueuedDelivery> {
+        require_v4(operation_id)?;
+        let record = db
+            .collection::<QueuedDelivery>(COLLECTION_NAME)
+            .find_one(doc! {"_id": operation_id.to_string()})
+            .await?
+            .ok_or(AppError::AuditIntegrityConflict)?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// The producer/sink commits its protected product receipt/outcome in this
+    /// same session. Core completion uses the already reserved terminal slot.
+    pub async fn finish_in_session(
+        db: &Database,
+        session: &mut ClientSession,
+        runtime: &AuditRuntime,
+        operation_id: Uuid,
+        outcome: DeliveryOutcome,
+    ) -> AppResult<()> {
+        require_v4(operation_id)?;
+        let record = db
+            .collection::<QueuedDelivery>(COLLECTION_NAME)
+            .find_one(doc! {"_id": operation_id.to_string()})
+            .session(&mut *session)
+            .await?
+            .ok_or(AppError::AuditIntegrityConflict)?;
+        record.validate()?;
+        let stage = match outcome {
+            DeliveryOutcome::Succeeded => AuditStage::Succeeded,
+            DeliveryOutcome::DefinitiveFailure => AuditStage::Failed,
+            DeliveryOutcome::Cancelled => AuditStage::Cancelled,
+            DeliveryOutcome::Uncertain => AuditStage::Uncertain,
+        };
+        runtime
+            .finish_effect_in_session(db, session, &record.operation_id, stage)
+            .await
+    }
+
+    fn require_v4(id: Uuid) -> AppResult<()> {
+        if id.get_version_num() == 4 {
+            Ok(())
+        } else {
+            Err(AppError::AuditIntegrityConflict)
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "w8_coreb_delivery_tests.rs"]
+mod w8_coreb_delivery_tests;
+
 /// Result of a multi-channel notification delivery attempt.
 pub struct NotificationResult {
     /// Channel names that successfully delivered (e.g. "telegram", "fcm", "apns")
