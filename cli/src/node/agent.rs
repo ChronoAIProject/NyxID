@@ -198,8 +198,13 @@ pub fn cmd_version() {
     println!("nyxid node agent {}", env!("CARGO_PKG_VERSION"));
 }
 
-pub fn cmd_migrate(target_backend: &str, config_path: Option<&str>) -> Result<()> {
-    super::migration::command(target_backend, config_path, false, false)
+pub fn cmd_migrate(
+    target_backend: &str,
+    config_path: Option<&str>,
+    dry_run: bool,
+    status: bool,
+) -> Result<()> {
+    super::migration::command(target_backend, config_path, dry_run, status)
 }
 
 // ---------------------------------------------------------------------------

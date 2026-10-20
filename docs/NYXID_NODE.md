@@ -259,6 +259,10 @@ nyxid node migrate --to keychain
 
 # Migrate from keychain back to file
 nyxid node migrate --to file
+
+# Inspect without staging secrets (select the same target/profile/config on resume)
+nyxid node migrate --to keychain --dry-run --profile work
+nyxid node migrate --to keychain --status --profile work
 ```
 
 This unreleased branch currently refuses a mutating migration with
@@ -282,8 +286,37 @@ CLI cannot preserve also refuse before staging; use a compatible CLI and retain
 the original config and custody.
 
 A private `.nyxid-storage-migration.json` journal binds the exact original config,
-complete source digest, owned target attempt, recovery records and retirement
-inventory. The complete plan must fit its size bound before any target is staged;
+complete source authentication tag, owned target attempt, recovery records and
+retirement inventory. All secret-derived checks use HMAC-SHA256 under a fresh
+random 32-byte migration key, including individual legacy values, the file key
+and OAuth recovery-envelope keys. The migration key lives only in the selected
+node's OS keychain at `object/v1/migration/<migration-id>`; the journal records the
+non-secret UUID, never the key or unkeyed secret hashes. Config-byte CAS hashes
+continue to bind ciphertext/reference projections.
+
+A reservation marker precedes migration-key creation and contains only the
+original encoded config, selected legacy vault/individual source, target and
+identifiers. Losing a selected vault cannot make stale individual entries
+authoritative during a resumed reservation. No target or source-retirement
+effect is permitted in this phase. Restart can finish this initial reservation;
+the key and original complete source-plan tag commit together in one OS-keychain
+record, so recovery after key creation cannot reseal changed values, retirement
+bytes or OAuth recovery records. Once the active journal with keyed tags is
+installed, a missing/invalid migration key always refuses without regeneration
+or cleanup. Retain or restore its
+original keychain custody. After all target validation and source retirement are
+durable, the journal is replaced with a terminal marker that contains no secret
+tags. That marker authorizes only migration-key deletion and marker removal; it
+never authorizes config publication or source cleanup. Restart after key deletion
+revalidates the exact healthy installed target and completes marker removal.
+The unreleased v1 migration journal format is refused, not silently adopted.
+
+`--dry-run` validates source custody and prints counts without storing a migration
+key or staging targets. `--status` prints fixed states/counts. Neither flag may be
+combined with the other; `--to` is required, and `--config`/`--profile` follow the
+same selection rules as other node commands.
+
+The complete plan must fit its size bound before any target is staged;
 `node_migration_capacity_exceeded` leaves the source usable without a marker.
 While that marker exists, normal secret readers, writers, config
 publication and garbage collection refuse. Keep the same profile/config and

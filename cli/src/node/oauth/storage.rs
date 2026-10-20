@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 use super::super::config::{NodeConfig, OAuthRequestOptions};
 use super::super::error::{Error, Result};
 use super::super::keychain::KeychainBackend;
+use super::super::migration::MigrationKey;
 use super::super::secret_backend::SecretBackend;
 use super::super::storage::{Directory, MAX_CONFIG_BYTES};
 use super::{OAuthConfig, TokenResponse};
@@ -615,6 +616,11 @@ fn encrypt_record(record: &Record, key: &[u8], plain: &[u8]) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 impl RecoveryMove {
+    pub(crate) fn source_only(&self) -> Self {
+        let mut source = self.clone();
+        source.target_bytes = None;
+        source
+    }
     /// A size-only upper bound, never persisted or used as authority. AES-GCM
     /// relocation preserves ciphertext length; decimal hash bytes may grow.
     pub(crate) fn reserve_target_capacity(&mut self) -> Result<()> {
@@ -637,6 +643,7 @@ impl RecoveryMove {
         config: &NodeConfig,
         keychain: &KeychainBackend,
         target_file: bool,
+        migration_key: &MigrationKey,
     ) -> Result<(Vec<Self>, Vec<File>)> {
         let mut records = Vec::new();
         let mut leases = Vec::new();
@@ -696,7 +703,9 @@ impl RecoveryMove {
                 name: name.into(),
                 source_bytes: String::from_utf8(bytes).map_err(|_| invalid())?,
                 target_bytes: None,
-                key_digest: key.as_ref().map(|k| Sha256::digest(k.as_slice()).into()),
+                key_digest: key
+                    .as_ref()
+                    .map(|k| migration_key.tag(b"oauth-envelope", k.as_slice())),
                 target_file,
             });
         }
@@ -743,12 +752,13 @@ impl RecoveryMove {
         keychain: &KeychainBackend,
         observed: [u8; 32],
         installed: [u8; 32],
+        migration_key: &MigrationKey,
     ) -> Result<()> {
         let source = self.source()?;
         let key = read_envelope(directory, keychain, &source)?;
         if key
             .as_ref()
-            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            .map(|v| migration_key.tag(b"oauth-envelope", v.as_slice()))
             != self.key_digest
         {
             return Err(invalid());
@@ -802,14 +812,19 @@ impl RecoveryMove {
         Ok(())
     }
 
-    pub(crate) fn stage(&self, directory: &Directory, keychain: &KeychainBackend) -> Result<()> {
+    pub(crate) fn stage(
+        &self,
+        directory: &Directory,
+        keychain: &KeychainBackend,
+        migration_key: &MigrationKey,
+    ) -> Result<()> {
         let source = self.source()?;
         let target = self.target()?;
         if source.file_key == target.file_key || self.key_digest.is_none() {
             return Ok(());
         }
         let key = read_envelope(directory, keychain, &source)?.ok_or_else(invalid)?;
-        if Some(Sha256::digest(key.as_slice()).into()) != self.key_digest {
+        if Some(migration_key.tag(b"oauth-envelope", key.as_slice())) != self.key_digest {
             return Err(invalid());
         }
         match read_envelope(directory, keychain, &target)? {
@@ -831,12 +846,13 @@ impl RecoveryMove {
         if std::env::var_os("NYXID_TEST_MIGRATION_EXIT_AFTER_ENVELOPE_PUT").is_some() {
             std::process::exit(0);
         }
-        self.validate_target(directory, keychain)
+        self.validate_target(directory, keychain, migration_key)
     }
     pub(crate) fn validate_target(
         &self,
         directory: &Directory,
         keychain: &KeychainBackend,
+        migration_key: &MigrationKey,
     ) -> Result<()> {
         let target = self.target()?;
         let source = self.source()?;
@@ -851,7 +867,7 @@ impl RecoveryMove {
         let key = read_envelope(directory, keychain, &target)?;
         if key
             .as_ref()
-            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            .map(|v| migration_key.tag(b"oauth-envelope", v.as_slice()))
             != self.key_digest
         {
             return Err(invalid());
@@ -871,8 +887,9 @@ impl RecoveryMove {
         directory: &Directory,
         keychain: &KeychainBackend,
         cleaning: bool,
+        migration_key: &MigrationKey,
     ) -> Result<()> {
-        self.validate_target(directory, keychain)?;
+        self.validate_target(directory, keychain, migration_key)?;
         let source = self.source()?;
         if source.file_key == self.target_file || self.key_digest.is_none() {
             return Ok(());
@@ -883,7 +900,7 @@ impl RecoveryMove {
         }
         if actual
             .as_ref()
-            .map(|v| <[u8; 32]>::from(Sha256::digest(v.as_slice())))
+            .map(|v| migration_key.tag(b"oauth-envelope", v.as_slice()))
             != self.key_digest
         {
             return Err(invalid());

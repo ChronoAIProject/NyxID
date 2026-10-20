@@ -2893,11 +2893,17 @@ pub enum NodeCommands {
         #[arg(long, env = "NYXID_PROFILE")]
         profile: Option<String>,
     },
-    /// Migrate secret storage from file to OS keychain (or vice versa)
+    /// Migrate secret storage (requires stopped daemons and verified quiescence)
     Migrate {
         /// Target backend: "keychain" or "file"
-        #[arg(long)]
+        #[arg(long, value_parser = ["keychain", "file"])]
         to: String,
+        /// Validate the complete source without staging target secrets
+        #[arg(long, conflicts_with = "status")]
+        dry_run: bool,
+        /// Show migration state and counts without printing secrets
+        #[arg(long, conflicts_with = "dry_run")]
+        status: bool,
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,

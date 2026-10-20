@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -166,16 +167,16 @@ impl SecretSnapshot {
 
     /// Includes typed slots and explicit None/Some(empty) sentinels; never
     /// printed or used as a replacement for reading authoritative custody.
-    pub(crate) fn value_digest(&self) -> Result<[u8; 32]> {
-        let mut hash = Sha256::new();
-        hash.update(b"nyxid-node-migration-values-v1");
+    pub(crate) fn value_digest(&self, key: &[u8; 32]) -> Result<[u8; 32]> {
+        let mut hash = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts 32-byte keys");
+        hash.update(b"nyxid-node-migration-values-v2");
         for (field, value) in &self.values {
             let encoded =
                 Zeroizing::new(serde_json::to_vec(&(field, value)).map_err(|_| invalid())?);
-            hash.update((encoded.len() as u64).to_be_bytes());
+            hash.update(&(encoded.len() as u64).to_be_bytes());
             hash.update(&encoded);
         }
-        Ok(hash.finalize().into())
+        Ok(hash.finalize().into_bytes().into())
     }
 
     pub(crate) fn get(&self, field: &SecretField) -> Result<Option<Zeroizing<String>>> {

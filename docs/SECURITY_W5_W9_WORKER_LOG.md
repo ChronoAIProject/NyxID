@@ -1695,3 +1695,16 @@ Shared Cargo policy used exactly. Initial all-target check and CLI Clippy exit0/
 Feature library initially260/3/3: hard-coded binary child-test prefix selected zero library tests (confirmed by both exact listings). Derive the name from module_path; all original denial/crash/winner assertions and bounds retained.
 Final feature-library263/0/3 in28.80s; binary storage13/0/1 in0.24s; rebuilt full node585/0/3 in74.79s. Final all-target/node-proxy-test CLI Clippy exit0/zero diagnostics; owned rustfmt/diff checks pass. Overlapping totals, existing ignores unchanged; daemon guard moved unchanged before tests for Clippy ordering.
 Artifacts remain within .nyxid-storage-* and object/v1/*; native disposable-file/mock-key-service controls only. Daemon activation, CLI flags, real OS/Linux custody and W9.5 remain open. No push, OS service/keyring action or guest use.
+
+## W9.6 checkpoint 7 — keyed migration journal and CLI diagnostics, 2026-10-20 (review pending)
+
+PM structurally accepted f3d78472f with mandatory R1: secret-derived SHA-256 journal values were offline guess-confirmation oracles. PRE-08 remains open.
+Value/retirement/OAuth-envelope checks now use HMAC-SHA256 under one random Zeroizing 32-byte key stored only in OS keychain object/v1/migration/<id>; no plaintext-file key or unkeyed secret hashes enter the journal.
+A non-secret reservation pins selected legacy custody; key creation atomically stores the complete original source-plan HMAC, preventing recovery from resealing changed values/raw retirement bytes. Active journals refuse missing/replaced keys without regeneration.
+After durable source retirement, only a terminal marker permits idempotent key/marker removal after exact healthy-target validation; it grants no publication/source-cleanup authority. Bidirectional failpoints/actual child exits cover all new key transitions.
+Journal-byte controls reject every fixture-secret SHA-256 and the exact old aggregate; outage, selected-vault loss, same-value/raw-byte drift, missing/wrong key and terminal target drift retain recovery.
+Approved CLI hunks expose --to keychain|file, mutually exclusive --dry-run/--status, config/profile selection and quiescence help; real dispatch preserves unconditional production refusal.
+Exact shared Cargo policy used: all-target/node-proxy-test check exit0/zero warnings; final feature migration24/0/0 in39.75s; rebuilt feature binary node596/0/3 existing ignored in90.21s, command2/0/0 in0.07s and keychain5/0/0 in0.03s.
+Feature-library263/0/3 existing ignored in25.45s; final all-target/node-proxy-test CLI Clippy exit0/zero diagnostics in9m08s including target-lock wait. Totals overlap; owned rustfmt/diff checks pass.
+Docs explain key lifecycle, unreleased v1 refusal and flags. EXECUTION/REVIEW stay untracked. C's zbus switch has not landed at this checkpoint; repeat rebuilt keychain/migration tests once it does, with Linux real secret-service evidence owned by C.
+Logs:/tmp/nyxid-w96-r1-*.log. Namespace stays within .nyxid-storage-* and object/v1/*; no host keyring/service action, guest use or push. Actual daemon stop/status/wait/manual cutover, OS custody and W9.5 remain open.

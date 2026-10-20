@@ -563,11 +563,13 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
         NodeCommands::Migrate {
             to,
+            dry_run,
+            status,
             config,
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
-            crate::node::agent::cmd_migrate(&to, effective_config.as_deref())
+            crate::node::agent::cmd_migrate(&to, effective_config.as_deref(), dry_run, status)
                 .map_err(anyhow::Error::from)
         }
 
@@ -1270,6 +1272,100 @@ fn format_connected_duration(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn migration_flags_dispatch_without_secret_output_or_mutation() {
+        use crate::cli::{Cli, Commands};
+        use crate::node::{config::NodeConfig, encryption::LocalEncryption};
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        let encryption = LocalEncryption::initialize(dir.path()).unwrap();
+        config.node.auth_token_encrypted = encryption.encrypt("command-token-SENTINEL").unwrap();
+        config.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let key = zeroize::Zeroizing::new(std::fs::read(dir.path().join(".keyfile")).unwrap());
+        for flag in ["--dry-run", "--status"] {
+            let cli = Cli::try_parse_from([
+                "nyxid",
+                "node",
+                "migrate",
+                "--to",
+                "keychain",
+                flag,
+                "--config",
+                dir.path().to_str().unwrap(),
+                "--profile",
+                "custom",
+            ])
+            .unwrap();
+            let Commands::Node { command } = cli.command else {
+                panic!("expected node command")
+            };
+            run(command).await.unwrap();
+        }
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "migrate",
+            "--to",
+            "keychain",
+            "--config",
+            dir.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let Commands::Node { command } = cli.command else {
+            panic!("expected node command")
+        };
+        let error = run(command).await.unwrap_err().to_string();
+        assert!(error.contains("node_migration_quiescence_required"));
+        assert!(!error.contains("SENTINEL"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(std::fs::read(dir.path().join(".keyfile")).unwrap() == key.as_slice());
+        assert!(!dir.path().join(".nyxid-storage-migration.json").exists());
+    }
+
+    #[test]
+    fn migration_parser_rejects_ambiguous_or_unknown_operations_and_documents_quiescence() {
+        use crate::cli::Cli;
+        use clap::Parser;
+        for args in [
+            vec![
+                "nyxid",
+                "node",
+                "migrate",
+                "--to",
+                "file",
+                "--dry-run",
+                "--status",
+            ],
+            vec!["nyxid", "node", "migrate", "--to", "other"],
+            vec!["nyxid", "node", "migrate", "--status"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let error = match Cli::try_parse_from(["nyxid", "node", "--help"]) {
+            Err(error) => error,
+            Ok(_) => panic!("help must be rendered"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("requires stopped daemons and verified quiescence")
+        );
+        let profile = resolve_effective_config(None, Some("migration-fixture"))
+            .unwrap()
+            .unwrap();
+        assert!(profile.ends_with("profiles/migration-fixture"));
+        assert_eq!(
+            resolve_effective_config(Some("/explicit"), Some("migration-fixture"))
+                .unwrap()
+                .as_deref(),
+            Some("/explicit")
+        );
+    }
 
     #[test]
     fn test_format_source_ip() {

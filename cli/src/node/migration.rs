@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
 
+use base64::Engine;
+use hmac::{Hmac, Mac};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -26,8 +29,200 @@ fn invalid() -> Error {
 fn capacity_error() -> Error {
     Error::Config("node_migration_capacity_exceeded: the complete migration recovery plan exceeds its size bound; no target secrets were staged".into())
 }
-fn digest(bytes: &[u8]) -> [u8; 32] {
+// Config projections contain encoded ciphertext/references, never clear values.
+fn config_digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+/// One random key per migration. Only its UUID-derived keychain name is public.
+/// This object is not an immutable credential reference and is never collected
+/// by ordinary object GC. No Debug/Serialize implementation exposes its bytes.
+pub(crate) struct MigrationKey(Zeroizing<[u8; 32]>, Option<[u8; 32]>);
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyRecord {
+    key: Zeroizing<String>,
+    source_plan: [u8; 32],
+}
+impl MigrationKey {
+    fn random() -> Self {
+        let mut bytes = Zeroizing::new([0; 32]);
+        rand::rngs::OsRng.fill_bytes(bytes.as_mut());
+        Self(bytes, None)
+    }
+    fn name(id: Uuid) -> String {
+        format!("object/v1/migration/{id}")
+    }
+    fn read(store: &KeychainBackend, id: Uuid) -> Result<Option<Self>> {
+        store
+            .get_optional(&Self::name(id))
+            .map_err(|_| invalid())?
+            .map(|encoded| {
+                let encoded = Zeroizing::new(encoded);
+                if encoded.len() > 512 {
+                    return Err(invalid());
+                }
+                let record: KeyRecord = serde_json::from_str(&encoded).map_err(|_| invalid())?;
+                if record.key.len() != 44 {
+                    return Err(invalid());
+                }
+                let bytes = Zeroizing::new(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(record.key.as_bytes())
+                        .map_err(|_| invalid())?,
+                );
+                let mut key = Zeroizing::new([0; 32]);
+                if bytes.len() != key.len() {
+                    return Err(invalid());
+                }
+                key.copy_from_slice(&bytes);
+                Ok(Self(key, Some(record.source_plan)))
+            })
+            .transpose()
+    }
+    fn create(&self, store: &KeychainBackend, id: Uuid, plan: &Journal) -> Result<()> {
+        if Self::read(store, id)?.is_some() {
+            return Err(invalid());
+        }
+        // The key and original complete plan commit in one OS-keychain write.
+        // A crash before the active journal cannot reseal changed custody.
+        let source_plan = self.plan_tag(plan)?;
+        let record = KeyRecord {
+            key: Zeroizing::new(
+                base64::engine::general_purpose::STANDARD.encode(self.0.as_slice()),
+            ),
+            source_plan,
+        };
+        let encoded = Zeroizing::new(serde_json::to_string(&record).map_err(|_| invalid())?);
+        store
+            .set(&Self::name(id), &encoded)
+            .map_err(|_| invalid())?;
+        if Self::read(store, id)?
+            .is_none_or(|actual| actual.0 != self.0 || actual.1 != Some(source_plan))
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(crate) fn tag(&self, domain: &[u8], bytes: &[u8]) -> [u8; 32] {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.0.as_slice()).expect("HMAC accepts 32-byte keys");
+        mac.update(b"nyxid-node-migration-v2");
+        mac.update(&(domain.len() as u64).to_be_bytes());
+        mac.update(domain);
+        mac.update(bytes);
+        mac.finalize().into_bytes().into()
+    }
+    fn plan_tag(&self, journal: &Journal) -> Result<[u8; 32]> {
+        let mut source = journal.clone();
+        source.attempt = None;
+        source.prepared = None;
+        source.cleaning = false;
+        source.recovery = source
+            .recovery
+            .iter()
+            .map(RecoveryMove::source_only)
+            .collect();
+        source.recovery.sort_by(|a, b| a.name().cmp(b.name()));
+        source.retire.sort_by(|a, b| a.name.cmp(&b.name));
+        let encoded = Zeroizing::new(serde_json::to_vec(&source).map_err(|_| invalid())?);
+        Ok(self.tag(b"source-plan", &encoded))
+    }
+    fn values(&self, snapshot: &SecretSnapshot) -> Result<[u8; 32]> {
+        snapshot.value_digest(&self.0)
+    }
+}
+
+/// A reservation contains no secret-derived tags. Until Active is durable,
+/// there are no target/source effects and no hashes authorized by this key.
+/// Only this phase may create a missing key; Active always fails closed.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Boundary {
+    id: Uuid,
+    config_name: String,
+    config: String,
+    target: String,
+    legacy_source: Option<LegacySource>,
+}
+impl Boundary {
+    fn validate(
+        &self,
+        directory: &Directory,
+        path: &Path,
+        target: &str,
+        store: &KeychainBackend,
+    ) -> Result<NodeConfig> {
+        if self.id.get_version_num() != 4
+            || self.target != target
+            || Some(self.config_name.as_str()) != path.file_name().and_then(OsStr::to_str)
+            || directory.read(OsStr::new(&self.config_name), MAX_CONFIG_BYTES)?
+                != self.config.as_bytes()
+        {
+            return Err(invalid());
+        }
+        let config = NodeConfig::from_bytes(self.config.as_bytes()).map_err(|_| invalid())?;
+        validate_stored_projection(&config, self.config.as_bytes())?;
+        if config.node.id != store.owner_id() {
+            return Err(invalid());
+        }
+        Ok(config)
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "phase",
+    content = "plan",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum MigrationState {
+    Reserved(Boundary),
+    Active(Box<Journal>),
+    /// Written only after all source retirement is durable. It authorizes only
+    /// deleting this migration's key and marker, never publication/source GC.
+    Retiring(Boundary),
+}
+impl MigrationState {
+    fn read(directory: &Directory) -> Result<Option<Self>> {
+        optional(directory, MIGRATION_NAME)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
+            .transpose()
+    }
+    fn persist(&self, directory: &Directory, replace: bool) -> Result<()> {
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid())?;
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(capacity_error());
+        }
+        directory.publish(OsStr::new(MIGRATION_NAME), &bytes, replace)
+    }
+}
+fn finish_retirement(
+    boundary: &Boundary,
+    directory: &Directory,
+    path: &Path,
+    target: &str,
+    store: &KeychainBackend,
+    step: &mut impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    let config = boundary.validate(directory, path, target, store)?;
+    if boundary.legacy_source.is_some()
+        || config.storage_backend != target
+        || (target == "keychain" && config.keychain_format != Some(KeychainFormat::ImmutableV1))
+    {
+        return Err(invalid());
+    }
+    // The terminal marker has no secret tags left to validate. Re-read healthy
+    // installed custody before idempotent key/marker removal, including resumes
+    // after deletion. A missing ACTIVE key is never accepted through this path.
+    SecretSnapshot::read_projection_in(directory, &config, path, Some(store), None, None)?;
+    store
+        .delete(&MigrationKey::name(boundary.id))
+        .map_err(|_| invalid())?;
+    step("key_deleted")?;
+    if MigrationKey::read(store, boundary.id)?.is_some() {
+        return Err(invalid());
+    }
+    directory.remove(OsStr::new(MIGRATION_NAME))
 }
 /// Ordinary serde readers tolerate unknown keys. Migration must not retire
 /// custody after silently dropping a field that this binary cannot preserve.
@@ -104,9 +299,10 @@ impl Retirement {
         directory: &Directory,
         keychain: &KeychainBackend,
         cleaning: bool,
+        key: &MigrationKey,
     ) -> Result<()> {
         match self.read(directory, keychain)? {
-            Some(v) if digest(&v) == self.digest => Ok(()),
+            Some(v) if key.tag(b"retirement", &v) == self.digest => Ok(()),
             None if cleaning => Ok(()),
             _ => Err(invalid()),
         }
@@ -187,28 +383,31 @@ impl Journal {
         for record in &mut reserved.recovery {
             record.reserve_target_capacity()?;
         }
-        if serde_json::to_vec(&reserved).map_err(|_| invalid())?.len() as u64 > MAX_CONFIG_BYTES {
+        if serde_json::to_vec(&MigrationState::Active(Box::new(reserved)))
+            .map_err(|_| invalid())?
+            .len() as u64
+            > MAX_CONFIG_BYTES
+        {
             return Err(capacity_error());
         }
         Ok(())
     }
+    #[cfg(test)]
     fn read(directory: &Directory) -> Result<Option<Self>> {
-        optional(directory, MIGRATION_NAME)?
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
-            .transpose()
+        match MigrationState::read(directory)? {
+            Some(MigrationState::Active(journal)) => Ok(Some(*journal)),
+            None => Ok(None),
+            _ => Err(invalid()),
+        }
     }
     fn persist(&self, directory: &Directory, replace: bool) -> Result<()> {
-        let bytes = serde_json::to_vec(self).map_err(|_| invalid())?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err(invalid());
-        }
-        directory.publish(OsStr::new(MIGRATION_NAME), &bytes, replace)
+        MigrationState::Active(Box::new(self.clone())).persist(directory, replace)
     }
     fn source(&self) -> Result<NodeConfig> {
         NodeConfig::from_bytes(self.source.as_bytes()).map_err(|_| invalid())
     }
     fn validate(&self, path: &Path, target: &str) -> Result<()> {
-        if self.version != 1
+        if self.version != 2
             || self.id.get_version_num() != 4
             || self.target != target
             || Some(self.config_name.as_str()) != path.file_name().and_then(OsStr::to_str)
@@ -266,8 +465,8 @@ impl Journal {
         if let Some(prepared) = &self.prepared {
             for record in &self.recovery {
                 record.validate_plan(
-                    digest(self.source.as_bytes()),
-                    digest(prepared.config.as_bytes()),
+                    config_digest(self.source.as_bytes()),
+                    config_digest(prepared.config.as_bytes()),
                 )?;
             }
             let target_config =
@@ -320,31 +519,40 @@ pub(crate) fn command(
     match (dry_run, status) {
         (false, true) => {
             let _lock = directory.writer_lock()?;
-            if let Some(journal) = Journal::read(&directory)? {
-                journal.validate(&path, target)?;
-                let current = directory.read(OsStr::new("config.toml"), MAX_CONFIG_BYTES)?;
-                let state = if journal.cleaning {
-                    "cleanup_pending"
-                } else if journal
-                    .prepared
-                    .as_ref()
-                    .is_some_and(|p| current == p.config.as_bytes())
-                {
-                    "installed_recovery_pending"
-                } else if journal.prepared.is_some() {
-                    "prepared"
-                } else {
-                    "preparing"
-                };
-                println!(
-                    "Migration: {state}; recovery records: {}",
-                    journal.recovery.len()
-                );
-            } else {
-                println!(
+            match MigrationState::read(&directory)? {
+                Some(MigrationState::Active(journal)) => {
+                    journal.validate(&path, target)?;
+                    let current = directory.read(OsStr::new("config.toml"), MAX_CONFIG_BYTES)?;
+                    let state = if journal.cleaning {
+                        "cleanup_pending"
+                    } else if journal
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|p| current == p.config.as_bytes())
+                    {
+                        "installed_recovery_pending"
+                    } else if journal.prepared.is_some() {
+                        "prepared"
+                    } else {
+                        "preparing"
+                    };
+                    println!(
+                        "Migration: {state}; recovery records: {}",
+                        journal.recovery.len()
+                    );
+                }
+                Some(MigrationState::Reserved(boundary)) => {
+                    boundary.validate(&directory, &path, target, &keychain)?;
+                    println!("Migration: key_reservation_pending");
+                }
+                Some(MigrationState::Retiring(boundary)) => {
+                    boundary.validate(&directory, &path, target, &keychain)?;
+                    println!("Migration: key_retirement_pending");
+                }
+                None => println!(
                     "Migration: idle; backend: {}",
                     checked_backend(&config.storage_backend)?
-                );
+                ),
             }
             Ok(())
         }
@@ -363,13 +571,18 @@ pub(crate) fn command(
                 None,
                 None,
             )?;
-            let (recovery, _leases) =
-                RecoveryMove::capture_all(&directory, &path, &config, &keychain, target == "file")?;
+            let (recovery, _leases) = RecoveryMove::capture_all(
+                &directory,
+                &path,
+                &config,
+                &keychain,
+                target == "file",
+                &MigrationKey::random(),
+            )?;
             check_capacity(&config, &snapshot, target)?;
             if config.storage_backend == "keychain" && config.keychain_format.is_none() {
                 LegacySnapshot::retirement_keys(&config, &keychain)?;
             }
-            snapshot.value_digest()?;
             println!(
                 "Migration dry run: {} -> {target}; secret slots: {}; recovery records: {}; no target writes",
                 checked_backend(&config.storage_backend)?,
@@ -420,6 +633,65 @@ fn validate_target(value: &str) -> Result<()> {
     }
 }
 
+fn source_plan(
+    directory: &Directory,
+    path: &Path,
+    target: &str,
+    keychain: &KeychainBackend,
+    config: &NodeConfig,
+    id: Uuid,
+    key: &MigrationKey,
+) -> Result<(Journal, Vec<std::fs::File>)> {
+    let source_bytes = directory.read(path.file_name().ok_or_else(invalid)?, MAX_CONFIG_BYTES)?;
+    validate_stored_projection(config, &source_bytes)?;
+    let snapshot =
+        SecretSnapshot::read_projection_in(directory, config, path, Some(keychain), None, None)?;
+    check_capacity(config, &snapshot, target)?;
+    let (recovery, leases) =
+        RecoveryMove::capture_all(directory, path, config, keychain, target == "file", key)?;
+    let mut retire = Vec::new();
+    if config.storage_backend == "file" {
+        let bytes = Zeroizing::new(directory.read(OsStr::new(".keyfile"), 32)?);
+        retire.push(Retirement {
+            file: true,
+            name: ".keyfile".into(),
+            digest: key.tag(b"retirement", &bytes),
+        });
+    } else if config.keychain_format.is_none() {
+        for name in LegacySnapshot::retirement_keys(config, keychain)? {
+            if let Some(value) = keychain.get_optional(&name).map_err(|_| invalid())? {
+                let value = Zeroizing::new(value);
+                retire.push(Retirement {
+                    file: false,
+                    name,
+                    digest: key.tag(b"retirement", value.as_bytes()),
+                });
+            }
+        }
+    }
+    let journal = Journal {
+        version: 2,
+        id,
+        config_name: path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(invalid)?
+            .into(),
+        source: String::from_utf8(source_bytes).map_err(|_| invalid())?,
+        target: target.into(),
+        values: key.values(&snapshot)?,
+        legacy_source: snapshot.legacy_anchor().and_then(|v| v.source.clone()),
+        attempt: None,
+        recovery,
+        retire,
+        prepared: None,
+        cleaning: false,
+    };
+    journal.validate(path, target)?;
+    journal.preflight_capacity(&snapshot)?;
+    Ok((journal, leases))
+}
+
 /// Failpoints model process loss at durable transitions; production uses a
 /// no-op callback. No rollback runs on error or Drop.
 fn run(
@@ -432,87 +704,95 @@ fn run(
     validate_target(target)?;
     let _registration = directory.registration_lock()?;
     let mut journal;
+    let key;
     let _recovery_leases;
     {
         let _lock = directory.writer_lock()?;
-        if let Some(existing) = Journal::read(directory)? {
-            existing.validate(path, target)?;
-            let source = existing.source()?;
-            if keychain.owner_id() != source.node.id {
-                return Err(invalid());
+        match MigrationState::read(directory)? {
+            Some(MigrationState::Retiring(boundary)) => {
+                return finish_retirement(&boundary, directory, path, target, keychain, &mut step);
             }
-            _recovery_leases = existing
-                .recovery
-                .iter()
-                .map(|r| r.hold(directory, path, &source.node.id))
-                .collect::<Result<Vec<_>>>()?;
-            journal = existing;
-        } else {
-            let config = NodeConfig::load_in(directory, path)?;
-            if keychain.owner_id() != config.node.id {
-                return Err(invalid());
-            }
-            if config.storage_backend == target
-                && (target == "file" || config.keychain_format == Some(KeychainFormat::ImmutableV1))
-            {
-                return Ok(());
-            }
-            let source_bytes =
-                directory.read(path.file_name().ok_or_else(invalid)?, MAX_CONFIG_BYTES)?;
-            validate_stored_projection(&config, &source_bytes)?;
-            let snapshot = SecretSnapshot::read_projection_in(
-                directory,
-                &config,
-                path,
-                Some(keychain),
-                None,
-                None,
-            )?;
-            check_capacity(&config, &snapshot, target)?;
-            let (recovery, leases) =
-                RecoveryMove::capture_all(directory, path, &config, keychain, target == "file")?;
-            let mut retire = Vec::new();
-            if config.storage_backend == "file" {
-                let bytes = Zeroizing::new(directory.read(OsStr::new(".keyfile"), 32)?);
-                retire.push(Retirement {
-                    file: true,
-                    name: ".keyfile".into(),
-                    digest: digest(&bytes),
-                });
-            } else if config.keychain_format.is_none() {
-                for name in LegacySnapshot::retirement_keys(&config, keychain)? {
-                    if let Some(value) = keychain.get_optional(&name).map_err(|_| invalid())? {
-                        let value = Zeroizing::new(value);
-                        retire.push(Retirement {
-                            file: false,
-                            name,
-                            digest: digest(value.as_bytes()),
-                        });
-                    }
+            Some(MigrationState::Reserved(boundary)) => {
+                let config = boundary.validate(directory, path, target, keychain)?;
+                let existing = MigrationKey::read(keychain, boundary.id)?;
+                let create = existing.is_none();
+                key = existing.unwrap_or_else(MigrationKey::random);
+                let (planned, leases) = source_plan(
+                    directory,
+                    path,
+                    target,
+                    keychain,
+                    &config,
+                    boundary.id,
+                    &key,
+                )?;
+                let plan_tag = key.plan_tag(&planned)?;
+                if planned.legacy_source != boundary.legacy_source
+                    || key.1.is_some_and(|expected| expected != plan_tag)
+                {
+                    return Err(invalid());
                 }
+                if create {
+                    key.create(keychain, boundary.id, &planned)?;
+                }
+                step("key_created")?;
+                planned.persist(directory, true)?;
+                journal = planned;
+                _recovery_leases = leases;
             }
-            journal = Journal {
-                version: 1,
-                id: Uuid::new_v4(),
-                config_name: path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .ok_or_else(invalid)?
-                    .into(),
-                source: String::from_utf8(source_bytes).map_err(|_| invalid())?,
-                target: target.into(),
-                values: snapshot.value_digest()?,
-                legacy_source: snapshot.legacy_anchor().and_then(|v| v.source.clone()),
-                attempt: None,
-                recovery,
-                retire,
-                prepared: None,
-                cleaning: false,
-            };
-            journal.validate(path, target)?;
-            journal.preflight_capacity(&snapshot)?;
-            journal.persist(directory, false)?;
-            _recovery_leases = leases;
+            Some(MigrationState::Active(existing)) => {
+                existing.validate(path, target)?;
+                let source = existing.source()?;
+                if keychain.owner_id() != source.node.id {
+                    return Err(invalid());
+                }
+                key = MigrationKey::read(keychain, existing.id)?.ok_or_else(invalid)?;
+                if key.1 != Some(key.plan_tag(&existing)?) {
+                    return Err(invalid());
+                }
+                _recovery_leases = existing
+                    .recovery
+                    .iter()
+                    .map(|r| r.hold(directory, path, &source.node.id))
+                    .collect::<Result<Vec<_>>>()?;
+                journal = *existing;
+            }
+            None => {
+                let config = NodeConfig::load_in(directory, path)?;
+                if keychain.owner_id() != config.node.id {
+                    return Err(invalid());
+                }
+                if config.storage_backend == target
+                    && (target == "file"
+                        || config.keychain_format == Some(KeychainFormat::ImmutableV1))
+                {
+                    return Ok(());
+                }
+                let id = Uuid::new_v4();
+                key = MigrationKey::random();
+                let (planned, leases) =
+                    source_plan(directory, path, target, keychain, &config, id, &key)?;
+                let boundary = Boundary {
+                    id,
+                    config_name: planned.config_name.clone(),
+                    config: planned.source.clone(),
+                    target: target.into(),
+                    legacy_source: planned.legacy_source.clone(),
+                };
+                // Establish absence before claiming this namespace. A key
+                // found after the durable reservation belongs to this attempt;
+                // one found before it must never be adopted or overwritten.
+                if MigrationKey::read(keychain, id)?.is_some() {
+                    return Err(invalid());
+                }
+                MigrationState::Reserved(boundary).persist(directory, false)?;
+                step("key_reserved")?;
+                key.create(keychain, id, &planned)?;
+                step("key_created")?;
+                planned.persist(directory, true)?;
+                journal = planned;
+                _recovery_leases = leases;
+            }
         }
     }
     step("journal")?;
@@ -534,13 +814,13 @@ fn run(
                 None,
                 None,
             )?;
-            if snapshot.value_digest()? != journal.values
+            if key.values(&snapshot)? != journal.values
                 || snapshot.legacy_anchor().and_then(|v| v.source.clone()) != journal.legacy_source
             {
                 return Err(invalid());
             }
             for item in &journal.retire {
-                item.validate(directory, keychain, false)?;
+                item.validate(directory, keychain, false, &key)?;
             }
             for record in &journal.recovery {
                 record.validate_record(directory)?;
@@ -602,13 +882,14 @@ fn run(
         {
             let _lock = directory.writer_lock()?;
             secret_transaction::check_observed(directory, path, source.publication.snapshot())?;
-            verify_values(directory, path, &projected, keychain, journal.values)?;
+            verify_values(directory, path, &projected, keychain, journal.values, &key)?;
             for record in &mut journal.recovery {
                 record.prepare(
                     directory,
                     keychain,
-                    digest(journal.source.as_bytes()),
-                    digest(target_bytes.as_bytes()),
+                    config_digest(journal.source.as_bytes()),
+                    config_digest(target_bytes.as_bytes()),
+                    &key,
                 )?;
             }
             journal.prepared = Some(Prepared {
@@ -629,7 +910,14 @@ fn run(
             return Err(invalid());
         }
         verify_inventory(directory, &journal)?;
-        verify_values(directory, path, &target_config, keychain, journal.values)?;
+        verify_values(
+            directory,
+            path,
+            &target_config,
+            keychain,
+            journal.values,
+            &key,
+        )?;
         if !installed {
             let fresh = SecretSnapshot::read_projection_in(
                 directory,
@@ -639,16 +927,16 @@ fn run(
                 None,
                 None,
             )?;
-            if fresh.value_digest()? != journal.values
+            if key.values(&fresh)? != journal.values
                 || fresh.legacy_anchor().and_then(|v| v.source.clone()) != journal.legacy_source
             {
                 return Err(invalid());
             }
             for item in &journal.retire {
-                item.validate(directory, keychain, false)?;
+                item.validate(directory, keychain, false, &key)?;
             }
             for record in &journal.recovery {
-                record.stage(directory, keychain)?;
+                record.stage(directory, keychain, &key)?;
             }
             step("envelopes")?;
             secret_transaction::validate_publication(
@@ -667,7 +955,7 @@ fn run(
         }
         step("installed")?;
         for record in &journal.recovery {
-            record.validate_target(directory, keychain)?;
+            record.validate_target(directory, keychain, &key)?;
             record.install(directory)?;
             step("recovery")?;
         }
@@ -675,12 +963,19 @@ fn run(
         // Every target and every source artifact is validated before any
         // destructive retirement. Missing predecessors are legal only after
         // the durable cleaning transition, never during preparation.
-        verify_values(directory, path, &target_config, keychain, journal.values)?;
+        verify_values(
+            directory,
+            path,
+            &target_config,
+            keychain,
+            journal.values,
+            &key,
+        )?;
         for record in &journal.recovery {
-            record.validate_cleanup(directory, keychain, journal.cleaning)?;
+            record.validate_cleanup(directory, keychain, journal.cleaning, &key)?;
         }
         for item in &journal.retire {
-            item.validate(directory, keychain, journal.cleaning)?;
+            item.validate(directory, keychain, journal.cleaning, &key)?;
         }
         journal.cleaning = true;
         journal.persist(directory, true)?;
@@ -696,7 +991,16 @@ fn run(
             step("retire")?;
         }
         directory.sync()?;
-        directory.remove(OsStr::new(MIGRATION_NAME))?;
+        let boundary = Boundary {
+            id: journal.id,
+            config_name: journal.config_name.clone(),
+            config: prepared.config.clone(),
+            target: target.into(),
+            legacy_source: None,
+        };
+        MigrationState::Retiring(boundary.clone()).persist(directory, true)?;
+        step("key_retirement")?;
+        finish_retirement(&boundary, directory, path, target, keychain, &mut step)?;
     }
     Ok(())
 }
@@ -727,10 +1031,11 @@ fn verify_values(
     config: &NodeConfig,
     keychain: &KeychainBackend,
     expected: [u8; 32],
+    key: &MigrationKey,
 ) -> Result<()> {
     let snapshot =
         SecretSnapshot::read_projection_in(directory, config, path, Some(keychain), None, None)?;
-    if snapshot.value_digest()? != expected {
+    if key.values(&snapshot)? != expected {
         return Err(invalid());
     }
     Ok(())
@@ -812,7 +1117,7 @@ mod tests {
         let config = NodeConfig::load_in(directory, path).unwrap();
         SecretSnapshot::read_projection_in(directory, &config, path, Some(store), None, None)
             .unwrap()
-            .value_digest()
+            .value_digest(&[0; 32])
             .unwrap()
     }
     fn assert_no_plaintext(directory: &Directory) {
@@ -827,6 +1132,400 @@ mod tests {
                 !bytes
                     .windows(b"returned-refresh-SENTINEL".len())
                     .any(|v| v == b"returned-refresh-SENTINEL")
+            );
+        }
+    }
+    pub(super) fn forbidden_digests(
+        directory: &Directory,
+        path: &Path,
+        store: &KeychainBackend,
+    ) -> Vec<[u8; 32]> {
+        fn digest(bytes: &[u8]) -> [u8; 32] {
+            Sha256::digest(bytes).into()
+        }
+        let config = NodeConfig::load_in(directory, path).unwrap();
+        let snapshot =
+            SecretSnapshot::read_projection_in(directory, &config, path, Some(store), None, None)
+                .unwrap();
+        let mut forbidden = vec![
+            digest(b"returned-access-SENTINEL"),
+            digest(b"returned-refresh-SENTINEL"),
+        ];
+        let mut old = Sha256::new();
+        old.update(b"nyxid-node-migration-values-v1");
+        let fields: std::collections::BTreeMap<_, _> = secret_fields::fields(&config)
+            .unwrap()
+            .into_iter()
+            .map(|(field, _)| {
+                let value = snapshot.get(&field).unwrap();
+                (field, value)
+            })
+            .collect();
+        for (field, value) in fields {
+            if let Some(value) = &value {
+                forbidden.push(digest(value.as_bytes()));
+            }
+            let encoded = Zeroizing::new(serde_json::to_vec(&(&field, &value)).unwrap());
+            old.update((encoded.len() as u64).to_be_bytes());
+            old.update(&encoded);
+        }
+        forbidden.push(old.finalize().into());
+        if let Some(key) = optional(directory, ".keyfile").unwrap() {
+            forbidden.push(digest(&Zeroizing::new(key)));
+        }
+        for name in LegacySnapshot::retirement_keys(&config, store).unwrap_or_default() {
+            if let Some(value) = store.get_optional(&name).unwrap() {
+                forbidden.push(digest(Zeroizing::new(value).as_bytes()));
+            }
+        }
+        forbidden
+    }
+    pub(super) fn assert_no_oracles(directory: &Directory, forbidden: &[[u8; 32]]) {
+        assert_no_plaintext(directory);
+        let Some(bytes) = optional(directory, MIGRATION_NAME).unwrap() else {
+            return;
+        };
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        fn contains(value: &serde_json::Value, needle: &serde_json::Value) -> bool {
+            value == needle
+                || match value {
+                    serde_json::Value::Array(items) => items.iter().any(|v| contains(v, needle)),
+                    serde_json::Value::Object(items) => items.values().any(|v| contains(v, needle)),
+                    _ => false,
+                }
+        }
+        for digest in forbidden {
+            // Arrays are the actual digest encoding, not raw byte sequences.
+            assert!(!contains(&parsed, &serde_json::to_value(digest).unwrap()));
+            for encoded in [
+                hex::encode(digest),
+                base64::engine::general_purpose::STANDARD.encode(digest),
+            ] {
+                assert!(
+                    !bytes
+                        .windows(encoded.len())
+                        .any(|v| v == encoded.as_bytes())
+                );
+            }
+        }
+    }
+    #[test]
+    fn unsealed_reservation_cannot_fall_back_from_vault_to_stale_individual_custody() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node".into(),
+            "keychain".into(),
+        );
+        config.save(&path).unwrap();
+        let directory = Directory::open(dir.path()).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        let vault = r#"{"auth_token":"current-vault-SENTINEL"}"#;
+        store.set("vault", vault).unwrap();
+        store
+            .set("auth_token", "stale-individual-SENTINEL")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            run(&directory, &path, "file", &store, |phase| {
+                if phase == "key_reserved" {
+                    Err(invalid())
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        let Some(MigrationState::Reserved(boundary)) = MigrationState::read(&directory).unwrap()
+        else {
+            panic!("expected an unsealed reservation")
+        };
+        assert!(boundary.legacy_source == Some(LegacySource::Vault));
+        store.delete("vault").unwrap();
+        // A fresh legacy read *could* use this complete stale shadow. The
+        // migration must preserve the already selected vault instead.
+        assert!(
+            LegacySnapshot::read(&config, &store).unwrap().source == Some(LegacySource::Individual)
+        );
+        assert!(test_migrate(&path, "file", &store).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join(".keyfile").exists());
+        assert!(
+            store
+                .get_optional(&MigrationKey::name(boundary.id))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.get("auth_token").unwrap(),
+            "stale-individual-SENTINEL"
+        );
+        assert!(dir.path().join(MIGRATION_NAME).exists());
+        store.set("vault", vault).unwrap();
+        test_migrate(&path, "file", &store).unwrap();
+        let installed = NodeConfig::load(&path).unwrap();
+        let snapshot = SecretSnapshot::read_projection_in(
+            &directory,
+            &installed,
+            &path,
+            Some(&store),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .get(&SecretField::AuthToken)
+                .unwrap()
+                .unwrap()
+                .as_str()
+                == "current-vault-SENTINEL"
+        );
+    }
+    #[test]
+    fn key_creation_atomically_pins_source_plan_before_the_active_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node".into(),
+            "keychain".into(),
+        );
+        config.save(&path).unwrap();
+        let directory = Directory::open(dir.path()).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        let original = r#"{"auth_token":"original-vault-SENTINEL"}"#;
+        store.set("vault", original).unwrap();
+        let config_before = std::fs::read(&path).unwrap();
+        assert!(
+            run(&directory, &path, "file", &store, |phase| {
+                if phase == "key_created" {
+                    Err(invalid())
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        let Some(MigrationState::Reserved(boundary)) = MigrationState::read(&directory).unwrap()
+        else {
+            panic!("active journal must not exist yet")
+        };
+        let name = MigrationKey::name(boundary.id);
+        let key_before = Zeroizing::new(store.get(&name).unwrap());
+        for modified in [
+            r#"{"auth_token":"changed-vault-SENTINEL"}"#,
+            "{\n  \"auth_token\": \"original-vault-SENTINEL\"\n}",
+        ] {
+            store.set("vault", modified).unwrap();
+            assert!(test_migrate(&path, "file", &store).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), config_before);
+            assert!(!dir.path().join(".keyfile").exists());
+            assert!(Zeroizing::new(store.get(&name).unwrap()).as_str() == key_before.as_str());
+            assert!(dir.path().join(MIGRATION_NAME).exists());
+        }
+        store.set("vault", original).unwrap();
+        test_migrate(&path, "file", &store).unwrap();
+        assert!(store.get_optional(&name).unwrap().is_none());
+        let installed = NodeConfig::load(&path).unwrap();
+        let snapshot = SecretSnapshot::read_projection_in(
+            &directory,
+            &installed,
+            &path,
+            Some(&store),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .get(&SecretField::AuthToken)
+                .unwrap()
+                .unwrap()
+                .as_str()
+                == "original-vault-SENTINEL"
+        );
+    }
+    #[test]
+    fn unavailable_migration_key_custody_refuses_before_marker_or_source_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fixture(&path);
+        let directory = Directory::open(dir.path()).unwrap();
+        drop(directory.registration_lock().unwrap());
+        let entries = directory.names().unwrap();
+        let config = std::fs::read(&path).unwrap();
+        let key = Zeroizing::new(directory.read(OsStr::new(".keyfile"), 32).unwrap());
+        let store = KeychainBackend::new_failing_mock("node", "custody-error-SENTINEL");
+        let error = test_migrate(&path, "keychain", &store)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("node_migration_invalid"));
+        assert!(!error.contains("SENTINEL"));
+        assert_eq!(std::fs::read(&path).unwrap(), config);
+        assert!(directory.read(OsStr::new(".keyfile"), 32).unwrap() == key.as_slice());
+        assert_eq!(directory.names().unwrap(), entries);
+        assert!(directory.require_idle().is_ok());
+    }
+    #[test]
+    fn missing_or_wrong_active_key_refuses_without_publication_or_retirement() {
+        for target in ["file", "keychain"] {
+            for phase in ["journal", "prepared", "cleaning"] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("config.toml");
+                fixture(&path);
+                let directory = Directory::open(dir.path()).unwrap();
+                let store = KeychainBackend::new_mock("node");
+                if target == "file" {
+                    test_migrate(&path, "keychain", &store).unwrap();
+                }
+                assert!(
+                    run(&directory, &path, target, &store, |s| if s == phase {
+                        Err(invalid())
+                    } else {
+                        Ok(())
+                    })
+                    .is_err()
+                );
+                let journal = Journal::read(&directory).unwrap().unwrap();
+                let name = MigrationKey::name(journal.id);
+                let original = Zeroizing::new(store.get(&name).unwrap());
+                let before = directory
+                    .names()
+                    .unwrap()
+                    .into_iter()
+                    .map(|n| {
+                        let bytes = Zeroizing::new(directory.read(&n, MAX_CONFIG_BYTES).unwrap());
+                        (n, bytes)
+                    })
+                    .collect::<Vec<_>>();
+                let mut wrong: KeyRecord = serde_json::from_str(&original).unwrap();
+                wrong.key =
+                    Zeroizing::new(base64::engine::general_purpose::STANDARD.encode([42; 32]));
+                for replacement in [
+                    None,
+                    Some(Zeroizing::new(serde_json::to_string(&wrong).unwrap())),
+                ] {
+                    store.delete(&name).unwrap();
+                    if let Some(value) = replacement {
+                        store.set(&name, &value).unwrap();
+                    }
+                    let error = test_migrate(&path, target, &store).unwrap_err().to_string();
+                    assert!(error.contains("node_migration_invalid"));
+                    assert!(!error.contains("SENTINEL"));
+                    for (n, bytes) in &before {
+                        let actual = Zeroizing::new(directory.read(n, MAX_CONFIG_BYTES).unwrap());
+                        assert!(
+                            actual.as_slice() == bytes.as_slice(),
+                            "retained artifact changed"
+                        );
+                    }
+                    assert_eq!(directory.names().unwrap().len(), before.len());
+                }
+                store.set(&name, &original).unwrap();
+                test_migrate(&path, target, &store).unwrap();
+                assert!(store.get_optional(&name).unwrap().is_none());
+            }
+        }
+    }
+    #[test]
+    fn terminal_retirement_requires_healthy_exact_target_and_only_removes_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fixture(&path);
+        let directory = Directory::open(dir.path()).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        test_migrate(&path, "keychain", &store).unwrap();
+        assert!(
+            run(&directory, &path, "file", &store, |phase| {
+                if phase == "key_retirement" {
+                    Err(invalid())
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        let Some(MigrationState::Retiring(boundary)) = MigrationState::read(&directory).unwrap()
+        else {
+            panic!("terminal state must be durable before key deletion")
+        };
+        let key = Zeroizing::new(directory.read(OsStr::new(".keyfile"), 32).unwrap());
+        let key_name = MigrationKey::name(boundary.id);
+        store.set("vault", "unowned-late-SENTINEL").unwrap();
+        directory.remove(OsStr::new(".keyfile")).unwrap();
+        assert!(test_migrate(&path, "file", &store).is_err());
+        assert!(store.get_optional(&key_name).unwrap().is_some());
+        assert!(dir.path().join(MIGRATION_NAME).exists());
+        directory
+            .publish(OsStr::new(".keyfile"), &key, false)
+            .unwrap();
+        let installed = std::fs::read(&path).unwrap();
+        let mut changed = NodeConfig::load(&path).unwrap();
+        changed.server.url = "wss://changed.invalid".into();
+        directory
+            .publish(
+                OsStr::new("config.toml"),
+                toml::to_string(&changed).unwrap().as_bytes(),
+                true,
+            )
+            .unwrap();
+        assert!(test_migrate(&path, "file", &store).is_err());
+        assert!(store.get_optional(&key_name).unwrap().is_some());
+        directory
+            .publish(OsStr::new("config.toml"), &installed, true)
+            .unwrap();
+        test_migrate(&path, "file", &store).unwrap();
+        assert!(store.get_optional(&key_name).unwrap().is_none());
+        assert_eq!(store.get("vault").unwrap(), "unowned-late-SENTINEL");
+        assert_eq!(std::fs::read(&path).unwrap(), installed);
+        assert!(directory.require_idle().is_ok());
+    }
+    #[test]
+    fn each_migration_uses_a_distinct_custody_key_and_retires_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fixture(&path);
+        let directory = Directory::open(dir.path()).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        let mut last = None;
+        for target in ["keychain", "file", "keychain"] {
+            let forbidden = forbidden_digests(&directory, &path, &store);
+            assert!(
+                run(&directory, &path, target, &store, |phase| {
+                    if phase == "journal" {
+                        Err(invalid())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            let journal = Journal::read(&directory).unwrap().unwrap();
+            let key = MigrationKey::read(&store, journal.id).unwrap().unwrap();
+            let encoded =
+                Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(key.0.as_slice()));
+            let bytes = optional(&directory, MIGRATION_NAME).unwrap().unwrap();
+            assert!(
+                !bytes
+                    .windows(encoded.len())
+                    .any(|v| v == encoded.as_bytes())
+            );
+            assert!(!bytes.windows(32).any(|v| v == key.0.as_slice()));
+            assert_no_oracles(&directory, &forbidden);
+            if let Some((id, previous, tag)) = last {
+                assert_ne!(journal.id, id);
+                assert!(key.0 != previous);
+                assert_ne!(journal.values, tag);
+            }
+            last = Some((journal.id, key.0, journal.values));
+            test_migrate(&path, target, &store).unwrap();
+            assert!(
+                store
+                    .get_optional(&MigrationKey::name(journal.id))
+                    .unwrap()
+                    .is_none()
             );
         }
     }
@@ -911,6 +1610,7 @@ mod tests {
                 }
                 returned(&path, &store, false, false);
                 let original = values(&directory, &path, &store);
+                let forbidden = forbidden_digests(&directory, &path, &store);
                 let mut events = 0;
                 let result = run(&directory, &path, target, &store, |_| {
                     events += 1;
@@ -933,8 +1633,18 @@ mod tests {
                 );
                 assert!(config.save(&path).is_err());
                 assert!(secret_transaction::collect_all_in(&directory, &path, &store).is_err());
-                assert_no_plaintext(&directory);
+                assert_no_oracles(&directory, &forbidden);
+                let id = match MigrationState::read(&directory).unwrap().unwrap() {
+                    MigrationState::Active(j) => j.id,
+                    MigrationState::Reserved(b) | MigrationState::Retiring(b) => b.id,
+                };
                 test_migrate(&path, target, &store).unwrap();
+                assert!(
+                    store
+                        .get_optional(&MigrationKey::name(id))
+                        .unwrap()
+                        .is_none()
+                );
                 assert!(values(&directory, &path, &store) == original);
                 recover(&path, &store).unwrap();
                 let config = NodeConfig::load(&path).unwrap();
@@ -1084,6 +1794,10 @@ mod tests {
     fn real_process_exit_resumes_without_an_in_memory_key_service() {
         for target in ["keychain", "file"] {
             for phase in [
+                "key_reserved",
+                "key_created",
+                "key_retirement",
+                "key_deleted",
                 "journal",
                 "object",
                 "object-put",
@@ -1319,7 +2033,7 @@ mod additional_tests {
         let mut config = NodeConfig::load(&path).unwrap();
         let snapshot =
             SecretSnapshot::read_in(&directory, &config, &path, None, None, None).unwrap();
-        let expected = snapshot.value_digest().unwrap();
+        let expected = snapshot.value_digest(&[0; 32]).unwrap();
         let mut credentials = std::collections::BTreeMap::<String, Zeroizing<String>>::new();
         let mut pending = std::collections::BTreeMap::<String, Zeroizing<String>>::new();
         for (field, _) in secret_fields::fields(&config).unwrap() {
@@ -1370,6 +2084,19 @@ mod additional_tests {
         directory.remove(OsStr::new(".keyfile")).unwrap();
         // The source is the vault; stale individual names must never win.
         store.set("auth_token", "stale-shadow-SENTINEL").unwrap();
+        let forbidden = super::tests::forbidden_digests(&directory, &path, &store);
+        assert!(
+            run(&directory, &path, "keychain", &store, |phase| {
+                super::tests::assert_no_oracles(&directory, &forbidden);
+                if phase == "prepared" {
+                    Err(invalid())
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        super::tests::assert_no_oracles(&directory, &forbidden);
         test_migrate(&path, "keychain", &store).unwrap();
         assert!(super::tests::values(&directory, &path, &store) == expected);
         assert!(
