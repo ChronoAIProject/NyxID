@@ -3662,9 +3662,10 @@ mod tests {
         assert!(!ids.is_empty());
         drop(runtime);
         drop(session);
-        drop(db);
         // Process-exit recovery uses the same tracked IDs if driver teardown
         // cannot release its guard after the owning runtime has disappeared.
+        // Retain the database guard until that recovery finishes: releasing it
+        // here would race a second lifecycle drop against the exit-recovery test.
         let cleanup_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3678,6 +3679,7 @@ mod tests {
             );
             assert!(!client.list_database_names().await.unwrap().contains(&name));
         });
+        drop(db);
     }
 
     #[tokio::test]

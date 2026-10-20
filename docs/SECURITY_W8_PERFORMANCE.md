@@ -199,3 +199,43 @@ exact snapshot-closure regression: one passed, zero failed/ignored, 2.71 s.
 Build plus target-lock wait took 41m28s; that is build contention, not the
 measured test time. The complete frozen copy adds only the owned fixture diff
 to this source; shared-tree integration may additionally include other lanes.
+
+
+## Integration status after fixture cleanup
+
+The compatibility follow-up `af55e0602` passed backend all-target Clippy with
+both KMS features and 13 focused detail tests. The complete cleanup fixture
+filter passed 27/0/0. A subsequent broad audit run returned 166 passed, two
+failed and two manual benchmarks ignored: the existing 32-body contention
+budget exhausted under host load, and the runtime-shutdown cleanup regression
+raced its own lifecycle drop against its explicit exit-recovery drop. The latter
+is a test-ownership race, observed as Mongo `DatabaseDropPending` (215), not a
+three-second timeout. Its focused correction retains the database guard through
+manual recovery while still dropping the owning runtime and session first.
+An isolated contention recheck passed all 256 appends from 16 tasks in 2.25 s,
+with 691 body attempts, maximum 16 body attempts/one commit attempt per operation
+and zero integrity conflicts. This rerun does not replace the broad-run failures.
+
+PM accepted the mechanism, measurements and fixes `aeebc7d16` / `c103bc99f`
+pending hosted end-to-end proof on `82e7605bb`. The replacement matching-profile
+300-test local comparison is incomplete and no final before/after ratio is
+claimed; its idle runner has been stopped while hosted validation and the urgent
+caller handoffs take precedence. The original instrumented baseline's timing
+remains disqualified. No test timeout, transaction lifetime, durability setting
+or retry budget has been increased.
+
+The coordinator handoff reuses the shared both-KMS executable compiled from
+19:34:14, with mtime 19:46:01. The corrected fixture filter passed 27/0/0 in
+4.44 s. Its broader `audit_` run completed 190/1/2 in 347.96 s; only the
+256-append/16-task contention test failed, with raw Mongo code 112 and
+`TransientTransactionError` after the unchanged body-attempt ceiling. The
+shutdown-cleanup test passed. A single isolated contention recheck also failed
+0/1/0 in 13.48 s. This reproduces contention independently of the broad filter;
+the earlier isolated success does not establish reliable contention handling.
+No passing broad-suite or restored end-to-end runtime claim is made from this
+run. Logs are `/tmp/nyxid-w8-ci-perf/handoff-{audit_,contention-isolated}.log`.
+
+The CORE-B RSA guard refresh procedure is now committed. Both the refresh and
+the working-tree reference/private-operation validation pass; retaining the
+cleanup guard changes no bound RSA reference or private-operation line, so
+there is no policy pin delta to include with this focused test correction.
