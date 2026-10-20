@@ -91,5 +91,7 @@ it("F04 closes the menu after current-document navigation and history", async ()
     );
   });
   await waitFor(() => expect(router.state.location.pathname).toBe("/security"));
-  expect(burger()).toHaveAttribute("aria-expanded", "false");
+  await waitFor(() =>
+    expect(burger()).toHaveAttribute("aria-expanded", "false"),
+  );
 });

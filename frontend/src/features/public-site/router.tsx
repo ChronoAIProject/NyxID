@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import type { ComponentType } from "react";
 import {
   createRootRoute,
@@ -110,11 +110,17 @@ function PublicLayout() {
   const location = useLocation();
   const router = useRouter();
   const [navigationRevision, setNavigationRevision] = useState(0);
+  const lastSuccessfulHref = useRef(location.href);
   useEffect(
     () =>
-      router.subscribe("onResolved", () => {
-        if (router.state.matches.every((match) => match.status === "success"))
+      router.subscribe("onResolved", ({ toLocation }) => {
+        if (
+          router.state.matches.every((match) => match.status === "success") &&
+          toLocation.href !== lastSuccessfulHref.current
+        ) {
+          lastSuccessfulHref.current = toLocation.href;
           setNavigationRevision((value) => value + 1);
+        }
       }),
     [router],
   );
