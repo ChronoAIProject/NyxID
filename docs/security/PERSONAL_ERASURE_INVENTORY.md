@@ -1,28 +1,31 @@
 # Personal-account erasure inventory and acceptance contract
 
-This is an implementation checklist for W2. The existing synchronous cascade
-does **not** satisfy this contract. In particular, queued vendor erasure is not
-complete personal erasure, and a scan for `user_id` cannot establish ownership.
-Runtime and implementation status remain in the
-[W1–W4 tracker](../SECURITY_REMEDIATION_W1_W4.md).
+This runbook describes personal-account erasure acceptance, durable cleanup and
+provider revocation. Acceptance fences account authority; completion waits for
+the recorded local and remote obligations. Queuing vendor erasure does not
+establish completion, and a scan for `user_id` alone cannot establish ownership.
+The [coverage limits below](#coverage-limits-and-follow-up-tests) distinguish
+the implemented cleanup from the remaining completeness and recovery tests.
 
 ## Acceptance before account fencing
 
 Only `UserType::Person` uses personal erasure. Organization users must use the
-existing organization lifecycle. Admin removal must not grant owner-confirmed
-Machine workspace destruction: preserve the existing explicit `machine-data-provider-revocation-v2`
-policy boundary and retain required Machine lifecycle evidence.
+existing organization lifecycle. Admin removal does not grant owner-confirmed
+Machine workspace destruction. The explicit
+`machine-data-provider-revocation-v2` policy boundary and required Machine
+lifecycle evidence remain in force.
 
-Before accepting an intent, check and fence every prerequisite that can reject
-deletion. A rejection must preserve authentication and account usability, and
-must not dispatch vendor erasure or revoke unrelated credentials. The current
-cascade's call-admission mutations and vendor enqueue before conflict checks
-must be replaced by transactional acceptance or a reversible preparation phase.
+Preparation checks credential dependencies without closing account authority.
+The acceptance transaction checks and fences lifecycle prerequisites before
+committing the intent and account fence. A rejected request preserves
+authentication and account usability; it dispatches no vendor erasure and
+revokes no unrelated credentials. Temporary email lifecycle claims are released
+after the acceptance attempt or expire after process loss.
 
 | Prerequisite | Required behavior and race fence |
 | --- | --- |
 | Organization recovery | The person cannot be the sole active admin of a live org. Require promotion/transfer or deliberate org deletion. Membership removal/demotion and personal-erasure acceptance must contend on the same org fence; two simultaneous admin deletions cannot each rely on the other. Count live, nondeleting people, not only unrevoked membership rows. |
-| Calls, SMS and email | Preserve settlement/active-effect guards. Do not discard billing or delivery evidence to make a guard pass. Existing Aurinko cleanup and call owner-admission contracts need preparation that does not strand a rejected account. |
+| Calls, SMS and email | Settlement and active-effect guards run before acceptance. Aurinko lifecycle coordination and call owner-admission fences preserve a rejected account's usability. Billing and delivery evidence remain subject to their existing lifecycle. |
 | Oracle pools | Reuse pool lifecycle admission, active-task/command guards, tombstone, credential invalidation, mandatory chained audit and bounded durable cleanup. No forced abandonment. Settle expired commands using the existing bounded contract. |
 | Managed Machines | Preserve owner policy, lifecycle version, revocation outbox and remote cleanup evidence. An admin may fence execution without authorizing indefinite workspace destruction. |
 | Remote provider grants | Group the person's own live keys/tokens by provider and OAuth app lineage, using the same owner and lineage rules as ordinary disconnect. Other owners' local rows are never targeted. A grant-wide provider call can invalidate another owner's imported copy of that upstream grant, as ordinary disconnect can. |
@@ -42,18 +45,18 @@ generation and lease check; stale workers cannot alter successor plans.
 For a grant group, preservation selects its newest refresh-token member, else
 its newest access-token member, before creating the shared effect. This keeps
 one bounded source transaction while preventing a stale access-only sibling
-from supplying the group's revocation capability. Only Delivered confirms a
-Grant effect; NotFound alone requires `grant_scope_unconfirmed`. Token effects
-accept Delivered or NotFound. Bulk domain retries rearm only effects explicitly
-classified `single_attempt: false`; single-attempt retries use the per-effect
-reconciliation disclosure.
+from supplying the group's revocation capability. Only `Delivered` confirms a
+`Grant` effect; `NotFound` alone requires `grant_scope_unconfirmed`. `Token`
+effects accept `Delivered` or `NotFound`. Bulk domain retries rearm only effects
+explicitly classified `single_attempt: false`; single-attempt retries use the
+per-effect reconciliation disclosure.
 
 ## Durable phases and completion
 
-The accepted intent needs a deterministic per-person identity, explicit policy
-basis and majority-durable account fence. Fence user/session/MFA/approval,
-Machine and ordinary OAuth authority in the same accepted transition. A held
-login or in-flight writer must not create successor authority after acceptance.
+The accepted intent has a deterministic per-person identity, explicit policy
+basis and majority-durable account fence. The accepted transition fences user,
+session, MFA, approval, Machine and ordinary OAuth authority. Login and writer
+paths check the same lifecycle barrier before creating successor authority.
 The intent survives removal of the user document and authorizes only the
 enumerated cleanup work; possession of its ID grants no API access.
 
@@ -64,14 +67,16 @@ a resource transferred after discovery. Uncertain remote effects retain their
 encrypted retry capability and exact destination/app lineage before local purge.
 Retry errors use finite diagnostic categories, never provider response bodies.
 
-Use separate accepted, pending and complete states. Local authority closure,
-local cleanup, required remote revocations, vendor asynchronous deletion and
-policy-retained exceptions each need explicit progress. API acceptance, a
+Jobs expose `accepted`, `pending`, `operator_action` and `complete` states.
+Domain checkpoints record local cleanup, required remote revocations, vendor
+asynchronous deletion and policy-retained exceptions. API acceptance, a
 scheduled task, HTTP 2xx or an empty source query is not evidence of remote
 completion. An operator can see pending/action-needed evidence through an
 authenticated, authorized surface. No unauthenticated status link is a bearer
 grant. Retained immutable evidence is described as retained, not erased.
 
+Disconnects from the keys UI, provider connections and assistant actions, as
+well as personal erasure, retain durable provider-revocation obligations.
 Provider source removal and its encrypted revocation intent commit atomically.
 A group produces one `Grant` effect when effective revocation has
 `revokes_grant` and at least one member is non-legacy; otherwise it produces
@@ -109,26 +114,34 @@ transaction, so stale dispatch cannot recreate receipts after final cleanup.
 A receipt lease expires with its parent effect lease and cannot extend dispatch
 authority.
 
-`complete` requires a confirmed provider receipt or an audited operator
-resolution with an evidence reference. `record_external_revocation_confirmed`
-is available for every `operator_action` reason, including unreadable preserved
-capabilities. `record_remote_revocation_unavailable` also resolves unsupported
+An effect becomes `complete` only with a confirmed provider receipt or an
+audited operator resolution with an evidence reference.
+`record_external_revocation_confirmed` is available for every `operator_action`
+reason, including unreadable preserved capabilities.
+`record_remote_revocation_unavailable` also resolves unsupported
 revocation, unavailable capabilities, and exhausted or permanent failures;
 this records an exception and does not claim provider confirmation. Pending or
 in-flight effects cannot be resolved. Only `retry_with_current_provider_config`
-decrypts capability material during reconciliation. Both resolutions and automatic completion remove
-`capability_encrypted` in that same update. Unresolved `operator_action` keeps
-the encrypted capability for an explicit retry or resolution. Personal erasure
+decrypts capability material during reconciliation. Both resolutions and
+automatic completion remove `capability_encrypted` in that same update.
+Unresolved `operator_action` keeps the encrypted capability for an explicit
+retry or resolution. Personal erasure
 cannot report complete while any effect is pending, unresolved, or retains
 capability ciphertext. The DELETE acceptance response includes a bounded page
-of effect outcomes; the admin erasure GET paginates all outcomes, including
-completed live-user disconnects when no erasure job exists. Receipt metadata is stored separately from the obligation list.
+of effect outcomes. `GET /admin/users/{user_id}/erasure` paginates all outcomes,
+including completed live-user disconnects when no erasure job exists. Receipt
+metadata is stored separately from the obligation list. Final source cleanup
+removes the owner's receipts in bounded pages and deletes the user document
+after the provider obligations and local inventory have settled. The durable
+job remains available after the user document is gone; overall `complete` also
+requires the remaining domain checkpoints, including vendor erasure, to finish.
 
 ## Ownership and lifecycle rules
 
-These groups require concrete bounded adapters and regression evidence. The
-model-reference appendix below is discovery input; it does not override these
-rules or authorize blanket deletion.
+Cleanup uses explicit owner and child-join predicates with bounded domain
+adapters. The table describes their ownership and retention rules. The
+model-reference appendix is discovery input, not a complete collection registry
+or authority for blanket deletion.
 
 | Group | Ownership / action | Retained or shared state |
 | --- | --- | --- |
@@ -139,26 +152,35 @@ rules or authorize blanket deletion.
 | Machine / saved login | Owner-confirmed Machine lifecycle, saved logins and setup/desktop/update metadata. Preserve signed remote deletion basis, version fences and outbox until cleanup resolves. | Jobs, operations, billing and lifecycle evidence remain as required by existing retention and remote revocation. Admin removal does not silently erase workspaces. |
 | Oracle | Pool `user_id` is owner; worker `owner_user_id` can be a person contributing to an org pool. Revoke that worker while preserving the pool. Reuse tombstone/cleanup contract for personally owned pools. | Snapshot/profile creator, task submitter and command creator are attribution. Existing pool-bound encrypted formats, terminal history/TTL and tombstone owner history remain valid. |
 | Channel bots / connections | Bot polymorphic owner plus conversation/message joins. Use webhook deregistration and durable connection-backed retry semantics before credential purge. Release a person's NyxBot link/route through existing owner APIs. | Preserve org bots and their other consumers. Sender/recipient/creator fields alone do not confer ownership. Delivery, usage and settlement evidence need their existing lifecycle. |
-| Assistant / NyxBot | Person-owned conversations, short-lived `assistant_resources` source locators, attachments (including upload variants), messages, agents, groups, learning bodies, checkpoints, settings, watches and encrypted deliveries. Join child records to authoritative owner, then delete in bounded batches. | Shared authored/published learning, group members and messages need their actual owner and publication contract. A creator reference alone must not destroy shared content. `assistant_uploads` is not a collection. |
+| Assistant / NyxBot | Person-owned conversations, short-lived `assistant_resources` source locators, attachments (including upload variants), messages, agents, groups, learning bodies, checkpoints, settings, watches and encrypted deliveries. Local cleanup includes `assistant_invocations` and `assistant_invocation_turns` by exact `user_id`. Join child records to authoritative owner, then delete in bounded batches. | Shared authored/published learning, group members and messages need their actual owner and publication contract. A creator reference alone must not destroy shared content. `assistant_uploads` is not a collection. |
 | Platform surfaces | Reuse personal-owner retirement, installation/binding/setup/public-session/turn cleanup and credential-owner lifecycle. | Sponsor, payer, initiating actor and manager ingress receipts can represent someone else's shared service or retained effect. Preserve shared bot funding/configuration and mandatory cleanup. |
 | Services / clients / service accounts | Resolve canonical owner; use explicit legacy fallback only where its model contract permits. Deactivate authored OAuth clients through their lifecycle and retain consent-revocation receipts; follow service-account child tokens and grants. | Creator on platform catalog, provider and feature settings is attribution. Shared services are transferred or retired by their manager contract, not deleted by creator search. |
 | Organization membership | Remove/revoke the person's memberships and pending registrations/invites with last-admin fencing. | Preserve org user, wallets, resources, role scopes and other memberships. Never dissolve an org implicitly. |
-| Billing / grants / effects | Settle outstanding operations and preserve immutable financial/effect records. Apply existing grant/wallet/account lifecycle to personally owned balances. | Billing ledger, audit chain, retained settlement/checkpoint/operation and transfer evidence cannot be scrubbed, TTL-deleted or re-signed here. W8 defines integrity-aware retention separately. |
+| Billing / grants / effects | Settle outstanding operations and preserve immutable financial/effect records. Apply existing grant/wallet/account lifecycle to personally owned balances. | Billing ledger, audit chain, retained settlement/checkpoint/operation and transfer evidence remain under their existing retention rules. Personal erasure does not scrub, TTL-delete or re-sign them. |
 | Telemetry | Central consent/account fence, durable dispatch settlement and current provider-generation drain precede vendor deletion/no-data attestation. Fan out historical destinations and keep unresolved configuration actionable. | Capture acceptance does not prove provider processing is drained. Completion requires supported authenticated deletion/status evidence or a current-generation operator attestation with the same transport/drain fences. |
 
-## Service-layer literal discovery
+## Coverage limits and follow-up tests
 
-Model constants are insufficient. Reconcile literal collections and references
-in assistant execution/learning/publication, channel effects, Machine lifecycle,
-platform retirement, service history, billing reconciliation and telemetry with
-the groups above. Record each adapter's collection, exact owner/join predicate,
-bounded index, retained evidence and prerequisite. Any unclassified reference is
-an open acceptance item, not implicitly safe to delete or retain forever.
+The full collection registry and its completeness test remain follow-up work in
+[#1930](https://github.com/ChronoAIProject/NyxID/issues/1930). The registry must
+cover model constants, service-layer literal collections and embedded variants,
+with each collection's exact owner or join predicate, bounded index, retained
+evidence and prerequisites. The current adapters and bookkeeping registry do
+not establish that every collection has been classified.
 
-The initial 129-model reference scan is recorded below for reviewability. It is
-not exhaustive and its field matches include false ownership candidates such as
-creator attribution and cursor IDs. Every literal/embedded variant still needs
-source tracing and an explicit decision before completion can be claimed.
+The full-collection interrupt/resume test also remains follow-up work in #1930.
+Focused tests cover acceptance, domain recovery and provider-effect completion;
+they do not prove interruption and recovery across every collection in one
+erasure. These gaps limit the completeness claim, even though the implemented
+job reports completion only after its recorded obligations settle.
+
+## Model-reference discovery appendix
+
+The model-reference scan below is retained as discovery input. It is not
+exhaustive, and its field matches include false ownership candidates such as
+creator attribution and cursor IDs. A reference alone authorizes neither
+deletion nor indefinite retention; its owner and lifecycle require source
+tracing and an explicit classification.
 
 <!-- Model discovery appendix follows; predicates are deliberately not generated. -->
 
@@ -178,6 +200,7 @@ backend/src/models/assistant_attachment.rs: COLLECTION_NAME=assistant_attachment
 backend/src/models/assistant_checkpoint.rs: COLLECTION_NAME=assistant_checkpoints | user_id
 backend/src/models/assistant_conversation.rs: COLLECTION_NAME=assistant_conversations | agent_owner_id, user_id
 backend/src/models/assistant_group.rs: COLLECTION_NAME=assistant_groups, MESSAGES_COLLECTION_NAME=assistant_group_messages, REQUESTS_COLLECTION_NAME=assistant_group_requests | actor_user_id, author_user_id, created_by, created_by_user_id, user_id
+backend/src/models/assistant_invocation.rs: COLLECTION_NAME=assistant_invocations, TURNS=assistant_invocation_turns | user_id
 backend/src/models/assistant_message.rs: COLLECTION_NAME=assistant_messages | user_id
 backend/src/models/assistant_message_feedback.rs: COLLECTION_NAME=assistant_message_feedback | user_id
 backend/src/models/assistant_settings.rs: COLLECTION_NAME=assistant_settings | user_id
