@@ -1612,7 +1612,10 @@ mod analytics_tests {
         .unwrap();
         assert!(saved.enabled);
         assert_eq!(saved.account_id, first);
-        assert_eq!(saved.policy_version.as_deref(), Some(consent::POLICY_VERSION));
+        assert_eq!(
+            saved.policy_version.as_deref(),
+            Some(consent::POLICY_VERSION)
+        );
         assert!(!saved.revision.is_empty());
         assert_eq!(headers.get("cache-control").unwrap(), "no-store");
         assert_eq!(consent::read(&db, &second).await.unwrap(), b);

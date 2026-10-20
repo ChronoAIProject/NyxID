@@ -1069,7 +1069,7 @@ async fn authenticate_mcp_or_public(
                 crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims)
                     .await
                     .map_err(|error| match error {
-                        AppError::OAuthAuthorityUnavailable => error.into_response(),
+                        crate::errors::AppError::OAuthAuthorityUnavailable => error.into_response(),
                         _ => mcp_401(&state.config.base_url),
                     })?;
                 // Manual MCP authentication preserves the same sender-bound

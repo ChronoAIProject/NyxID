@@ -886,7 +886,10 @@ async fn unavailable_authority_reads_return_retryable_503_without_consuming_stat
             assert_eq!(before, token_and_session_rows(&fixture.state.db).await);
             assert_eq!(
                 READ_FAULT
-                    .scope(ReadFault { collection, kind }, fixture.mcp_initialize(&token))
+                    .scope(
+                        ReadFault { collection, kind },
+                        fixture.mcp_initialize(&token)
+                    )
                     .await,
                 StatusCode::SERVICE_UNAVAILABLE,
             );
