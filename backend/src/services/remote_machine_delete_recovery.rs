@@ -339,21 +339,21 @@ async fn pending_attempt(
     let _ = super::remote_machine_runtime::finalize_never_submitted(
         &manager.db,
         manager.billing.clone(),
-        &machine,
+        machine,
     )
     .await;
     if lifecycle::finalize_unallocated_delete(&manager.db, &machine.node_id)
         .await?
         .is_some()
     {
-        return manager.complete_if_final(&machine).await;
+        return manager.complete_if_final(machine).await;
     }
     if machine.sandbox_uid.is_none() {
         manager.observe_delete_resource(machine).await?;
     }
     // An already valid ordinary stop remains ordinary authority. Retain its
     // real source operation when delete only relabels an already stopped CR.
-    if super::remote_machine_native::predecessor_stopped(&machine)
+    if super::remote_machine_native::predecessor_stopped(machine)
         && machine.pvc_name.is_some()
         && machine.pvc_uid.is_some()
         && machine.native_pv_name.is_some()
@@ -1121,11 +1121,11 @@ fn recover_resources<'a>(
 }
 
 async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine) -> AppResult<()> {
-    let mut progress = initial_progress(&machine)?;
+    let mut progress = initial_progress(machine)?;
     // A retained completion is historical evidence until this pass has
     // completed its current inventory. Persist pending before any new effect.
     progress.resources_complete = false;
-    retain_known_volume(&machine, &mut progress);
+    retain_known_volume(machine, &mut progress);
     if machine
         .native_uncertainty
         .as_deref()
@@ -1133,7 +1133,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_uncertainty_reason_not_allowed",
         )
@@ -1145,10 +1145,10 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         .await
         .map_err(|error| api_pending(machine, error))?;
     if let Some(sandbox) = &sandbox {
-        if !sandbox_matches(&machine, sandbox) {
+        if !sandbox_matches(machine, sandbox) {
             return block(
                 manager,
-                &machine,
+                machine,
                 &mut progress,
                 "delete_sandbox_identity_conflict",
             )
@@ -1160,14 +1160,14 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
                 || sandbox.operation_id != machine.active_operation_id)
         {
             let intent = super::remote_machine_adapter::intent(
-                &machine,
+                machine,
                 &progress.operation_id,
                 manager.storage_class.as_deref(),
                 false,
                 &manager.bootstrap_base_url,
             );
-            *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
-            live_before_effect(&manager.db, &machine).await?;
+            *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
+            live_before_effect(&manager.db, machine).await?;
             manager
                 .api
                 .suspend_if_identity(
@@ -1195,7 +1195,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     }) {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_current_suspension_unconfirmed",
         )
@@ -1217,7 +1217,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         .await
         .map_err(|error| api_pending(machine, error))?;
     if pods.iter().any(|p| {
-        !owned(&machine, p)
+        !owned(machine, p)
             || machine
                 .pod_uid
                 .as_ref()
@@ -1225,17 +1225,17 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     }) {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_pod_identity_conflict",
         )
         .await;
     }
     if machine.resource_state == ResourceState::Deleted && !pods.is_empty() {
-        if pods.len() != 1 || !stop_is_valid(&delete_projection(&machine), &progress) {
+        if pods.len() != 1 || !stop_is_valid(&delete_projection(machine), &progress) {
             return block(
                 manager,
-                &machine,
+                machine,
                 &mut progress,
                 "delete_pod_identity_conflict",
             )
@@ -1255,15 +1255,15 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         {
             return block(
                 manager,
-                &machine,
+                machine,
                 &mut progress,
                 "delete_pod_identity_conflict",
             )
             .await;
         }
         progress.resources_complete = false;
-        *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
-        live_before_effect(&manager.db, &machine).await?;
+        *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
+        live_before_effect(&manager.db, machine).await?;
         manager
             .api
             .delete_resource_if_identity(
@@ -1279,7 +1279,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             )
             .await
             .map_err(|error| api_pending(machine, error))?;
-        return block(manager, &machine, &mut progress, "delete_pod_gc_pending").await;
+        return block(manager, machine, &mut progress, "delete_pod_gc_pending").await;
     }
     if let Some(name) = &machine.native_pod_name
         && let Some(pod) = manager
@@ -1288,29 +1288,29 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             .await
             .map_err(|error| api_pending(machine, error))?
     {
-        if pod.uid != machine.pod_uid || !owned(&machine, &pod) {
+        if pod.uid != machine.pod_uid || !owned(machine, &pod) {
             return block(
                 manager,
-                &machine,
+                machine,
                 &mut progress,
                 "delete_pod_identity_conflict",
             )
             .await;
         }
-        return block(manager, &machine, &mut progress, "delete_pod_still_present").await;
+        return block(manager, machine, &mut progress, "delete_pod_still_present").await;
     }
     if !pods.is_empty() {
-        return block(manager, &machine, &mut progress, "delete_pod_still_present").await;
+        return block(manager, machine, &mut progress, "delete_pod_still_present").await;
     }
     // Pending claims and exact persisted PVs share the same current verifier.
     let pv = discover_original_volume(manager, machine, &mut progress, pvc.as_ref()).await?;
     let current_creation_terminal =
-        operations::creation_responsibilities_terminal(&manager.db, &machine).await?;
+        operations::creation_responsibilities_terminal(&manager.db, machine).await?;
     if machine.resource_state != ResourceState::Deleted {
         progress.creation_terminal = current_creation_terminal;
     }
     if progress.stop.is_none() {
-        if super::remote_machine_native::predecessor_stopped(&machine) {
+        if super::remote_machine_native::predecessor_stopped(machine) {
             let o = machine
                 .native_observation
                 .as_ref()
@@ -1326,7 +1326,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             });
         } else if sandbox.is_none() {
             if !current_creation_terminal {
-                return block(manager, &machine, &mut progress, "creation_result_unknown").await;
+                return block(manager, machine, &mut progress, "creation_result_unknown").await;
             }
             progress.stop = Some(DeleteStopEvidence {
                 kind: DeleteStopKind::ControlPlaneWorkloadAbsent,
@@ -1350,7 +1350,7 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             }) else {
                 return block(
                     manager,
-                    &machine,
+                    machine,
                     &mut progress,
                     "delete_current_suspension_unconfirmed",
                 )
@@ -1371,11 +1371,11 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     }
     progress.resources_complete = false;
     progress.blocker = None;
-    *machine = save(&manager.db, &machine, &mut progress, Document::new()).await?;
-    if !stop_is_valid(&delete_projection(&machine), &progress) {
+    *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
+    if !stop_is_valid(&delete_projection(machine), &progress) {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_stop_evidence_unverified",
         )
@@ -1389,21 +1389,15 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         let _ = super::remote_machine_runtime::settle_persisted_delete(
             &manager.db,
             billing.clone(),
-            &machine,
+            machine,
         )
         .await;
     }
     if let Some(s) = &sandbox {
         if s.deletion_timestamp.is_some() {
-            return block(
-                manager,
-                &machine,
-                &mut progress,
-                "delete_sandbox_gc_pending",
-            )
-            .await;
+            return block(manager, machine, &mut progress, "delete_sandbox_gc_pending").await;
         }
-        live_before_effect(&manager.db, &machine).await?;
+        live_before_effect(&manager.db, machine).await?;
         manager
             .api
             .delete_if_identity(
@@ -1416,25 +1410,19 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             )
             .await
             .map_err(|error| api_pending(machine, error))?;
-        return block(
-            manager,
-            &machine,
-            &mut progress,
-            "delete_sandbox_gc_pending",
-        )
-        .await;
+        return block(manager, machine, &mut progress, "delete_sandbox_gc_pending").await;
     }
     if let Some(pvc) = &pvc {
         if pvc.deletion_timestamp.is_some() {
             return block(
                 manager,
-                &machine,
+                machine,
                 &mut progress,
                 "delete_pvc_finalizer_pending",
             )
             .await;
         }
-        live_before_effect(&manager.db, &machine).await?;
+        live_before_effect(&manager.db, machine).await?;
         manager
             .api
             .delete_resource_if_identity(
@@ -1450,12 +1438,12 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
             )
             .await
             .map_err(|error| api_pending(machine, error))?;
-        return block(manager, &machine, &mut progress, "delete_pvc_gc_pending").await;
+        return block(manager, machine, &mut progress, "delete_pvc_gc_pending").await;
     }
     if pv.is_some() {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_original_pv_csi_pending",
         )
@@ -1464,33 +1452,33 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     progress.storage = DeleteStorageDisposition::ControlPlaneReleased;
     progress.resources_complete = true;
     if !current_creation_terminal {
-        return block(manager, &machine, &mut progress, "creation_result_unknown").await;
+        return block(manager, machine, &mut progress, "creation_result_unknown").await;
     }
     progress.blocker = None;
     let cleanup = doc! {"cleanup_state":"complete","cleanup_evidence_digest":&progress.evidence_id};
-    *machine = save(&manager.db, &machine, &mut progress, cleanup).await?;
+    *machine = save(&manager.db, machine, &mut progress, cleanup).await?;
     if machine.resource_state == ResourceState::Deleted {
         // Only the resource milestone changes. Original stop/accounting and
         // successful operation/slot state remain final and idempotent.
         return Ok(());
     }
-    if !finality_ready(&machine, &progress) {
+    if !finality_ready(machine, &progress) {
         return block(
             manager,
-            &machine,
+            machine,
             &mut progress,
             "delete_remaining_responsibilities_pending",
         )
         .await;
     }
-    if super::remote_machine_runtime::require_accounting_final(&manager.db, &machine)
+    if super::remote_machine_runtime::require_accounting_final(&manager.db, machine)
         .await
         .is_err()
     {
-        return block(manager, &machine, &mut progress, "accounting_pending").await;
+        return block(manager, machine, &mut progress, "accounting_pending").await;
     }
-    super::remote_machine_native::finalize_persisted_delete(&manager.db, &machine).await?;
-    manager.complete_if_final(&machine).await
+    super::remote_machine_native::finalize_persisted_delete(&manager.db, machine).await?;
+    manager.complete_if_final(machine).await
 }
 
 #[cfg(test)]

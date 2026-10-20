@@ -633,11 +633,11 @@ mod pagination_tests {
         let op = overdue_delete_operation(&db, legacy).await;
         sweep(&db, Utc::now()).await.unwrap();
         assert_overdue_projection(&db, &op, legacy).await;
-        let error = Some((
+        let (code, message) = (
             "delete_kubernetes_response_invalid",
             "Kubernetes cleanup observation response is invalid",
-        ));
-        let (code, message) = error.unwrap();
+        );
+        let error = Some((code, message));
         db.collection::<Document>(OPERATIONS)
             .update_one(
                 doc! {"_id":&op.id,"terminal_at":bson::Bson::Null},
