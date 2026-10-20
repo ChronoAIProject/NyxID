@@ -9,11 +9,12 @@ and provider sinks have been converted and their complete boundaries tested.
 
 ## Ownership and identities
 
-ID owns account, connection-expiry, connect-link and OAuth-broker producers.
+ID owns connection-expiry, connect-link and OAuth-broker producers.
 ASSIST owns channel/platform/automation producers and their adapter effects.
 NODE owns approval, Oracle and machine producers. CORE-B owns the shared
-email/push/Telegram/generic-webhook sinks. Each owning producer still enforces
-its live authentication, owner ACL, authority generations and business dedupe.
+push/Telegram/generic-webhook sinks; email remains unconfigured as described
+below. Each owning producer still enforces its live authentication, owner ACL,
+authority generations and business dedupe.
 This interface never grants access based on a supplied owner or a loaded queue row.
 
 Prepare one `DeliveryKey` outside the transaction retry callback, and persist it
@@ -33,6 +34,28 @@ Do not mint fresh IDs to escape a claim or terminal outcome. A notification sent
 to three devices is three effects with three operations and six reserved slots.
 Do not share a permit across recipients or wrap a multi-send loop in one permit.
 Transport wrappers consume the same permit; they do not reserve nested intents.
+
+## Email remains unconfigured
+
+`Channel::Email` and `PayloadSource::Account` remain reserved interface values.
+This remediation adds no SMTP transport, email consumer or mail dependency.
+The existing `SMTP_*` configuration fields and deployment documentation do not
+implement delivery: registration verification and password-reset email remain a
+product gap. Implementing that transport is separate product work.
+
+ID does not create an account email payload store, persist raw verification/reset
+tokens for an absent consumer, or enqueue account email effects. There is no
+`account_delivery` startup index registration or email dispatch/recovery worker.
+The existing account-token verification and reset semantics remain domain-owned.
+
+If an Email-channel envelope is ever encountered, its resolver must report the
+explicit unconfigured outcome and send nothing. An absent consumer must not
+obtain a dispatch claim, report provider acceptance, fall through to another
+channel, log a token, or manufacture a delivery receipt. The generic
+`execution::dispatch_one` API requires an explicitly supplied consumer; it does
+not discover an email transport or turn SMTP configuration into send authority.
+A future email feature must supply its reviewed immutable payload, destination,
+consumer and startup/recovery wiring before enabling account mail producers.
 
 ## Product payload storage and safe evidence
 
@@ -87,7 +110,7 @@ no automatic queue scan or recovered envelope grants dispatch authority:
 
 | Interface | Required consumer and contract |
 | --- | --- |
-| `DeliveryBinding { destination_id: Uuid, payload: PayloadRef }` | ID's `PayloadSource::Account` resolver, and other producer-owned resolvers, return the exact server-loaded immutable payload/destination binding. It contains no dispatch authority. |
+| `DeliveryBinding { destination_id: Uuid, payload: PayloadRef }` | ID's ConnectLink/Connection resolvers, and other producer-owned resolvers, return the exact server-loaded immutable payload/destination binding. It contains no dispatch authority. |
 | `DeliveryPermit::run_bound(binding, channel, effect)` | The sink checks the queued destination, payload reference and channel against that independently resolved binding before consuming the existing one-shot permit. A mismatch refuses the send. |
 | `SendOutcome<T>` | A sink returns `Accepted(T)` for positive provider acceptance, `Rejected { status: Option<u16>, invalid_destination: bool }` only for positive rejection, or `Uncertain` for ambiguous delivery. Provider receipt `T` stays in protected product storage; no free-form response enters audit detail. |
 | `SendOutcome::delivery_outcome()` | The worker maps those outcomes to Succeeded, DefinitiveFailure or Uncertain and commits the product receipt plus the reviewed core terminal completion together. Webhook failure detail uses `finish_effect_with_detail_in_session`; mapping never grants retry authority. |
@@ -96,9 +119,9 @@ no automatic queue scan or recovered envelope grants dispatch authority:
 `record_outcome_in_session` and `terminal_detail`. `resolve` loads and authorizes
 the immutable product version and independently constructs
 `ResolvedDelivery { binding, channel, prepared }`; copying identity fields from
-the queue is not a resolver. ID's Account resolver owns that protected version
-store and can return the same `DeliveryBinding`; no dependency on the Account
-model is required by the shared sink.
+the queue is not a resolver. Each producer owns its protected version store
+and returns the same `DeliveryBinding`; the shared sink has no dependency on
+that product model. There is no Account/email consumer in this remediation.
 
 After confirmed enqueue commit and materialization, invoke
 `execution::dispatch_one(db, serving_runtime, operation_id, consumer)`. It
@@ -113,8 +136,9 @@ record by stable operation ID and must refuse any changed receipt replay.
 provider or reviewed reconciliation evidence without sending. If completion is
 unresolved, the durable claim remains reserved for reconciliation. A later
 `dispatch_one` cannot resend a claimed or terminal operation; a lost response
-never proves non-delivery. Account/approval/connection workers retain their own
-live owner, revision, destination and revocation fences, and must recheck any
+never proves non-delivery. Approval/connection and other converted workers
+retain their own live owner, revision, destination and revocation fences, and
+must recheck any
 mutable authority immediately before the network effect. There is no new
 automatic worker that could dispatch an unconverted producer. Do not create a
 second intent, bypass a permit, fan out inside one send, detach the effect, or
