@@ -210,7 +210,6 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
         let input = SkillUpdate::default();
         let committed = catalog_skill_service::create_with_endpoints(
             &db,
-            &crate::test_utils::test_encryption_keys(),
             &service,
             actor,
             &input,
@@ -234,7 +233,6 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
             .unwrap();
         let replay = catalog_skill_service::create_with_endpoints(
             &db,
-            &crate::test_utils::test_encryption_keys(),
             &service,
             actor,
             &input,
@@ -256,7 +254,6 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
             matches!(
                 catalog_skill_service::create_with_endpoints(
                     &db,
-                    &crate::test_utils::test_encryption_keys(),
                     &service,
                     actor,
                     &input,
@@ -1046,8 +1043,12 @@ async fn tools_manager_catalog_auth_scheme_reaches_http_ws_and_mcp_user_connecti
         );
         let response = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Mcp-Session-Id", &session).header("Accept", "application/json, text/event-stream")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":"scheme-personal__read","arguments_json":"{}"}}})).send().await.unwrap();
-        assert!(response.status().is_success());
+        let status = response.status();
         let result = response.text().await.unwrap();
+        assert!(
+            status.is_success(),
+            "MCP scheme request failed ({status}): {result}"
+        );
         assert!(
             !result.contains("\"isError\":true") && !result.contains("\"error\":"),
             "MCP scheme call failed: {result}"
@@ -1158,7 +1159,6 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
             assert!(matches!(
                 mutations::commit_update(
                     &db,
-                    Some(&state.encryption_keys),
                     &snapshot,
                     &actor,
                     &fields,
@@ -1221,7 +1221,6 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
     // Authorized conversion is supported; stale Tool callers then conflict.
     let converted = mutations::commit_update(
         &db,
-        Some(&state.encryption_keys),
         &tool,
         &admin_authority,
         &doc! {"offering_kind":"ai_service"},
@@ -1243,7 +1242,6 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
     ));
     let restored = mutations::commit_update(
         &db,
-        Some(&state.encryption_keys),
         &converted,
         &admin_authority,
         &doc! {"offering_kind":"tool"},
@@ -1265,7 +1263,6 @@ async fn tools_manager_mutations_reject_stale_kind_owner_and_revoked_admin() {
         assert!(matches!(
             mutations::commit_update(
                 &db,
-                Some(&state.encryption_keys),
                 &restored,
                 &admin_authority,
                 &fields,
@@ -1590,22 +1587,10 @@ async fn tools_manager_first_secret_races_and_freeze_survives_admin_clear() {
     let moved = doc! {"base_url":"https://other.example","updated_at":bson::DateTime::from_chrono(observed.updated_at+chrono::Duration::milliseconds(1))};
     let (a, b) = tokio::join!(
         crate::services::tools_manager_service::commit_manager_update(
-            &db,
-            &state.encryption_keys,
-            &observed,
-            &manager,
-            &frozen,
-            &[2; 32],
-            &actor
+            &db, &observed, &manager, &frozen, &[2; 32], &actor
         ),
         crate::services::tools_manager_service::commit_manager_update(
-            &db,
-            &state.encryption_keys,
-            &observed,
-            &manager,
-            &moved,
-            &[2; 32],
-            &actor
+            &db, &observed, &manager, &moved, &[2; 32], &actor
         )
     );
     assert_ne!(a.is_ok(), b.is_ok(), "one destination-version winner");
@@ -3177,7 +3162,6 @@ async fn tools_manager_icons_and_operation_fences_recheck_live_authority() {
     assert!(
         crate::services::tools_manager_service::commit_manager_update(
             &db,
-            &state.encryption_keys,
             &observed,
             &manager,
             &doc! {"icon_url":"replacement"},
@@ -4170,7 +4154,6 @@ async fn tools_manager_parent_projection_allows_billing_sync_but_binds_contract(
     db.collection::<Document>(SERVICES).update_one(doc! {"_id":&observed.id},doc! {"$set":{"billing":bson::to_bson(&crate::models::service_billing::ServiceBilling {platform_pricing:Some(crate::models::service_billing::ServicePlatformPricing {credits_per_unit:"1".into(),lago_metric_code:"projection".into(),sync_status:crate::models::service_billing::PricingSyncStatus::Failed,sync_error:Some("loopback sync fixture".into())}),..Default::default()}).unwrap(),"updated_at":bson::DateTime::now()}}).await.unwrap();
     let updated = mutations::commit_update(
         &db,
-        Some(&state.encryption_keys),
         &observed,
         &authority,
         &doc! {"description":"edited"},
@@ -4209,7 +4192,6 @@ async fn tools_manager_parent_projection_allows_billing_sync_but_binds_contract(
         assert!(matches!(
             mutations::commit_update(
                 &db,
-                Some(&state.encryption_keys),
                 &current,
                 &authority,
                 &doc! {"description":"stale"},
@@ -4787,7 +4769,6 @@ async fn tools_manager_provider_and_identity_alternate_paths_bind_live_parent_an
     assert!(matches!(
         mutations::commit_update(
             &db,
-            Some(&state.encryption_keys),
             &observed,
             &authority,
             &doc! {"offering_kind":"tool"},
@@ -4862,7 +4843,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     let fields = doc! {"description":"completed shared connector"};
     mutations::commit_update(
         &db,
-        Some(&crate::test_utils::test_encryption_keys()),
         &parent,
         &authority,
         &fields,
@@ -4909,7 +4889,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
         assert!(matches!(
             mutations::commit_update(
                 &db,
-                Some(&crate::test_utils::test_encryption_keys()),
                 &observed,
                 &authority,
                 &fields,
@@ -4953,7 +4932,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     assert!(matches!(
         mutations::commit_update(
             &db,
-            Some(&crate::test_utils::test_encryption_keys()),
             &parent,
             &authority,
             &fields,
@@ -4973,7 +4951,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     assert!(matches!(
         mutations::commit_update(
             &db,
-            Some(&crate::test_utils::test_encryption_keys()),
             &parent,
             &authority,
             &doc! {"is_active":false},
@@ -4999,7 +4976,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     assert!(matches!(
         mutations::commit_update(
             &db,
-            Some(&crate::test_utils::test_encryption_keys()),
             &credential_parent,
             &authority,
             &doc! {"base_url":"https://other.example/api"},
@@ -5029,7 +5005,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     assert!(matches!(
         mutations::commit_update(
             &db,
-            Some(&crate::test_utils::test_encryption_keys()),
             &parent,
             &authority,
             &fields,
@@ -5077,7 +5052,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
     };
     mutations::commit_update(
         &db,
-        Some(&crate::test_utils::test_encryption_keys()),
         &parent,
         &legacy_authority,
         &fields,
@@ -5103,7 +5077,6 @@ async fn tools_manager_shared_catalog_commits_bind_live_permission_kind_and_owne
         .unwrap();
     mutations::commit_update(
         &db,
-        Some(&crate::test_utils::test_encryption_keys()),
         &parent,
         &legacy_authority,
         &doc! {"base_url":"https://legacy.example/api"},

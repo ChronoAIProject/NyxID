@@ -1011,7 +1011,7 @@ async fn delete_account(
         .await?
         .ok_or_else(|| AppError::Conflict("Account deletion has not been accepted".into()))?;
     Ok(Json(AssistantAccountDeletionResponse {
-        erasure: erasure.into(),
+        erasure: users::DeleteAccountResponse::from_job(&state.db, erasure).await?,
         resource: AssistantAccountResource { user_id },
         replayed,
     }))
@@ -4382,7 +4382,7 @@ mod wave4_effect_tests {
         // Wrong confirmation must be refused.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data", "confirmEmail": "someone@else.test" }),
+            json!({ "actionRequestId": "delete-wrong", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "someone@else.test" }),
         )
         .await;
         assert!(
@@ -4393,7 +4393,7 @@ mod wave4_effect_tests {
         // Empty confirmation must be refused too.
         let (status, _) = post(
             state.clone(),
-            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data", "confirmEmail": "   " }),
+            json!({ "actionRequestId": "delete-empty", "deletionPolicyVersion":"machine-data-provider-revocation-v2", "confirmEmail": "   " }),
         )
         .await;
         assert!(
@@ -4584,7 +4584,10 @@ mod wave4_effect_tests {
             })
             .unwrap()
         };
-        assert_ne!(fingerprint("machine-data"), fingerprint("previous-policy"));
+        assert_ne!(
+            fingerprint("machine-data-provider-revocation-v2"),
+            fingerprint("previous-policy")
+        );
     }
 
     #[tokio::test]

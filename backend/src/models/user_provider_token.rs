@@ -13,10 +13,6 @@ pub struct UserProviderToken {
     /// legacy decoder only while trusted legacy reads remain enabled.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
-    /// Stable known-copy origins survive refresh, transfer and encryption rewrap.
-    /// Absence is legacy unknown provenance, never evidence of grant isolation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant_lineage: Option<super::oauth_grant_lineage::OAuthGrantLineage>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -104,7 +100,6 @@ mod tests {
     #[test]
     fn bson_roundtrip_oauth2_token() {
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -141,7 +136,6 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key_token() {
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

@@ -413,17 +413,18 @@ pub(crate) async fn migrate_storage_snapshot(
             .map_err(|_| AppError::Internal("Invalid platform credential storage".into()))?,
     );
     verify_current_storage_snapshot(keys, &candidate).await?;
-    super::token_copy_admission::migrate_storage(
-        db,
-        keys,
-        COLLECTION_NAME,
-        source,
-        &doc! {
-            "secrets": candidate.get("secrets").cloned(),
-            "secret_context_versions": candidate.get("secret_context_versions").cloned()
-        },
-    )
-    .await
+    Ok(db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            super::record_storage::exact_document_predicate(source),
+            doc! {"$set":{
+                "secrets":candidate.get("secrets").cloned(),
+                "secret_context_versions":candidate.get("secret_context_versions").cloned()
+            }},
+        )
+        .await?
+        .matched_count
+        == 1)
 }
 
 pub async fn update(
@@ -555,9 +556,9 @@ pub async fn update(
         None => doc! {"_id":&id,"provider":descriptor.provider},
     };
     let db = super::transaction_service::durable_database(db);
-    let context = (&db, keys, &id, &filter, &update, source.is_none());
+    let context = (&db, &filter, &update, source.is_none());
     super::transaction_service::run_db_only(&db, &context, |tx, context| {
-        let &(db, keys, id, filter, update, upsert) = context;
+        let &(db, filter, update, upsert) = context;
         Box::pin(async move {
             let result = db
                 .collection::<PlatformCredential>(COLLECTION_NAME)
@@ -570,8 +571,7 @@ pub async fn update(
                     "Platform credentials changed; reload and retry".into(),
                 ));
             }
-            super::token_copy_admission::installed_in_session(db, keys, COLLECTION_NAME, id, tx)
-                .await
+            Ok(())
         })
     })
     .await
@@ -593,7 +593,6 @@ pub async fn delete(
                 },
                 None,
                 None,
-                None,
             )
             .await?;
             return Ok(());
@@ -613,15 +612,10 @@ pub async fn delete(
     super::transaction_service::run_db_only(&db, &(&db, descriptor.provider), |tx, context| {
         let &(db, provider) = context;
         Box::pin(async move {
-            if let Some(row) = db
-                .collection::<PlatformCredential>(COLLECTION_NAME)
-                .find_one_and_delete(doc! {"provider": provider})
+            db.collection::<PlatformCredential>(COLLECTION_NAME)
+                .delete_one(doc! {"provider": provider})
                 .session(&mut *tx)
-                .await?
-            {
-                super::token_copy_admission::remove_in_session(db, COLLECTION_NAME, &row.id, tx)
-                    .await?;
-            }
+                .await?;
             Ok(())
         })
     })
@@ -746,7 +740,6 @@ async fn update_provider_oauth(
             update,
             Some(auxiliary_update),
             Some((&provider.id, &auxiliary_id)),
-            Some(keys),
         )
         .await?
         {
@@ -784,7 +777,6 @@ async fn write_composite_provider(
     update: bson::Document,
     auxiliary_update: Option<bson::Document>,
     expected_ids: Option<(&str, &str)>,
-    keys: Option<&EncryptionKeys>,
 ) -> AppResult<bool> {
     let db = super::transaction_service::durable_database(db);
     let context = (
@@ -794,10 +786,9 @@ async fn write_composite_provider(
         &update,
         &auxiliary_update,
         expected_ids,
-        keys,
     );
     super::transaction_service::run_db_only(&db, &context, |session, context| {
-        let &(db, slug, provider, update, auxiliary, expected_ids, keys) = context;
+        let &(db, slug, provider, update, auxiliary, expected_ids) = context;
         Box::pin(async move {
             let mut provider_filter = doc! {"slug":slug};
             if let Some((provider_id, _)) = expected_ids {
@@ -822,34 +813,11 @@ async fn write_composite_provider(
                     .upsert(true)
                     .session(&mut *session)
                     .await?;
-                // Authenticate the raw installed winner, including concurrent
-                // untouched auxiliary fields, in the same majority transaction.
-                let winner = db
-                    .collection::<bson::Document>(COLLECTION_NAME)
-                    .find_one(doc! {"provider":provider})
+            } else {
+                stored
+                    .delete_one(doc! {"provider":provider})
                     .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::Internal("Platform credentials disappeared".into()))?;
-                super::token_copy_admission::write_in_session(
-                    db,
-                    keys,
-                    COLLECTION_NAME,
-                    &winner,
-                    session,
-                )
-                .await?;
-            } else if let Some(removed) = stored
-                .find_one_and_delete(doc! {"provider":provider})
-                .session(&mut *session)
-                .await?
-            {
-                super::token_copy_admission::remove_in_session(
-                    db,
-                    COLLECTION_NAME,
-                    &removed.id,
-                    session,
-                )
-                .await?;
+                    .await?;
             }
             Ok(true)
         })

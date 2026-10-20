@@ -230,12 +230,6 @@ pub(crate) async fn rebind_key_owner(
     let source = CredentialRecord::key(row);
     let mut versions = row.secret_context_versions.clone();
     let mut set = bson::Document::new();
-    if let Some(lineage) = super::oauth_grant_lineage_service::for_key(keys, row).await? {
-        set.insert(
-            "grant_lineage",
-            bson::to_bson(&lineage).map_err(|_| invalid())?,
-        );
-    }
     for (field, value) in [
         ("credential_encrypted", row.credential_encrypted.as_deref()),
         (
@@ -338,7 +332,6 @@ pub(crate) fn exact_source_filter(
         "gateway_url",
         "credential_source",
         "oauth_app_observation",
-        "grant_lineage",
         "source_id",
         "metadata",
         VERSIONS,
@@ -583,7 +576,7 @@ pub(crate) async fn migrate_snapshot(
             .collection::<bson::Document>(collection)
             .update_one(
                 exact_source_filter(collection, source)?,
-                bson::doc! {"$set":set,"$unset":{"revocation_provenance":""}},
+                bson::doc! {"$set":set},
             )
             .session(&mut tx)
             .await?;

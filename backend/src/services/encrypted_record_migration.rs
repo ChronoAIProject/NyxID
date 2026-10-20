@@ -683,7 +683,9 @@ async fn verify(
         Adapter::Setup => {
             super::platform_setup_record_service::verify_current_snapshot(keys, row).await
         }
-        Adapter::AgentLogin => super::agent_login_record_service::verify_current_snapshot(keys,row).await,
+        Adapter::AgentLogin => {
+            super::agent_login_record_service::verify_current_snapshot(keys, row).await
+        }
         Adapter::Pending => Err(AppError::Conflict(
             "Encrypted field adapter implementation is pending".into(),
         )),
@@ -782,7 +784,9 @@ async fn migrate(
         Adapter::Setup => {
             super::platform_setup_record_service::migrate_snapshot(db, keys, row).await
         }
-        Adapter::AgentLogin => super::agent_login_record_service::migrate_snapshot(db,keys,row).await,
+        Adapter::AgentLogin => {
+            super::agent_login_record_service::migrate_snapshot(db, keys, row).await
+        }
         Adapter::Pending => Err(AppError::Conflict(
             "Encrypted field adapter implementation is pending".into(),
         )),

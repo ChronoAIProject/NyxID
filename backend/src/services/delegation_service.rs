@@ -345,7 +345,6 @@ mod tests {
             .unwrap();
 
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_user_id.clone(),

@@ -6319,7 +6319,6 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -9160,7 +9159,6 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -9241,7 +9239,6 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -9278,7 +9275,6 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

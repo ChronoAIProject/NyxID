@@ -1,3 +1,4 @@
+import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
@@ -358,10 +359,10 @@ function SecurityTab() {
     }
     setIsDeletingAccount(true);
     try {
-      const result = await apiClient<DeleteAccountResponse>("/users/me", {
+      const result = await withErasurePreparation(() => apiClient<DeleteAccountResponse>("/users/me", {
         method: "DELETE",
         headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
-      });
+      }));
       toast.success(result.status === "complete" ? "Account erasure complete" : "Account deletion accepted. Cleanup continues until verified.");
       try {
         await logout();

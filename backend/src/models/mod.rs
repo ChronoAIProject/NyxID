@@ -70,7 +70,6 @@ pub mod oauth_broker_binding;
 pub mod oauth_client;
 pub mod oauth_consent_request;
 pub mod oauth_flow_kind;
-pub mod oauth_grant_lineage;
 pub mod oauth_state;
 pub mod oracle_login_profile;
 pub mod oracle_login_snapshot;

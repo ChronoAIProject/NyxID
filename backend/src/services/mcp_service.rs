@@ -5119,11 +5119,9 @@ fn execute_tool_resolved_boxed<'a>(
 
 // Keep forwarding-only temporaries off the authorization/acknowledgement stack.
 // Invoke the constructor outside the caller's poll frame before boxing.
-fn box_mcp_forwarding<'a, F>(
-    make: impl FnOnce() -> F,
-) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>>
+fn box_mcp_forwarding<'a, F>(make: impl FnOnce() -> F) -> futures::future::BoxFuture<'a, F::Output>
 where
-    F: std::future::Future<Output = AppResult<McpToolExecutionOutcome>> + Send + 'a,
+    F: std::future::Future + Send + 'a,
 {
     Box::pin(make())
 }
@@ -5598,7 +5596,7 @@ async fn execute_tool_resolved_inner(
                 (&billing_ctx, &resource_owner_id, assistant_chat.as_ref()),
             );
             destination_audit.dispatch();
-            let managed = match super::telnyx_platform_service::execute(
+            let managed = match box_mcp_forwarding(|| super::telnyx_platform_service::execute(
                 db,
                 billing.clone(),
                 billing_ctx,
@@ -5609,7 +5607,7 @@ async fn execute_tool_resolved_inner(
                 body.as_deref().unwrap_or_default(),
                 service_lease,
                 managed_guard,
-            )
+            ))
             .await
             {
                 Ok(response) => response,
@@ -5642,8 +5640,7 @@ async fn execute_tool_resolved_inner(
                 origin: ToolResponseOrigin::Downstream,
             }));
         }
-        let metered = billing
-            .open(&billing_ctx)
+        let metered = box_mcp_forwarding(|| billing.open(&billing_ctx))
             .await
             .inspect_err(|error| request_audit.admission_error(error))?;
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
@@ -5764,8 +5761,7 @@ async fn execute_tool_resolved_inner(
                     .await
                 {
                     Ok(ProxyResponseType::Complete(resp)) => {
-                        billing
-                            .settle(
+                        box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 mcp_platform_usage_for_path(
                                     &resp.body,
@@ -5776,7 +5772,7 @@ async fn execute_tool_resolved_inner(
                                 ),
                                 None,
                                 None,
-                            )
+                            ))
                             .await?;
                         destination_audit.complete(resp.status);
                         request_audit.response(resp.status);
@@ -5810,8 +5806,7 @@ async fn execute_tool_resolved_inner(
                                 return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
                             }
                         };
-                        billing
-                            .settle(
+                        box_mcp_forwarding(|| billing.settle(
                                 &metered,
                                 mcp_platform_usage_for_path(
                                     &body_buf,
@@ -5822,7 +5817,7 @@ async fn execute_tool_resolved_inner(
                                 ),
                                 None,
                                 None,
-                            )
+                            ))
                             .await?;
                         destination_audit.complete(status);
                         request_audit.response(status);
@@ -6019,8 +6014,7 @@ async fn execute_tool_resolved_inner(
                 ));
             }
         };
-        billing
-            .settle(
+        box_mcp_forwarding(|| billing.settle(
                 &metered,
                 mcp_platform_usage_for_path(
                     body_text.as_bytes(),
@@ -6031,7 +6025,7 @@ async fn execute_tool_resolved_inner(
                 ),
                 None,
                 None,
-            )
+            ))
             .await?;
 
         destination_audit.complete(status);

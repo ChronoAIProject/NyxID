@@ -3300,7 +3300,6 @@ mod tests {
 
     fn make_blank_api_key() -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

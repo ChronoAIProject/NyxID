@@ -722,7 +722,6 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

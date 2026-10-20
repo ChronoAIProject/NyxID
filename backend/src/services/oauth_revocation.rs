@@ -56,6 +56,7 @@ pub enum TokenOutcome {
     Delivered,
     NotFound,
     SendFailed,
+    PermanentFailure,
     Skipped(&'static str),
 }
 
@@ -134,23 +135,6 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
         };
     };
 
-    if req.scope == RevocationScope::Token
-        && !verified_token_only(&config)
-        && config.style != "facebook_deauth"
-    {
-        return RevocationOutcome {
-            style: Some(config.style),
-            scope: req.scope,
-            access: req
-                .access_token
-                .as_ref()
-                .map(|_| TokenOutcome::Skipped("unverified_token_only_effect_scope")),
-            refresh: req
-                .refresh_token
-                .as_ref()
-                .map(|_| TokenOutcome::Skipped("unverified_token_only_effect_scope")),
-        };
-    }
     let style = config.style.clone();
     let access_token = req.access_token.as_ref().map(|token| token.as_str());
     let refresh_token = req.refresh_token.as_ref().map(|token| token.as_str());
@@ -294,6 +278,15 @@ async fn revoke_rfc7009_token(
     };
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status.is_success() => TokenOutcome::Delivered,
+        Ok(response)
+            if response.status.is_client_error()
+                && !matches!(
+                    response.status,
+                    StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                ) =>
+        {
+            TokenOutcome::PermanentFailure
+        }
         Ok(_) | Err(_) => TokenOutcome::SendFailed,
     })
 }
@@ -331,6 +324,15 @@ async fn revoke_github_token(
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status == StatusCode::NO_CONTENT => TokenOutcome::Delivered,
         Ok(response) if response.status == StatusCode::NOT_FOUND => TokenOutcome::NotFound,
+        Ok(response)
+            if response.status.is_client_error()
+                && !matches!(
+                    response.status,
+                    StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                ) =>
+        {
+            TokenOutcome::PermanentFailure
+        }
         Ok(_) | Err(_) => TokenOutcome::SendFailed,
     })
 }
@@ -364,6 +366,15 @@ async fn revoke_self_bearer(
                 Ok(_) | Err(_) => TokenOutcome::SendFailed,
             }
         }
+        Ok(response)
+            if response.status.is_client_error()
+                && !matches!(
+                    response.status,
+                    StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                ) =>
+        {
+            TokenOutcome::PermanentFailure
+        }
         Ok(_) | Err(_) => TokenOutcome::SendFailed,
     })
 }
@@ -393,6 +404,15 @@ async fn revoke_facebook_grant(
                 }
                 Ok(_) | Err(_) => TokenOutcome::SendFailed,
             }
+        }
+        Ok(response)
+            if response.status.is_client_error()
+                && !matches!(
+                    response.status,
+                    StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+                ) =>
+        {
+            TokenOutcome::PermanentFailure
         }
         Ok(_) | Err(_) => TokenOutcome::SendFailed,
     })
@@ -722,7 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omitted_effect_scope_and_legacy_url_never_dispatch_token_revocation() {
+    async fn omitted_effect_scope_and_legacy_url_preserve_ordinary_token_revocation() {
         let mut server = spawn_server(StatusCode::OK, Vec::new()).await;
         for legacy in [false, true] {
             let mut config = provider(
@@ -743,15 +763,11 @@ mod tests {
                 Some("refresh-never-sent"),
             ))
             .await;
-            assert_eq!(
-                result.access,
-                Some(TokenOutcome::Skipped("unverified_token_only_effect_scope"))
-            );
-            assert_eq!(
-                result.refresh,
-                Some(TokenOutcome::Skipped("unverified_token_only_effect_scope"))
-            );
-            assert!(server.receiver.try_recv().is_err());
+            assert_eq!(result.access, Some(TokenOutcome::Delivered));
+            assert_eq!(result.refresh, Some(TokenOutcome::Delivered));
+            for _ in 0..2 {
+                assert_eq!(server.receiver.recv().await.unwrap().method, Method::POST);
+            }
         }
     }
 
@@ -903,6 +919,36 @@ mod tests {
             form_fields(&refresh.body)["token_type_hint"],
             "refresh_token"
         );
+    }
+
+    #[tokio::test]
+    async fn permanent_provider_rejections_are_distinct_from_retryable_failures() {
+        for (status, expected) in [
+            (StatusCode::BAD_REQUEST, TokenOutcome::PermanentFailure),
+            (StatusCode::UNAUTHORIZED, TokenOutcome::PermanentFailure),
+            (StatusCode::NOT_FOUND, TokenOutcome::PermanentFailure),
+            (StatusCode::TOO_MANY_REQUESTS, TokenOutcome::SendFailed),
+            (StatusCode::REQUEST_TIMEOUT, TokenOutcome::SendFailed),
+            (StatusCode::SERVICE_UNAVAILABLE, TokenOutcome::SendFailed),
+        ] {
+            let mut server = spawn_server(status, Vec::new()).await;
+            let provider = provider(
+                "rfc7009",
+                format!("{}/revoke", server.base_url),
+                "none",
+                false,
+            );
+            let result = revoke_remote(request(
+                &provider,
+                RevocationScope::Token,
+                None,
+                Some("synthetic-token"),
+                None,
+            ))
+            .await;
+            assert_eq!(result.access, Some(expected));
+            assert_eq!(server.receiver.recv().await.unwrap().method, Method::POST);
+        }
     }
 
     #[tokio::test]

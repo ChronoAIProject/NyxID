@@ -1468,7 +1468,9 @@ pub(crate) async fn adopt_anonymous(
             || captured.platform_config_id.as_deref() != Some(profile.id.as_str())
             || captured.profile_generation != Some(profile.generation)
             || captured.state != SetupState::AwaitingIdentity
-            || captured.expires_at.is_none_or(|e| e <= Utc::now())
+            || captured
+                .expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now())
         {
             return Err(AppError::Conflict(
                 "Anonymous draft expired or changed".into(),
@@ -1488,7 +1490,7 @@ pub(crate) async fn adopt_anonymous(
         )
     };
     #[cfg(test)]
-    if let Some(pause) = ADOPTION_PAUSE.try_with(Clone::clone).ok() {
+    if let Ok(pause) = ADOPTION_PAUSE.try_with(Clone::clone) {
         pause.entered.notify_one();
         pause.release.notified().await;
     }

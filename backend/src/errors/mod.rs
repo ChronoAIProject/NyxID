@@ -790,6 +790,11 @@ pub enum AppError {
     )]
     ManagedExecutionPending(String),
 
+    #[error(
+        "Credential dependency preparation is running; retry deletion while your account remains usable"
+    )]
+    ErasurePreparing,
+
     #[error("Plan entitlement required: {0}")]
     PlanEntitlementRequired(String),
 
@@ -829,7 +834,7 @@ impl AppError {
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
-            Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
@@ -1060,6 +1065,7 @@ impl AppError {
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
+            Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
@@ -1324,6 +1330,7 @@ impl AppError {
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
+            Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
@@ -2116,6 +2123,7 @@ mod tests {
     fn error_codes_unique() {
         let codes = vec![
             AppError::ManagedExecutionPending("".into()).error_code(),
+            AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),

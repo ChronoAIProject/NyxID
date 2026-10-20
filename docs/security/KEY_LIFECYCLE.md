@@ -14,23 +14,22 @@ their respective domains. Audit-derived material also keys instruction context,
 call/channel identities and callbacks, voice credential revisions, Machine and
 Oracle lifecycle, service history and other persisted operation fingerprints.
 
-The token-copy admission ledger adds durable audit-derived dependencies:
+The remediation retains these audit-derived digests on
+`personal_erasure_effects` (receipt matching also uses the owner-scoped
+`personal_erasure_revocation_receipts` collection):
 
-| Collection | Key-dependent evidence | Recovery requirement |
+| Digest domain | Key-dependent evidence | Recovery requirement |
 |---|---|---|
-| `credential_token_holders` | Exact-token fingerprints and explicit bearer OWS safety aliases under `oauth-revocation-provenance-v1`; authenticated source-to-token associations | Restore the same stable audit-domain key with the database, then reconcile the matching holder coverage/backfill contract before dispatch. |
-| `credential_token_fences` | The same global fingerprints identify permanently closed tokens across provider and owner labels | Preserve tombstones and their original ownership/uncertainty. A new key cannot safely rediscover these identities or permit an old token to return. |
-| `credential_token_revocations` | Token fingerprints plus `oauth-revocation-authority-v1` digests of captured provider endpoint/style/effect scope and resolved client identity/credentials | Confirmations apply only to equivalent captured authorities. Keep the original key to match delayed effects and partial-success receipts; never treat another authority's HTTP200 as confirmation. |
-| `credential_revocation_dependencies` | Keyed token fingerprints and grant-origin provenance used by erasure preparation | Preserve the key and source revision semantics; an empty/mismatching index is not evidence of isolation. |
+| `oauth-revocation-authority-v1` | Captured provider endpoint, style, scope and resolved OAuth app credentials; per-owner token SHA-256 dedup and receipt matching | Restore the same stable audit-domain key so a receipt matches only its captured revocation authority. |
+| `provider-issuance-response-v1` | Per-effect evidence of a late provider issuance response | Preserve the key with unresolved issuance evidence; this is not a token index. |
+| `provider-install-token-v1` | Per-effect evidence that the issued credential was installed | Preserve the key until the issuance/install obligation and retained evidence no longer need it; this is not a token index. |
 
-These are stable-key **backup and retirement dependencies**, even after local
-source ciphertext has been removed. Replacing the audit key would make old
-closures and receipts unmatchable. The current implementation has no complete
-versioned re-key protocol for these ledgers, and the encryption migration
-runner does not rotate their HMAC identities. Independent keyset adoption keeps
-the exact existing bytes; arbitrary HMAC-key rotation remains unsupported.
-Token-holder implementation coverage and deployment activation are tracked
-separately in [the token admission runbook](TOKEN_COPY_ADMISSION.md).
+Erasure attestations are ordinary chained audit rows. The digests and receipts
+are stable-key backup and retirement dependencies even after source ciphertext
+has been removed. There is no global cross-owner token-copy index or closure
+ledger. Independent keyset adoption keeps the existing digest bytes; the
+encryption migration runner does not rotate these identities, and arbitrary
+HMAC-key rotation remains unsupported.
 
 Independent keyset adoption preserves the **exact existing final domain keys**.
 It does not rotate those HMAC keys. Keeping their bytes unchanged preserves
@@ -128,5 +127,7 @@ stable HMAC keyset alone do not prove ciphertext/backups ready for key retiremen
 OAuth consent revisions and signed delegation origins introduce an independent
 authority compatibility boundary. Follow the
 [coordinated OAuth authority cutover](OAUTH_AUTHORITY_ROLLOUT.md); JWT verifier
-overlap does not make mixed old/new authority readers safe or preserve legacy
-callbacks. Affected clients must reauthorize.
+overlap does not make mixed old/new authority readers safe. The runbook's PD-3
+eligibility rules allow eligible ordinary refresh records to upgrade once;
+ineligible records require authorization. Legacy delegation and callback work
+must drain before the cutover.

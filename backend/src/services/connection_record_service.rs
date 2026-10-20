@@ -103,7 +103,6 @@ pub(crate) async fn commit(
     db: &mongodb::Database,
     source: Option<&Document>,
     row: &UserServiceConnection,
-    keys: Option<&EncryptionKeys>,
 ) -> AppResult<()> {
     validate(row)?;
     let mut tx = db.client().start_session().await?;
@@ -154,20 +153,6 @@ pub(crate) async fn commit(
                 .session(&mut tx)
                 .await?;
         }
-        let installed = db
-            .collection::<Document>(COLLECTION_NAME)
-            .find_one(doc! {"_id":&row.id})
-            .session(&mut tx)
-            .await?
-            .ok_or_else(invalid)?;
-        super::token_copy_admission::write_in_session(
-            db,
-            keys,
-            COLLECTION_NAME,
-            &installed,
-            &mut tx,
-        )
-        .await?;
         Ok(())
     }
     .await;
@@ -202,7 +187,7 @@ pub(crate) async fn migrate_snapshot(
     let plaintext = text(keys, &row).await?;
     encrypt(keys, &mut row, plaintext.as_bytes()).await?;
     verify_current_snapshot(keys, &bson::to_document(&row).map_err(|_| invalid())?).await?;
-    match commit(db, Some(source), &row, Some(keys)).await {
+    match commit(db, Some(source), &row).await {
         Ok(()) => Ok(true),
         Err(AppError::Conflict(_)) => Ok(false),
         Err(error) => Err(error),

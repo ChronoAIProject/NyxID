@@ -172,7 +172,7 @@ describe.each(["/settings", "/assistant"] as const)(
         ["/api/v1/users/me", expect.objectContaining({
           method: "DELETE",
           credentials: "include",
-          headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
+          headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),
         })],
       ]));
       await waitFor(() => expect(confirm).toBeEnabled());

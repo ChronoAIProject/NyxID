@@ -198,16 +198,22 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         updated_at: now,
     };
     let context = (db.clone(), owner.to_owned(), agent);
-    super::transaction_service::run_db_only(db,&context,|session,(db,owner,agent)| {
+    super::transaction_service::run_db_only(db, &context, |session, (db, owner, agent)| {
         Box::pin(async move {
-            super::erasure_admission::fence_in_session(db,owner,session).await?;
+            super::erasure_admission::fence_in_session(db, owner, session).await?;
             let collection = db.collection::<AssistantAgent>(AGENTS);
-            if let Some(winner) = collection.find_one(doc! {"user_id":owner,"kind":"nyxbot"})
-                .session(&mut *session).await? { return Ok(winner); }
+            if let Some(winner) = collection
+                .find_one(doc! {"user_id":owner,"kind":"nyxbot"})
+                .session(&mut *session)
+                .await?
+            {
+                return Ok(winner);
+            }
             collection.insert_one(agent).session(session).await?;
             Ok(agent.clone())
         })
-    }).await
+    })
+    .await
 }
 
 /// An agent of the owner by ID.

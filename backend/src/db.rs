@@ -4844,7 +4844,6 @@ pub(crate) async fn migrate_provider_tokens(
             };
             // Create UserApiKey -- clean up endpoint on failure
             let api_key = UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: versions,
                 oauth_app_observation: (token.token_type == "oauth2").then(|| {
                     crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
@@ -4936,8 +4935,7 @@ pub(crate) async fn migrate_provider_tokens(
             let source_id = token.id.clone();
             let token = token.clone();
             let db = db.clone();
-            let committed = crate::services::service_history::transaction::run_send(&transaction_db, &keys, move |session, keys| {
-            let encryption_keys=*keys;
+            let committed = crate::services::service_history::transaction::run_send(&transaction_db, &keys, move |session, _keys| {
             let db = db.clone();
             let source_filter = source_filter.clone();
             let token = token.clone();
@@ -4976,7 +4974,7 @@ pub(crate) async fn migrate_provider_tokens(
                     && services.find_one(doc! {"user_id":&token.user_id,"catalog_service_id":catalog,"is_active":true}).session(&mut *session).await?.is_some() { return Ok(false) }
                 crate::services::service_history::collection::<UserEndpoint>(&db, USER_ENDPOINTS)
                     .insert_one(&endpoint).session(&mut *session).await?;
-                keys_collection.insert_one(&api_key).credential_keys(encryption_keys).session(&mut *session).await?;
+                keys_collection.insert_one(&api_key).session(&mut *session).await?;
                 services.insert_one(&user_service).session(&mut *session).await?;
                 Ok(true)
             }.await;
@@ -5182,7 +5180,6 @@ pub(crate) async fn migrate_service_connections(
                 None
             };
             let api_key = UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: versions,
                 oauth_app_observation: None,
                 credential_source: None,
@@ -5264,8 +5261,7 @@ pub(crate) async fn migrate_service_connections(
             };
             let transaction_db = crate::services::transaction_service::durable_database(db);
             let db = transaction_db.clone();
-            let committed=crate::services::service_history::transaction::run_send(&transaction_db,&keys,move |session,encryption_keys| {
-            let encryption_keys=*encryption_keys;
+            let committed=crate::services::service_history::transaction::run_send(&transaction_db,&keys,move |session,_keys| {
             let db=db.clone();let source=source.clone();let raw_service=raw_service.clone();
             let conn=conn.clone();let endpoint=endpoint.clone();let api_key=api_key.clone();let user_service=user_service.clone();
             Box::pin(async move {
@@ -5283,7 +5279,7 @@ pub(crate) async fn migrate_service_connections(
                         || services.find_one(doc!{"source":"migration_connection","source_id":&conn.id}).session(&mut *session).await?.is_some()
                         || services.find_one(doc!{"user_id":&conn.user_id,"catalog_service_id":&conn.service_id,"is_active":true}).session(&mut *session).await?.is_some(){return Ok(false);}
                     crate::services::service_history::collection::<UserEndpoint>(&db,USER_ENDPOINTS).insert_one(&endpoint).session(&mut *session).await?;
-                    keys.insert_one(&api_key).credential_keys(encryption_keys).session(&mut *session).await?;
+                    keys.insert_one(&api_key).session(&mut *session).await?;
                     services.insert_one(&user_service).session(&mut *session).await?;
                     Ok(true)
                 }.await;
@@ -5458,7 +5454,6 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

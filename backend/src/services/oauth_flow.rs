@@ -446,10 +446,7 @@ pub async fn refresh_oauth_token(
     .await?;
     records::mark_version(&mut versions, encryption_keys, "access_token_encrypted");
 
-    let grant_lineage =
-        super::oauth_grant_lineage_service::for_token(encryption_keys, token).await?;
     let mut set_doc = doc! {
-        "grant_lineage":bson::to_bson(&grant_lineage).map_err(|_|AppError::Internal("Invalid OAuth grant provenance".into()))?,
         "access_token_encrypted": bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes: access_enc,
@@ -505,10 +502,7 @@ pub async fn refresh_oauth_token(
         .await?;
         let update = db
             .collection::<UserProviderToken>(COLLECTION_NAME)
-            .update_one(
-                predicate,
-                doc! {"$set":set_doc,"$unset":{"revocation_provenance":""}},
-            )
+            .update_one(predicate, doc! {"$set":set_doc})
             .session(&mut tx)
             .await?;
         if update.matched_count != 1 {
@@ -516,14 +510,6 @@ pub async fn refresh_oauth_token(
                 "OAuth credential changed while it was being refreshed".into(),
             ));
         }
-        super::token_copy_admission::installed_in_session(
-            db,
-            encryption_keys,
-            COLLECTION_NAME,
-            &token.id,
-            &mut tx,
-        )
-        .await?;
         super::personal_erasure_service::issuance::installed_in_session(
             db,
             &attempt,

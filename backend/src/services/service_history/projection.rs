@@ -92,12 +92,10 @@ fn operational(entity: &str, key: &str) -> bool {
                 | "status"
                 | "oauth_attempt_nonce"
                 | "oauth_app_observation"
-                // Storage dispatch and known-copy provenance are operational
-                // metadata. Credential byte changes still produce user history;
+                // Storage versions are operational metadata.
+                // Credential byte changes still produce user history;
                 // the mutation boundary independently invalidates dependencies.
                 | "secret_context_versions"
-                | "grant_lineage"
-                | "revocation_provenance"
         ))
 }
 
@@ -528,17 +526,13 @@ async fn record_service(
 mod storage_metadata_tests {
     use super::*;
     #[test]
-    fn storage_and_grant_metadata_do_not_turn_refresh_into_user_history() {
+    fn storage_metadata_does_not_turn_refresh_into_user_history() {
         let before = doc! {"_id":"key","access_token_encrypted":vec![1_i32]};
         let mut after = before.clone();
         after.insert("access_token_encrypted", vec![2_i32]);
         after.insert(
             "secret_context_versions",
             doc! {"access_token_encrypted":3_i32},
-        );
-        after.insert(
-            "grant_lineage",
-            doc! {"version":1_i32,"origins":["redacted"]},
         );
         let (changes, additional, changed) = diff("user_api_keys", &before, &after, true);
         assert!(!changed);
@@ -547,5 +541,11 @@ mod storage_metadata_tests {
         let (changes, _, changed) = diff("user_api_keys", &before, &after, false);
         assert!(changed);
         assert!(changes.iter().any(|change| change.field == "credential"));
+        after.insert("opaque_storage_metadata", doc! {"version":1_i32});
+        let (_, additional, changed) = diff("user_api_keys", &before, &after, true);
+        assert!(
+            additional && changed,
+            "unrecognized metadata is still a real change"
+        );
     }
 }

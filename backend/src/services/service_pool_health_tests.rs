@@ -407,7 +407,7 @@ async fn held_observation_cannot_recreate_health_after_completed_owner_erasure()
         loop {
             match erasure::accept(&db, &scope.owner_id, &scope.owner_id, None).await {
                 Ok(_) => break,
-                Err(crate::errors::AppError::Conflict(_)) => {
+                Err(crate::errors::AppError::ErasurePreparing) => {
                     erasure::prepare_one_for_test(&db, &state.encryption_keys)
                         .await
                         .unwrap();
@@ -425,7 +425,41 @@ async fn held_observation_cannot_recreate_health_after_completed_owner_erasure()
             {
                 break;
             }
+            db.collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+                .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+                .await
+                .unwrap();
             erasure::process_one(&state).await.unwrap();
+            if db
+                .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id":&scope.owner_id})
+                .await
+                .unwrap()
+                .is_none()
+                && crate::services::telemetry_erasure_service::completion_evidence(
+                    &db,
+                    &scope.owner_id,
+                )
+                .await
+                .unwrap()
+                .is_none()
+            {
+                crate::services::telemetry_erasure_service::drain_once(
+                    &db,
+                    &crate::telemetry::erasure::ErasureClients::default(),
+                )
+                .await
+                .unwrap();
+                crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+                    &db,
+                    &scope.owner_id,
+                    "fixture-operator",
+                    "fixture://never-configured",
+                    "Synthetic deployment has never configured telemetry",
+                )
+                .await
+                .unwrap();
+            }
             tokio::task::yield_now().await;
         }
         pause.release.notify_one();

@@ -194,7 +194,7 @@ pub async fn upsert_feedback(
     write: FeedbackWrite,
 ) -> crate::errors::AppResult<(AssistantMessageFeedback, Option<AssistantMessageFeedback>)> {
     #[cfg(test)]
-    if let Some(pause) = FEEDBACK_WRITE_PAUSE.try_with(Clone::clone).ok() {
+    if let Ok(pause) = FEEDBACK_WRITE_PAUSE.try_with(Clone::clone) {
         pause.entered.notify_one();
         pause.release.notified().await;
     }
@@ -599,7 +599,7 @@ mod lifecycle_tests {
             loop {
                 match erasure::accept(&db, &owner, &owner, None).await {
                     Ok(_) => break,
-                    Err(AppError::Conflict(_)) => {
+                    Err(AppError::ErasurePreparing) => {
                         erasure::prepare_one_for_test(&db, &state.encryption_keys)
                             .await
                             .unwrap();
@@ -613,7 +613,38 @@ mod lifecycle_tests {
                 {
                     break;
                 }
+                db.collection::<bson::Document>(crate::models::personal_erasure::COLLECTION_NAME)
+                    .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+                    .await
+                    .unwrap();
                 erasure::process_one(&state).await.unwrap();
+                if db
+                    .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&owner})
+                    .await
+                    .unwrap()
+                    .is_none()
+                    && crate::services::telemetry_erasure_service::completion_evidence(&db, &owner)
+                        .await
+                        .unwrap()
+                        .is_none()
+                {
+                    crate::services::telemetry_erasure_service::drain_once(
+                        &db,
+                        &crate::telemetry::erasure::ErasureClients::default(),
+                    )
+                    .await
+                    .unwrap();
+                    crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+                        &db,
+                        &owner,
+                        "fixture-operator",
+                        "fixture://never-configured",
+                        "Synthetic deployment has never configured telemetry",
+                    )
+                    .await
+                    .unwrap();
+                }
                 tokio::task::yield_now().await;
             }
             assert_eq!(

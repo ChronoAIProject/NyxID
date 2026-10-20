@@ -158,8 +158,7 @@ pub async fn connect_user(
         )
         .await?;
     }
-    super::connection_record_service::commit(db, raw_source.as_ref(), &conn, Some(encryption_keys))
-        .await?;
+    super::connection_record_service::commit(db, raw_source.as_ref(), &conn).await?;
 
     Ok(ConnectionResult {
         service_name: service.name,
@@ -233,8 +232,7 @@ pub async fn update_credential(
         .checked_add(1)
         .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
     row.updated_at = Utc::now();
-    super::connection_record_service::commit(db, Some(&raw_source), &row, Some(encryption_keys))
-        .await?;
+    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
 
     Ok(())
 }
@@ -281,7 +279,7 @@ pub async fn disconnect_user_with_expected_state_version(
         .state_version
         .checked_add(1)
         .ok_or_else(|| AppError::Conflict("Service connection revision exhausted".into()))?;
-    super::connection_record_service::commit(db, Some(&raw_source), &row, None).await?;
+    super::connection_record_service::commit(db, Some(&raw_source), &row).await?;
     Ok(row)
 }
 
@@ -585,13 +583,7 @@ mod tests {
         // The earlier snapshot cannot replace a successor, including marker changes.
         let old: UserServiceConnection = bson::from_document(current).unwrap();
         assert!(matches!(
-            super::super::connection_record_service::commit(
-                &db,
-                Some(&source),
-                &old,
-                Some(&strict)
-            )
-            .await,
+            super::super::connection_record_service::commit(&db, Some(&source), &old).await,
             Err(AppError::Conflict(_))
         ));
         let target = super::super::proxy_service::resolve_proxy_target(

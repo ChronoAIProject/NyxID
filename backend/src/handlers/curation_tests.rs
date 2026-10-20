@@ -1231,7 +1231,6 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
             .db
             .collection::<UserProviderToken>(PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: owner.clone(),

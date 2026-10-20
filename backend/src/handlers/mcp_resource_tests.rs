@@ -81,7 +81,6 @@ async fn move_source_to_org(
                 doc! {"_id":&key.id,"user_id":&key.user_id},
                 doc! {"$set":rebound.clone()},
             )
-            .credential_keys(&f.state.encryption_keys)
             .session(tx)
             .await?;
         assert_eq!(keys.matched_count, 1);
@@ -91,7 +90,6 @@ async fn move_source_to_org(
                     doc! {"_id":id,"user_id":&key.user_id},
                     doc! {"$set":{"user_id":org}},
                 )
-                .credential_keys(&f.state.encryption_keys)
                 .session(tx)
                 .await?;
         }

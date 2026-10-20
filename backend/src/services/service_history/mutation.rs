@@ -129,7 +129,6 @@ pub struct Write<'a, T> {
     name: String,
     mutation: mongodb::error::Result<Mutation>,
     session: Option<&'a mut ClientSession>,
-    credential_keys: Option<&'a crate::crypto::aes::EncryptionKeys>,
     upsert: bool,
     routine_refresh: bool,
     return_document: ReturnDocument,
@@ -145,7 +144,6 @@ impl<T: Send + Sync + Serialize + DeserializeOwned> Collection<T> {
             name: self.raw.name().into(),
             mutation,
             session: None,
-            credential_keys: None,
             upsert: false,
             routine_refresh: false,
             return_document: ReturnDocument::Before,
@@ -224,31 +222,9 @@ impl<'a, T> Write<'a, T> {
             name: self.name,
             mutation: self.mutation,
             session: Some(session.into()),
-            credential_keys: self.credential_keys,
             upsert: self.upsert,
             routine_refresh: self.routine_refresh,
             return_document: self.return_document.clone(),
-            context: self.context,
-            ids: self.ids,
-            result: PhantomData,
-        }
-    }
-    pub(crate) fn credential_keys<'b>(
-        self,
-        keys: &'b crate::crypto::aes::EncryptionKeys,
-    ) -> Write<'b, T>
-    where
-        'a: 'b,
-    {
-        Write {
-            db: self.db,
-            name: self.name,
-            mutation: self.mutation,
-            session: self.session,
-            credential_keys: Some(keys),
-            upsert: self.upsert,
-            routine_refresh: self.routine_refresh,
-            return_document: self.return_document,
             context: self.context,
             ids: self.ids,
             result: PhantomData,
@@ -329,7 +305,6 @@ impl<'a, T: WriteResult + Send + 'a> IntoFuture for Write<'a, T> {
                 db: self.db,
                 name: self.name,
                 mutation,
-                credential_keys: self.credential_keys,
                 upsert: self.upsert,
                 return_document: self.return_document,
                 routine_refresh: self.routine_refresh,
@@ -346,8 +321,7 @@ impl<'a, T: WriteResult + Send + 'a> IntoFuture for Write<'a, T> {
     }
 }
 
-struct LocalCommit<'a> {
-    credential_keys: Option<&'a crate::crypto::aes::EncryptionKeys>,
+struct LocalCommit {
     db: Database,
     name: String,
     mutation: Mutation,
@@ -357,7 +331,7 @@ struct LocalCommit<'a> {
     context: HistoryContext,
     ids: EventIds,
 }
-impl LocalCommit<'_> {
+impl LocalCommit {
     async fn run_owned(&self) -> mongodb::error::Result<Outcome> {
         let filter = match &self.mutation {
             Mutation::Update {
@@ -410,7 +384,6 @@ impl LocalCommit<'_> {
                 },
             };
             let batch = LocalCommit {
-                credential_keys: self.credential_keys,
                 db: self.db.clone(),
                 name: self.name.clone(),
                 mutation,
@@ -587,34 +560,6 @@ impl LocalCommit<'_> {
         // services/endpoints/keys. Fence creation and material replacement in
         // the same transaction; cleanup deletions remain available afterward.
         let admission: crate::errors::AppResult<()> = async {
-            if matches!(self.name.as_str(), "user_api_keys" | "user_services") {
-                for row in &after {
-                    let old = before.iter().find(|old| old.get("_id") == row.get("_id"));
-                    if super::super::token_copy_admission::material_changed(old, row) {
-                        super::super::token_copy_admission::write_in_session(
-                            &self.db,
-                            self.credential_keys,
-                            &self.name,
-                            row,
-                            session,
-                        )
-                        .await?;
-                    }
-                }
-                for row in &before {
-                    if !after.iter().any(|after| after.get("_id") == row.get("_id")) {
-                        let id = row.get_str("_id").map_err(|_| {
-                            crate::errors::AppError::Internal(
-                                "Credential identity is unavailable".into(),
-                            )
-                        })?;
-                        super::super::token_copy_admission::remove_in_session(
-                            &self.db, &self.name, id, session,
-                        )
-                        .await?;
-                    }
-                }
-            }
             let mut owners = std::collections::BTreeSet::new();
             let mut dependency_owners = std::collections::BTreeSet::new();
             for row in &after {
@@ -641,7 +586,6 @@ impl LocalCommit<'_> {
                             "credential_source",
                             "oauth_app_observation",
                             "secret_context_versions",
-                            "grant_lineage",
                         ]
                         .iter()
                         .any(|field| old.get(*field) != row.get(*field))
@@ -687,36 +631,6 @@ impl LocalCommit<'_> {
                     &self.db, &after, session,
                 )
                 .await?;
-                for row in &after {
-                    let old = before.iter().find(|old| old.get("_id") == row.get("_id"));
-                    if old.is_none_or(|old| {
-                        [
-                            "user_id",
-                            "credential_encrypted",
-                            "access_token_encrypted",
-                            "refresh_token_encrypted",
-                            "user_oauth_client_id_encrypted",
-                            "user_oauth_client_secret_encrypted",
-                            "provider_config_id",
-                            "connection_id",
-                            "source_id",
-                            "credential_source",
-                            "oauth_app_observation",
-                            "secret_context_versions",
-                            "grant_lineage",
-                        ]
-                        .iter()
-                        .any(|field| old.get(*field) != row.get(*field))
-                    }) {
-                        collection
-                            .update_one(
-                                doc! {"_id":row.get("_id").unwrap()},
-                                doc! {"$unset":{"revocation_provenance":""}},
-                            )
-                            .session(&mut *session)
-                            .await?;
-                    }
-                }
             }
             Ok(())
         }

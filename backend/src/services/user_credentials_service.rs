@@ -655,7 +655,6 @@ mod tests {
 
     fn placeholder_key(connection_id: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

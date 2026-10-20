@@ -11,6 +11,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
         (
+            super::preparation::PREPARATIONS,
+            doc! {"$or":[{"_id":owner},{"user_id":owner}]},
+        ),
+        (
             provider::EFFECTS,
             doc! {"user_id":owner,"kind":"oauth_issuance","status":"complete",
             "reason":{"$in":["credential_installed","protocol_no_issuance"]},
@@ -382,18 +386,6 @@ async fn erase_page(
                 super::super::erasure_admission::close_in_session(db, target, &mut tx).await?;
             }
         }
-        if matches!(collection, "user_api_keys" | "user_provider_tokens") {
-            for id in &ids {
-                super::super::token_copy_admission::remove_in_session(
-                    db,
-                    collection,
-                    id.as_str()
-                        .ok_or_else(|| AppError::Internal("Invalid credential identity".into()))?,
-                    &mut tx,
-                )
-                .await?;
-            }
-        }
         db.collection::<Document>(collection)
             .delete_many(doc! {"$and":[filter, {"_id":{"$in":ids}}]})
             .session(&mut tx)
@@ -746,12 +738,20 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         .write_concern(WriteConcern::majority())
         .await?;
     let result:AppResult<bool>=async {
-        if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"status":{"$ne":"complete"}}).session(&mut tx).await?.is_some() {return Ok(false);}
+        if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
         for (collection,filter) in inventory(&job.user_id) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
         }
         let barrier=db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(doc! {"_id":&job.user_id,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}}).session(&mut tx).await?;
         if barrier.matched_count!=1 {return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));}
+        for (collection, filter) in super::super::personal_erasure_registry::final_metadata(&job.user_id) {
+            let mut cursor = db.collection::<Document>(collection).find(filter).projection(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
+            let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
+            if !rows.is_empty() {
+                db.collection::<Document>(collection).delete_many(doc! {"user_id":&job.user_id,"_id":{"$in":rows.into_iter().filter_map(|mut row| row.remove("_id")).collect::<Vec<_>>()}}).session(&mut tx).await?;
+                return Ok(false);
+            }
+        }
         db.collection::<Document>(USERS).delete_one(doc! {"_id":&job.user_id,"is_active":false,"platform_personal_deleting":true,"platform_personal_retirement_pending":{"$ne":true}}).session(&mut tx).await?;
         Ok(db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none())
     }.await;

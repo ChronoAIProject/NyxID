@@ -698,10 +698,10 @@ pub async fn delete_user(
             "Use personal account deletion to confirm its owner policy".into(),
         ));
     }
+    let job = crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
+        .await?;
     Ok(Json(
-        crate::services::personal_erasure_service::accept(&state.db, &user_id, &actor, None)
-            .await?
-            .into(),
+        super::users::DeleteAccountResponse::from_job(&state.db, job).await?,
     ))
 }
 
@@ -711,7 +711,7 @@ pub struct ErasureStatusQuery {
     pub after: Option<String>,
     pub nodes_after: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureEffectResponse {
     #[serde(rename = "_id")]
     id: String,
@@ -761,7 +761,7 @@ pub async fn erasure_status(
 ) -> AppResult<Json<ErasureProgressResponse>> {
     require_admin_or_operator(&state, &auth, "admin.users.erasure_status").await?;
     let job = crate::services::personal_erasure_service::status(&state.db, &user).await?;
-    let effects = crate::services::personal_erasure_service::issuance::unresolved(
+    let effects = crate::services::personal_erasure_service::issuance::outcomes(
         &state.db,
         &user,
         query.after.as_deref(),
@@ -780,8 +780,12 @@ pub async fn erasure_status(
     .await?;
     let next_node_after =
         (node_drains.len() == 64).then(|| node_drains.last().unwrap().node_id.clone());
+    let erasure = match job {
+        Some(job) => Some(super::users::DeleteAccountResponse::from_job(&state.db, job).await?),
+        None => None,
+    };
     Ok(Json(ErasureProgressResponse {
-        erasure: job.map(super::users::DeleteAccountResponse::from),
+        erasure,
         next_after,
         node_drains,
         next_node_after,
@@ -1037,7 +1041,9 @@ pub async fn erasure_reconcile(
         .await?;
     }
     Ok(Json(AdminActionResponse {
-        message: "Reconciliation evidence recorded; completion will be re-evaluated".into(),
+        message: if matches!(action, "retry" | "retry_with_current_provider_config") {
+            "Reconciliation evidence recorded; completion will be re-evaluated. For a single-attempt revocation, any authorization granted since at the provider for this OAuth app will also be revoked."
+        } else { "Reconciliation evidence recorded; completion will be re-evaluated" }.into(),
     }))
 }
 
@@ -3216,11 +3222,18 @@ mod operator_route_tests {
         let consent = crate::services::analytics_consent_service::set(&db, &user, true)
             .await
             .unwrap();
-        let dispatch =
-            crate::services::analytics_dispatch_service::begin(&db, &user, &consent.revision)
-                .await
-                .unwrap();
-        crate::services::analytics_dispatch_service::settle(&db, &dispatch, false)
+        // Repair starts from durable transport uncertainty; the separate
+        // bounded analytics admission path is not this permission test's setup.
+        let dispatch = Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::services::analytics_dispatch_service::COLLECTION)
+            .insert_one(doc! {"_id":&dispatch,"user_id":&user,"status":"uncertain",
+            "created_at":bson::DateTime::now(),"settled_at":bson::DateTime::now()})
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::services::analytics_dispatch_service::ACCOUNTS)
+            .insert_one(
+                doc! {"_id":&user,"generation":&dispatch,"updated_at":bson::DateTime::now()},
+            )
             .await
             .unwrap();
         let state = test_app_state(db.clone());
@@ -3359,6 +3372,27 @@ mod operator_route_tests {
                 .unwrap()
                 .unwrap()
                 .is_active
+        );
+        db.collection::<bson::Document>("personal_erasure_revocation_receipts").insert_one(doc! {"_id":"receipt-metadata","user_id":&target,"kind":"oauth_revocation_receipt","confirmed":true}).await.unwrap();
+        let completed = erasure_status(
+            State(state),
+            test_auth_user(&operator),
+            Path(target.clone()),
+            Query(ErasureStatusQuery {
+                after: None,
+                nodes_after: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(completed.erasure.is_none());
+        assert_eq!(completed.effects.len(), 1);
+        assert_eq!(completed.effects[0].id, effect_id);
+        assert_eq!(completed.effects[0].status, "complete");
+        assert_eq!(
+            completed.effects[0].reason.as_deref(),
+            Some("external_revocation_confirmed")
         );
         assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
             .count_documents(doc! {"user_id":&operator,"event_type":"user.account.erasure_provider_reconciled"})

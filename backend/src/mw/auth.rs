@@ -3010,7 +3010,6 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 id: actor_external_key_id.clone(),
@@ -3169,7 +3168,6 @@ mod tests {
             .unwrap();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: actor_id.to_string(),

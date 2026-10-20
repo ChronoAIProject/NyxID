@@ -176,7 +176,6 @@ fn authority_projection(service: &DownstreamService) -> AppResult<Document> {
 
 pub async fn commit_update(
     db: &Database,
-    encryption_keys: Option<&crate::crypto::aes::EncryptionKeys>,
     observed: &DownstreamService,
     authority: &Authority,
     fields: &Document,
@@ -189,17 +188,9 @@ pub async fn commit_update(
     let fields = fields.clone();
     let filter = filter.clone();
     let key = zeroize::Zeroizing::new(audit_key.to_vec());
-    let context = (
-        &db,
-        encryption_keys,
-        &observed,
-        &authority,
-        &fields,
-        &filter,
-        &key,
-    );
+    let context = (&db, &observed, &authority, &fields, &filter, &key);
     super::transaction_service::run_db_only(&db, &context, |session, context| {
-        let &(db, encryption_keys, observed, authority, fields, filter, key) = context;
+        let &(db, observed, authority, fields, filter, key) = context;
         Box::pin(async move {
             let (live, admin) = fence(db, session, observed, Some(authority)).await?;
             let tool = live.offering_kind == OfferingKind::Tool;
@@ -227,15 +218,10 @@ pub async fn commit_update(
                 || fields.get_str("offering_kind").is_ok_and(|kind| kind != "tool")) {
                 super::service_endpoint_service::demote_tool_in_session(db, session, &live.id, None, Some((&authority.actor, key))).await?;
             }
-            let before = db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"_id":&live.id}).session(&mut *session).await?.ok_or_else(||AppError::Conflict("Catalog row changed".into()))?;
             let updated = db.collection::<DownstreamService>(COLLECTION_NAME).find_one_and_update(
                 filter.clone(), doc! {"$set": &fields, "$unset": {"api_spec_url": ""}}
             ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Service changed or identity reconciliation is pending".into()))?;
-            let after = db.collection::<Document>(COLLECTION_NAME).find_one(doc! {"_id":&updated.id}).session(&mut *session).await?.ok_or_else(||AppError::Conflict("Catalog row changed".into()))?;
-            if super::token_copy_admission::material_changed(Some(&before), &after) {
-                super::token_copy_admission::write_in_session(db, encryption_keys, COLLECTION_NAME, &after, session).await?;
-            }
             if tool {
                 super::audit_service::log_actor_event_in_session(db, session, key, &authority.actor, "tools_manager_updated",
                     serde_json::json!({"service_id":live.id,"authority":if admin {"admin"} else {"tools_manager"},"fields":fields.keys().filter(|k| k.as_str() != "updated_at").collect::<Vec<_>>()})).await?;

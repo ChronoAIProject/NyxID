@@ -1,50 +1,101 @@
-//! Bounded provenance preparation leaves account authority unchanged. Plaintext
-//! token fingerprints survive ciphertext rewrap/rebind and never expose tokens.
+//! Bounded per-owner scope planning. Preparation never closes account authority
+//! and observes only that owner's credential dependency revision.
 use super::*;
 use crate::crypto::aes::EncryptionKeys;
-use sha2::{Digest, Sha256};
-pub(super) const PREPARATIONS: &str = "personal_erasure_preparations";
-const VERSION: i32 = 5;
-const DEPENDENCIES: &str = "credential_revocation_dependencies";
+use futures::TryStreamExt;
 
+pub(super) const PREPARATIONS: &str = "personal_erasure_preparations";
+const VERSION: i32 = 7;
+const COLLECTIONS: [&str; 2] = [
+    crate::models::user_api_key::COLLECTION_NAME,
+    crate::models::user_provider_token::COLLECTION_NAME,
+];
+
+fn secret_rows(owner: &str) -> Document {
+    doc! {"user_id":owner,"personal_erasure_preserved":{"$ne":true},
+    "$or":[{"access_token_encrypted":{"$ne":bson::Bson::Null}},
+    {"refresh_token_encrypted":{"$ne":bson::Bson::Null}}]}
+}
+fn accounts(user: &str) -> Document {
+    doc! {"$or":[{"owner_user_id":user},{"owner_user_id":bson::Bson::Null,"created_by":user}]}
+}
 pub(super) async fn ensure_indexes(db: &Database) -> AppResult<()> {
-    for keys in [
-        doc! {"owner_user_id":1,"_id":1},
-        doc! {"token_fingerprints":1,"owner_user_id":1},
-        doc! {"grant_origins":1,"owner_user_id":1},
-        doc! {"connection_id":1,"owner_user_id":1},
-        doc! {"source_id":1,"owner_user_id":1},
-    ] {
-        db.collection::<Document>(DEPENDENCIES)
-            .create_index(mongodb::IndexModel::builder().keys(keys).build())
-            .await?;
-    }
     for collection in COLLECTIONS {
-        db.collection::<Document>(collection)
-            .create_index(
-                mongodb::IndexModel::builder()
-                    .keys(doc! {"provider_config_id":1,"_id":1})
-                    .build(),
-            )
-            .await?;
-        db.collection::<Document>(collection)
-            .create_index(
-                mongodb::IndexModel::builder()
-                    .keys(doc! {"user_id":1,"_id":1})
-                    .build(),
-            )
-            .await?;
+        for keys in [
+            doc! {"user_id":1,"_id":1},
+            doc! {"user_id":1,"provider_config_id":1,"created_at":1},
+        ] {
+            db.collection::<Document>(collection)
+                .create_index(mongodb::IndexModel::builder().keys(keys).build())
+                .await?;
+        }
     }
+    db.collection::<Document>(PREPARATIONS)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"user_id":1,"generation":1,"subject":1,"group":1,"non_legacy":1})
+                .build(),
+        )
+        .await?;
     Ok(())
 }
-
+fn plan_id(generation: &str, collection: &str, source_id: &str) -> String {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("erasure-plan:{generation}:{collection}:{source_id}").as_bytes(),
+    )
+    .to_string()
+}
+pub(super) async fn source_plan(
+    db: &Database,
+    user: &str,
+    collection: &str,
+    source_id: &str,
+) -> AppResult<Option<Document>> {
+    let Some(preparation) = db
+        .collection::<Document>(PREPARATIONS)
+        .find_one(doc! {"_id":user,"status":"ready","version":VERSION})
+        .await?
+    else {
+        return Ok(None);
+    };
+    let generation = preparation
+        .get_str("generation")
+        .map_err(|_| AppError::Internal("Invalid preparation generation".into()))?;
+    Ok(db.collection::<Document>(PREPARATIONS).find_one(doc! {
+        "_id":plan_id(generation, collection, source_id),"source_revision":preparation.get("source_revision").cloned()
+    }).await?)
+}
+async fn has_credentials(db: &Database, user: &str, tx: &mut ClientSession) -> AppResult<bool> {
+    for collection in COLLECTIONS {
+        if db
+            .collection::<Document>(collection)
+            .find_one(secret_rows(user))
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let mut cursor = db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+            .aggregate([doc! {"$match":accounts(user)},
+                doc! {"$lookup":{"from":collection,"localField":"_id","foreignField":"user_id",
+                    "pipeline":[{"$match":{"$or":[{"access_token_encrypted":{"$ne":bson::Bson::Null}},
+                        {"refresh_token_encrypted":{"$ne":bson::Bson::Null}}]}},{"$limit":1}],"as":"credentials"}},
+                doc! {"$match":{"credentials.0":{"$exists":true}}},doc! {"$limit":1}])
+            .session(&mut *tx).await?;
+        if cursor.stream(&mut *tx).try_next().await?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 pub(super) async fn require_ready_in_session(
     db: &Database,
     user: &str,
     tx: &mut ClientSession,
 ) -> AppResult<()> {
-    // Acceptance performs point reads only. Every credential/copy/transfer writer
-    // must fence this person and bump this revision with its dependency change.
     let owner = db
         .collection::<Document>(USERS)
         .find_one(doc! {"_id":user})
@@ -55,133 +106,18 @@ pub(super) async fn require_ready_in_session(
         .get("credential_dependency_revision")
         .cloned()
         .unwrap_or(bson::Bson::Int64(0));
-    let inventory_revision =
-        super::super::erasure_admission::credential_inventory_in_session(db, tx, false).await?;
-    let prepared = db
+    if db
         .collection::<Document>(PREPARATIONS)
-        .find_one(doc! {"_id":user,"status":"ready","source_revision":revision,"inventory_revision":inventory_revision,"version":VERSION})
+        .find_one(doc! {"_id":user,"status":"ready","source_revision":revision,"version":VERSION})
         .session(&mut *tx)
-        .await?;
-    if let Some(prepared) = prepared {
-        return if prepared.get_bool("shared_dependency").unwrap_or(true) {
-            Err(AppError::Conflict("Another owner retains a related OAuth connection or token copy; separate or reconnect that shared grant before deleting this account".into()))
-        } else {
-            Ok(())
-        };
+        .await?
+        .is_some()
+        || !has_credentials(db, user, tx).await?
+    {
+        return Ok(());
     }
-    if !provider_ids_in_session(db, user, tx).await?.is_empty() {
-        return Err(AppError::Conflict("Credential dependency preparation is required; retry deletion while the account remains usable".into()));
-    }
-    Ok(())
+    Err(AppError::ErasurePreparing)
 }
-const FIELDS: [&str; 4] = [
-    "access_token_encrypted",
-    "refresh_token_encrypted",
-    "credential_encrypted",
-    "api_key_encrypted",
-];
-// Bind exact authenticated source and app/owner lineage with a storage digest.
-// Persisting a second ciphertext snapshot would retain hidden key dependencies.
-// Real credential writers must invalidate/bump dependency authority atomically.
-const SOURCE_FIELDS: &[&str] = &[
-    "user_id",
-    "provider_config_id",
-    "credential_user_id",
-    "connection_id",
-    "source_id",
-    "credential_source",
-    "oauth_app_observation",
-    "credential_epoch",
-    "secret_context_versions",
-    "grant_lineage",
-    "access_token_encrypted",
-    "refresh_token_encrypted",
-    "credential_encrypted",
-    "api_key_encrypted",
-    "user_oauth_client_id_encrypted",
-    "user_oauth_client_secret_encrypted",
-];
-
-fn source_snapshot(row: &Document) -> Document {
-    SOURCE_FIELDS
-        .iter()
-        .map(|field| {
-            (
-                (*field).to_owned(),
-                row.get(*field).cloned().unwrap_or(bson::Bson::Null),
-            )
-        })
-        .collect()
-}
-
-fn source_hash(row: &Document) -> AppResult<String> {
-    let bytes = bson::to_vec(&source_snapshot(row))
-        .map_err(|_| AppError::Internal("Credential source encoding failed".into()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
-}
-const COLLECTIONS: [&str; 2] = [
-    crate::models::user_api_key::COLLECTION_NAME,
-    crate::models::user_provider_token::COLLECTION_NAME,
-];
-
-fn secret_rows() -> Document {
-    // GCP service-account cached access has no per-token revocation API or
-    // provider-config lineage. Its explicit adapter preserves an unavailable
-    // revocation disposition; it must not enter OAuth grant attribution.
-    doc! {"credential_type":{"$ne":"gcp_service_account"},"$or":[{"access_token_encrypted":{"$ne":bson::Bson::Null}},{"refresh_token_encrypted":{"$ne":bson::Bson::Null}}]}
-}
-
-/// Discover personal and canonically owned SA providers under the same
-/// snapshot/person revision. Each child lookup uses the credential owner
-/// index; creator attribution on an explicitly other-owned SA is excluded.
-// Empty is an internal inventory bucket for absent/null attribution. It is
-// persisted as BSON null and never used as a fabricated provider identity.
-fn provider_bucket(group: &Document) -> AppResult<String> {
-    match group.get("_id") {
-        None | Some(bson::Bson::Null) => Ok(String::new()),
-        Some(bson::Bson::String(provider)) if !provider.is_empty() => Ok(provider.clone()),
-        _ => Err(AppError::Conflict(
-            "OAuth provider attribution has an invalid shape".into(),
-        )),
-    }
-}
-
-async fn provider_ids_in_session(
-    db: &Database,
-    user: &str,
-    tx: &mut ClientSession,
-) -> AppResult<std::collections::BTreeSet<String>> {
-    use futures::TryStreamExt;
-    let mut providers = std::collections::BTreeSet::new();
-    for collection in COLLECTIONS {
-        let mut filter = secret_rows();
-        filter.insert("user_id", user);
-        let mut cursor = db
-            .collection::<Document>(collection)
-            .aggregate([
-                doc! {"$match":filter},
-                doc! {"$group":{"_id":"$provider_config_id"}},
-            ])
-            .session(&mut *tx)
-            .await?;
-        while let Some(row) = cursor.stream(&mut *tx).try_next().await? {
-            providers.insert(provider_bucket(&row)?);
-        }
-        let mut cursor = db.collection::<Document>(crate::models::service_account::COLLECTION_NAME).aggregate([
-            doc! {"$match":{"$or":[{"owner_user_id":user},{"owner_user_id":bson::Bson::Null,"created_by":user}]}},
-            doc! {"$lookup":{"from":collection,"localField":"_id","foreignField":"user_id",
-                "pipeline":[{"$match":secret_rows()},{"$group":{"_id":"$provider_config_id"}}],"as":"providers"}},
-            doc! {"$unwind":"$providers"},doc! {"$group":{"_id":"$providers._id"}}
-        ]).session(&mut *tx).await?;
-        while let Some(row) = cursor.stream(&mut *tx).try_next().await? {
-            providers.insert(provider_bucket(&row)?);
-        }
-    }
-    Ok(providers)
-}
-
-/// The API can report preparation in progress and retain sign-in capability.
-/// The worker does real bounded work; there is no permanent cardinality limit.
 pub(crate) async fn ready_or_enqueue(db: &Database, user: &str) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(db);
     let mut tx = db.client().start_session().await?;
@@ -189,337 +125,184 @@ pub(crate) async fn ready_or_enqueue(db: &Database, user: &str) -> AppResult<boo
         .read_concern(ReadConcern::snapshot())
         .write_concern(WriteConcern::majority())
         .await?;
-    let result:AppResult<bool>=async {
-        // Discover the inventory and its generation under the SAME source
-        // writer fence/snapshot. A newly introduced provider cannot be omitted
-        // while its successor owner revision is accepted as prepared.
-        let owner=db.collection::<Document>(USERS).find_one_and_update(doc! {"_id":user,"is_active":true,"platform_personal_deleting":{"$ne":true}},doc! {"$inc":{"credential_preparation_fence":1_i64}}).session(&mut tx).await?
+    let result: AppResult<bool> = async {
+        let owner = db.collection::<Document>(USERS).find_one_and_update(
+            doc! {"_id":user,"is_active":true,"platform_personal_deleting":{"$ne":true}},
+            doc! {"$inc":{"credential_preparation_fence":1_i64}}).session(&mut tx).await?
             .ok_or_else(||AppError::Conflict("Credential owner changed".into()))?;
         let revision=owner.get("credential_dependency_revision").cloned().unwrap_or(bson::Bson::Int64(0));
-        let inventory_revision=super::super::erasure_admission::credential_inventory_in_session(&db,&mut tx,false).await?;
-        if let Some(job)=db.collection::<Document>(PREPARATIONS).find_one(doc! {"_id":user,"source_revision":&revision,"inventory_revision":inventory_revision,"version":VERSION}).session(&mut tx).await? {
-            if job.get_str("status")==Ok("ready") {return Ok(true);}
-            if job.get_str("status")==Ok("preparing") {return Ok(false);}
+        if let Some(job)=db.collection::<Document>(PREPARATIONS).find_one(doc! {"_id":user,"source_revision":&revision,"version":VERSION}).session(&mut tx).await? {
+            match job.get_str("status").ok() {Some("ready")=>return Ok(true),Some("preparing")=>return Ok(false),_=>{}}
         }
-        let providers=provider_ids_in_session(&db,user,&mut tx).await?;
-        if providers.is_empty() {return Ok(true);}
-        let mut ceilings = Document::new();
-        for collection in COLLECTIONS {
-            let last = db.collection::<Document>(collection).find_one(doc! {}).sort(doc! {"_id":-1})
-                .projection(doc! {"_id":1}).session(&mut tx).await?;
-            ceilings.insert(collection, last.and_then(|row|row.get("_id").cloned()).unwrap_or(bson::Bson::Null));
-        }
-        db.collection::<Document>(PREPARATIONS).update_one(doc! {"_id":user},doc! {"$set":{"version":VERSION,"status":"preparing","generation":uuid::Uuid::new_v4().to_string(),"phase":"scan","collection_index":0_i32,
-            "cursor":bson::Bson::Null,"ceilings":ceilings,"source_revision":revision,"inventory_revision":inventory_revision,"provider_ids":providers.into_iter().map(|provider| if provider.is_empty() {bson::Bson::Null} else {bson::Bson::String(provider)}).collect::<Vec<_>>(),"shared_dependency":false,"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null},"$setOnInsert":{"created_at":bson::DateTime::now()},"$currentDate":{"updated_at":true}}).upsert(true).session(&mut tx).await?;
+        if !has_credentials(&db,user,&mut tx).await? {return Ok(true);}
+        db.collection::<Document>(PREPARATIONS).replace_one(doc! {"_id":user},doc! {
+            "_id":user,"version":VERSION,"status":"preparing","source_revision":revision,
+            "generation":uuid::Uuid::new_v4().to_string(),"phase":"cleanup","subject":user,"account_cursor":bson::Bson::Null,
+            "collection_index":0_i32,"cursor":bson::Bson::Null,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        }).upsert(true).session(&mut tx).await?;
         Ok(false)
     }.await;
     super::super::org_membership_authority::finish(tx, result).await
 }
-
 fn progress_filter(job: &Document) -> AppResult<Document> {
-    let mut filter = doc! {"_id":job.get_str("_id").map_err(|_|AppError::Internal("Invalid preparation identity".into()))?,"status":"preparing",
-    "generation":job.get("generation").cloned().unwrap_or(bson::Bson::Null),
-    "lease_token":job.get("lease_token").cloned().unwrap_or(bson::Bson::Null),
-    "$expr":{"$gt":["$lease_expires_at","$$NOW"]}};
-    for field in ["source_revision", "phase", "cursor", "collection_index"] {
-        filter.insert(field, job.get(field).cloned().unwrap_or(bson::Bson::Null));
-    }
-    Ok(filter)
+    Ok(
+        doc! {"_id":job.get_str("_id").map_err(|_|AppError::Internal("Invalid preparation identity".into()))?,
+        "status":"preparing","generation":job.get("generation").cloned(),"lease_token":job.get("lease_token").cloned(),
+        "$expr":{"$gt":["$lease_expires_at","$$NOW"]}},
+    )
 }
 async fn advance(db: &Database, job: &Document, set: Document) -> AppResult<()> {
-    let result=db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,doc! {"$set":set,"$unset":{"lease_token":"","lease_expires_at":""},"$currentDate":{"updated_at":true}}).await?;
-    if result.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "Preparation lease/generation changed".into(),
-        ));
+    if db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,
+        doc! {"$set":set,"$unset":{"lease_token":"","lease_expires_at":""},"$currentDate":{"updated_at":true}}).await?.matched_count!=1 {
+        return Err(AppError::Conflict("Preparation lease/generation changed".into()));
     }
     Ok(())
 }
-
+async fn advance_page(
+    db: &Database,
+    job: &Document,
+    plans: &[Document],
+    obsolete: &[Document],
+    set: &Document,
+) -> AppResult<()> {
+    // A page has at most 32 metadata rows. Commit changes with the leased cursor:
+    // one majority acknowledgement per page, and no stale generation can
+    // recreate old children or delete a successor's planning rows.
+    super::super::transaction_service::run_db_only(db, &(db, job, plans, obsolete, set), |tx, context| {
+        let &(db, job, plans, obsolete, set) = context;
+        Box::pin(async move {
+            if db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,
+                doc! {"$set":set.clone(),"$unset":{"lease_token":"","lease_expires_at":""},"$currentDate":{"updated_at":true}})
+                .session(&mut *tx).await?.matched_count != 1 {
+                return Err(AppError::Conflict("Preparation lease/generation changed".into()));
+            }
+            if !obsolete.is_empty() {
+                db.collection::<Document>(PREPARATIONS).delete_many(doc! {
+                    "user_id":job.get("_id").cloned(),"kind":"scope_source",
+                    "generation":{"$ne":job.get("generation").cloned()},
+                    "_id":{"$in":obsolete.iter().filter_map(|row|row.get("_id")).cloned().collect::<Vec<_>>()}
+                }).session(&mut *tx).await?;
+            }
+            for plan in plans {
+                db.collection::<Document>(PREPARATIONS)
+                    .replace_one(doc! {"_id":plan.get("_id").cloned()}, plan.clone())
+                    .upsert(true).session(&mut *tx).await?;
+            }
+            Ok(())
+        })
+    }).await
+}
 pub(super) async fn process_one(db: &Database, keys: &EncryptionKeys) -> AppResult<bool> {
-    use futures::TryStreamExt;
     let durable = super::super::transaction_service::durable_database(db);
     let db = &durable;
     let Some(job)=db.collection::<Document>(PREPARATIONS).find_one_and_update(
         doc! {"status":"preparing","version":VERSION,"$expr":{"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]}},
-        vec![doc! {"$set":{"lease_token":uuid::Uuid::new_v4().to_string(),"lease_expires_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":120}},"updated_at":"$$NOW"}}],
-    ).sort(doc! {"updated_at":1,"_id":1}).return_document(mongodb::options::ReturnDocument::After).await? else {return Ok(false);};
-    let _user = job
-        .get_str("_id")
-        .map_err(|_| AppError::Internal("Invalid preparation identity".into()))?;
-
-    if job.get_str("phase") == Ok("verify") {
-        return verify_page(db, &job).await;
-    }
-    let collection_index = job.get_i32("collection_index").unwrap_or(0) as usize;
-    let Some(collection) = COLLECTIONS.get(collection_index) else {
-        advance(db, &job, doc! {"phase":"verify","cursor":bson::Bson::Null}).await?;
-        return Ok(true);
-    };
-    // Provider labels and local app handles cannot bound token-copy identity.
-    // Walk every credential material row in bounded pages, including generic
-    // bearer/API-key imports which can contain the same opaque upstream token.
-    let mut filter = doc! {"$or":FIELDS.iter().map(|field|doc! {*field:{"$ne":bson::Bson::Null}}).collect::<Vec<_>>()};
-    let ceiling = job
-        .get_document("ceilings")
-        .ok()
-        .and_then(|ceilings| ceilings.get(*collection))
-        .cloned()
-        .ok_or_else(|| AppError::Internal("Preparation scan ceiling is invalid".into()))?;
-    let mut range = doc! {"$lte":ceiling};
-    if let Ok(cursor) = job.get_str("cursor") {
-        range.insert("$gt", cursor);
-    }
-    filter.insert("_id", range);
-    let rows: Vec<Document> = db
-        .collection::<Document>(collection)
-        .find(filter)
-        .sort(doc! {"_id":1})
-        .limit(32)
-        .await?
-        .try_collect()
-        .await?;
-    for row in &rows {
-        prepare_row(db, keys, collection, row).await?;
-    }
-    let set = if let Some(last) = rows.last() {
-        doc! {"cursor":last.get_str("_id").map_err(|_|AppError::Internal("Credential identity is invalid".into()))?}
-    } else {
-        doc! {"collection_index":(collection_index+1) as i32,"cursor":bson::Bson::Null}
-    };
-    advance(db, &job, set).await?;
-    Ok(true)
-}
-
-async fn prepare_row(
-    db: &Database,
-    keys: &EncryptionKeys,
-    collection: &str,
-    row: &Document,
-) -> AppResult<()> {
-    let id = row
-        .get_str("_id")
-        .map_err(|_| AppError::Internal("Invalid credential identity".into()))?;
-    let owner = row
-        .get_str("user_id")
-        .map_err(|_| AppError::Internal("Invalid credential ownership".into()))?;
-    let canonical_owner = super::super::erasure_admission::credential_owner(db, owner).await?;
-    let mut predicate = doc! {"_id":id,"user_id":owner};
-    let mut tokens = Vec::new();
-    let mut unreadable = false;
-    for field in FIELDS {
-        let value = row.get(field).cloned().unwrap_or(bson::Bson::Null);
-        predicate.insert(field, value.clone());
-        if matches!(value, bson::Bson::Null) {
-            continue;
-        }
-        #[derive(serde::Deserialize)]
-        struct StoredBytes {
-            #[serde(with = "crate::models::bson_bytes::required")]
-            data: Vec<u8>,
-        }
-        let bytes = match bson::from_document::<StoredBytes>(doc! {"data":value}) {
-            Ok(value) => value.data,
-            Err(_) => {
-                unreadable = true;
-                continue;
-            }
-        };
-        let storage_collection = match collection {
-            crate::models::user_api_key::COLLECTION_NAME => {
-                crate::models::user_api_key::COLLECTION_NAME
-            }
-            crate::models::user_provider_token::COLLECTION_NAME => {
-                crate::models::user_provider_token::COLLECTION_NAME
-            }
-            _ => {
-                return Err(AppError::Internal(
-                    "Unsupported credential preparation source".into(),
-                ));
-            }
-        };
-        let decoded = super::super::credential_record_service::decrypt_stored_field(
-            keys,
-            storage_collection,
-            row,
-            field,
-            &bytes,
-        )
-        .await;
-        match decoded {
-            Ok(token) if !token.is_empty() => tokens.push(
-                super::super::audit_service::keyed_fingerprint(
-                    super::super::audit_service::audit_chain_hmac_key(),
-                    b"oauth-revocation-provenance-v1",
-                    &token,
-                )
-                .ok_or_else(|| {
-                    AppError::Internal("Credential provenance key is unavailable".into())
-                })?,
-            ),
-            Ok(_) => {}
-            Err(_) => unreadable = true,
-        }
-    }
-    let grant_lineage =
-        match super::super::oauth_grant_lineage_service::from_snapshot(keys, collection, row).await
-        {
-            Ok(lineage) => lineage,
-            Err(_) => {
-                unreadable = true;
-                None
-            }
-        };
-    let grant_origins = grant_lineage
-        .map(|lineage| lineage.origins)
-        .unwrap_or_default();
-    let snapshot = source_snapshot(row);
-    predicate.extend(snapshot.clone());
-    let source_id = format!("{collection}:{id}");
-    let source_hash = source_hash(row)?;
-    let mut tx = db.client().start_session().await?;
-    tx.start_transaction()
-        .read_concern(ReadConcern::snapshot())
-        .write_concern(WriteConcern::majority())
-        .await?;
-    let result:AppResult<()> = async {
-        // Contend on service-account ownership without treating preparation
-        // itself as credential replacement or changing its dependency epoch.
-        if owner != canonical_owner {
-            let changed=db.collection::<Document>(crate::models::service_account::COLLECTION_NAME)
-                .update_one(doc! {"_id":owner,"$or":[{"owner_user_id":&canonical_owner},{"owner_user_id":bson::Bson::Null,"created_by":&canonical_owner}]},doc! {"$inc":{"owner_lifecycle_fence":1_i64}}).session(&mut tx).await?;
-            if changed.matched_count!=1 {return Err(AppError::Conflict("Credential target ownership changed".into()));}
-        }
-        let changed=db.collection::<Document>(collection).update_one(predicate,doc! {"$set":{"revocation_provenance":{"version":VERSION,
-            "state":if unreadable {"unreadable"} else {"ready"},"token_fingerprints":&tokens,"source_hash":&source_hash}}}).session(&mut tx).await?;
-        if changed.matched_count!=1 {return Ok(());}
-        let dependency=doc! {"_id":&source_id,"source_collection":collection,"source_record_id":id,"owner_user_id":&canonical_owner,"resource_owner_id":owner,
-            "provider_config_id":row.get("provider_config_id").cloned().unwrap_or(bson::Bson::Null),
-            "connection_id":row.get("connection_id").cloned().unwrap_or(bson::Bson::Null),
-            "source_id":row.get("source_id").cloned().unwrap_or(bson::Bson::Null),
-            "grant_origins":grant_origins,"token_fingerprints":tokens,"state":if unreadable {"unreadable"} else {"ready"},"source_hash":source_hash};
-        db.collection::<Document>(DEPENDENCIES).replace_one(doc! {"_id":source_id},dependency).upsert(true).session(&mut tx).await?;
-        Ok(())
-    }.await;
-    super::super::org_membership_authority::finish(tx, result).await?;
-    Ok(())
-}
-
-/// Each page makes at most32 indexed source queries and bounded indexed
-/// equality lookups. Independent target owners are never scanned for no-match.
-async fn verify_page(db: &Database, job: &Document) -> AppResult<bool> {
-    use futures::TryStreamExt;
+        vec![doc! {"$set":{"lease_token":uuid::Uuid::new_v4().to_string(),"lease_expires_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":120}},"updated_at":"$$NOW"}}])
+        .sort(doc! {"updated_at":1,"_id":1}).return_document(mongodb::options::ReturnDocument::After).await? else {return Ok(false);};
     let user = job
         .get_str("_id")
-        .map_err(|_| AppError::Internal("Preparation identity is invalid".into()))?;
-    let mut filter = doc! {"owner_user_id":user};
-    if let Ok(cursor) = job.get_str("cursor") {
-        filter.insert("_id", doc! {"$gt":cursor});
+        .map_err(|_| AppError::Internal("Invalid preparation identity".into()))?;
+    if job.get_str("phase") == Ok("cleanup") {
+        let old: Vec<Document> = db.collection::<Document>(PREPARATIONS)
+            .find(doc! {"user_id":user,"kind":"scope_source","generation":{"$ne":job.get("generation").cloned()}})
+            .projection(doc! {"_id":1}).limit(32).await?.try_collect().await?;
+        let set = if old.is_empty() {
+            doc! {"phase":"scan"}
+        } else {
+            doc! {}
+        };
+        advance_page(db, &job, &[], &old, &set).await?;
+        return Ok(true);
     }
-    let rows: Vec<Document> = db
-        .collection::<Document>(DEPENDENCIES)
-        .find(filter)
-        .sort(doc! {"_id":1})
-        .limit(32)
-        .await?
-        .try_collect()
-        .await?;
-    let mut shared = job.get_bool("shared_dependency").unwrap_or(false);
-    for row in &rows {
-        let collection = row
-            .get_str("source_collection")
-            .map_err(|_| AppError::Internal("Invalid dependency source".into()))?;
-        if !COLLECTIONS.contains(&collection) {
-            return Err(AppError::Internal("Invalid dependency collection".into()));
+    let subject = job
+        .get_str("subject")
+        .map_err(|_| AppError::Internal("Invalid preparation subject".into()))?;
+    let index = job.get_i32("collection_index").unwrap_or(0) as usize;
+    if let Some(collection) = COLLECTIONS.get(index) {
+        let mut filter = secret_rows(subject);
+        if let Ok(cursor) = job.get_str("cursor") {
+            filter.insert("_id", doc! {"$gt":cursor});
         }
-        let id = row
-            .get_str("source_record_id")
-            .map_err(|_| AppError::Internal("Invalid dependency identity".into()))?;
-        let live = db
+        let rows: Vec<Document> = db
             .collection::<Document>(collection)
-            .find_one(doc! {"_id":id})
+            .find(filter)
+            .sort(doc! {"_id":1})
+            .limit(32)
+            .await?
+            .try_collect()
             .await?;
-        if live.as_ref().is_none_or(|source| {
-            source.get_str("user_id").ok()
-                != row
-                    .get_str("resource_owner_id")
-                    .or_else(|_| row.get_str("owner_user_id"))
-                    .ok()
-                || source_hash(source).ok().as_deref() != row.get_str("source_hash").ok()
-        }) {
-            db.collection::<Document>(DEPENDENCIES).delete_one(doc! {"_id":row.get("_id").cloned().unwrap(),"source_hash":row.get("source_hash").cloned().unwrap_or(bson::Bson::Null)}).await?;
-            if live.is_some() {
-                return Err(AppError::Conflict(
-                    "Credential dependency changed; restart preparation".into(),
-                ));
-            }
-            continue;
-        }
-        if row.get_str("state") != Ok("ready") {
-            return Err(AppError::Conflict(
-                "A credential requires authenticated repair before erasure".into(),
-            ));
-        }
-        let mut alternatives = Vec::new();
-        if let Ok(tokens) = row.get_array("token_fingerprints")
-            && (!tokens.is_empty())
-        {
-            alternatives.push(doc! {"token_fingerprints":{"$in":tokens}});
-        }
-        if let Ok(origins) = row.get_array("grant_origins")
-            && !origins.is_empty()
-        {
-            alternatives.push(doc! {"grant_origins":{"$in":origins}});
-        }
-        if let Ok(connection) = row.get_str("connection_id") {
-            alternatives.push(doc! {"connection_id":connection});
-            alternatives.push(doc! {"source_id":connection});
-        }
-        if let Ok(source) = row.get_str("source_record_id") {
-            alternatives.push(doc! {"source_id":source});
-        }
-        if !alternatives.is_empty() {
-            // Scan a bounded dependency page; every stale candidate is
-            // removed using its exact source digest before retry. A no-match
-            // uses the token/connection/source indexes, not a raw source scan.
-            let candidates: Vec<Document> = db
-                .collection::<Document>(DEPENDENCIES)
-                .find(doc! {"owner_user_id":{"$ne":user},"$or":alternatives})
-                .limit(32)
-                .await?
-                .try_collect()
-                .await?;
-            for candidate in &candidates {
-                let collection = candidate
-                    .get_str("source_collection")
-                    .map_err(|_| AppError::Internal("Invalid dependency collection".into()))?;
-                if !COLLECTIONS.contains(&collection) {
-                    return Err(AppError::Internal("Invalid dependency source".into()));
+        let mut plans = Vec::with_capacity(rows.len());
+        for source in &rows {
+            let mut marker = super::super::unified_key_service::erasure_credential_group(
+                db, keys, collection, source,
+            )
+            .await?;
+            let group = marker
+                .get_str("group")
+                .map_err(|_| AppError::Internal("Invalid credential group".into()))?
+                .to_owned();
+            if job.get_str("phase") == Ok("plan") {
+                let non_legacy = db.collection::<Document>(PREPARATIONS).find_one(doc! {
+                    "user_id":user,"generation":job.get("generation").cloned(),"subject":subject,"group":&group,"non_legacy":true
+                }).await?.is_some();
+                let grant = marker.get_bool("grant_wide_only") == Ok(true)
+                    || (marker.get_bool("revokes_grant") == Ok(true) && non_legacy);
+                marker.insert("scope", if grant { "grant" } else { "token" });
+                if grant {
+                    let representative = db.collection::<Document>(PREPARATIONS).find_one(doc! {
+                        "user_id":user,"generation":job.get("generation").cloned(),"subject":subject,"group":&group,"kind":"scope_source"
+                    }).sort(doc! {"has_refresh":-1,"source_updated_at":-1,"source_created_at":-1,"source_id":1,"source_collection":1}).await?
+                        .ok_or_else(||AppError::Internal("Missing grant representative".into()))?;
+                    marker.insert(
+                        "representative_collection",
+                        representative.get("source_collection").cloned(),
+                    );
+                    marker.insert(
+                        "representative_id",
+                        representative.get("source_id").cloned(),
+                    );
                 }
-                let live=db.collection::<Document>(collection).find_one(doc! {"_id":candidate.get_str("source_record_id").map_err(|_|AppError::Internal("Invalid dependency identity".into()))?}).await?;
-                if live.as_ref().is_some_and(|source| {
-                    source.get_str("user_id").ok()
-                        == candidate
-                            .get_str("resource_owner_id")
-                            .or_else(|_| candidate.get_str("owner_user_id"))
-                            .ok()
-                        && source_hash(source).ok().as_deref()
-                            == candidate.get_str("source_hash").ok()
-                }) {
-                    shared = true;
-                    break;
-                }
-                db.collection::<Document>(DEPENDENCIES).delete_one(doc! {"_id":candidate.get("_id").cloned().unwrap(),"source_hash":candidate.get("source_hash").cloned().unwrap_or(bson::Bson::Null)}).await?;
             }
-            if candidates.len() == 32 && !shared {
-                return Err(AppError::Conflict(
-                    "Stale dependency page removed; resume preparation".into(),
-                ));
-            }
+            let generation = job
+                .get_str("generation")
+                .map_err(|_| AppError::Internal("Invalid preparation generation".into()))?;
+            let id = source
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("Invalid credential identity".into()))?;
+            marker.extend(doc! {"_id":plan_id(generation, collection, id),"kind":"scope_source","user_id":user,
+                "generation":generation,"source_revision":job.get("source_revision").cloned(),"subject":subject,
+                "source_collection":*collection,"source_id":id,
+                "has_refresh":source.get_binary_generic("refresh_token_encrypted").is_ok(),
+                "source_updated_at":source.get("updated_at").or_else(||source.get("created_at")).cloned().unwrap_or(bson::Bson::Null),
+                "source_created_at":source.get("created_at").cloned().unwrap_or(bson::Bson::Null)});
+            plans.push(marker);
         }
+        let set = if let Some(last) = rows.last() {
+            doc! {"cursor":last.get("_id").cloned()}
+        } else {
+            doc! {"collection_index":(index+1) as i32,"cursor":bson::Bson::Null}
+        };
+        advance_page(db, &job, &plans, &[], &set).await?;
+        return Ok(true);
     }
-    if let Some(last) = rows.last() {
-        advance(db,job,doc! {"cursor":last.get_str("_id").map_err(|_|AppError::Internal("Preparation cursor is invalid".into()))?,"shared_dependency":shared}).await?;
+    let mut account_filter = accounts(user);
+    if let Ok(cursor) = job.get_str("account_cursor") {
+        account_filter.insert("_id", doc! {"$gt":cursor});
+    }
+    if let Some(account) = db
+        .collection::<Document>(crate::models::service_account::COLLECTION_NAME)
+        .find_one(account_filter)
+        .sort(doc! {"_id":1})
+        .await?
+    {
+        let id = account
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid credential subject".into()))?;
+        advance(db,&job,doc! {"subject":id,"account_cursor":id,"collection_index":0_i32,"cursor":bson::Bson::Null}).await?;
+        return Ok(true);
+    }
+    if job.get_str("phase") == Ok("scan") {
+        advance(db,&job,doc! {"phase":"plan","subject":user,"account_cursor":bson::Bson::Null,"collection_index":0_i32,"cursor":bson::Bson::Null}).await?;
         return Ok(true);
     }
     let mut tx = db.client().start_session().await?;
@@ -527,26 +310,47 @@ async fn verify_page(db: &Database, job: &Document) -> AppResult<bool> {
         .read_concern(ReadConcern::snapshot())
         .write_concern(WriteConcern::majority())
         .await?;
-    let result:AppResult<()> = async {
-        let revision=job.get("source_revision").cloned().unwrap_or(bson::Bson::Int64(0));
-        let observed_inventory=job.get_i64("inventory_revision").map_err(|_|AppError::Internal("Missing credential inventory revision".into()))?;
-        let current_inventory=super::super::erasure_admission::credential_inventory_in_session(db,&mut tx,false).await?;
-        if current_inventory!=observed_inventory {
-            db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,doc! {"$set":{"status":"stale"},"$unset":{"lease_token":"","lease_expires_at":""}}).session(&mut tx).await?;
-            return Ok(());
-        }
-        let changed=db.collection::<Document>(USERS).update_one(doc! {"_id":user,"is_active":true,
-            "$expr":{"$eq":[{"$ifNull":["$credential_dependency_revision",0_i64]},{"$literal":&revision}]}},
-            doc! {"$inc":{"credential_preparation_fence":1_i64}}).session(&mut tx).await?;
-        if changed.matched_count!=1 {
-            db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,doc! {"$set":{"status":"stale"},"$unset":{"lease_token":"","lease_expires_at":""}}).session(&mut tx).await?;
+    let result: AppResult<()> = async {
+        let revision = job
+            .get("source_revision")
+            .cloned()
+            .unwrap_or(bson::Bson::Int64(0));
+        let owner = db
+            .collection::<Document>(USERS)
+            .find_one_and_update(
+                doc! {"_id":user},
+                doc! {"$inc":{"credential_preparation_fence":1_i64}},
+            )
+            .session(&mut tx)
+            .await?;
+        let current = owner
+            .as_ref()
+            .and_then(|row| row.get("credential_dependency_revision"))
+            .cloned()
+            .unwrap_or(bson::Bson::Int64(0));
+        let state = if owner.is_some() && current == revision {
+            "ready"
         } else {
-            let changed=db.collection::<Document>(PREPARATIONS).update_one(progress_filter(job)?,
-                vec![doc! {"$set":{"status":"ready","shared_dependency":shared,"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,"updated_at":"$$NOW"}}]).session(&mut tx).await?;
-            if changed.matched_count!=1 {return Err(AppError::Conflict("Preparation lease changed".into()));}
+            "stale"
+        };
+        if db
+            .collection::<Document>(PREPARATIONS)
+            .update_one(
+                progress_filter(&job)?,
+                doc! {"$set":{"status":state},"$unset":{"lease_token":"","lease_expires_at":""}},
+            )
+            .session(&mut tx)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(AppError::Conflict(
+                "Preparation lease/generation changed".into(),
+            ));
         }
         Ok(())
-    }.await;
+    }
+    .await;
     super::super::org_membership_authority::finish(tx, result).await?;
     Ok(true)
 }
@@ -554,6 +358,99 @@ async fn verify_page(db: &Database, job: &Document) -> AppResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_cleanup_cannot_delete_successor_plans_or_recreate_old_plans() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let old = doc! {"_id":&owner,"status":"preparing","version":VERSION,
+        "generation":"old","phase":"cleanup","lease_token":"old-lease",
+        "lease_expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(2))};
+        let preparations = db.collection::<Document>(PREPARATIONS);
+        preparations.insert_one(&old).await.unwrap();
+        preparations
+            .update_one(
+                doc! {"_id":&owner},
+                doc! {"$set":{
+                "generation":"successor","lease_token":"successor-lease"}},
+            )
+            .await
+            .unwrap();
+        let successor = preparations
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let current_plan = doc! {"_id":plan_id("successor", COLLECTIONS[0], "source"),
+        "user_id":&owner,"kind":"scope_source","generation":"successor"};
+        let old_plan = doc! {"_id":plan_id("old", COLLECTIONS[0], "source"),
+        "user_id":&owner,"kind":"scope_source","generation":"old"};
+        preparations.insert_one(&current_plan).await.unwrap();
+
+        // The stale scanner can observe successor rows as obsolete. Its lease
+        // must fence both removal and any page writes in the same transaction.
+        assert!(matches!(
+            advance_page(
+                &db,
+                &old,
+                std::slice::from_ref(&old_plan),
+                std::slice::from_ref(&current_plan),
+                &doc! {"phase":"scan"}
+            )
+            .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            preparations.find_one(doc! {"_id":&owner}).await.unwrap(),
+            Some(successor.clone())
+        );
+        assert_eq!(
+            preparations
+                .find_one(doc! {"_id":current_plan.get("_id").cloned()})
+                .await
+                .unwrap(),
+            Some(current_plan.clone())
+        );
+        assert!(
+            preparations
+                .find_one(doc! {"_id":old_plan.get("_id").cloned()})
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        preparations.insert_one(&old_plan).await.unwrap();
+        advance_page(
+            &db,
+            &successor,
+            &[],
+            std::slice::from_ref(&old_plan),
+            &doc! {"phase":"scan"},
+        )
+        .await
+        .unwrap();
+        assert!(
+            preparations
+                .find_one(doc! {"_id":old_plan.get("_id").cloned()})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            preparations
+                .find_one(doc! {"_id":current_plan.get("_id").cloned()})
+                .await
+                .unwrap(),
+            Some(current_plan)
+        );
+        let advanced = preparations
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(advanced.get_str("phase"), Ok("scan"));
+        assert!(!advanced.contains_key("lease_token"));
+        db.drop().await.unwrap();
+    }
 
     fn binary(bytes: Vec<u8>) -> bson::Bson {
         bson::Bson::Binary(bson::Binary {
@@ -570,7 +467,13 @@ mod tests {
             .await?;
         super::super::super::erasure_admission::credential_change_in_session(db, owner, &mut tx)
             .await?;
-        db.collection::<Document>(COLLECTIONS[1]).update_one(doc! {"_id":"token-0000"},doc! {"$set":{"access_token_encrypted":binary(encrypted)},"$unset":{"revocation_provenance":""}}).session(&mut tx).await?;
+        db.collection::<Document>(COLLECTIONS[1])
+            .update_one(
+                doc! {"_id":"token-0000"},
+                doc! {"$set":{"access_token_encrypted":binary(encrypted)}},
+            )
+            .session(&mut tx)
+            .await?;
         super::super::super::transaction_service::commit(&mut tx).await
     }
     async fn finish_preparation(db: &Database, keys: &EncryptionKeys, user: &str) {
@@ -651,37 +554,12 @@ mod tests {
         let (db, user) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
         import_material(&db, &keys, &user, Some("personal-provider"), "oauth2").await;
-        crate::services::token_copy_admission::begin_discovery(&db, true)
-            .await
-            .unwrap();
-        for _ in 0..16 {
-            if !crate::services::token_copy_admission::discover_one(&db, &keys)
-                .await
-                .unwrap()
-            {
-                break;
-            }
-        }
-        assert_eq!(
-            crate::services::token_copy_admission::discovery_status(&db)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "complete"
-        );
         assert!(!ready_or_enqueue(&db, &user).await.unwrap());
         let initial = db
             .collection::<Document>(PREPARATIONS)
             .find_one(doc! {"_id":&user})
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(initial.get_i64("inventory_revision"), Ok(-1));
-        let global_before = db
-            .collection::<Document>(crate::services::erasure_admission::CREDENTIAL_INVENTORY)
-            .find_one(doc! {"_id":"global-v1"})
-            .await
             .unwrap();
         let mut ready = false;
         for iteration in 0..32 {
@@ -722,16 +600,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current.get("generation"), initial.get("generation"));
-        assert!(!current.get_bool("shared_dependency").unwrap());
         assert_eq!(
-            db.collection::<Document>(crate::services::erasure_admission::CREDENTIAL_INVENTORY)
-                .find_one(doc! {"_id":"global-v1"})
-                .await
-                .unwrap(),
-            global_before
+            current.get("source_revision"),
+            initial.get("source_revision")
         );
-        // Readiness is an owner observation, not a promise that no other owner
-        // can import this token later. Actual dispatch still checks holders.
+        // Other owners' imports do not change this owner's preparation.
         let copied = import_material(
             &db,
             &keys,
@@ -741,16 +614,6 @@ mod tests {
         )
         .await;
         assert!(ready_or_enqueue(&db, &user).await.unwrap());
-        assert!(
-            crate::services::token_copy_admission::close_for_dispatch(
-                &db,
-                "effect",
-                &"a".repeat(64),
-                &["same-opaque-upstream-token"]
-            )
-            .await
-            .is_err()
-        );
         assert!(
             db.collection::<Document>(crate::models::user_api_key::COLLECTION_NAME)
                 .find_one(doc! {"_id":copied.id})
@@ -762,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_provider_and_unattributed_manual_copies_are_discovered_without_a_source_link() {
+    async fn cross_provider_and_unattributed_manual_copies_do_not_block_acceptance() {
         for provider in [Some("different-provider"), None] {
             let (db, user) = super::super::tests::fixture().await;
             let keys = crate::test_utils::test_encryption_keys();
@@ -778,13 +641,18 @@ mod tests {
             let copy = import_material(&db, &keys, &org, provider, "oauth2").await;
             assert!(copy.source_id.is_none());
             finish_preparation(&db, &keys, &user).await;
-            assert!(matches!(
-                super::super::accept(&db, &user, &user, None).await,
-                Err(AppError::Conflict(_))
-            ));
+            let job = super::super::accept(&db, &user, &user, None).await.unwrap();
+            assert_eq!(job.status, ErasureStatus::Accepted);
             assert!(
-                db.collection::<crate::models::user::User>(USERS)
-                    .find_one(doc! {"_id":&user,"is_active":true})
+                db.collection::<Document>(USERS)
+                    .find_one(doc! {"_id":&user,"is_active":false})
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                db.collection::<Document>(COLLECTIONS[0])
+                    .find_one(doc! {"_id":&copy.id,"user_id":&org})
                     .await
                     .unwrap()
                     .is_some()
@@ -801,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn held_manual_bearer_import_after_ready_invalidates_the_prepared_person() {
+    async fn held_other_owner_import_preserves_prepared_revision_and_acceptance() {
         let (db, user) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
         let org = uuid::Uuid::new_v4().to_string();
@@ -830,7 +698,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(!observed.get_bool("shared_dependency").unwrap());
+            assert_eq!(observed.get_str("status"), Ok("ready"));
             held.release.notify_one();
             observed
         };
@@ -846,23 +714,22 @@ mod tests {
             unchanged_person.get("credential_dependency_revision"),
             observed.get("source_revision")
         );
-        // Destination-only personal revisions would incorrectly accept here.
-        assert!(matches!(
-            super::super::accept(&db, &user, &user, None).await,
-            Err(AppError::Conflict(_))
-        ));
-        finish_preparation(&db, &keys, &user).await;
-        assert!(matches!(
-            super::super::accept(&db, &user, &user, None).await,
-            Err(AppError::Conflict(_))
-        ));
+        let job = super::super::accept(&db, &user, &user, None).await.unwrap();
+        assert_eq!(job.status, ErasureStatus::Accepted);
         let preparation = db
             .collection::<Document>(PREPARATIONS)
             .find_one(doc! {"_id":&user})
             .await
             .unwrap()
             .unwrap();
-        assert!(preparation.get_bool("shared_dependency").unwrap());
+        assert_eq!(preparation.get("generation"), observed.get("generation"));
+        assert!(
+            db.collection::<Document>(COLLECTIONS[0])
+                .find_one(doc! {"_id":&copy.id,"user_id":&org})
+                .await
+                .unwrap()
+                .is_some()
+        );
         db.drop().await.unwrap();
     }
 
@@ -894,7 +761,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(key.grant_lineage.as_ref().unwrap().provider_unattributed);
         assert!(key.provider_config_id.is_none());
         assert_eq!(
             crate::services::credential_record_service::CredentialRecord::key(&key)
@@ -926,7 +792,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(key.grant_lineage.as_ref().unwrap().provider_unattributed);
         finish_preparation(&db, &keys, &user).await;
         let job = super::super::accept(&db, &user, &user, None).await.unwrap();
         let mut actionable = false;
@@ -1059,15 +924,12 @@ mod tests {
         finish_preparation(&db, &strict, &user).await;
         assert!(ready_or_enqueue(&db, &user).await.unwrap());
         assert_eq!(
-            db.collection::<Document>(COLLECTIONS[1])
-                .find_one(doc! {"_id":"token"})
+            source_plan(&db, &user, COLLECTIONS[1], "token")
                 .await
                 .unwrap()
                 .unwrap()
-                .get_document("revocation_provenance")
-                .unwrap()
-                .get_str("state"),
-            Ok("ready")
+                .get_str("scope"),
+            Ok("token")
         );
         crate::services::user_credentials_service::delete_user_credentials(&db, &user, "provider")
             .await
@@ -1103,64 +965,58 @@ mod tests {
         }
         assert!(ready_or_enqueue(&db, &user).await.unwrap());
         assert_eq!(
-            tokens
-                .count_documents(doc! {"revocation_provenance.state":"ready"})
+            db.collection::<Document>(PREPARATIONS)
+                .count_documents(doc! {"user_id":&user,"scope":"token"})
                 .await
                 .unwrap(),
             270
         );
-        let original = tokens
-            .find_one(doc! {"_id":"token-0000"})
+        let original = source_plan(&db, &user, COLLECTIONS[1], "token-0000")
             .await
             .unwrap()
             .unwrap();
-        // An old snapshot cannot stamp readiness after a refresh wins its CAS.
         replace(&db, &user, &keys).await.unwrap();
-        prepare_row(&db, &keys, COLLECTIONS[1], &original)
-            .await
-            .unwrap();
-        assert!(!ready_or_enqueue(&db, &user).await.unwrap());
-        finish_preparation(&db, &keys, &user).await;
-        assert!(ready_or_enqueue(&db, &user).await.unwrap());
-        let refreshed = tokens
-            .find_one(doc! {"_id":"token-0000"})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(
-            original
-                .get_document("revocation_provenance")
-                .unwrap()
-                .get_array("token_fingerprints")
-                .unwrap(),
-            refreshed
-                .get_document("revocation_provenance")
-                .unwrap()
-                .get_array("token_fingerprints")
-                .unwrap()
-        );
-        // Replacing storage with the same authenticated token preserves its
-        // fingerprint; readiness requires the full scan and verification phases.
-        let fingerprint = refreshed
-            .get_document("revocation_provenance")
-            .unwrap()
-            .get_array("token_fingerprints")
-            .unwrap()
-            .clone();
-        replace(&db, &user, &keys).await.unwrap();
-        assert!(!ready_or_enqueue(&db, &user).await.unwrap());
-        finish_preparation(&db, &keys, &user).await;
-        assert_eq!(
-            tokens
+        assert!(
+            !tokens
                 .find_one(doc! {"_id":"token-0000"})
                 .await
                 .unwrap()
                 .unwrap()
-                .get_document("revocation_provenance")
+                .contains_key("erasure_scope_preparation")
+        );
+        assert!(!ready_or_enqueue(&db, &user).await.unwrap());
+        assert!(
+            source_plan(&db, &user, COLLECTIONS[1], "token-0000")
+                .await
                 .unwrap()
-                .get_array("token_fingerprints")
+                .is_none()
+        );
+        finish_preparation(&db, &keys, &user).await;
+        let refreshed = source_plan(&db, &user, COLLECTIONS[1], "token-0000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(original.get("generation"), refreshed.get("generation"));
+        assert_eq!(
+            db.collection::<Document>(PREPARATIONS)
+                .count_documents(
+                    doc! {"user_id":&user,"generation":original.get("generation").cloned()}
+                )
+                .await
                 .unwrap(),
-            &fingerprint
+            0
+        );
+        let group = refreshed.get_str("group").unwrap().to_owned();
+        replace(&db, &user, &keys).await.unwrap();
+        assert!(!ready_or_enqueue(&db, &user).await.unwrap());
+        finish_preparation(&db, &keys, &user).await;
+        assert_eq!(
+            source_plan(&db, &user, COLLECTIONS[1], "token-0000")
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("group"),
+            Ok(group.as_str())
         );
         assert!(
             db.collection::<User>(USERS)
@@ -1171,5 +1027,117 @@ mod tests {
         );
         assert!(super::super::status(&db, &user).await.unwrap().is_none());
         db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn own_provider_app_group_dispatches_one_grant_or_per_credential_tokens() {
+        use axum::{Router, http::StatusCode, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        for grant in [true, false] {
+            let (db, user) = super::super::tests::fixture().await;
+            let keys = crate::test_utils::test_encryption_keys();
+            let count = Arc::new(AtomicUsize::new(0));
+            let calls = count.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().route(
+                        "/revoke",
+                        post(move |body: String| {
+                            if grant {
+                                assert!(
+                                    body.contains("own-refresh-2"),
+                                    "grant must use the newest refresh member: {body}"
+                                );
+                            }
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            async { StatusCode::OK }
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let provider = doc! {"_id":"group-provider","slug":"group-provider","name":"Group","provider_type":"oauth2","is_active":true,
+            "created_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            "revocation":{"style":"rfc7009","url":url,"auth":"none","request_encoding":"form","revokes_grant":grant,"effect_scope":if grant {"grant_wide"}else{"token_only"}}};
+            db.collection::<Document>(crate::models::provider_config::COLLECTION_NAME)
+                .insert_one(provider)
+                .await
+                .unwrap();
+            for index in 0..3 {
+                let mut row = doc! {"_id":format!("token-{index}"),"user_id":&user,"provider_config_id":"group-provider",
+                "token_type":"oauth2","status":"active","created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(3-index)),"updated_at":bson::DateTime::now()};
+                if index == 0 {
+                    row.insert(
+                        "access_token_encrypted",
+                        binary(keys.encrypt(b"stale-access").await.unwrap()),
+                    );
+                } else {
+                    row.insert(
+                        "refresh_token_encrypted",
+                        binary(
+                            keys.encrypt(format!("own-refresh-{index}").as_bytes())
+                                .await
+                                .unwrap(),
+                        ),
+                    );
+                }
+                db.collection::<Document>(COLLECTIONS[1])
+                    .insert_one(row)
+                    .await
+                    .unwrap();
+            }
+            finish_preparation(&db, &keys, &user).await;
+            let rows: Vec<Document> = db
+                .collection::<Document>(COLLECTIONS[1])
+                .find(doc! {"user_id":&user})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            let first = source_plan(&db, &user, COLLECTIONS[1], rows[0].get_str("_id").unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let group = first.get_str("group").unwrap();
+            for row in &rows {
+                assert!(!row.contains_key("erasure_scope_preparation"));
+                let plan = source_plan(&db, &user, COLLECTIONS[1], row.get_str("_id").unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(plan.get_str("group"), Ok(group));
+                assert_eq!(
+                    plan.get_str("scope"),
+                    Ok(if grant { "grant" } else { "token" })
+                );
+            }
+            let job = super::super::accept(&db, &user, &user, None).await.unwrap();
+            let mut complete = false;
+            for _ in 0..12 {
+                if matches!(
+                    Box::pin(super::super::provider::pass(&db, &keys, &job))
+                        .await
+                        .unwrap(),
+                    super::super::provider::Pass::Complete
+                ) {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(complete);
+            let expected = if grant { 1 } else { 3 };
+            assert_eq!(count.load(Ordering::SeqCst), expected);
+            assert_eq!(db.collection::<Document>(super::super::provider::EFFECTS).count_documents(doc! {"user_id":&user,"kind":"oauth_token_revocation","status":"complete","capability_encrypted":{"$exists":false}}).await.unwrap(),expected as u64);
+            assert_eq!(db.collection::<Document>(COLLECTIONS[1]).count_documents(doc! {"user_id":&user,"status":"revoked","access_token_encrypted":{"$exists":false}}).await.unwrap(),3);
+            server.abort();
+            db.drop().await.unwrap();
+        }
     }
 }

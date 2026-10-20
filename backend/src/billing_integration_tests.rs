@@ -2586,7 +2586,6 @@ async fn insert_llm_route_service(
     .await;
     db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
         .insert_one(UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),

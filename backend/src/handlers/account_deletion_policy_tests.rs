@@ -448,7 +448,12 @@ impl Fixture {
 async fn direct_account_delete_requires_current_disclosure_before_any_effect() {
     let f = Fixture::new("direct_account_policy_denial").await;
     f.assert_authenticated_read(&f.human_token, false).await;
-    for policy in [None, Some("machine-data-v0"), Some("machine-data-v1")] {
+    for policy in [
+        None,
+        Some("machine-data"),
+        Some("machine-data-v0"),
+        Some("machine-data-v1"),
+    ] {
         let response = f
             .request(&f.human_token, false, "DELETE", DIRECT, policy, None)
             .await;
@@ -465,6 +470,7 @@ async fn assistant_account_delete_requires_current_disclosure_before_receipt_res
     for (id, policy) in [
         ("missing-policy", None),
         ("old-policy", Some("machine-data-v0")),
+        ("previous-policy", Some("machine-data")),
         ("obsolete-development-policy", Some("machine-data-v1")),
     ] {
         let response = f

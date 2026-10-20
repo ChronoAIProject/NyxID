@@ -477,7 +477,6 @@ pub async fn store_api_key(
                 },
                 "status": "active",
                 "token_type": "api_key",
-                "grant_lineage": bson::Bson::Null,
                 "access_token_encrypted": bson::Bson::Null,
                 "refresh_token_encrypted": bson::Bson::Null,
                 "credential_user_id": bson::Bson::Null,
@@ -503,7 +502,7 @@ pub async fn store_api_key(
             db.collection::<UserProviderToken>(COLLECTION_NAME)
                 .update_one(
                     doc! { "_id": &existing_token.id },
-                    vec![doc! { "$set": set_doc },doc! {"$unset":["revocation_provenance"]}],
+                    vec![doc! { "$set": set_doc }],
                 )
                 .session(&mut tx)
                 .await?;
@@ -515,14 +514,11 @@ pub async fn store_api_key(
                 .await?
                 .ok_or_else(|| AppError::Internal("Token disappeared after update".to_string()))?;
 
-            super::token_copy_admission::installed_in_session(
-                db, encryption_keys, COLLECTION_NAME, &updated.id, &mut tx,
-            ).await?;
             return Ok(updated);
         }
 
         let token = UserProviderToken {
-            grant_lineage: None,
+
             secret_context_versions: versions,
             id,
             user_id: user_id.to_string(),
@@ -552,9 +548,6 @@ pub async fn store_api_key(
             .session(&mut tx)
             .await?;
 
-        super::token_copy_admission::installed_in_session(
-            db, encryption_keys, COLLECTION_NAME, &token.id, &mut tx,
-        ).await?;
         tracing::info!(
             user_id = %user_id,
             provider_id = %provider_id,
@@ -683,7 +676,6 @@ async fn store_telegram_identity(
         }
 
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -1862,9 +1854,6 @@ async fn store_device_code_tokens(
     let (versions,access_enc,refresh_enc)=super::credential_record_service::oauth_token_fields(
         encryption_keys,&id,user_id,existing_token.as_ref(),access_token,refresh_token).await?;
     let token = UserProviderToken {
-        grant_lineage: super::oauth_grant_lineage_service::install_on_token(
-        encryption_keys,existing_token.as_ref(),provider_id,access_token,refresh_token,
-    ).await?,
         secret_context_versions: versions,
         id,
         user_id: user_id.to_string(),
@@ -1889,7 +1878,7 @@ async fn store_device_code_tokens(
         updated_at: now,
     };
 
-    commit_legacy_authorization(db, encryption_keys, LegacyAuthorization {
+    commit_legacy_authorization(db, LegacyAuthorization {
     token: &token, expected: existing_token.as_ref(), lifecycle_owner, state, attempt,
     tokens: crate::services::personal_erasure_service::issuance::IssuedTokens {access: Some(access_token), refresh: refresh_token},
 }).await?;
@@ -1926,7 +1915,6 @@ struct LegacyAuthorization<'a> {
 /// transaction, so a held callback cannot insert a successor after a sweep.
 async fn commit_legacy_authorization(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
     authorization: LegacyAuthorization<'_>,
 ) -> AppResult<()> {
     let LegacyAuthorization {
@@ -1994,14 +1982,6 @@ async fn commit_legacy_authorization(
                 .session(&mut tx)
                 .await?;
         }
-        super::token_copy_admission::installed_in_session(
-            db,
-            encryption_keys,
-            COLLECTION_NAME,
-            &token.id,
-            &mut tx,
-        )
-        .await?;
         super::personal_erasure_service::issuance::installed_in_session(
             db,
             attempt,
@@ -2415,9 +2395,6 @@ pub async fn handle_oauth_callback(
             .or_else(|| existing_token.as_ref().and_then(|t| t.token_scopes.clone()));
 
         let token = UserProviderToken {
-            grant_lineage: super::oauth_grant_lineage_service::install_on_token(
-                encryption_keys,existing_token.as_ref(),provider_id,access_token,refresh_token,
-            ).await?,
             secret_context_versions: versions,
             id,
             user_id: user_id.to_string(),
@@ -2442,7 +2419,7 @@ pub async fn handle_oauth_callback(
             updated_at: now,
         };
 
-        commit_legacy_authorization(db, encryption_keys, LegacyAuthorization {
+        commit_legacy_authorization(db, LegacyAuthorization {
     token: &token, expected: existing_token.as_ref(), lifecycle_owner: &lifecycle_owner, state, attempt: &attempt,
     tokens: crate::services::personal_erasure_service::issuance::IssuedTokens {access: Some(access_token), refresh: refresh_token},
 })
@@ -3010,10 +2987,7 @@ async fn refresh_user_api_key_under_lease(
     } else {
         super::oauth_app_source::OAuthAppSource::Platform
     };
-    let grant_lineage =
-        super::oauth_grant_lineage_service::for_key(encryption_keys, api_key).await?;
     let mut set_doc = doc! {
-        "grant_lineage":bson::to_bson(&grant_lineage).map_err(|_|AppError::Internal("Invalid OAuth grant provenance".into()))?,
         "access_token_encrypted": bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
             bytes: access_enc,
@@ -3491,9 +3465,6 @@ pub async fn claim_provider_token_by_id_with_expected_state_version(
                 "updated_at":bson::DateTime::from_chrono(Utc::now()),
                 "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
             }}]).return_document(ReturnDocument::Before).session(&mut *tx).await?;
-            if claimed.is_some() {
-                super::token_copy_admission::remove_in_session(db, COLLECTION_NAME, token_id, tx).await?;
-            }
             Ok(claimed)
         })
     }).await
@@ -3723,7 +3694,6 @@ mod tests {
         metadata.insert("username".to_string(), "nyx_user".to_string());
 
         UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: "token-1".to_string(),
             user_id: "user-1".to_string(),
@@ -5783,7 +5753,6 @@ mod tests {
         };
         let now = Utc::now();
         let key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -6006,12 +5975,28 @@ mod tests {
         let (token_url,server,requests,entered,release)=spawn_counting_token_server(
             serde_json::json!({"access_token":"late-refresh-access","refresh_token":"late-refresh-token","expires_in":3600})
         ).await;
+        let revocations = Arc::new(AtomicUsize::new(0));
+        let counted = revocations.clone();
+        let app = axum::Router::new().route(
+            "/revoke",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let revocation_url = format!("http://{}/revoke", listener.local_addr().unwrap());
+        let revocation_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let provider_id = Uuid::new_v4().to_string();
         let client = keys.encrypt(b"client-id").await.unwrap();
         let mut provider = make_test_provider(&provider_id, &token_url, Some(client), None);
         provider.revocation = Some(
             serde_json::from_value(serde_json::json!({
-                "style":"rfc7009", "url":&token_url, "auth":"none",
+                "style":"rfc7009", "url":&revocation_url, "auth":"none",
                 "request_encoding":"form", "revokes_grant":false, "effect_scope":"token_only"
             }))
             .unwrap(),
@@ -6025,8 +6010,9 @@ mod tests {
         let replace = async {
             entered.notified().await;
             // Providers may return an already existing token. Import the exact
-            // held response under a retained org before the response arrives;
-            // losing this personal install must not authorize revoking it.
+            // held response under a retained org before the response arrives.
+            // PD-1 preserves its local row while the late personal issuance
+            // retains its independent upstream revocation obligation.
             let org = Uuid::new_v4().to_string();
             db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                 .insert_one(crate::test_utils::test_user(
@@ -6094,7 +6080,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             live, winner,
-            "late refresh must preserve the replacement's exact storage and provenance"
+            "late refresh must preserve the replacement's exact storage and authority"
         );
         let plaintext = crate::services::credential_record_service::CredentialRecord::key(&result)
             .text(
@@ -6121,7 +6107,6 @@ mod tests {
         );
         assert!(effect.contains_key("capability_encrypted"));
         let effect_id = effect.get_str("_id").unwrap();
-        let capability = effect.get("capability_encrypted").unwrap().clone();
         db.collection::<bson::Document>("personal_erasure_effects")
             .update_one(doc! {"_id":effect_id}, vec![doc! {"$set":{"updated_at":{"$dateSubtract":{"startDate":"$$NOW","unit":"second","amount":121}}}}])
             .await.unwrap();
@@ -6149,12 +6134,17 @@ mod tests {
             crate::services::personal_erasure_service::process_one(&state),
         )
         .await
-        .expect("copy review must return without an upstream request")
+        .expect("explicit retry must deliver the preserved late issuance")
         .unwrap();
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
-            "a reused late response must not dispatch revocation"
+            "revocation must not repeat the OAuth refresh"
+        );
+        assert_eq!(
+            revocations.load(Ordering::SeqCst),
+            2,
+            "the preserved access and refresh tokens must each reach the provider despite another owner's copy"
         );
         let blocked = db
             .collection::<bson::Document>("personal_erasure_effects")
@@ -6162,12 +6152,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(blocked.get_str("status").unwrap(), "operator_action");
+        assert_eq!(blocked.get_str("status").unwrap(), "complete");
         assert_eq!(
             blocked.get_str("reason").unwrap(),
-            "credential_copy_isolation_requires_external_reconciliation"
+            "provider_revocation_confirmed"
         );
-        assert_eq!(blocked.get("capability_encrypted"), Some(&capability));
+        assert!(!blocked.contains_key("capability_encrypted"));
         let org_live = db
             .collection::<UserApiKey>(USER_API_KEYS)
             .find_one(doc! {"_id":&retained.id})
@@ -6185,6 +6175,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(retained_access.as_str(), "late-refresh-access");
+        revocation_server.abort();
         server.abort();
         db.drop().await.unwrap();
     }
@@ -7475,7 +7466,6 @@ mod tests {
 
         let now = Utc::now();
         let key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -7610,7 +7600,6 @@ mod tests {
         let now = Utc::now();
         let encrypted = enc.encrypt(api_key_value.as_bytes()).await.unwrap();
         UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -7648,7 +7637,6 @@ mod tests {
         let now = Utc::now();
         let access_enc = enc.encrypt(access_token.as_bytes()).await.unwrap();
         UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -8013,7 +8001,6 @@ mod tests {
 
         let now = Utc::now();
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
@@ -8522,7 +8509,6 @@ mod tests {
             None
         };
         let key = UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,

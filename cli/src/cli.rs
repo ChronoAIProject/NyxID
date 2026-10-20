@@ -629,6 +629,27 @@ pub enum AdminPlatformCredentialsCommands {
 
 #[derive(Subcommand)]
 pub enum AdminUserCommands {
+    /// Reconcile one durable provider revocation outcome
+    ErasureReconcile {
+        /// User ID, including a deleted account
+        user_id: uuid::Uuid,
+        #[arg(long)]
+        effect_id: uuid::Uuid,
+        #[arg(long, value_parser = ["retry", "retry_with_current_provider_config", "record_external_revocation_confirmed", "record_remote_revocation_unavailable"])]
+        action: String,
+        #[arg(long)]
+        expected_retry_generation: u64,
+        /// UUID identifying this exact request; reuse only for an identical retry
+        #[arg(long)]
+        idempotency_key: uuid::Uuid,
+        /// Reference to operator evidence (never a credential)
+        #[arg(long)]
+        evidence_reference: String,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List platform users (paginated)
     List {
         /// Page number (1-based)

@@ -26,19 +26,6 @@ pub(super) async fn ensure_indexes(db: &Database) -> AppResult<()> {
     db.collection::<Document>(EFFECTS)
         .create_index(
             mongodb::IndexModel::builder()
-                .keys(doc! {"duplicate_checked_at":1,"_id":1})
-                .options(
-                    IndexOptions::builder()
-                        .name(provider::DUPLICATE_SETTLEMENT_INDEX.to_owned())
-                        .partial_filter_expression(provider::duplicate_settlement_filter())
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
-    db.collection::<Document>(EFFECTS)
-        .create_index(
-            mongodb::IndexModel::builder()
                 .keys(doc! {"routine_expires_at":1})
                 .options(
                     IndexOptions::builder()
@@ -375,13 +362,35 @@ pub(crate) struct EffectMetadata {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+#[cfg(test)]
 pub(crate) async fn unresolved(
     db: &Database,
     owner: &str,
     after: Option<&str>,
 ) -> AppResult<Vec<EffectMetadata>> {
+    effect_page(db, owner, after, true).await
+}
+pub(crate) async fn outcomes(
+    db: &Database,
+    owner: &str,
+    after: Option<&str>,
+) -> AppResult<Vec<EffectMetadata>> {
+    effect_page(db, owner, after, false).await
+}
+async fn effect_page(
+    db: &Database,
+    owner: &str,
+    after: Option<&str>,
+    only_unresolved: bool,
+) -> AppResult<Vec<EffectMetadata>> {
     use futures::TryStreamExt;
-    let mut filter = doc! {"user_id":owner,"status":{"$ne":"complete"}};
+    let mut filter = doc! {"user_id":owner};
+    if only_unresolved {
+        filter.insert(
+            "$or",
+            bson::bson!([{"status":{"$ne":"complete"}}, {"capability_encrypted":{"$exists":true}}]),
+        );
+    }
     if let Some(after) = after {
         filter.insert("_id", doc! {"$gt":after});
     }

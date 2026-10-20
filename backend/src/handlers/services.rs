@@ -1975,7 +1975,6 @@ async fn create_service_inner(
         Box::pin(
             crate::services::catalog_skill_service::create_with_endpoints(
                 &state.db,
-                &state.encryption_keys,
                 &new_service,
                 &auth_user.user_id.to_string(),
                 &initial_skills,
@@ -1990,7 +1989,6 @@ async fn create_service_inner(
     } else {
         Box::pin(crate::services::catalog_skill_service::create(
             &state.db,
-            &state.encryption_keys,
             &new_service,
             &auth_user.user_id.to_string(),
             &initial_skills,
@@ -2121,7 +2119,6 @@ pub async fn delete_service(
     };
     Box::pin(crate::services::catalog_mutation_service::commit_update(
         &state.db,
-        Some(&state.encryption_keys),
         &service,
         &authority,
         &doc! {"is_active": false, "updated_at": bson::DateTime::from_chrono(now)},
@@ -3467,7 +3464,6 @@ pub(crate) async fn update_service_inner(
     } else {
         Box::pin(crate::services::catalog_mutation_service::commit_update(
             &state.db,
-            Some(&state.encryption_keys),
             &service,
             &mutation_authority,
             &set_doc,

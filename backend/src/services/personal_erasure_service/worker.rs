@@ -101,6 +101,23 @@ async fn checkpoint(
             domain.reason = Some((*reason).to_owned());
         }
     }
+    if domains
+        .iter()
+        .all(|domain| domain.status == DomainStatus::Complete)
+        && db
+            .collection::<Document>(provider::EFFECTS)
+            .find_one(doc! {"user_id":&job.user_id,
+            "$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]})
+            .await?
+            .is_some()
+        && let Some(domain) = domains
+            .iter_mut()
+            .find(|domain| domain.domain == "provider_credentials")
+    {
+        domain.status = DomainStatus::Pending;
+        domain.completed_at = None;
+        domain.reason = Some("provider_revocation_requires_reconciliation".into());
+    }
     let complete = domains
         .iter()
         .all(|domain| domain.status == DomainStatus::Complete);
@@ -362,7 +379,7 @@ pub(crate) async fn retry_domain(
         checkpoint.consecutive_failures = 0;
         if domain == "provider_credentials" {
             db.collection::<Document>(super::provider::EFFECTS).update_many(
-                doc! {"user_id":user,"kind":"oauth_token_revocation","status":"operator_action","capability_encrypted":{"$type":"binData"},
+                doc! {"user_id":user,"kind":"oauth_token_revocation","single_attempt":false,"status":"operator_action","capability_encrypted":{"$type":"binData"},
                     "$expr":{"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]}},
                 vec![doc! {"$set":{"status":"pending","reason":bson::Bson::Null,"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,"attempts":0_i64,"retry_generation":{"$add":[{"$ifNull":["$retry_generation",0_i64]},1_i64]},"retry_at":"$$NOW","updated_at":"$$NOW"}}],
             ).session(&mut *tx).await?;
