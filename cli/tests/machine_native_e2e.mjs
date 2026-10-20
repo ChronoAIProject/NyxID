@@ -18,6 +18,18 @@ assert.equal(process.platform,'linux');assert.equal(process.getuid(),0);
 const binary=process.env.NYXID_TEST_CLI,cua=process.env.NYXID_TEST_CUA_DRIVER;
 assert(binary&&path.isAbsolute(binary),'NYXID_TEST_CLI must name the built CLI');
 assert(cua&&path.isAbsolute(cua),'NYXID_TEST_CUA_DRIVER must name the pinned driver');
+// Match setup's package candidates, including Google Chrome on hosted Ubuntu.
+const browserBinary=(await Promise.all(['/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'].map(async candidate=>await fs.access(candidate).then(()=>candidate,()=>undefined)))).find(Boolean);
+assert(browserBinary,'install a supported Chromium or Google Chrome package');
+const resolvedBrowser=await fs.realpath(browserBinary);
+let policyDirectory,browserExecutable;
+if(/^\/snap\/chromium\/\d+\/usr\/lib\/chromium-browser\/chrome$/.test(resolvedBrowser)) {
+ policyDirectory='/etc/chromium-browser/policies/managed';browserExecutable=resolvedBrowser;
+}else if(['/usr/bin/chromium','/usr/lib/chromium/chromium'].includes(resolvedBrowser)) {
+ policyDirectory='/etc/chromium/policies/managed';browserExecutable='/usr/lib/chromium/chromium';
+}else if(['/opt/google/chrome/google-chrome','/opt/google/chrome/chrome'].includes(resolvedBrowser)) {
+ policyDirectory='/etc/opt/chrome/policies/managed';browserExecutable='/opt/google/chrome/chrome';
+}else assert.fail('native acceptance requires a recognized resolved browser package layout');
 const profileName=process.env.NYXID_TEST_NATIVE_PROFILE??`w94-${process.pid}`;
 assert(/^[a-z][a-z0-9-]{0,15}$/.test(profileName),'safe unique native test profile');
 const directory=`/var/lib/nyxid-machine/${profileName}/node`,workspace=`/srv/nyxid-${profileName}-workspace`;
@@ -26,7 +38,7 @@ const root=await fs.mkdtemp(path.join(tmpdir(),'nyxid-machine-native-'));
 // Browser identities import the public fixture certificate by its known path.
 await fs.chmod(root,0o711);
 console.log(`Native acceptance profile=${profileName} artifacts=${root}`);
-for(const backup of ['/usr/bin/chromium-cold-test-real','/opt/nyxid/machine-browser/native-host-probe-test-real'])assert(!(await fs.access(backup).then(()=>true,()=>false)),`pre-existing test backup: ${backup}`);
+for(const backup of [browserBinary+'-cold-test-real','/opt/nyxid/machine-browser/native-host-probe-test-real'])assert(!(await fs.access(backup).then(()=>true,()=>false)),`pre-existing test backup: ${backup}`);
 const signing=randomBytes(32),nodeId=randomUUID();
 const token=`nyx_nreg_${randomBytes(32).toString('hex')}`,auth=`nyx_nauth_${randomBytes(32).toString('hex')}`;
 const conversationId=randomUUID(),turnId=randomUUID(),responses=new Map(),frames=[];
@@ -105,8 +117,6 @@ try{
  // A written policy is insufficient: prove the live negative control before
  // any context exists, then restore the exact protected inode in all cases.
  await stop();
- const resolvedBrowser=await fs.realpath('/usr/bin/chromium');
- const policyDirectory=resolvedBrowser.startsWith('/snap/chromium/')?'/etc/chromium-browser/policies/managed':'/etc/chromium/policies/managed';
  // Chromium reads policy files regardless of their extension. Move the inode
  // outside managed/, keeping it on the same filesystem for exact restoration.
  const policyFile=`${policyDirectory}/nyxid.json`,policyBackup=path.join(policyDirectory,'../nyxid.native-acceptance-disabled');
@@ -120,7 +130,7 @@ try{
  } finally {await fs.rename(policyBackup,policyFile);}
  const beforePolicyRestart=receivedProfile;launch();await waitFor(()=>receivedProfile>beforePolicyRestart,'restored effective policy',60000);assert.equal(profile.separation_evidence.managed_browser_policy,true);assert.equal(profile.separated.available,true);
  checkpoint('missing secure policy refuses separation; restored policy is effective');
- await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart},checkpoint});
+ await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart,browserBinary},checkpoint});
  const journal=JSON.parse(await fs.readFile(`${directory}/machine-contexts.json`,'utf8'));
  const roles=Object.values(journal.contexts).map(c=>c.browsers[c.generation].secure_uid);
  const users=new Set(Object.values(journal.contexts).flatMap(c=>[c.command_uid,...Object.values(c.browsers).flatMap(b=>[b.secure_uid,b.dev_uid])]).map(uid=>`nyxc${uid}`));
@@ -140,8 +150,8 @@ try{
    const parentStatus=await fs.readFile(`/proc/${parent}/status`,'utf8');
    for(const field of ['Uid','Gid'])assert.deepEqual(parentStatus.match(new RegExp(`^${field}:\\s+(.+)$`,'m'))[1].trim().split(/\s+/).map(Number),[uid,uid,uid,uid]);
    assert(Number(status.match(/^Seccomp_filters:\s+(\d+)$/m)[1])>Number(parentStatus.match(/^Seccomp_filters:\s+(\d+)$/m)[1]),'renderer adds sandbox filters beyond its browser parent');
-   assert.equal(await fs.readlink(`/proc/${entry}/exe`),resolvedBrowser);
-   assert.equal(await fs.readlink(`/proc/${parent}/exe`),resolvedBrowser);
+   assert.equal(await fs.readlink(`/proc/${entry}/exe`),browserExecutable);
+   assert.equal(await fs.readlink(`/proc/${parent}/exe`),browserExecutable);
    for(const namespace of ['user','pid','net']) {
     const child=await fs.readlink(`/proc/${entry}/ns/${namespace}`);
     assert.notEqual(child,await fs.readlink(`/proc/${parent}/ns/${namespace}`));
@@ -156,8 +166,8 @@ try{
  console.log(`ACCEPTANCE ${checkpoints.length} passed / 0 failed / 0 skipped`);
 }finally{
  await stop();clearInterval(heartbeat);
- for(const original of ['/usr/bin/chromium','/opt/nyxid/machine-browser/native-host']){
-  const backup=original+(original.includes('chromium')?'-cold-test-real':'-probe-test-real');
+ for(const original of [browserBinary,'/opt/nyxid/machine-browser/native-host']){
+  const backup=original+(original===browserBinary?'-cold-test-real':'-probe-test-real');
   if(await fs.access(backup).then(()=>true,()=>false))await fs.rename(backup,original);
  }
 

@@ -97,7 +97,7 @@ export async function contexts({call,callWithReconnect,profile,conversationId,tu
  // hook or altered signed extension. The wrapper keeps Chromium's PID. Both
  // first launches exceed the former 12 + 4 s grace. Optionally exercise the
  // complete 45 s failure and one fresh repair budget as well.
- const chromium='/usr/bin/chromium', real=chromium+'-cold-test-real';
+ const chromium=native?.browserBinary??'/usr/bin/chromium', real=chromium+'-cold-test-real';
  const nativeHost='/opt/nyxid/machine-browser/native-host',realNativeHost=nativeHost+'-probe-test-real';
  await fs.rename(nativeHost,realNativeHost);
  await fs.copyFile(new URL('./machine_native_probe_drop.py',import.meta.url),nativeHost);
