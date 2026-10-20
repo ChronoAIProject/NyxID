@@ -14,7 +14,9 @@ pub struct AuditLink {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdvanceRequest {
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
+    #[serde(with = "uuid_text")]
     pub request_id: Uuid,
     pub previous_receipt: String,
     pub links: Vec<AuditLink>,
@@ -25,9 +27,13 @@ pub struct AdvanceRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchRequest {
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
+    #[serde(with = "uuid_text")]
     pub operation_id: Uuid,
+    #[serde(with = "uuid_text")]
     pub attempt_id: Uuid,
+    #[serde(with = "uuid_text")]
     pub process_id: Uuid,
     pub intent_seq: u64,
     pub intent_hash: String,
@@ -46,6 +52,7 @@ pub enum WitnessEvent {
 #[serde(deny_unknown_fields)]
 pub struct ReceiptBody {
     pub protocol: u32,
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
     pub receipt_seq: u64,
     pub previous_receipt: String,
@@ -64,6 +71,7 @@ pub struct SignedReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObserveRequest {
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
     pub challenge: String,
 }
@@ -72,6 +80,7 @@ pub struct ObserveRequest {
 #[serde(deny_unknown_fields)]
 pub struct ObservationBody {
     pub protocol: u32,
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
     pub challenge: String,
     pub witness_time_ms: u64,
@@ -88,6 +97,7 @@ pub struct SignedObservation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryRequest {
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
     pub from_receipt: u64,
     pub limit: usize,
@@ -98,8 +108,75 @@ pub struct HistoryRequest {
 #[serde(deny_unknown_fields)]
 pub struct Enrollment {
     pub protocol: u32,
+    #[serde(with = "uuid_text")]
     pub chain_id: Uuid,
     pub initial_head: AuditLink,
     pub verification_key: String,
     pub append_token_sha256: String,
+}
+
+// UUID's default serde switches representations on is_human_readable(). The
+// Mongo raw-document reader and serde's in-memory BSON serializer disagree on
+// that flag. Explicit text preserves the existing HTTP JSON and canonical raw
+// UUID signature bytes while making nested durable receipts round-trip.
+mod uuid_text {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use uuid::Uuid;
+    pub fn serialize<S: Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&id.hyphenated().to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Uuid, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Uuid::parse_str(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn audit_witness_uuid_json_is_unchanged_and_raw_bson_round_trips() {
+        let request = DispatchRequest {
+            chain_id: Uuid::new_v4(),
+            operation_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            process_id: Uuid::new_v4(),
+            intent_seq: 1,
+            intent_hash: "a".repeat(64),
+            previous_receipt: "b".repeat(64),
+        };
+        let receipt = SignedReceipt {
+            body: ReceiptBody {
+                protocol: 1,
+                chain_id: request.chain_id,
+                receipt_seq: 2,
+                previous_receipt: request.previous_receipt.clone(),
+                witness_time_ms: 1,
+                head: AuditLink {
+                    key_version: 1,
+                    seq: 1,
+                    prev_hash: "0".repeat(64),
+                    entry_hash: "a".repeat(64),
+                },
+                event: WitnessEvent::Dispatch {
+                    request: request.clone(),
+                },
+            },
+            signature: "0".repeat(128),
+        };
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["chain_id"],
+            request.chain_id.hyphenated().to_string()
+        );
+        let encoded = bson::to_vec(&receipt).unwrap();
+        assert_eq!(
+            bson::from_slice::<SignedReceipt>(&encoded).unwrap(),
+            receipt
+        );
+        assert_eq!(
+            serde_json::from_str::<SignedReceipt>(&serde_json::to_string(&receipt).unwrap())
+                .unwrap(),
+            receipt
+        );
+    }
 }

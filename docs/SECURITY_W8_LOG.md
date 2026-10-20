@@ -99,3 +99,13 @@
 - Frontend focused tests: 15 passed, 0 failed/ignored; ESLint/TypeScript/scoped rustfmt/whitespace/58-row tier checks passed. `cargo clippy -p nyxid --all-targets --features aws-kms,gcp-kms -- -D warnings`: exit 101, four other-owned CLI needless-borrow errors plus own unused state reader (now test-only); final repeat cancelled while queued (143), validation still blocked.
 - External relay/pinned enrollment, live observation renewal, protected intent/claim runtime and workflow conversions remain pending W8-4/W8-6 work. Proxy-fault telemetry, readiness-capability and API-doc ownership requests remain pending PM clearance; W8-4 is not complete.
 - Explicit-pathspec commits: docs/tiers/recovery `db23e5588`; C2 policy/local clock/replay/health/transition foundation `8771d5f5e`; verify/Integrity DTO/UI `7bc81c3ba`. Shared registry diffs inspected; no push/merge/deploy or forbidden-path edits.
+
+## W8-4d — first backend execution and witness UUID storage fix (2026-10-20)
+
+- Required shared env: `/tmp/nyxid-shared-target`, jobs 4, incremental 0, dev/test debug 0; own background replica set on 50012, nofile 60000.
+- `cargo test -p nyxid --features aws-kms,gcp-kms -- audit_ --test-threads=2`: library 25 passed/0 failed/0 ignored; backend 130 passed/5 failed/0 ignored (9,545 filtered). C2 matrix/config/restart/transaction/transition and Integrity handlers passed.
+- Three relay failures exposed UUID default-serde disagreement between BSON serializers/readers (string versus expected byte array). Explicit UUID text preserves existing HTTP JSON and signature bytes; added nested raw-BSON/JSON round-trip regression. Fix rerun pending shared target lock.
+- One focused old-binary reproduction: 0 passed/1 failed/0 ignored, same BSON UUID decoding failure. No timeout, test, assertion or lint weakened.
+- Other two failures require test-fixture ownership: oracle lifecycle rejecting validator must use collMod on preinitialized audit_log; service-history unique index must use the existing audit_log_seq_unique name. Exact functions/hunks sent to PM; untouched pending approval.
+- `cargo clippy -p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings` queued. `--no-deps` scopes linting to backend targets per PM direction while A fixes CLI WIP; no backend lint suppression.
+- Scoped rustfmt/whitespace and inventory structure checks passed: 58 workflows, 57 pending/1 tested. Configured relay/intent implementation and expanded tests remain uncommitted/in validation; W8-4 is incomplete.
