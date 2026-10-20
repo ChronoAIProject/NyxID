@@ -60,7 +60,7 @@ Servers receive technical metadata with HTTPS requests for security and audit. O
 
 NyxID stores account data in MongoDB. Dedicated OAuth-token, MFA-secret and API-credential fields use application-layer AES-256 encryption. Passwords use Argon2id with per-user salts; session tokens are hashed rather than reversibly encrypted. Newly saved configured default request-header values are encrypted at rest. Values saved before this protection was enabled are protected when the operator migrates them. Database/storage encryption and backup protections depend on the deployment.
 
-Production deployments should use HTTPS; the deployment operator configures this protection. Tokens are digitally signed. NyxID supports changing signing keys while continuing to verify tokens signed with retained keys. The keys used to check existing audit and billing records must be preserved when signing or encryption keys change. The deployment operator manages key rotation and retirement. Ask the deployment operator about its actual key-rotation schedule.
+Production deployments should use HTTPS; the deployment operator configures this protection. Tokens use RS256 digital signatures. NyxID supports changing signing keys with an overlap period during which tokens signed with retained keys can still be verified. It also supports changing encryption keys in stages and migrating stored encrypted data. Keys must be kept while they are needed to read stored data or verify existing audit and billing records. The service operator decides the key-rotation schedule and when old keys can be retired.
 
 On mobile, authentication tokens use the OS-provided secure storage (iOS Keychain via Expo SecureStore, Android EncryptedSharedPreferences).
 
@@ -76,23 +76,24 @@ We do **not** sell, rent, or trade your personal information. We share data only
 
 Depending on enabled features and operator configuration, data can reach:
 
-- PostHog: product analytics events, pseudonymous account UUID and scrubbed event metadata. The built-in host is the US ingestion endpoint; self-hosters can override it.
-- Firebase Cloud Messaging and Apple Push Notification service: device push tokens and notification payloads when push is enabled.
-- Hosting, database, storage and transactional email services: stored account/application data, email addresses and transactional messages as configured.
-- Lago and payment integrations such as Stripe: billing identities, usage, checkout and payment references when billing is enabled. Lago may be self-hosted; the implementation alone does not establish an external processor.
-- NyxAgent (`llm-nyx`) or the configured Aevatar broker: conversation content and tool context for the selected assistant engine.
-- Configured model/voice services, including OpenAI and xAI platform-key paths: prompts, audio and related request content needed for the requested feature.
-- Connected OAuth providers, messaging platforms/channel bots, credential-proxy destinations and Oracle workers: the account identifiers, messages or request content needed for the connection or operation you initiate.
+- Product analytics services: optional events, a pseudonymous account identifier and filtered event metadata, only with analytics permission as described in section 8. The shipped integration is PostHog, when enabled. Its built-in host is the US ingestion endpoint; self-hosters can configure a different host for their own analytics project.
+- Email, SMS and push-delivery services: delivery addresses or device tokens and the messages or notifications needed for the enabled feature. Configured push integrations include Firebase Cloud Messaging and Apple Push Notification service.
+- Providers you connect: account identifiers, authorization credentials, messages or request content needed for the connection or operation you initiate.
+- Assistant, model and voice services: conversation content, tool context, prompts, audio and related content needed for the feature you choose to use. When enabled or configured, integrations include the NyxAgent assistant engine or Aevatar broker, and model/voice services such as OpenAI and xAI, including connections using an operator-configured key.
+- Billing and payment services: billing identities, usage, checkout and payment references when billing is enabled. Configured integrations include Lago, which may be self-hosted, and payment integrations such as Stripe.
+- Hosting, database, storage and key-management services managed by the operator: the application data and key-management requests needed to run the deployment.
 
-The providers used depend on your deployment and enabled features. User-connected third parties have their own policies. For the applicable service-provider register, processing locations, retention and cross-border transfer arrangements, ask [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun) for the applicable deployment information.
+The providers used depend on your deployment and enabled features. User-connected third parties have their own policies. The deployment's sub-processor register and processing regions are available from [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). You can also ask that address about the deployment's retention and cross-border transfer arrangements.
 
 ## 6. Data Retention
 
-Account data is retained while the account is active. When an account-deletion request is accepted, access ends immediately and removal continues in the background. If something must be resolved before deletion can begin, the request is not accepted and access continues. The deletion status shows what is pending and which steps need help from the service operator. Some records and connected-service authorizations may remain until that work is finished; deletion does not yet cover every stored record or confirm that every connected service has revoked its authorization. Contact us for deletion status; removal of all copies and external records within 30 days is not guaranteed.
+Account data is retained while the account is active. Account-deletion requests receive an immediate acceptance response once the required checks pass, and account access is revoked at acceptance. Local data removal continues in the background. If a request needs more preparation or another issue must be resolved first, access continues until the request can be accepted.
 
-Audit and billing records, and some records of Machine actions and access restrictions, are retained for integrity and safety. Audit records are not automatically deleted, including after 90 days. These records remain subject to access controls and the applicable retention arrangements. Organization-owned resources remain owned by the organization when a person's account is deleted.
+NyxID requests revocation of connected-provider authorizations where the provider supports it. This can also revoke your other connections that share the same provider authorization. The deletion status shows pending work and unsupported or unconfirmed revocations to the service operator. Some records and authorizations can remain until the operator resolves that work. Deletion does not yet cover every stored record or establish that every external copy has been removed. Contact us for the status of your request.
 
-NyxID tracks analytics deletion requests and any further steps needed from the provider or service operator. Accepting a request does not prove that the provider has completed deletion. Backup retention, legally required evidence retention, other external-provider deletion and actual fulfillment timelines require operator confirmation. Contact us for the status and applicable retention details of a deletion request.
+Audit and billing records, and some records of Machine actions, settlements and access restrictions, are retained for integrity and safety. These records are not automatically purged and have no fixed retention period in the software. They remain subject to access controls and the operator's retention arrangements. Organization-owned resources remain owned by the organization when a person's account is deleted.
+
+NyxID tracks analytics deletion requests and any further steps needed from the provider or service operator. Accepting a request does not prove that the provider has completed deletion. Account deletion does not purge operator-managed backups; those backups expire under the operator's retention policy. Contact us for the applicable retention details.
 
 ## 7. Your Rights
 
@@ -107,7 +108,7 @@ You have the right to:
 - Disable push notifications through your device settings
 - Opt out of non-essential communications
 
-Available settings cover profile changes, account deletion and connection/approval controls. For access/export and other requests, contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). Personal-data exports are requested through that contact channel; they are not currently available as a self-service download.
+Available settings cover profile changes, account deletion and connection/approval controls. For access/export and other requests, contact [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun). Access and export requests are fulfilled manually after identity verification. We provide the expected timeline when we acknowledge the request. Personal-data exports are not currently available as a self-service download.
 
 ## 8. Cookies, Local Storage, and Telemetry
 
