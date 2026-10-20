@@ -1006,7 +1006,8 @@ jobs:
         working-directory: base-coverage
         run: >-
           python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test
-          cargo llvm-cov nextest --package nyxid --profile ci --no-report
+          cargo llvm-cov nextest --package nyxid --profile ci
+          --config-file "$GITHUB_WORKSPACE/.config/nextest.toml" --no-report
       - name: Test MongoDB diagnostics
         if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
         continue-on-error: true
