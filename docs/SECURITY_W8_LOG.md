@@ -245,3 +245,10 @@
 - Reused C's shared backend all-target both-KMS Clippy with -D warnings; drivers 14811/14815 began 22:05:52/53 after CORE freeze 22:05:04, exit 0 at 22:10:20 (4m30s), zero diagnostics. Required shared build env, nofile 60000.
 - Command: cargo clippy --locked -p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings. Persistent log: ~/Library/Caches/nyxid-coreb/gates/post-reboot-shared-rerun-clippy.log.
 - rustfmt/check and git diff --check pass. One shared test no-run follows; post-reboot helper execution remains pending that binary. PM requested this small prerequisite commit immediately after Clippy.
+
+## W8 hosted follow-up — platform fixture signing key (2026-10-20)
+
+- Changed only the five PM-approved platform fixture arguments to use their AppState audit_chain_hmac_key. The fixture previously signed one chain with literal test keys and later used the AppState key; production tail-HMAC validation correctly rejected it. No production verification change.
+- Reused C's both-KMS test compiler 16831 (start 22:10:43, executable nyxid_server-483e6416bf263370 mtime 22:20:43). Direct services::platform_entry_admin_service::tests:: --nocapture --test-threads=2 on own Mongo 50012: 13 passed / 0 failed / 0 ignored, 44.33s, including the hosted rotation failure.
+- Gate: C's all-target both-KMS backend Clippy --no-deps -- -D warnings, drivers 14811/14815 at 22:05:52/53, exit 0 at 22:10:20; after these five source edits. Exact shared build env/nofile 60000; no B Cargo queued.
+- Focused rustfmt/check and git diff --check pass. Evidence: ~/Library/Caches/nyxid-w8-core/evidence/post-reboot-platform-fixtures.log. Teardown, GuardOptions, FIFO and index/performance changes remain separate slices.

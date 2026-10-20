@@ -352,7 +352,7 @@ fn actual_native_x_conversion_uses_billed_verification_with_original_transport_p
             let controls = super::super::platform_bot_runtime_control_service::update(
                 &fixture.state.db,
                 &actor,
-                b"native-runtime-test-audit",
+                fixture.state.audit_chain_hmac_key.as_slice(),
                 &profile.id,
                 &change,
                 &NoPublic,
@@ -642,7 +642,7 @@ pub(crate) async fn enable_personal_as(
         &super::super::audit_service::AuditActor::from_auth_user(
             &crate::test_utils::test_auth_user(actor),
         ),
-        b"native-review-test-audit",
+        state.audit_chain_hmac_key.as_slice(),
         &profile.id,
         &change,
         &NoPublic,
@@ -1687,7 +1687,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
         let paused = update(
             &fixture.state.db,
             &actor,
-            b"native-review-test-audit",
+            fixture.state.audit_chain_hmac_key.as_slice(),
             &profile.id,
             &change,
             &NoPublic,
@@ -1739,7 +1739,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
                 update(
                     &fixture.state.db,
                     &actor,
-                    b"native-review-test-audit",
+                    fixture.state.audit_chain_hmac_key.as_slice(),
                     &profile.id,
                     &change,
                     &NoPublic
@@ -1758,7 +1758,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
         let resumed = update(
             &fixture.state.db,
             &actor,
-            b"native-review-test-audit",
+            fixture.state.audit_chain_hmac_key.as_slice(),
             &profile.id,
             &change,
             &NoPublic,
