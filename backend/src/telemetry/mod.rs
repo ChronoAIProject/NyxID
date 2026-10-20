@@ -12,6 +12,8 @@
 
 pub mod client_event;
 pub mod context;
+#[cfg(test)]
+mod dispatch_inventory_tests;
 pub mod erasure;
 pub mod sampling;
 pub mod schema;
@@ -583,6 +585,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn api_key_events_use_authenticated_human_owner_permission() {
+        use crate::{models::api_key::ApiKey, services::analytics_consent_service as consent};
+        let (tx, mut rx) = mpsc::channel(4);
+        let client = test_client_with_sender(tx).await;
+        let db = client.db.as_ref().unwrap();
+        let owner = "11111111-2222-4333-8444-555555555555";
+        let key_id = uuid::Uuid::new_v4().to_string();
+        let key: ApiKey = mongodb::bson::from_document(mongodb::bson::doc! {
+            "_id": &key_id, "user_id": owner, "name": "consent-test", "key_prefix": "test",
+            "key_hash": "not-a-secret", "scopes": "proxy", "is_active": true,
+            "created_at": mongodb::bson::DateTime::now()
+        })
+        .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(auth.user_id.to_string(), owner);
+        let ctx = TelemetryContext {
+            analytics_allowed: true,
+            analytics_account: Some(owner.into()),
+            ..Default::default()
+        };
+        consent::set(db, owner, false).await.unwrap();
+        // Even a consenting account whose UUID equals the key ID cannot grant
+        // permission to the key's human owner.
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                &key_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        consent::set(db, &key_id, true).await.unwrap();
+        emit_event(
+            Some(&client),
+            &auth.user_id.to_string(),
+            Some(&key_id),
+            &ctx,
+            TelemetryEvent::AuthLoggedOut,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+        consent::set(db, &key_id, false).await.unwrap();
+        consent::set(db, owner, true).await.unwrap();
+        emit_event(
+            Some(&client),
+            &auth.user_id.to_string(),
+            Some(&key_id),
+            &ctx,
+            TelemetryEvent::AuthLoggedOut,
+        )
+        .await;
+        let job = rx
+            .try_recv()
+            .expect("owner's permission admits the API-key event");
+        assert_eq!(job.distinct_id, owner);
+        assert_eq!(job.properties["surface"], "agent");
+        assert_eq!(
+            job.properties["api_key_id"],
+            sampling::hash_short_id(&key_id)
+        );
+        let denied = TelemetryContext {
+            analytics_allowed: false,
+            ..ctx
+        };
+        emit_event(
+            Some(&client),
+            &auth.user_id.to_string(),
+            Some(&key_id),
+            &denied,
+            TelemetryEvent::AuthLoggedOut,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+    }
+
     /// The worker is held by not starting it until after withdrawal/regrant.
     /// A valid sentinel follows rejected work so receipt proves the drain passed
     /// every earlier item without timing sleeps or an assumed empty network.
@@ -614,17 +693,38 @@ mod tests {
             .await
             .unwrap()
             .database(db.name());
+        let mut first_state = Box::new(crate::test_utils::test_app_state(db.clone()));
+        first_state.telemetry = Some(Arc::new(client.clone()));
+        let (remote_tx, remote_rx) = mpsc::channel(1);
+        let mut second_state = Box::new(crate::test_utils::test_app_state(remote_db.clone()));
+        second_state.telemetry = Some(Arc::new(TelemetryClient {
+            db: Some(remote_db.clone()),
+            tx: remote_tx,
+            admission_slots: Arc::new(Semaphore::new(CHANNEL_CAPACITY)),
+            ..client.clone()
+        }));
         let allowed = |actor: &str| TelemetryContext {
             analytics_allowed: true,
             analytics_account: Some(actor.into()),
             ..Default::default()
         };
         let admitted_revision = consent::read(db, actor).await.unwrap().revision;
-        client
+        first_state
+            .telemetry
+            .as_ref()
+            .unwrap()
             .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
             .await;
-        consent::set(&remote_db, actor, false).await.unwrap();
-        consent::set(&remote_db, actor, true).await.unwrap();
+        second_state
+            .telemetry
+            .as_ref()
+            .unwrap()
+            .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
+            .await;
+        consent::set(&second_state.db, actor, false).await.unwrap();
+        consent::set(&second_state.db, actor, true).await.unwrap();
+        drop(first_state);
+        drop(second_state);
         // A delayed client request must not obtain a new revision at server
         // admission after withdrawal/regrant has already happened.
         client
@@ -688,11 +788,12 @@ mod tests {
                 None,
             )
             .await;
+        let unknown = uuid::Uuid::new_v4().to_string();
         client
             .track(
-                &uuid::Uuid::new_v4().to_string(),
+                &unknown,
                 TelemetryEvent::AuthLoggedOut,
-                &allowed(actor),
+                &allowed(&unknown),
                 None,
             )
             .await;
@@ -847,6 +948,16 @@ mod tests {
         drop(unavailable);
         let db = db.clone();
         drop(client);
+        // Both replicas admitted work before the acknowledged withdrawal. Each
+        // independently drains against the same authoritative account revision.
+        drain_loop(
+            remote_rx,
+            Client::new(),
+            "test-dsn".into(),
+            host.clone(),
+            Some(remote_db),
+        )
+        .await;
         drain_loop(rx, Client::new(), "test-dsn".into(), host, Some(db)).await;
         let capture = received.try_recv().expect("exactly one permitted capture");
         assert_eq!(capture["event"], "key.created");

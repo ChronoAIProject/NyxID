@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createAnalyticsConsentState } from './analyticsConsentState';
 import { createAnalyticsRelay, saveAnalyticsPermission, type RelayRequest } from './analyticsRelay';
+import { createConsentPersistence } from './consentPersistence';
 const event = { name: 'mobile.deep_link_opened', props: { link_type: 'challenge' } } as const;
 const permission = { account_id: 'a', enabled: true, revision: 'r1' };
 function setup() {
@@ -58,6 +59,52 @@ test('mutation binds account intent and late response cannot apply positive stat
   const request: RelayRequest = async (_path, options) => { body = options?.body; state.bindAccount('b'); return { ...permission, account_id: 'b' } as any; };
   await assert.rejects(saveAnalyticsPermission('a', true, request, state.getSnapshot, state.setConsent));
   assert.deepEqual(body, { account_id: 'a', enabled: true });
+  assert.equal(state.getSnapshot().enabled, false);
+});
+test('Settings account toggle waits for acknowledgement and persists enable and withdrawal', async () => {
+  const { state } = setup();
+  const persist = createConsentPersistence(state, async () => {});
+  let saved = Promise.resolve();
+  const setLocal = (enabled: boolean) => { state.setConsent(enabled); saved = persist(); };
+  for (const enabled of [true, false]) {
+    let release!: (value: any) => void;
+    let options: Parameters<RelayRequest>[1];
+    const request: RelayRequest = async (_path, value) => {
+      options = value;
+      return new Promise((resolve) => { release = resolve; });
+    };
+    const pending = saveAnalyticsPermission('a', enabled, request, state.getSnapshot, setLocal);
+    assert.equal(state.getSnapshot().enabled, false, 'local collection stops while saving');
+    assert.equal(options?.method, 'PUT');
+    assert.equal(options?.expectedAccountId, 'a');
+    assert.deepEqual(options?.body, { account_id: 'a', enabled });
+    // Settings persists the local denial asynchronously. A successful device
+    // write may finish before the account API does; that is the same intent.
+    await saved;
+    options?.authorityGuard?.();
+    release({ ...permission, enabled });
+    await pending;
+    await saved;
+    assert.equal(state.getSnapshot().enabled, enabled);
+    const restored = createAnalyticsConsentState();
+    restored.bindAccount('a'); restored.hydrate(state.serialize());
+    assert.equal(restored.getSnapshot().enabled, enabled);
+  }
+});
+test('failed Settings withdrawal stops this device and reports the failure', async () => {
+  const { state } = setup();
+  await assert.rejects(saveAnalyticsPermission('a', false, async () => { throw new Error('offline'); },
+    state.getSnapshot, state.setConsent), /offline/);
+  assert.equal(state.getSnapshot().enabled, false);
+});
+test('a newer local choice fences a delayed Settings opt-in acknowledgement', async () => {
+  const { state } = setup();
+  let release!: (value: any) => void;
+  const request: RelayRequest = async () => new Promise((resolve) => { release = resolve; });
+  const pending = saveAnalyticsPermission('a', true, request, state.getSnapshot, state.setConsent);
+  state.setConsent(false);
+  release(permission);
+  await assert.rejects(pending, /analytics_authority_changed/);
   assert.equal(state.getSnapshot().enabled, false);
 });
 test('mobile choices restore only for their account; late hydration preserves local withdrawal', () => {

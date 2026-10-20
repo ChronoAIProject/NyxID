@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useConsentStore } from '@/stores/consent-store';
 
 export interface AnalyticsConsent {
+  policy_version?: string | null;
   enabled: boolean;
   changed_at: string | null;
   revision: string;
@@ -33,11 +34,18 @@ export async function saveAnalyticsConsent(accountId: string, enabled: boolean):
   // durable acknowledgement and cannot inherit a previous account's preference.
   useConsentStore.getState().setConsent(false);
   disableTelemetry();
+  const revision = useConsentStore.getState().revision;
+  const intentGuard = () => {
+    guard();
+    if (useConsentStore.getState().revision !== revision) {
+      throw new Error('Analytics choice changed; try again from the current settings.');
+    }
+  };
   const result = await apiClient<AnalyticsConsent>('/users/me/preferences/analytics', {
-    method: 'PUT', body: { account_id: accountId, enabled }, authorityGuard: guard,
+    method: 'PUT', body: { account_id: accountId, enabled }, authorityGuard: intentGuard,
   });
-  guard();
-  if (result.account_id !== accountId) throw new Error('Account preference response did not match.');
+  intentGuard();
+  if (result.account_id !== accountId || result.enabled !== enabled) throw new Error('Account preference response did not match.');
   useConsentStore.getState().setConsent(enabled && result.enabled);
   return result;
 }

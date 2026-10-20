@@ -8,8 +8,8 @@ export function createAnalyticsConsentState() {
   const failures = new Set<string>();
   let state: ConsentSnapshot = { ...OFF, accountId: null, revision: 0, isHydrated: false, persistenceError: false };
   const listeners = new Set<() => void>();
-  const update = (patch: Partial<ConsentSnapshot>) => {
-    state = { ...state, ...patch, revision: state.revision + 1 };
+  const update = (patch: Partial<ConsentSnapshot>, invalidate = true) => {
+    state = { ...state, ...patch, revision: state.revision + (invalidate ? 1 : 0) };
     listeners.forEach((listener) => listener());
   };
   return {
@@ -53,7 +53,10 @@ export function createAnalyticsConsentState() {
         // longer selected. Retain this denial across rebind and late hydration.
         choices = { ...choices, [intent.accountId]: { enabled: false, asked: true } };
       }
-      if (state.accountId === intent.accountId) update({ ...choices[intent.accountId], persistenceError: !success });
+      // A successful write acknowledges the same choice. It must not revoke
+      // a pending account toggle's authority merely because storage finished.
+      // Failure changes authority to denial and still invalidates pending work.
+      if (state.accountId === intent.accountId) update({ ...choices[intent.accountId], persistenceError: !success }, !success);
     },
     serialize: () => JSON.stringify({ version: 2, choices }),
   };
