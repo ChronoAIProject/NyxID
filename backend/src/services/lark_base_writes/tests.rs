@@ -1,10 +1,10 @@
 use super::*;
-use mongodb::bson;
 use crate::{
     models::lark_base_write_photo::{COLLECTION_NAME as PHOTOS, LarkBaseWritePhoto},
     test_utils::connect_transaction_test_database,
 };
 use chrono::Duration;
+use mongodb::bson;
 
 fn make_proposal(hashes: &[&str]) -> (LarkBaseWrite, Vec<String>) {
     let now = Utc::now();
