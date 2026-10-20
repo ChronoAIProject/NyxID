@@ -261,6 +261,94 @@ credential provisioning.
 
 ---
 
+## Managed Lark Base writes
+
+`bitable_fields_list` is an ordinary read-only GET with `page_size` and
+`page_token`. Owner chat keys with `assistant:attachment-writes` enabled also
+see `bitable_record_create_with_attachments`. It accepts a closed JSON object:
+
+```json
+{
+  "app_token": "your_base_token",
+  "table_id": "your_table_id",
+  "fields": {"Amount": 12.34, "Type": "Meal"},
+  "attachments": {"Receipt": ["attachment UUID"]}
+}
+```
+
+The path parameters are tool arguments; the canonical request body contains
+only `fields` and `attachments`. The managed operation's reserved path is
+`POST /nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records`.
+NyxID executes it internally and refuses forwarding that path to a provider.
+The capability requires matching, published SYSTEM catalog contracts for the
+composite, field listing, media upload and ordinary record create. Instance
+specs and edited contracts cannot grant it. The composite is excluded from
+`/mcp/config`, exact descriptors, non-chat, durable and async execution. Ordinary
+`bitable_record_create` retains its existing contract and discovery behavior.
+
+One owner decision binds the connection, method, reserved path, canonical JSON
+body and all four operation contracts. The server reads at most five field
+pages of 100 fields, checks attachment fields and existing select options, then
+uploads each file sequentially before one record create. Child requests use the
+selected user/tenant credential and recheck the live turn, key, operation scopes,
+connection, credential generation and published contracts at every send. Errors
+identify the outbound service slug and connection label so the owner can fix
+that principal's scopes and Base access. Provider error prose is not exposed.
+
+The attachment map and each array must be nonempty, with at most ten distinct
+attachment IDs and 50 MiB total (20 MiB per file). Every declared photo from a
+channel message must exist and be included. Repeated content is refused even
+when it has different upload IDs. A closed Receipt-Bot operation scope can
+require the four value fields and photo field; see
+[operation scopes](AGENT_OPERATION_SCOPES.md). Unscoped callers and external
+Base writers retain their own responsibility for complete receipt values.
+
+A stable content identity and transactional per-photo reservations protect the
+same owner/Base/table for 400 days. An identical successful call returns
+`{record_id, already_created: true}`; changed fields or attachment assignments
+require updating the existing record. Overlapping batches cannot create a
+second row containing a reserved photo. A proven pre-dispatch or definite
+provider refusal releases that attempt's reservations. An unknown outcome
+retains them: check the Base manually; NyxID never automatically resends a
+record create after its persisted dispatch barrier. Uploaded file tokens remain
+bound to the connection principal and contract versions. The whole active
+operation has a 180-second deadline.
+
+### Managed Base-write rollout
+
+Upgrade every replica and drain pre-release workers before enabling either
+`assistant:channel-media` or `assistant:attachment-writes`. Both flags default
+off. Media on/writes off enables inbound photos; media off/writes on permits
+browser attachments; both on enables the full flow. Upgrade all replicas before
+saving scopes using `JsonShape::Number`; old readers fail closed on that shape.
+
+For rollback, disable both flags first. Keep the new binaries running: accepted
+inbound work drains and the flag-independent 15-second maintenance sweep settles
+stale writes in bounded batches of 100. Uploading attempts past their deadline
+become `failed_pre_dispatch` and release only that attempt's reservations;
+dispatching attempts become `uncertain` and retain their barrier. A stale worker
+cannot resume sending. Terminal ledger rows and retained reservations expire
+together after 400 days; active rows are never retention-deleted. Owner purge
+removes both collections.
+
+The write completion gate is the following MongoDB query, which must return 0:
+
+```javascript
+db.lark_base_writes.countDocuments({state: {$in: ["uploading", "dispatching"]}})
+```
+
+Also complete the inbound drain gates and early queue conversion procedure in
+[uploads](chat/10-uploads.md#channel-rollout-and-rollback). Queued media is eligible for
+normal forced conversion after six days; orphan turns require the existing
+75-second stale heartbeat. Completion depends on bounded sweep progress, not a
+fixed waiting period. Before deploying the old release, remove the two new
+attachment operation rows (`bitable_media_upload` and
+`bitable_record_create_with_attachments`) for all four Lark/Feishu slugs, and
+remove saved scopes using `Number`, as described in the inbound rollback
+procedure. Old executors' rejection of the reserved JSON route is a provider
+compatibility assumption requiring the live preflight; it is never the local
+security boundary of this release.
+
 ## Recommended Operator Flow
 
 1. Register the downstream service with its `base_url`.
