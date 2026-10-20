@@ -374,3 +374,11 @@
 - Both authenticated October 20 noble-security native indexes still offer linux/source and linux-libc-dev 6.8.0-147.147; checksums and sizes match pinned InRelease.
 - Record last hosted package/finding counts per component and distinguish new native fixtures; machine header findings remain blocking until the exact documentation-path ruling and final-image proof.
 - CLI ownership/manifest coordination is pending for a shell-free node entrypoint and a non-DBus container feature; no A/D CLI files edited.
+
+## W7 CI82 follow-up — exact approved kernel-header records
+- Allow only headers plus changelog.Debian.gz/copyright at their exact linux-libc-dev paths and parent directories; require regular non-ELF/non-executable content and bind every byte.
+- Activate 309 exact records per machine component/architecture (2,472 total): 298 HIGH + 11 CRITICAL; owner recorded, issued 2026-10-20, exclusive expiry 2026-11-19.
+- Authenticated native package replay: amd64 988 headers + 2 docs; arm64 960 headers + 2 docs; unchanged signed-security candidate 6.8.0-147.147.
+- Real retained report + exact native package proof replay: 8/8 component/arch mappings remove only 309 approved identities; 8/8 injected new-CVE cases remain blocking. This is not a rebuilt final-image scan.
+- Local: eligibility 15/15, vulnerabilities 14/14, scanner workflows 7/7, packaging workflows 17/17, SBOM workflows 3/3, runtime 9/9; diff whitespace passes.
+- PR: Security Scans / Scanner Policy; Artifact Packaging Policy; every workstation Shipped Image Identity matrix cell. Private hosted builds rerun final proof through the operator gate.

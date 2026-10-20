@@ -1,8 +1,9 @@
 # Image vulnerability remediation review (CI head 82e7605bb)
 
 The final-image Trivy reports from CI 39412744887 remain the evidence source.
-Raw HIGH/CRITICAL/UNKNOWN findings stay visible and blocking. No disposition or
-severity change is introduced by this report.
+Raw HIGH/CRITICAL/UNKNOWN findings stay visible. Only the exact reviewed
+header-package findings below can pass the executable eligibility gate; every
+other finding remains blocking and no severity changes.
 
 Machine workstation images retain `build-essential` and its header closure for
 C/C++ compile/link/run, make, npm native installs and pip local wheels. The
@@ -75,9 +76,9 @@ SHA-256 hashes were checked against the catalog-bound signed InRelease.
 | --- | --- | --- | --- |
 | node-agent | 91 / 91 | 60 | Five-package exported rootfs: 0; completed image awaits the CLI DBus/entrypoint change |
 | mcp-demo | 78 / 78 | 46 | Static scratch fixture: no OS packages, 11 embedded Rust packages, 0 blocking findings |
-| nyxid-node-machine | 740 / 737 | 309, all linux-libc-dev | Toolchain retained; no dispositions activated |
-| machine-node-only | 553 / 552 | 309, all linux-libc-dev | Toolchain retained; no dispositions activated |
-| machine-hosted-desktop / machine-hosted | No retained complete report | New scan required | gh upgraded to 2.102.0; toolchain retained |
+| nyxid-node-machine | 740 / 737 | 309, all linux-libc-dev | Toolchain retained; 309 exact header records per architecture |
+| machine-node-only | 553 / 552 | 309, all linux-libc-dev | Toolchain retained; 309 exact header records per architecture |
+| machine-hosted-desktop / machine-hosted | No retained complete report | New scan required | 309 exact header records per component/architecture; final scan must match; gh 2.102.0 retained |
 | nyxid-machine-updater | 0 / 0 | 0 | Existing static scratch image unchanged |
 
 The native scans use the existing local vulnerability database. Only new PR
@@ -128,16 +129,42 @@ or resolved advisory identities require removing stale records.
 
 The host inspects a stopped immutable image's real dpkg file list and exported
 filesystem; no image-provided program is trusted to assert absence of code.
-Only non-executable, non-ELF header files under `/usr/include` currently pass.
-The existing two documentation files therefore prevent activating the current
-header findings until the PM clarifies that precise path allowance. All active
-records are validated for expiry even when unrelated images are being scanned.
+Only regular, non-executable, non-ELF header files under `/usr/include` pass,
+with exactly two additional regular files allowed:
+`/usr/share/doc/linux-libc-dev/changelog.Debian.gz` and
+`/usr/share/doc/linux-libc-dev/copyright`, plus their parent directories.
+These documents must also be non-ELF and non-executable, and their bytes are
+bound by the package-content digest. Any other document, non-header path,
+symlink, executable or ELF object fails. Tests cover each forbidden case and
+changed document bytes. All active records are validated for expiry even when
+unrelated images are being scanned.
 Publication replay checks the same policy and reruns the filesystem proof;
 missing/changed evidence cannot become an unsigned summary-based pass.
 
-There are no active image dispositions in this commit. The following inventory
-is the **prior Debian-base baseline**, retained to identify every finding that
-the minimal service images must remove. It contains 104 no-fixed-version
+The policy records 309 exact CVE identities per component and architecture for
+`nyxid-node-machine`, `machine-node-only`, `machine-hosted-desktop` and
+`machine-hosted`: **2,472 records**, all source `linux` / binary `linux-libc-dev`
+`6.8.0-147.147`. Each group contains 298 HIGH and 11 CRITICAL findings. Records
+name the affected kernel operation and reviewer, were issued 2026-10-20, and
+expire exclusively on 2026-11-19 (30 days). The retained node-machine and
+node-only reports have identical reviewed header-advisory content on both
+architectures. Hosted records cover that same exact package/advisory set;
+there is no retained complete hosted report, so they cannot establish that its
+next final scan has no additional findings.
+
+Both native security indexes still offer only `6.8.0-147.147`. Authenticated
+package archives were unpacked with dpkg in disposable scratch proof images;
+the actual collector inspected the dpkg file lists and every payload file.
+The amd64 payload has 988 headers plus the two documents; arm64 has 960 headers
+plus the two documents. Their bound content digests are respectively
+`064b54e8c4e2881d001e0ae80600f1c7d303732f58228e9eb41c4c347ad7b7e2`
+and `3011922dc65fff693e9b67bfacdc14d3502931f5cb83ada6fd9868413ecdeac5`.
+This proves the exact package payloads; each rebuilt final workstation image
+must independently pass the same filesystem, source, candidate and advisory
+checks in PR CI or the private hosted operator path.
+
+The following inventory is the **prior Debian-base baseline**, retained to
+identify every finding that the minimal service images must remove. It contains 104 no-fixed-version
 component/package/version/CVE combinations (60 node-agent, 44 MCP demo), repeated
 across both architectures, plus the demo's two fixed liblzma5 findings.
 
@@ -183,6 +210,7 @@ across both architectures, plus the demo's two fixed liblzma5 findings.
   explicit, verified scope and rationale; a blanket source-package exception
   would lose that distinction.
 
-This document is a review inventory, not an active exception list. The image
-gate continues to fail on these findings until fixes or approved exact
-records with executable negative tests are implemented.
+These Debian baseline findings have no dispositions. The image gate continues
+to fail on them until the minimal service images remove their packages. Active
+header-only records live in `security/image-dispositions.json`, with all of the
+exact eligibility checks above.

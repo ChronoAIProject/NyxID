@@ -111,11 +111,26 @@ class Dispositions(unittest.TestCase):
             self.data['dispositions'][0]['binary_package']=package;self.write()
             with self.subTest(package=package),self.assertRaises(ValueError):self.apply()
 
-    def test_negative_proof_rejects_elf_executable_and_every_non_header_path(self):
+    def test_negative_proof_allows_only_headers_and_the_two_reviewed_documents(self):
         policy.header_member('/usr/include/linux/fixture.h',0o644,b'#define FIXTURE 1\n')
+        for path in policy.HEADER_DOCUMENTS:
+            policy.header_member(path,0o644,b'license/changelog')
         for path,mode,data in (('/usr/include/linux/fixture.h',0o755,b'script'),('/usr/include/linux/fixture.h',0o644,b'\x7fELFbinary'),
-                               ('/usr/bin/fixture',0o644,b'content'),('/usr/share/doc/linux-libc-dev/copyright',0o644,b'license')):
+                               ('/usr/bin/fixture',0o644,b'content'),('/usr/share/doc/linux-libc-dev/README',0o644,b'license'),
+                               ('/usr/share/doc/linux-libc-dev/copyright/extra',0o644,b'license'),
+                               ('/usr/include/../bin/fixture',0o644,b'content'),
+                               ('/usr/share/doc/other/copyright',0o644,b'license')):
             with self.subTest(path=path,mode=mode),self.assertRaises(ValueError):policy.header_member(path,mode,data)
+        for path in policy.HEADER_DOCUMENTS:
+            for mode,data in ((0o755,b'script'),(0o644,b'\x7fELFbinary')):
+                with self.subTest(path=path,mode=mode),self.assertRaises(ValueError):policy.header_member(path,mode,data)
+
+    def test_only_header_and_exact_document_parent_directories_are_allowed(self):
+        for path in (*policy.HEADER_DIRECTORIES,'/usr/include/linux'):
+            policy.header_directory(path)
+        for path in ('/usr/bin','/usr/share/doc/other','/usr/share/doc/linux-libc-dev/extra',
+                     '/usr/include/../bin','/usr//include/linux'):
+            with self.subTest(path=path),self.assertRaises(ValueError):policy.header_directory(path)
 
     def test_host_tar_inspection_checks_the_final_dpkg_file_list_and_actual_bytes(self):
         import io, tarfile
@@ -124,8 +139,12 @@ class Dispositions(unittest.TestCase):
         def container(image): yield 'container', {'Id': image}
         def run_case(mode):
             path='/usr/include/linux/fixture.h'
-            names=['/usr','/usr/include','/usr/include/linux',path]
+            directories=['/usr','/usr/include','/usr/include/linux', '/usr/share',
+                         '/usr/share/doc','/usr/share/doc/linux-libc-dev']
+            names=[*directories,path,*sorted(policy.HEADER_DOCUMENTS)]
             if mode=='outside':names.append('/usr/bin/bad')
+            if mode=='other-doc':names.append('/usr/share/doc/linux-libc-dev/README')
+            if mode=='other-dir':names.append('/usr/share/doc/linux-libc-dev/extra')
             def extract(container,path,destination):
                 destination.mkdir()
                 (destination/'linux-libc-dev:amd64.list').write_text('\n'.join(names)+'\n')
@@ -134,10 +153,15 @@ class Dispositions(unittest.TestCase):
                 for name in names:
                     if mode=='missing' and name==path:continue
                     member=tarfile.TarInfo(name.lstrip('/'))
-                    if name in names[:3]:member.type=tarfile.DIRTYPE;member.mode=0o755;archive.addfile(member)
+                    if name in directories or (mode=='other-dir' and name.endswith('/extra')):
+                        member.type=tarfile.DIRTYPE;member.mode=0o755;archive.addfile(member)
                     else:
-                        content=b'\x7fELFcode' if mode=='elf' else b'#define FIXTURE 1\n'
+                        content=b'\x7fELFcode' if mode=='elf' or (mode=='doc-elf' and name in policy.HEADER_DOCUMENTS) else b'#define FIXTURE 1\n'
+                        if mode=='doc-changed' and name in policy.HEADER_DOCUMENTS:content+=b'changed'
+                        if mode=='doc-link' and name in policy.HEADER_DOCUMENTS:
+                            member.type=tarfile.SYMTYPE;member.linkname='/usr/include/linux/fixture.h';archive.addfile(member);continue
                         member.mode=0o755 if mode=='executable' else 0o644
+                        if mode=='doc-executable' and name in policy.HEADER_DOCUMENTS:member.mode=0o755
                         member.size=len(content);archive.addfile(member,io.BytesIO(content))
             class Child:
                 def __init__(self,*args,**kwargs):self.stdout=io.BytesIO(data.getvalue())
@@ -149,7 +173,8 @@ class Dispositions(unittest.TestCase):
                     patch.object(policy,'copy',extract),patch.object(policy.subprocess,'Popen',Child):
                 return policy.header_content('sha256:'+'1'*64,'amd64',Path(temporary))
         self.assertRegex(run_case('valid'),r'^[0-9a-f]{64}$')
-        for mode in ('outside','missing','elf','executable'):
+        self.assertNotEqual(run_case('valid'),run_case('doc-changed'))
+        for mode in ('outside','missing','elf','executable','other-doc','other-dir','doc-elf','doc-executable','doc-link'):
             with self.subTest(mode=mode),self.assertRaises(ValueError):run_case(mode)
 
     def test_unknown_kind_missing_evidence_and_duplicate_records_fail(self):
@@ -163,5 +188,23 @@ class Dispositions(unittest.TestCase):
                 if mode=='missing-evidence':policy.apply(self.report,self.findings,'sha256:'+'1'*64,'machine-node-only','linux/amd64',None,root=self.root)
                 else:self.apply()
             self.data=original
+
+class RecordedPolicy(unittest.TestCase):
+    def test_active_records_bind_the_same_reviewed_package_and_advisories_per_architecture(self):
+        # Counts/dates are a review report, not an update prohibition. Every
+        # refreshed policy must still bind consistent exact native packages.
+        data = policy.load()
+        groups = {}
+        for item in data['dispositions']:
+            groups.setdefault((item['component'], item['architecture']), []).append(item)
+        for architecture in ('amd64', 'arm64'):
+            native = [records for (component, arch), records in groups.items() if arch == architecture]
+            if not native:
+                continue
+            projection = lambda records: sorted((r['cve'], r['finding_sha256'], r['version'],
+                r['source_version'], r['content_sha256'], r['catalog_sha256']) for r in records)
+            for records in native:
+                self.assertEqual(projection(records), projection(native[0]))
+                self.assertEqual(len({r['content_sha256'] for r in records}), 1)
 
 if __name__=='__main__':unittest.main()

@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import lzma
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import tarfile
@@ -23,6 +23,10 @@ FIELDS = {'cve', 'source_package', 'binary_package', 'version', 'component', 'ar
           'issued_on', 'expires_on', 'owner', 'rationale', 'affected_api', 'negative_test',
           'content_sha256', 'catalog_sha256', 'finding_sha256', 'source_version'}
 HEX = re.compile('[0-9a-f]{64}')
+HEADER_DOCUMENTS = frozenset({'/usr/share/doc/linux-libc-dev/changelog.Debian.gz',
+                              '/usr/share/doc/linux-libc-dev/copyright'})
+HEADER_DIRECTORIES = frozenset({'/usr', '/usr/include', '/usr/share', '/usr/share/doc',
+                                '/usr/share/doc/linux-libc-dev'})
 
 
 def canonical(value): return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
@@ -59,11 +63,17 @@ def load(root=ROOT, today=None):
 
 
 def header_member(name, mode, content):
-    # The current strict ruling permits header files only. Documentation paths
-    # require an explicit PM clarification before any real record can activate.
-    if not name.startswith('/usr/include/') or mode & 0o111 or content.startswith(b'\x7fELF'):
+    if name != PurePosixPath(name).as_posix() or '..' in PurePosixPath(name).parts or \
+            not (name.startswith('/usr/include/') or name in HEADER_DOCUMENTS) or \
+            mode & 0o111 or content.startswith(b'\x7fELF'):
         raise ValueError('linux-libc-dev negative proof found non-header path, executable or ELF: ' + name)
     return dict(path=name, mode=mode & 0o777, sha256=digest(content))
+
+
+def header_directory(name):
+    if name != PurePosixPath(name).as_posix() or '..' in PurePosixPath(name).parts or \
+            not (name in HEADER_DIRECTORIES or name.startswith('/usr/include/')):
+        raise ValueError('linux-libc-dev negative proof found non-header directory: ' + name)
 
 
 def header_content(image_id, architecture, output):
@@ -86,7 +96,9 @@ def header_content(image_id, architecture, output):
                         if name not in expected: continue
                         if name in found: raise ValueError('duplicate final package path')
                         found.add(name)
-                        if member.isdir(): continue
+                        if member.isdir():
+                            header_directory(name)
+                            continue
                         if not member.isfile() or member.size > 8 * 1024 * 1024:
                             raise ValueError('linked, special or oversized package file')
                         content = archive.extractfile(member).read(member.size + 1)
