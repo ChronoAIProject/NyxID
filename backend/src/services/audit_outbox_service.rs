@@ -28,7 +28,7 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
-    fn safe_projection(&self) -> SafeAuditEvent {
+    pub(super) fn safe_projection(&self) -> SafeAuditEvent {
         SafeAuditEvent {
             operation_id: self.operation_id.clone(),
             stage: self.stage.clone(),
@@ -50,7 +50,7 @@ fn uuid(value: &str) -> AppResult<()> {
     }
 }
 
-fn validate(event: &SafeAuditEvent) -> AppResult<()> {
+pub(super) fn validate(event: &SafeAuditEvent) -> AppResult<()> {
     uuid(&event.operation_id)?;
     if let AuditPrincipal::Person { id } = &event.principal {
         uuid(id)?;

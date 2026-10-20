@@ -1,10 +1,15 @@
 //! Audit configuration is deliberately local-first. Absence of a witness is
 //! an explicit unwitnessed deployment, never an implicit production-ready sink.
+mod configuration;
 mod diagnostics;
 mod evidence;
+pub mod intent;
 mod monitor;
+mod relay;
+pub use configuration::ConfiguredWitness;
 pub use diagnostics::{AuditDiagnostics, AuditRuntime};
 pub use monitor::spawn_monitor;
+pub use relay::WitnessRelay;
 pub mod policy;
 pub(super) use evidence::load_in_session;
 pub use evidence::{ExternalAuditEvidence, external_evidence};
@@ -17,6 +22,7 @@ pub struct AuditConfig {
     /// Required only when adopting a preexisting v1 chain for the first time.
     pub cutover_drained: bool,
     pub admission: policy::AdmissionLimits,
+    pub witness: Option<ConfiguredWitness>,
 }
 
 impl AuditConfig {
@@ -31,6 +37,14 @@ impl AuditConfig {
             optional("AUDIT_CUTOVER_DRAINED")?.as_deref(),
         )?;
         config.admission = policy::AdmissionLimits::from_env()?;
+        config.witness = ConfiguredWitness::from_env()?;
+        if let Some(witness) = &config.witness {
+            let enrolled = witness.pin.enrollment.body.chain_id;
+            if config.chain_id.is_some_and(|id| id != enrolled) {
+                return Err("Audit chain identity does not match the administrator witness pin");
+            }
+            config.chain_id = Some(enrolled);
+        }
         Ok(config)
     }
 
@@ -51,6 +65,7 @@ impl AuditConfig {
             chain_id,
             cutover_drained,
             admission: policy::AdmissionLimits::default(),
+            witness: None,
         })
     }
 }

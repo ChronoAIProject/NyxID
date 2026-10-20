@@ -86,6 +86,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>(crate::models::audit_effect_intent::COLLECTION_NAME)
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"terminal_stage": 1, "terminal_order": 1})
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -101,6 +108,18 @@ pub async fn load(db: &Database) -> AppResult<AuditState> {
 /// Old writers must be drained by the operator: an old binary cannot be made
 /// to honor a new Mongo head/CAS protocol by publishing a heartbeat.
 pub async fn initialize(db: &Database, key: &[u8], config: &AuditConfig) -> AppResult<AuditState> {
+    if let Some(witness) = &config.witness {
+        witness
+            .pin
+            .validate()
+            .map_err(|_| AppError::AuditIntegrityConflict)?;
+        if config
+            .chain_id
+            .is_some_and(|id| id != witness.pin.enrollment.body.chain_id)
+        {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+    }
     ensure_indexes(db).await?;
     for attempt in 0..8 {
         match initialize_once(db, key, config).await {
@@ -129,7 +148,7 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         .read_concern(mongodb::options::ReadConcern::snapshot())
         .write_concern(majority())
         .await?;
-    if let Some(state) = db
+    if let Some(mut state) = db
         .collection::<AuditState>(STATE)
         .find_one(doc! {"singleton": true})
         .session(&mut session)
@@ -137,7 +156,22 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
     {
         validate_identity(&state, config)?;
         validate_tail(db, &mut session, key, &state).await?;
-        session.abort_transaction().await?;
+        if config.witness.is_some() && !state.witness_enrolled {
+            // The protected pin proves enrollment, not live contact. Persist
+            // policy activation before serving, even if the first observation
+            // is unreachable. Removing settings must not downgrade admission.
+            db.collection::<AuditState>(STATE)
+                .update_one(
+                    doc! {"_id": &state.id},
+                    doc! {"$set": {"witness_enrolled": true}},
+                )
+                .session(&mut session)
+                .await?;
+            commit(&mut session).await?;
+            state.witness_enrolled = true;
+        } else {
+            session.abort_transaction().await?;
+        }
         return Ok(state);
     }
     let tail = db
@@ -167,7 +201,16 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         None => (0, chain::GENESIS_PREV_HASH.to_owned()),
     };
     let state = AuditState {
-        id: config.chain_id.unwrap_or_else(Uuid::new_v4).to_string(),
+        id: config
+            .chain_id
+            .or_else(|| {
+                config
+                    .witness
+                    .as_ref()
+                    .map(|w| w.pin.enrollment.body.chain_id)
+            })
+            .unwrap_or_else(Uuid::new_v4)
+            .to_string(),
         singleton: true,
         protocol: PROTOCOL,
         key_version: 1,
@@ -177,7 +220,7 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
         pending_count: 0,
         witnessed_seq: 0,
         witnessed_hash: chain::GENESIS_PREV_HASH.to_owned(),
-        witness_enrolled: false,
+        witness_enrolled: config.witness.is_some(),
         oldest_pending_at: None,
         adopted_at: Utc::now(),
         adopted_v1_seq: seq,
@@ -217,6 +260,10 @@ fn validate_identity(state: &AuditState, config: &AuditConfig) -> AppResult<()> 
         || state.protocol != PROTOCOL
         || state.key_version != 1
         || config.chain_id.is_some_and(|id| id.to_string() != state.id)
+        || config
+            .witness
+            .as_ref()
+            .is_some_and(|w| w.pin.enrollment.body.chain_id.to_string() != state.id)
     {
         return Err(AppError::AuditIntegrityConflict);
     }

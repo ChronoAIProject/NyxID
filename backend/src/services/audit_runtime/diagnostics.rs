@@ -1,6 +1,6 @@
 //! Safe operator projection of C2 admission. Live contact exists only in this
 //! process; persisted enrollment/cursors never initialize it.
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -12,7 +12,8 @@ use super::policy::{AdmissionFacts, AdmissionLimits, TierAdmission, WitnessState
 
 pub struct AuditRuntime {
     pub limits: AdmissionLimits,
-    configured: bool,
+    pub(super) configured: bool,
+    pub(super) effects: OnceLock<super::intent::EffectContext>,
     pub(super) monitor: Mutex<super::monitor::MonitorState>,
     session: Mutex<WitnessSession>,
 }
@@ -50,12 +51,68 @@ pub struct AuditDiagnostics {
 }
 
 impl AuditRuntime {
+    pub async fn restore_incident(
+        &self,
+        db: &mongodb::Database,
+        chain: &str,
+    ) -> crate::errors::AppResult<()> {
+        use crate::models::audit_witness_delivery::{COLLECTION_NAME, WitnessDivergence};
+        if let Some(saved) = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(bson::doc! {"_id": chain})
+            .projection(bson::doc! {"divergence": 1})
+            .await?
+            && let Some(value) = saved
+                .get("divergence")
+                .filter(|v| !matches!(v, bson::Bson::Null))
+        {
+            let detail =
+                bson::from_bson::<WitnessDivergence>(value.clone()).unwrap_or(WitnessDivergence {
+                    seq: 0,
+                    local_hash: String::new(),
+                    witnessed_hash: String::new(),
+                });
+            self.mark_divergence(&detail);
+        }
+        Ok(())
+    }
+
+    pub(super) fn accept_contact(&self, contact: VerifiedContact) {
+        let mut session = self.session.lock().expect("audit witness session poisoned");
+        if session.divergence.is_none() {
+            session.contact = Some(contact);
+        }
+    }
+
+    pub(super) fn mark_divergence(
+        &self,
+        detail: &crate::models::audit_witness_delivery::WitnessDivergence,
+    ) {
+        let mut session = self.session.lock().expect("audit witness session poisoned");
+        if session.divergence.is_none() {
+            let prefix = |hash: &str| {
+                if nyxid::services::audit_witness::valid_hash(hash) {
+                    hash[..12].to_owned()
+                } else {
+                    String::new()
+                }
+            };
+            session.divergence = Some(AuditDivergence {
+                seq: detail.seq.max(0),
+                local_hash_prefix: prefix(&detail.local_hash),
+                witnessed_hash_prefix: prefix(&detail.witnessed_hash),
+            });
+        }
+        session.contact = None;
+    }
+
     /// Configuration/enrollment never implies contact. Starting while the
     /// witness is down retains unknown freshness until a live observation.
     pub fn new(limits: AdmissionLimits, configured: bool) -> Self {
         Self {
             limits,
             configured,
+            effects: OnceLock::new(),
             monitor: Mutex::new(Default::default()),
             session: Mutex::new(WitnessSession::default()),
         }
@@ -75,6 +132,31 @@ impl AuditRuntime {
             return Err(crate::errors::AppError::AuditIntegrityConflict);
         }
         let (state, now) = super::load_in_session(db, session).await?;
+        if tier != super::policy::AuditTier::Narrowing
+            && (self.configured || state.as_ref().is_some_and(|s| s.witness_enrolled))
+        {
+            use crate::models::audit_witness_delivery::{COLLECTION_NAME, WitnessDivergence};
+            if let Some(state) = &state
+                && let Some(progress) = db
+                    .collection::<bson::Document>(COLLECTION_NAME)
+                    .find_one(bson::doc! {"_id": &state.id})
+                    .projection(bson::doc! {"divergence": 1})
+                    .session(&mut *session)
+                    .await?
+                && let Some(value) = progress
+                    .get("divergence")
+                    .filter(|value| !matches!(value, bson::Bson::Null))
+            {
+                let detail = bson::from_bson::<WitnessDivergence>(value.clone()).unwrap_or(
+                    WitnessDivergence {
+                        seq: 0,
+                        local_hash: String::new(),
+                        witnessed_hash: String::new(),
+                    },
+                );
+                self.mark_divergence(&detail);
+            }
+        }
         let report = self.diagnostics(state.as_ref(), now);
         let facts = AdmissionFacts {
             configured_or_enrolled: self.configured
@@ -169,6 +251,43 @@ mod tests {
     use super::*;
     use crate::services::audit_state_service;
     use mongodb::bson::doc;
+
+    #[tokio::test]
+    async fn audit_c2_shared_incident_fences_standard_without_blocking_narrowing_or_bounded_availability()
+     {
+        use super::super::policy::AuditTier;
+        let db =
+            crate::test_utils::connect_transaction_test_database("audit_c2_shared_incident").await;
+        let state = audit_state_service::load(&db).await.unwrap();
+        // Admission reads only the incident projection. Corrupt unrelated
+        // witness-cursor data cannot turn a witness incident into auth lockout.
+        db.collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &state.id, "divergence": "malformed incident", "receipt": "damaged cursor"}).await.unwrap();
+        let runtime = AuditRuntime::new(Default::default(), true);
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        runtime
+            .require_new_in_session(&db, &mut session, AuditTier::Narrowing, 1)
+            .await
+            .unwrap();
+        runtime
+            .require_new_in_session(&db, &mut session, AuditTier::Availability, 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            runtime
+                .require_new_in_session(&db, &mut session, AuditTier::Standard, 1)
+                .await,
+            Err(crate::errors::AppError::AuditWitnessDiverged)
+        ));
+        assert!(matches!(
+            runtime
+                .require_new_in_session(&db, &mut session, AuditTier::Effect, 1)
+                .await,
+            Err(crate::errors::AppError::AuditWitnessDiverged)
+        ));
+        session.abort_transaction().await.unwrap();
+    }
 
     #[tokio::test]
     async fn audit_c2_restart_unreachable_preserves_pending_age_without_replaying_receipts() {

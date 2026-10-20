@@ -109,3 +109,14 @@
 - Other two failures require test-fixture ownership: oracle lifecycle rejecting validator must use collMod on preinitialized audit_log; service-history unique index must use the existing audit_log_seq_unique name. Exact functions/hunks sent to PM; untouched pending approval.
 - `cargo clippy -p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings` queued. `--no-deps` scopes linting to backend targets per PM direction while A fixes CLI WIP; no backend lint suppression.
 - Scoped rustfmt/whitespace and inventory structure checks passed: 58 workflows, 57 pending/1 tested. Configured relay/intent implementation and expanded tests remain uncommitted/in validation; W8-4 is incomplete.
+
+## W8-4e — configured relay and intent/claim foundation (2026-10-20)
+
+- Added explicit HTTPS/pin-file/token-file configuration, administrator pin custody and zeroizing append credentials; no witness network dependency during startup.
+- Validated enrollment activates persistent admission before first contact; removing settings after an unreachable first boot cannot downgrade to unwitnessed. It never renews freshness or advances the witnessed cursor.
+- Relay authenticates history from the retained pin and a live challenge, checks canonical local links, persists conditional batches before send, recovers lost acknowledgments and atomically releases only observed reservations. Quiet chains renew contact.
+- Intent/business mutation and two capacity slots share the caller transaction. Terminal/uncertain outcomes consume reserved capacity; independent operation/attempt/process claims yield one-shot permits; recovery never resends ambiguous work.
+- Dispatch refresh cannot stale its own predecessor with unrelated delivery. Corrupt/signed-inconsistent claim replies latch an incident before any permit; shared incidents preserve Narrowing and bounded Availability.
+- Added live-replica/signed-provider tests for rollback, deletion, response loss, replay, restart/pause, terminal capacity, local C1 dispatch, configuration removal and corrupt claims. Latest `audit_` build is running; no new pass claim yet.
+- First backend-only all-target Clippy exited 101 on unused re-exports and a test Default initializer; fixed without suppression. Rerun uses `-p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings`, queued behind the shared target lock per PM policy.
+- Scoped rustfmt, whitespace and 58-row/tier checks pass; workflow statuses remain 57 pending/1 tested. Readiness/telemetry and two fixture ownership requests remain pending; W8-4 is incomplete.
