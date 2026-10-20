@@ -30,6 +30,12 @@ Running the arm64 archive in the exact pinned bookworm-slim base fails before
 main with a missing libdbus-1.so.3 loader error. The Dockerfile comment claiming
 that the encrypted file backend removes the loader dependency is incorrect;
 unconditional keyring Secret Service features introduce it even when unused.
+Reconstructing the current final Dockerfile stage, including its real snapshot
+CA installation, around that CI arm64 executable reproduces exit 127 from
+`docker run --rm --entrypoint /usr/local/bin/nyxid ... --version`.
+`dpkg-query` confirms ca-certificates is installed and libdbus-1-3 is absent.
+This reconstructs the final stage; it is not the historical image digest that
+the runner did not retain.
 
 The new exporter retains exactly the following runtime packages, their dpkg
 status/control records and actual file lists. A native arm64 disposable replay
@@ -60,6 +66,24 @@ behind the prior 60 Debian findings are excluded. The CLI container feature
 must also remove the DBus link; adding the old CLI to this rootfs would fail.
 This service image is distinct from the machine workstation images, whose
 owner shell/build/browser workloads retain their documented tools.
+
+The signed October 20 noble-security native package indexes for both amd64 and
+arm64 still offer linux-libc-dev/source linux `6.8.0-147.147`. Their sizes and
+SHA-256 hashes were checked against the catalog-bound signed InRelease.
+
+| Component | Last hosted inventory (amd64 / arm64 OS packages) | Blocking findings per architecture | New native evidence |
+| --- | --- | --- | --- |
+| node-agent | 91 / 91 | 60 | Five-package exported rootfs: 0; completed image awaits the CLI DBus/entrypoint change |
+| mcp-demo | 78 / 78 | 46 | Static scratch fixture: no OS packages, 11 embedded Rust packages, 0 blocking findings |
+| nyxid-node-machine | 740 / 737 | 309, all linux-libc-dev | Toolchain retained; no dispositions activated |
+| machine-node-only | 553 / 552 | 309, all linux-libc-dev | Toolchain retained; no dispositions activated |
+| machine-hosted-desktop / machine-hosted | No retained complete report | New scan required | gh upgraded to 2.102.0; toolchain retained |
+| nyxid-machine-updater | 0 / 0 | 0 | Existing static scratch image unchanged |
+
+The native scans use the existing local vulnerability database. Only new PR
+jobs can establish current counts for both rebuilt final architectures. The
+workstation package counts above describe the last hosted image, not a newly
+built final inventory.
 
 The mandatory final identity checker also executes the actual immutable image.
 Every CLI image must run `nyxid --version`, `nyxid --help`, and its configured

@@ -367,3 +367,10 @@
 - Probes have no network/registration input, read-only roots, dropped capabilities and resource/time bounds; cleanup removes probe containers and anonymous volumes.
 - Local: runtime 9/9, shell dispatcher 3/3, packaging 17/17, operator wrapper 19/19, build/APT policy 45/45; native scratch MCP passed this exact read-only/network-less runtime gate.
 - PR: Artifact Packaging Policy; Backend Credential Packaging and all Shipped Image Identity matrix cells; publication/operator checks inherit the same gate.
+
+## W7 CI82 follow-up — measured runtime and security-candidate evidence
+- Reconstructed current node final stage with the real CI arm64 executable and actual snapshot CA install; docker nyxid --version exits 127 for missing libdbus-1.so.3; dpkg confirms the library package is absent.
+- Native MCP scratch fixture passes the committed runtime gate; rootfs and MCP scans report 0 blocking findings with the existing local database, without claiming full new hosted-image evidence.
+- Both authenticated October 20 noble-security native indexes still offer linux/source and linux-libc-dev 6.8.0-147.147; checksums and sizes match pinned InRelease.
+- Record last hosted package/finding counts per component and distinguish new native fixtures; machine header findings remain blocking until the exact documentation-path ruling and final-image proof.
+- CLI ownership/manifest coordination is pending for a shell-free node entrypoint and a non-DBus container feature; no A/D CLI files edited.
