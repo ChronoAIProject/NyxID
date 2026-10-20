@@ -9,7 +9,7 @@
       "backend/src/services/assistant_service_execution_ssh_session_tests.rs": "b47cc442855ed4002a520b759558c3af74563d71dc1d4d3b7cbff02cf819399b",
       "backend/src/services/remote_machine_bootstrap_verifier.rs": "4e42819ce69bb34592b52ea15be7136092363fdada9333e6d3cb796d53e1ed8f",
       "backend/src/services/ssh_service.rs": "224f597c84cf6914bf33d3c0768f50eb3cb4ea372e39c0cb8ab364d135b2c065",
-      "backend/src/test_utils.rs": "75d27bd49cdf1d0b6666e8f8b48e7a3e7ebd3b66aa2d7d3095102e3d481b4d65",
+      "backend/src/test_utils.rs": "6a99bbdd3e860eba144bdfd9eccd08c73747e7d6328d293ca375531634fa23ee",
       "cli/src/commands/update_attestation.rs": "e1d0e0f2d41c07eb2c18e60c52c634d71b252d6ee3fe861b1132846b50090c79",
       "cli/src/node/ssh_algos.rs": "1d249511944efea95d48c5065bf0b8c77d15d7fddc45b0c4628bafe4e6e285ec",
       "cli/src/node/ssh_node_exec.rs": "56fa572cdde62bf0bb6c6b4f5baeaa3a6c32374dd1a03bf42571d01326e43f79",

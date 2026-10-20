@@ -205,4 +205,5 @@
 - Urgent zip 9 compatibility commit 53a10a33c maps invalid names to existing sanitized errors and adds a non-UTF-8 regression per site; locked workspace check with both KMS features passed (exit 0).
 - Clean committed-source audit: all 12 roots passed (8 npm/3 Cargo/1 pnpm); 7 raw findings retained, 7 exact reviewed, 0 unresolved; bundle 1 map/3691 modules/0 forbidden.
 - Full committed-history/tree scan: 215 history + 111 tree findings, 326 reviewed, 0 unresolved; build-input policy passed.
+- Reviewed B's committed AuditRuntime test setup (8771d5f5e); refreshed only test_utils.rs reference hash, with unchanged private-operation surface and passing Linux/KMS RSA graph checks.
 - Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Mobile, CLI Test, Rust Features/KMS and Artifact Packaging.
