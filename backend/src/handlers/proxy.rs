@@ -4151,6 +4151,16 @@ async fn execute_resolved_proxy_inner<'a>(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    billing_ctx = billing_ctx.with_assistant_provenance(
+        auth_user.assistant_turn_fence.is_some(),
+        nyxagent_admission,
+        crate::services::llm_usage_service::model_execution(
+            crate::services::llm_usage_service::inference_service(&target.service),
+            request.method().as_str(),
+            requested_path,
+            is_ws_candidate,
+        ),
+    );
     // Only the signed gateway handler can install this extension. Ordinary
     // request headers/body cannot author Machine billing identity.
     billing_ctx.machine_usage = request

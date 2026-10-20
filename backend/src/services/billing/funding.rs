@@ -1889,6 +1889,7 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             actor_user_id: owner_id.to_string(),
             api_key_id: None,
+            assistant_source: None,
             user_service_id: None,
             service_id: Some(service_id.to_string()),
             service_slug: Some(service_slug.to_string()),

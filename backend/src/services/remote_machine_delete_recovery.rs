@@ -115,7 +115,9 @@ fn known_storage_obligations_covered(
     machine: &ManagedMachine,
     progress: &DeleteRecoveryProgress,
 ) -> bool {
-    let volume_matches = match &progress.volume {
+    // Legacy cloud/provisioner hints are retained for investigation only.
+    // Historical external handles cannot create a new external-proof gate.
+    match &progress.volume {
         Some(v) => {
             v.reclaim_policy == "Delete"
                 && machine.native_pv_name.as_deref() == Some(v.pv_name.as_str())
@@ -127,10 +129,7 @@ fn known_storage_obligations_covered(
                 && machine.native_pv_uid.is_none()
                 && machine.native_pv_reclaim_policy.is_none()
         }
-    };
-    // Legacy cloud/provisioner hints are retained for investigation only.
-    // Historical external handles cannot create a new external-proof gate.
-    volume_matches
+    }
 }
 
 use super::{
