@@ -655,6 +655,7 @@ impl UpdateServiceRequest {
             clear_skill_refs: false,
             recommended_skill_refs: None,
             developer_app_ids: None,
+            introspection_client_ids: None,
             custom_user_agent: None,
             default_request_headers: None,
             token_exchange_config: None,
