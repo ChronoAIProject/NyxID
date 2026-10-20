@@ -6,6 +6,7 @@ use wiremock::{
 };
 
 const ID: &str = "00000000-0000-4000-8000-000000000001";
+const GRANT_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000002";
 const SENTINEL: &str = "test-secret-sentinel-never-print";
 
 async fn run(server: &MockServer, args: &[&str]) -> std::process::Output {
@@ -543,12 +544,446 @@ async fn grant_issue_json_prints_batch_id_and_each_activation_state() {
     .await;
     assert!(out.status.success(), "{}", output_text(&out));
     let value = json(&out);
+    let request_id = value["request_id"].as_str().unwrap();
+    assert_eq!(
+        uuid::Uuid::parse_str(request_id).unwrap().get_version_num(),
+        4
+    );
+    let receipt: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(receipt, json!({"request_id": request_id}));
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["request_id"], request_id);
+    assert_eq!(body["amount"], "5");
+    assert!(body.get("amount_credits").is_none());
     assert_eq!(value["batch_id"], "test-batch");
     assert_eq!(
         value["recipients"][1]["activation_state"],
         "pending_activation"
     );
     assert!(!output_text(&out).contains(SENTINEL));
+}
+
+fn grant_issue_args(amount: &str) -> Vec<&str> {
+    vec![
+        "admin",
+        "credits",
+        "grant",
+        "issue",
+        "--user",
+        ID,
+        "--all-services",
+        "--amount",
+        amount,
+        "--reason",
+        "Pilot",
+        "--yes",
+    ]
+}
+
+fn grant_diagnostics(out: &std::process::Output) -> Vec<Value> {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("{}", output_text(out))))
+        .collect()
+}
+
+#[tokio::test]
+async fn grant_issue_reuses_request_id_and_exact_decimal_body_across_invocations() {
+    let server = MockServer::start().await;
+    let expected = json!({
+        "request_id": GRANT_REQUEST_ID,
+        "amount": "0.123456789012",
+        "target_kind": "selected_users",
+        "target_user_ids": [ID],
+        "all_services": true,
+        "service_refs": [],
+        "expires_at": null,
+        "reason": "Pilot"
+    });
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/credits/grants"))
+        .and(wiremock::matchers::body_json(expected))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"batch_id": ID})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut args = grant_issue_args("0.123456789012");
+    args.extend(["--request-id", GRANT_REQUEST_ID, "--output", "json"]);
+    for _ in 0..2 {
+        let out = run(&server, &args).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        assert_eq!(json(&out)["request_id"], GRANT_REQUEST_ID);
+        assert_eq!(json(&out)["batch_id"], ID);
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].body, requests[1].body);
+}
+
+#[tokio::test]
+async fn grant_request_id_is_available_before_the_server_finishes_in_both_formats() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    for format in ["table", "json"] {
+        let server = MockServer::start().await;
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = dispatched.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/credits/grants"))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "request_id": GRANT_REQUEST_ID
+            })))
+            .respond_with(move |_: &Request| {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"batch_id": ID}))
+                    .set_delay(std::time::Duration::from_secs(30))
+            })
+            .mount(&server)
+            .await;
+        let home = tempfile::tempdir().unwrap();
+        let mut args = grant_issue_args("5");
+        args.extend(["--request-id", GRANT_REQUEST_ID, "--output", format]);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nyxid"))
+            .args(args)
+            .env("NYXID_URL", server.uri())
+            .env("NYXID_ACCESS_TOKEN", SENTINEL)
+            .env("HOME", home.path())
+            .env("CI", "1")
+            .env("NYXID_NO_UPDATE_CHECK", "1")
+            .env("NYXID_SKIP_SKILL_SELF_HEAL", "1")
+            .env_remove("NYXID_PROFILE")
+            .env_remove("NYXID_API_KEY")
+            .env_remove("NYXID_TELEMETRY_DSN")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut diagnostics = BufReader::new(child.stderr.take().unwrap()).lines();
+        let receipt =
+            tokio::time::timeout(std::time::Duration::from_secs(10), diagnostics.next_line())
+                .await
+                .expect("request ID must be available while the POST is pending")
+                .unwrap()
+                .unwrap();
+        if format == "json" {
+            let receipt: Value = serde_json::from_str(&receipt).unwrap();
+            assert_eq!(receipt, json!({"request_id": GRANT_REQUEST_ID}));
+        } else {
+            assert_eq!(receipt, format!("Request ID: {GRANT_REQUEST_ID}"));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !dispatched.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("grant POST should be in flight with the printed request ID");
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn grant_issue_help_and_table_conflict_explain_retry_identity() {
+    let server = MockServer::start().await;
+    let help = run(&server, &["admin", "credits", "grant", "issue", "--help"]).await;
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for text in [
+        "--request-id <UUID>",
+        "12 fractional digits",
+        "identical settings",
+        "Without --request-id, each invocation creates a new batch",
+        "all server replicas at NyxID 0.72.0 or later (credit allocations, #1950)",
+    ] {
+        assert!(help.contains(text), "Missing {text}: {help}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    Mock::given(method("POST"))
+        .and(path("/api/v1/admin/credits/grants"))
+        .respond_with(ResponseTemplate::new(409).set_body_string("different settings"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut args = grant_issue_args("5");
+    args.extend(["--request-id", GRANT_REQUEST_ID]);
+    let out = run(&server, &args).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8_lossy(&out.stderr);
+    let expected = format!(
+        "Request ID: {GRANT_REQUEST_ID}\n\
+         Error: /admin/credits/grants failed (HTTP 409 Conflict): different settings\n\
+         409 Conflict: a reused request ID requires identical settings. \
+         Retry with --request-id {GRANT_REQUEST_ID} and identical settings using the same account \
+         to return the original batch. A new invocation without --request-id creates a new batch.\n"
+    );
+    assert_eq!(error, expected);
+}
+
+#[tokio::test]
+async fn grant_issue_errors_preserve_request_id_http_details_and_retry_guidance() {
+    for (status, response) in [
+        (
+            409,
+            "This allocation request was already used with different settings",
+        ),
+        (503, "unavailable"),
+        (200, "invalid JSON after issuance"),
+        (200, "[]"),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/credits/grants"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut args = grant_issue_args("5");
+        args.extend(["--request-id", GRANT_REQUEST_ID, "--output", "json"]);
+        let out = run(&server, &args).await;
+        assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+        assert!(out.stdout.is_empty());
+        let diagnostics = grant_diagnostics(&out);
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0], json!({"request_id": GRANT_REQUEST_ID}));
+        let error = &diagnostics[1];
+        assert_eq!(error["request_id"], GRANT_REQUEST_ID);
+        let guidance = error["retry_guidance"].as_str().unwrap();
+        let prefix = if status == 409 {
+            "409 Conflict: a reused request ID requires identical settings. "
+        } else {
+            ""
+        };
+        let expected_guidance = format!(
+            "{prefix}Retry with --request-id {GRANT_REQUEST_ID} and identical settings using the same account \
+             to return the original batch. A new invocation without --request-id creates a new batch."
+        );
+        assert_eq!(guidance, expected_guidance);
+        if status != 200 {
+            assert_eq!(error["error"], "http_error");
+            assert_eq!(error["status"], status);
+            assert_eq!(error["path"], "/admin/credits/grants");
+            assert_eq!(error["body"], response);
+        }
+        if status == 409 {
+            assert!(guidance.contains("409 Conflict"));
+            assert!(guidance.contains("reused request ID requires identical settings"));
+        }
+        if response == "[]" {
+            assert_eq!(
+                error["message"],
+                format!(
+                    "Grant request {GRANT_REQUEST_ID}: Grant issuance returned a non-object response"
+                )
+            );
+        }
+        assert!(!output_text(&out).contains(SENTINEL));
+    }
+}
+
+#[tokio::test]
+async fn grant_issue_invalid_request_id_and_amount_are_local_binary_errors() {
+    let server = MockServer::start().await;
+    for amount in [
+        "0",
+        "-1",
+        "1000001",
+        "0.0000000000001",
+        "1.0000000000000",
+        "1e2",
+    ] {
+        let flag = format!("--amount={amount}");
+        let out = run(
+            &server,
+            &[
+                "admin",
+                "credits",
+                "grant",
+                "issue",
+                "--user",
+                ID,
+                "--all-services",
+                &flag,
+                "--reason",
+                "Pilot",
+                "--yes",
+                "--output",
+                "json",
+            ],
+        )
+        .await;
+        assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+        assert!(out.stdout.is_empty());
+    }
+    let mut args = grant_issue_args("5");
+    args.extend(["--request-id", "not-a-uuid", "--output", "json"]);
+    let out = run(&server, &args).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(output_text(&out).contains("--request-id must be a UUID"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn grant_issue_refreshes_proactively_and_replays_401_once_with_identical_body() {
+    for (proactive, final_status) in [(false, 200), (true, 200), (false, 401)] {
+        let server = MockServer::start().await;
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/api/v1/admin/credits/grants"))
+            .respond_with(move |_: &Request| {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 || final_status == 401 {
+                    ResponseTemplate::new(401)
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"batch_id": ID}))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let refreshes = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(move |_: &Request| {
+                let refresh = refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": format!("fresh-session-fixture-{refresh}"),
+                    "refresh_token": format!("rotated-refresh-fixture-{refresh}")
+                }))
+            })
+            .expect(if proactive { 2 } else { 1 })
+            .mount(&server)
+            .await;
+        let mut args = grant_issue_args("0.000000000001");
+        if proactive {
+            args.extend(["--request-id", GRANT_REQUEST_ID]);
+        }
+        let token = if proactive {
+            "eyJhbGciOiJub25lIn0.eyJleHAiOjF9.signature"
+        } else {
+            "stale-session-fixture"
+        };
+        let out = run_saved_session(&server, &args, token).await;
+        assert_eq!(
+            out.status.success(),
+            final_status == 200,
+            "{}",
+            output_text(&out)
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests[0].url.path().ends_with("/auth/refresh"), proactive);
+        let posts: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/credits/grants"))
+            .collect();
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].body, posts[1].body);
+        let initial_token = if proactive {
+            "Bearer fresh-session-fixture-0"
+        } else {
+            "Bearer stale-session-fixture"
+        };
+        let replay_token = if proactive {
+            "Bearer fresh-session-fixture-1"
+        } else {
+            "Bearer fresh-session-fixture-0"
+        };
+        assert_eq!(posts[0].headers["authorization"], initial_token);
+        assert_eq!(posts[1].headers["authorization"], replay_token);
+        let body: Value = serde_json::from_slice(&posts[0].body).unwrap();
+        let request_id = body["request_id"].as_str().unwrap();
+        uuid::Uuid::parse_str(request_id).unwrap();
+        assert_eq!(body["amount"], "0.000000000001");
+        assert!(body.get("amount_credits").is_none());
+        if proactive {
+            assert_eq!(request_id, GRANT_REQUEST_ID);
+        }
+        let diagnostics = grant_diagnostics(&out);
+        assert_eq!(diagnostics[0]["request_id"], request_id);
+        if final_status == 200 {
+            assert_eq!(json(&out)["request_id"], request_id);
+        } else {
+            assert_eq!(diagnostics[1]["request_id"], request_id);
+            assert_eq!(out.status.code(), Some(1));
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn grant_list_and_revoke_tables_show_exact_balances_limits_and_revoke_state() {
+    let server = MockServer::start().await;
+    let list: Value = serde_json::from_str(include_str!("fixtures/billing/grants.json")).unwrap();
+    let mut grant = list["grants"][0].clone();
+    grant
+        .as_object_mut()
+        .unwrap()
+        .remove("recipient_billing_enabled");
+    Mock::given(method("GET"))
+        .and(path("/api/v1/admin/credits/grants"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&list))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/admin/credits/grants/{ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&grant))
+        .expect(2)
+        .mount(&server)
+        .await;
+    for action in ["list", "revoke"] {
+        let mut args = vec!["admin", "credits", "grant", action];
+        if action == "revoke" {
+            args.push(ID);
+        }
+        let out = run(&server, &args).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        assert!(out.stdout.is_empty());
+        let table = String::from_utf8_lossy(&out.stderr);
+        for text in [
+            "Amount",
+            "Remaining",
+            "Reserved",
+            "Held",
+            "Reclaimed",
+            "Status",
+            "Activation",
+            "Revoke state",
+            "5.123456789012",
+            "4.123456789012",
+            "0.000000000001",
+            "0.000000000002",
+            "requested 2026-10-20T00:01:00Z",
+            "Service limits",
+            "Pilot ceiling",
+            "2.123456789012",
+        ] {
+            assert!(table.contains(text), "Missing {text}: {table}");
+        }
+        if action == "list" {
+            for text in ["Total: 2", "3.987654321098", "revoked", "complete"] {
+                assert!(table.contains(text), "Missing {text}: {table}");
+            }
+        }
+        args.extend(["--output", "json"]);
+        let out = run(&server, &args).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        assert_eq!(
+            json(&out),
+            if action == "list" {
+                list.clone()
+            } else {
+                grant.clone()
+            }
+        );
+    }
 }
 
 #[tokio::test]
@@ -1538,7 +1973,7 @@ async fn grant_list_pagination_exposes_total_and_rejects_invalid_bounds() {
 }
 
 #[tokio::test]
-async fn billing_service_and_grant_writes_do_not_refresh_or_replay_after_401() {
+async fn billing_service_and_grant_revoke_writes_do_not_refresh_or_replay_after_401() {
     let patch = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(patch.path(), r#"{"platform_billable":true}"#).unwrap();
     let verified = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
@@ -1582,21 +2017,7 @@ async fn billing_service_and_grant_writes_do_not_refresh_or_replay_after_401() {
             "--cache-read-price",
             "0",
         ],
-        vec![
-            "admin",
-            "credits",
-            "grant",
-            "issue",
-            "--user",
-            ID,
-            "--service",
-            ID,
-            "--amount",
-            "1",
-            "--reason",
-            "fixture",
-            "--yes",
-        ],
+        vec!["admin", "credits", "grant", "revoke", ID],
     ] {
         let server = MockServer::start().await;
         get(&server, &format!("/services/{ID}"), raw_service()).await;

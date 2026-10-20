@@ -271,11 +271,36 @@ Confirm the pilot's rollout separately and review every recipient's returned
 
 ```sh
 nyxid billing wallet --provision --profile pilot --output json
-nyxid admin credits grant issue --user "$PILOT_PERSON_UUID" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot" --profile billing-admin --output json
+nyxid admin credits grant issue --user "$PILOT_PERSON_UUID" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot" --profile billing-admin --output json > grant.json
 nyxid admin credits grant list --user "$PILOT_PERSON_UUID" --profile billing-admin --output json
 nyxid service update telnyx-platform --catalog-admin --platform-key-audience restricted --platform-key-allow "$PILOT_PERSON_UUID" --platform-key-enabled true --profile billing-admin --output json
 nyxid service add telnyx-platform --platform-key --profile pilot
 ```
+
+Grant amounts are exact decimal strings: greater than zero, at most 1,000,000
+credits, with up to twelve fractional digits. Integer `--amount 5` still works.
+Issuance requires confirmation or `--yes` and sends a generated UUID v4 request
+ID. The CLI prints it on stderr before the POST (as JSON in JSON mode) and
+includes `request_id` in JSON results and issuance errors. After an uncertain
+failure, rerun the identical command with `--request-id <printed UUID>` using
+the same admin account. This returns the original frozen batch; a new
+invocation without that flag creates a new batch. A different payload with
+the same request ID returns HTTP 409 naming that ID. Confirmation still applies
+on a retry.
+
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). The CLI sends `amount` and omits legacy
+`amount_credits`: older replicas ignore unknown exact-amount/request-ID fields
+but require the legacy amount, so this payload fails there instead of silently
+issuing an unprotected batch. Do not fall back to legacy requests during rollout.
+
+Grant list and revoke tables show exact balances, held and reclaimed credits,
+status, activation, revoke state and service limits; JSON retains the server
+response. With allocations enabled, revoke requests reclaim unused credits
+after held work finishes. A requested revoke on an active grant is pending;
+`complete` means the grant is revoked. Held includes reserved credits rather
+than adding another balance. Immediate revoke without the allocation capability
+refuses grants with in-flight holds.
 
 Personal wallet GETs also provision a missing wallet. With `--owner-id`, the
 wallet command always uses an owner-aware POST and provisions the selected
@@ -286,9 +311,11 @@ personal wallet for this walkthrough.
 Billing commands, catalog apply, proxy requests and MCP tools/calls check saved
 sessions before work and refresh expired tokens. Billing reads, catalog apply,
 MCP discovery and proxy GET/HEAD retain 401 refresh and replay. Idempotent wallet
-provisioning and top-up checkout POSTs also retain it; checkout reuses the same
-idempotency key. Billing configuration/grant writes, other proxy methods and MCP
-execution calls do not replay on 401. Explicit or environment credentials never
+provisioning, top-up checkout and grant issuance POSTs also retain it; checkout
+reuses the same idempotency key and issuance reuses its request ID and entire
+body. Billing configuration and grant revocation writes, other proxy methods
+and MCP execution calls do not replay on 401. Network and 5xx failures do not
+automatically retry grant issuance. Explicit or environment credentials never
 switch to a saved session for refresh.
 
 The next HTTP POST and MCP call each spend real Telnyx funds and NyxID credits.

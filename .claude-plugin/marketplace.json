@@ -18,7 +18,7 @@
     {
       "name": "nyxid-cli",
       "description": "CLI edition: NyxID skills for agents that drive the nyxid CLI or the authenticated Web API, plus the synchronized Aevatar platform skill family. For the hosted MCP connection, install the `nyxid` plugin.",
-      "version": "0.8.9",
+      "version": "0.8.10",
       "source": "./",
       "author": {
         "name": "ChronoAI"

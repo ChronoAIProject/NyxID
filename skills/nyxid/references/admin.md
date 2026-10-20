@@ -137,11 +137,26 @@ nyxid admin credits grant list --user "$PILOT_UUID"
 ```
 
 `set-managed` provides typed contract and three-price flags; see the billing
-reference before using it. `credits grant issue` requires a reason and explicit
-confirmation or `--yes`; each invocation creates a new batch. Ready, pending,
-and broken results use exits 0/2; server HTTP errors preserve status and body.
+reference before using it. `credits grant issue` accepts an exact decimal
+`--amount` greater than zero and at most 1,000,000, with up to twelve fractional
+digits, and requires a reason and confirmation or `--yes`. It generates a
+request UUID and prints it before sending; JSON results and issuance errors
+include `request_id`. Retry with that `--request-id`, identical settings and
+the same account to return the original batch. Omitting the flag creates a new
+batch. A conflicting reuse returns HTTP 409 naming the request ID. Issuance
+retains saved-session 401 refresh and one replay with the same body.
+
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). The CLI sends exact `amount` without legacy
+`amount_credits`, so older replicas reject the request rather than silently
+ignoring its retry ID. Ready, pending, and broken results use exits 0/2; server
+HTTP errors preserve status and body.
 
 Grant lists support `--page` and `--per-page` (1..=500), and include `total`.
+List and revoke tables show exact balances, held and reclaimed credits, status,
+activation, revoke state and service limits. Revoke can remain requested while
+held work finishes; `complete` means the grant is revoked. JSON is unchanged.
+
 `admin catalog apply` asks before disabling platform access or clearing a live
 service's owner allowlist. Non-interactive applies require
 `--allow-access-change`; `--dry-run` only warns. `catalog add --yes` does not

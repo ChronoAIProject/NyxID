@@ -19,10 +19,11 @@ stderr.
 Billing commands, catalog apply, proxy requests and MCP tools/calls check saved
 sessions before work and refresh expired tokens. Reads, including MCP discovery
 and proxy GET/HEAD, retain 401 refresh and replay. Billing configuration and
-grant writes, other proxy methods and MCP execution calls do not replay on 401.
-Catalog apply retains refresh and replay; wallet provisioning and checkout
-exceptions are described under [Fund a person](#fund-a-person). Explicit or
-environment credentials never switch to a saved session for refresh.
+grant revocation writes, other proxy methods and MCP execution calls do not
+replay on 401. Catalog apply retains refresh and replay. Grant issuance, wallet
+provisioning and checkout use the retry-safe POST behavior described under
+[Fund a person](#fund-a-person). Explicit or environment credentials never
+switch to a saved session for refresh.
 
 ## Inspect billing
 
@@ -140,7 +141,7 @@ or upstream behavior. Verify those independently before enabling access.
 nyxid billing wallet --owner-id "$OWNER_UUID" --output json
 nyxid billing wallet --provision --owner-id "$OWNER_UUID"
 nyxid billing topup --amount-credits 5 --open
-nyxid admin credits grant issue --user "$PILOT_UUID_OR_EMAIL" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot"
+nyxid admin credits grant issue --user "$PILOT_UUID_OR_EMAIL" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot" --output json > grant.json
 nyxid admin credits grant list --user "$PILOT_UUID_OR_EMAIL" --output json
 nyxid admin credits grant revoke "$GRANT_UUID"
 ```
@@ -152,16 +153,45 @@ and top-up checkout POSTs retain saved-session 401 refresh and one replay:
 provisioning is idempotent, and checkout reuses the same idempotency key in both
 `topup` and `verify-topup-flow`.
 
-Grants accept 1..=1,000,000 whole credits. Repeat `--service` for multiple
-catalog services or use `--all-services`. Optional `--expires-at` is an RFC3339
-instant. A nonblank `--reason` and confirmation (or `--yes`) are required. Issue
-creates a new batch on every successful invocation; it is not idempotent. Save
-the returned `batch_id` and check every recipient's `activation_state`. Pending
-activation grants are unspendable until their issuance is journaled. A grant
-does not provision a wallet/subscription or activate a person's billing rollout.
-Allowances and recurring schedules are outside this CLI surface.
+Grants accept exact decimal amounts greater than zero and at most 1,000,000
+credits, with up to twelve fractional digits; integer inputs still work.
+The CLI sends the canonical decimal string as `amount`. Repeat `--service`
+for multiple catalog services or use `--all-services`. Optional `--expires-at`
+is an RFC3339 instant. A nonblank `--reason` and confirmation (or `--yes`) are
+required, including on retries.
+
+Every issuance sends a request UUID, generated as UUID v4 unless supplied with
+`--request-id <UUID>`. Before the POST, the CLI prints this ID on stderr, as a
+JSON diagnostic in JSON mode. JSON success results and issuance errors also
+include `request_id`; stdout remains one JSON result object on success. Save
+the ID before retrying an uncertain outcome. Rerun the command with the same
+`--request-id`, identical settings and the same human account to return the
+original frozen batch. A new invocation without that flag creates a new batch.
+Reusing an ID with different settings returns HTTP 409 with the request ID and
+retry guidance. Saved sessions retain 401 refresh and a single replay of the
+identical issuance body, including its request ID. Network and 5xx failures
+are not automatically retried.
+
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). Older replicas ignore unknown `amount` and
+`request_id` fields. The CLI deliberately omits legacy `amount_credits`, which
+those replicas require, so they reject the request instead of silently issuing
+a batch without retry protection. There is no fallback to the legacy payload.
+
+Save the returned `batch_id` and check every recipient's `activation_state`.
+Pending activation grants are unspendable until their issuance is journaled.
+A grant does not provision a wallet/subscription or activate a person's billing
+rollout. Allowances and recurring schedules are outside this CLI surface.
 
 Grant lists expose `total` and accept `--page` and `--per-page` (1 through 500).
+List and revoke tables label exact amount, remaining, reserved, held, reclaimed,
+status, activation and revoke state, with a separate table for service limits.
+JSON list and revoke responses preserve the server's fields. With allocations
+enabled, revoke reclaims unused credits after held work finishes; an active
+grant with a requested revoke is still awaiting final reclaim. `complete` means
+the grant is revoked. Held includes reserved credits and any settlement hold;
+do not add it to reserved. Without the allocation capability, immediate revoke
+refuses grants with in-flight holds.
 
 ## Execute and correlate
 

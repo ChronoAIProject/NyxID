@@ -232,14 +232,24 @@ pub enum AdminCreditsCommands {
 
 #[derive(Subcommand)]
 pub enum CreditGrantCommands {
-    /// Issue a non-idempotent grant batch; asks for confirmation unless --yes
+    /// Issue a retry-safe grant batch; asks for confirmation unless --yes
+    #[command(after_help = concat!(
+        "Retry with the same --request-id, identical settings and the same account ",
+        "to return the original batch. ",
+        "Without --request-id, each invocation creates a new batch. ",
+        "Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later ",
+        "(credit allocations, #1950)."
+    ))]
     Issue {
         /// User UUID or exact email address
         #[arg(long)]
         user: String,
-        /// Whole credits (the grant endpoint accepts integer amounts)
-        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=1_000_000))]
-        amount: i64,
+        /// Exact credits: greater than 0, at most 1000000, up to 12 fractional digits
+        #[arg(long)]
+        amount: String,
+        /// Request UUID (default: new UUID v4); reuse with identical settings to retry
+        #[arg(long, value_name = "UUID")]
+        request_id: Option<String>,
         /// Catalog service slug or UUID (repeatable)
         #[arg(
             long,
