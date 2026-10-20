@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def workflows():
     return {name: load_unique((ROOT / '.github/workflows' / (name + '.yml')).read_text())
-            for name in ('ci', 'artifact-packaging', 'publish-images', 'release')}
+            for name in ('ci', 'artifact-packaging', 'publish-images', 'release', 'release-cache')}
 
 
 def require_gates(data):
@@ -113,11 +113,42 @@ def require_gates(data):
         if len(gates) != 1 or not stops or gates[0] >= stops[0] or steps[gates[0]].get('continue-on-error') or \
                 'if' in steps[gates[0]] or any(bypass in steps[gates[0]]['run'] for bypass in ('||', 'set +e')):
             raise ValueError('final identity gate must precede required publication output')
+    for workflow, job in (('release', 'build-local-artifacts'), ('release-cache', 'warm')):
+        steps = data[workflow]['jobs'][job]['steps']
+        installs = [index for index, step in enumerate(steps)
+                    if step.get('run') == 'sh scripts/install-release-dependencies.sh']
+        build = next(index for index, step in enumerate(steps) if step.get('name') == 'Build artifacts')
+        if len(installs) != 1 or installs[0] >= build or 'if' in steps[installs[0]] or \
+                steps[installs[0]].get('continue-on-error'):
+            raise ValueError('release/cache container tools must be snapshot-installed before building')
+    triggers = data['release-cache'].get('on', data['release-cache'].get(True))
+    for event in ('pull_request', 'push'):
+        for path in ('scripts/install-release-dependencies.sh', 'scripts/apt-snapshot-install.sh',
+                     'scripts/apt-snapshot-select.awk', 'scripts/apt-transport-ca.awk',
+                     'security/apt-snapshots.tsv', 'security/apt-transport-ca.pem', 'security/apt-transport-ca.tsv'):
+            if not any(fnmatch.fnmatchcase(path, pattern) for pattern in triggers[event]['paths']):
+                raise ValueError('release/cache dependency changes must select real container builds')
 
 
 class PackagingWorkflows(unittest.TestCase):
     def test_current_workflows_require_actual_packaging(self):
         require_gates(workflows())
+
+    def test_release_and_cache_require_container_prerequisites_and_pr_replay(self):
+        for workflow, job in (('release', 'build-local-artifacts'), ('release-cache', 'warm')):
+            for mutation in ('missing', 'conditional', 'late'):
+                data = workflows(); steps = data[workflow]['jobs'][job]['steps']
+                install = next(step for step in steps if step.get('run') == 'sh scripts/install-release-dependencies.sh')
+                if mutation == 'conditional': install['if'] = 'false'
+                else:
+                    steps.remove(install)
+                    if mutation == 'late': steps.append(install)
+                with self.subTest(workflow=workflow, mutation=mutation), self.assertRaises(ValueError):
+                    require_gates(data)
+        for event in ('pull_request', 'push'):
+            data = workflows(); triggers = data['release-cache'].get('on', data['release-cache'].get(True))
+            triggers[event]['paths'].remove('scripts/install-release-dependencies.sh')
+            with self.subTest(event=event), self.assertRaises(ValueError): require_gates(data)
 
     def test_old_apple_runner_bare_container_git_and_missing_sdk_check_rejected(self):
         for mutation in ('runner', 'git', 'sdk'):

@@ -23,6 +23,10 @@ on:
       - "scripts/guard-dist-cargo.py"
       - "scripts/publication_contract.py"
       - "scripts/check-dist-artifacts.py"
+      - "scripts/install-release-dependencies.sh"
+      - "scripts/apt-snapshot-install.sh"
+      - "scripts/apt-*.awk"
+      - "security/apt-*"
       - "security/publication-policy.json"
       - .github/workflows/release.yml
       - .github/workflows/release-cache.yml
@@ -31,6 +35,12 @@ on:
   pull_request:
     paths:
       - .github/workflows/release-cache.yml
+      - scripts/install-release-dependencies.sh
+      - .github/scripts/test_install_release_dependencies.py
+      - .github/scripts/test_install_linux_build_deps.py
+      - scripts/apt-snapshot-install.sh
+      - "scripts/apt-*.awk"
+      - "security/apt-*"
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:

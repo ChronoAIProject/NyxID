@@ -11,7 +11,7 @@ case "$ID:${VERSION_CODENAME:-}" in
 esac
 if [ "$(id -u)" = 0 ]; then
     exec sh "$release_script_dir/apt-snapshot-install.sh" "$release_script_dir/../security/apt-snapshots.tsv" \
-        "$release_root" -- clang libdbus-1-dev pkg-config python3
+        "$release_root" -- clang jq libdbus-1-dev pkg-config python3
 fi
 exec sudo -n sh "$release_script_dir/apt-snapshot-install.sh" --install-only "$release_script_dir/../security/apt-snapshots.tsv" \
-    "$release_root" -- clang libdbus-1-dev pkg-config python3
+    "$release_root" -- clang jq libdbus-1-dev pkg-config python3

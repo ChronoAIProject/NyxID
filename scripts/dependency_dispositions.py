@@ -40,8 +40,16 @@ def load_policy(root, today=None):
         if r['package'] == 'rsa':
             if r['kind'] != 'reviewed-rsa-uses' or r['advisory'] != 'RUSTSEC-2023-0071' or r['lock'] != 'Cargo.lock' or r['version'] not in ('0.9.10', '0.10.0-rc.18'):
                 raise ValueError('unreviewed RSA disposition scope')
-            if set(r['uses']) != {'scope', 'source_files', 'call_sites'} or not all(r['uses'].values()) or not r['parents'] or not r['features'] or not re.fullmatch('[0-9a-f]{64}', r['checksum']):
+            if set(r['uses']) != {'scope', 'source_files', 'manifest_files', 'call_sites'} or \
+                    not all(r['uses'][key] for key in ('scope', 'source_files', 'call_sites')) or \
+                    not isinstance(r['uses']['manifest_files'], dict) or not r['parents'] or not r['features'] or \
+                    not re.fullmatch('[0-9a-f]{64}', r['checksum']):
                 raise ValueError('missing RSA source/use/graph evidence')
+            manifests = r['uses']['manifest_files']
+            expected = {'backend/Cargo.toml', 'machine/Cargo.toml'} if r['version'] == '0.9.10' else set()
+            if set(manifests) != expected or any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
+                                                 for value in manifests.values()):
+                raise ValueError('missing exact RSA manifest binding')
         elif (r['package'], r['version'], r['advisory'], r['lock'], r['kind']) != \
                 ('braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm', 'mobile/pnpm-lock.yaml', 'build-tooling-only'):
             raise ValueError('unreviewed tooling-only disposition scope')
@@ -58,6 +66,27 @@ def load_policy(root, today=None):
         if dependency_subgraph.digest(graph) != r['lock_subgraph_sha256']:
             raise ValueError('affected package archive/consumer subgraph changed')
     return data
+
+
+def manifest_fingerprint(root, name):
+    """Bind the whole parsed manifest except the application's release number.
+
+    Crypto providers/features, normal/dev/target dependencies, package identity,
+    build configuration and every other TOML value remain review bindings.
+    Workspace release version changes already have a separate subject identity.
+    """
+    import tomllib
+    manifest = tomllib.loads(regular_file(root, name).read_text())
+    packages = {'backend/Cargo.toml': 'nyxid', 'machine/Cargo.toml': 'nyxid-machine'}
+    package = manifest.get('package', {})
+    if name not in packages or package.get('name') != packages[name]:
+        raise ValueError('unreviewed RSA manifest identity: ' + name)
+    version = package.get('version')
+    if isinstance(version, str) and re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
+        package['version'] = '@application-release'
+    elif version != {'workspace': True}:
+        raise ValueError('invalid application release version: ' + name)
+    return sha(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode())
 
 
 def rsa_surface(root):
@@ -81,8 +110,17 @@ def rsa_surface(root):
 
 
 def validate_rsa_surface(root, policy):
-    if rsa_surface(root) != policy['rsa_guard']:
-        raise ValueError('RSA reference/private-operation surface changed; explicit source review required')
+    observed = rsa_surface(root)
+    reviewed = policy['rsa_guard']
+    if observed != reviewed:
+        changes = []
+        for section in observed:
+            before, after = reviewed.get(section, {}), observed[section]
+            for name in sorted(set(before) | set(after)):
+                if before.get(name) != after.get(name):
+                    changes.append(section + ':' + name)
+        raise ValueError('RSA reference/private-operation surface changed; explicit source review required: ' +
+                         ', '.join(changes))
 
 
 def rsa_graph(metadata, version):
@@ -125,6 +163,9 @@ def verify_rsa(root, policy, environment):
         if graph != {key: r[key] for key in ('features', 'parents')}:
             raise ValueError('RSA parent chains or selected features changed')
         for name, digest in r['uses']['source_files'].items(): bound_file(root, name, digest)
+        for name, digest in r['uses']['manifest_files'].items():
+            if manifest_fingerprint(root, name) != digest:
+                raise ValueError('reviewed RSA manifest configuration changed: ' + name)
     return True
 
 

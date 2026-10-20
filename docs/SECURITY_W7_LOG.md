@@ -287,3 +287,17 @@
 - All 17 pinned-input/publication checks plus native/packaging/signing/SBOM/scanner workflow suites pass: 22 commands, 163 tests; 218 tests total, 0 failures; diff check passes.
 - GitHub annotations show Release and Release Build Cache did create jobs: remaining secret/dependency audit and arm64 cache runtime failures are separate from CI's invalid-workflow blocker.
 - PR jobs: Detect Changes, Workflow Permissions, Machine Native Acceptance / Native Machine Separation (amd64), CI Pipeline; no push, workflow dispatch or remote provisioning.
+
+## W7 hosted follow-up — Release scanners and arm64 cache
+- Read Release 39397124174 and Release Build Cache 39397124126 job logs; the reusable PR/Release scanner invocation and full-history checkout are identical.
+- Add one exact monthly non-secret prose disposition for the W8 inventory's slash-separated writer-state words; same-line new-key and all existing rule/path/content/expiry negatives remain blocking.
+- Review only four newly committed AES-GCM decrypt lines for the conservative RSA guard; retain all exact RSA/SSH source, graph, feature, advisory and expiry bindings; report changed paths on failure.
+- Bind whole canonical Cargo manifests apart from application package release numbers, fixing the v0.72.0-to-v0.73.0 drift; missing/moved bindings, JWT provider and RSA dependency changes fail tests.
+- Install missing jq through the existing signed APT snapshots in root and sudo release/cache paths; test update, download, offline install and all upgrade failures with the actual helper.
+- Require the shared dependency step before release/cache builds and select real cache PR builds when its installer or APT inputs change; regression tests reject omissions and late/conditional wiring.
+- Local: CI helper discovery 48/48; secret policy 18/18; dependency dispositions 17/17, patches 22/22, audits 7/7; scanner workflows 7/7, packaging 15/15.
+- Local: build inputs 20/20, APT inputs 23/23, APK inputs 43/43, workflow YAML 10/10; total 230 Python tests passed, 0 failures; actionlint 1.7.12, 17 workflow mappings, 14 permission edges and diff checks pass.
+- Actual scan: 216 history + 112 committed-tree findings, 328 exact reviewed, 0 unresolved; actual isolated committed-source audit: 13/13 roots passed, 7 registry findings, 7 reviewed, 0 unresolved.
+- Audit also passed 8/8 mobile patch regressions, 5/5 compatibility cases, 119 installed files, four vulnerable-original proofs and a 3,691-module app export with zero forbidden modules.
+- Local Python 3.9 uses a temporary verified Tomli 2.3.0 compatibility alias for tomllib; hosted Python 3.12 remains authoritative. No Cargo source, manifest, lock or other stream's document edited.
+- PR jobs: Detect Changes; Workflow Permissions; Security Scans / Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Security Scans Passed; Release Build Cache / warm (aarch64-unknown-linux-gnu); CI Pipeline. Real Linux cache build remains hosted-only.

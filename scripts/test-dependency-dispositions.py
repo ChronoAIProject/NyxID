@@ -63,6 +63,35 @@ class UseDispositions(unittest.TestCase):
                      '\n[[package]]\nname = "unrelated-fixture"\nversion = "1.0.0"\n')
         self.assertEqual(d.load_policy(self.root, today=date(2026, 10, 20)), self.policy)
 
+    def test_manifest_release_number_is_independent_but_crypto_context_is_exact(self):
+        name = 'backend/Cargo.toml'; path = self.root / name; path.parent.mkdir()
+        original = (ROOT / name).read_text(); path.write_text(original)
+        fingerprint = d.manifest_fingerprint(self.root, name)
+        self.assertEqual(fingerprint, self.policy['dispositions'][0]['uses']['manifest_files'][name])
+        path.write_text(original.replace('version = "0.73.0"', 'version = "0.74.0"', 1))
+        self.assertEqual(d.manifest_fingerprint(self.root, name), fingerprint)
+        for before, after in (('"aws_lc_rs"', '"rust_crypto"'),
+                              ('rsa = { version = "0.9.10"', 'rsa = { version = "0.10.0"'),
+                              ('name = "nyxid"', 'name = "different-app"')):
+            self.assertIn(before, original)
+            path.write_text(original.replace(before, after, 1))
+            with self.subTest(change=before):
+                if before.startswith('name'):
+                    with self.assertRaises(ValueError): d.manifest_fingerprint(self.root, name)
+                else:
+                    self.assertNotEqual(d.manifest_fingerprint(self.root, name), fingerprint)
+
+    def test_missing_moved_or_unbound_manifest_policy_fails(self):
+        original = copy.deepcopy(self.policy['dispositions'][0]['uses']['manifest_files'])
+        for mutation in ('missing', 'moved', 'unbound'):
+            files = copy.deepcopy(original)
+            if mutation == 'missing': files.pop('backend/Cargo.toml')
+            elif mutation == 'moved': files['other/Cargo.toml'] = files.pop('backend/Cargo.toml')
+            else: files['backend/Cargo.toml'] = '*'
+            self.policy['dispositions'][0]['uses']['manifest_files'] = files; self.save()
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'exact RSA manifest binding'):
+                d.load_policy(self.root, today=date(2026, 10, 20))
+
     def test_new_rsa_import_alias_or_private_operation_fails(self):
         source = self.root / 'backend/src/main.rs'; source.parent.mkdir(parents=True)
         source.write_text('fn existing() {}\n')
@@ -82,6 +111,19 @@ class UseDispositions(unittest.TestCase):
         policy = dict(rsa_guard=d.rsa_surface(self.root))
         source.write_text('key.sign(message);\nkey.sign(message);\n')
         with self.assertRaises(ValueError): d.validate_rsa_surface(self.root, policy)
+
+    def test_reviewed_aes_integration_does_not_grant_new_private_operations(self):
+        source = self.root / 'cli/src/node/secret_operation.rs'; source.parent.mkdir(parents=True)
+        source.write_text('let value = file.decrypt(encoded)?;\n')
+        policy = dict(rsa_guard=d.rsa_surface(self.root))
+        d.validate_rsa_surface(self.root, policy)
+        # A previously reviewed AES call is not an allowlist for another call,
+        # even in the same file, nor for a new RSA import using an alias.
+        for extra in ('let other = file.decrypt(unreviewed)?;\n', 'use rsa as another;\n'):
+            source.write_text('let value = file.decrypt(encoded)?;\n' + extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(
+                    ValueError, 'surface changed.*cli/src/node/secret_operation.rs'):
+                d.validate_rsa_surface(self.root, policy)
 
     def test_changed_reviewed_rsa_context_fails_even_if_operation_line_is_unchanged(self):
         source = self.root / 'cli/src/main.rs'; source.parent.mkdir(parents=True)

@@ -11,14 +11,17 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/install-linux-build-deps.sh"
 
 
-class BuildDependencyTests(unittest.TestCase):
+class BuildDependencyHarness:
+    source = SCRIPT
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="ci dependencies ")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         for directory in (".github/scripts", "scripts", "security", "bin", "keyrings"):
             (self.root / directory).mkdir(parents=True)
-        shutil.copyfile(SCRIPT, self.root / ".github/scripts" / SCRIPT.name)
+        self.script = self.root / self.source.relative_to(ROOT)
+        shutil.copyfile(self.source, self.script)
         self.calls = self.root / "calls"
         self.arguments = self.root / "arguments"
         # Run the real helper AND snapshot installer. Redirect only their two
@@ -61,7 +64,7 @@ sudo() {
      "$4" == --install-only && "$5" == "$TEST_ROOT/security/apt-snapshots.tsv" &&
      "$6" == ubuntu:noble && "$7" == -- ]] || return 99
   shift
-  command "$@"
+  TEST_SUDO=1 command "$@"
 }
 ''')
         self.stub("id", 'printf "0\\n"\n')
@@ -88,9 +91,11 @@ assert ca == Path(options["Dir::State::lists"]).parent / "transport-ca.pem"
 assert ca.read_bytes() == original_ca.read_bytes()
 assert ca.stat().st_mode & 0o777 == 0o644
 assert ca.parent.stat().st_mode & 0o777 == 0o755
-operation = "update" if "update" in args else ("download" if "--download-only" in args else "install")
+action = "upgrade" if "upgrade" in args else "install"
+operation = "update" if "update" in args else (("download-upgrade" if action == "upgrade" else "download") if "--download-only" in args else action)
 if operation != "update":
-    assert "install" in args and "--no-install-recommends" in args
+    assert ("install" in args) != ("upgrade" in args)
+    assert "--no-install-recommends" in args
     assert ("--download-only" in args) != ("--no-download" in args)
 with open(os.environ["TEST_ARGUMENTS"], "a") as output:
     output.write("\\n".join(args) + "\\n")
@@ -123,13 +128,15 @@ if operation == "update":
 
     def invoke(self, failure=""):
         return subprocess.run(
-            ["bash", str(self.root / ".github/scripts" / SCRIPT.name)],
+            ["bash", str(self.script)],
             env={**os.environ, "BASH_ENV": str(self.harness), "TEST_ROOT": str(self.root),
                  "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"],
                  "TEST_CALLS": str(self.calls), "TEST_ARGUMENTS": str(self.arguments), "TEST_FAIL": failure},
             capture_output=True, text=True, timeout=10,
         )
 
+
+class BuildDependencyTests(BuildDependencyHarness, unittest.TestCase):
     def test_success_requires_update_and_install(self):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)

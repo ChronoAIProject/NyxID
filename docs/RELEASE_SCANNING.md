@@ -110,6 +110,13 @@ in the same inventory. The current worker-log record expires monthly; the
 checkpoint record applies only to revision `61781e414d5c` and expires after
 12 months. Neither record grants an exception to any credential value.
 
+The W8 inventory's slash-separated `undeclared/missing/mixed/stale` writer
+matrix prose is another generic-detector false positive after the word `key`.
+One exact monthly record binds the identical full source line in its introducing
+revision `a71e937c1cb9` and the current tree. A real-detector regression adds a
+key to that same line and requires both changed findings to remain unresolved.
+The W8 document is scanned in full; it has no path-level exemption.
+
 ## Exact dependency dispositions
 
 The initial twelve-root audit found twelve Cargo advisory occurrences and six
@@ -136,6 +143,14 @@ locked metadata. Full before/after lock hashes still detect mutation during
 installation, bundle export and audits, without binding an exception to unrelated
 dependency updates.
 
+RSA manifest bindings cover the complete canonical parsed TOML, excluding only
+the application's package release version (or retaining its workspace-version
+inheritance). They include crypto provider selection, dependency definitions,
+features and all other manifest values. A v0.73.0 release-number bump cannot
+invalidate the v0.72.0 use review; switching JWT providers or RSA dependency
+configuration cannot inherit that review. Rust source bindings remain exact
+file bytes, with no version normalization.
+
 `security/dependency-dispositions.json` contains the PM's separate use decisions.
 The monthly braces 3.0.3 disposition requires exact Metro/Jest parent chains,
 lock/archive identity and a real production app export proving no braces or
@@ -147,6 +162,15 @@ owner-selected SSH client-signing uses are described in
 [the remediation record](RELEASE_DEPENDENCY_REMEDIATION.md). A new RSA reference,
 private-operation spelling or changed reviewed context fails the source guard;
 review must establish the use before updating that baseline.
+
+The release follow-up reviewed four added node-storage AES-GCM call lines in
+the committed integration: `managed_runtime.rs` reads an old fixture through
+`LocalEncryption`, `oauth/storage.rs` uses `Aes256Gcm` directly, and
+`secret_operation.rs` / `secret_transaction.rs` validate fields through
+`LocalEncryption` (which uses `Aes256Gcm`). Only their exact line hashes/counts
+were added to the conservative private-operation guard. No RSA/SSH reference
+file, parent chain, feature, advisory scope or expiry changed. Guard failures
+name each changed path and category without printing source or secret bytes.
 
 Every expired record fails globally, including unused entries. Failed or missing
 proof never becomes a warning. Scanner Policy tests tamper, scope, new-use and

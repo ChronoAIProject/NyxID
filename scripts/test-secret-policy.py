@@ -162,6 +162,22 @@ class SecretPolicy(unittest.TestCase):
         self.assertTrue(findings)
         self.assertTrue(all(disposition(item, [self.entry]) is None for item in findings))
 
+    def test_inventory_progress_prose_is_exact_and_cannot_cover_a_new_key(self):
+        name = 'docs/SECURITY_W8_INVENTORY.md'
+        content = (ROOT / name).read_bytes()
+        entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
+        findings = self.detect(content, name)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(disposition(findings[0], entries)['kind'], 'non-secret-identifier')
+        # Include the new key on the reviewed line: its full-content binding
+        # must refuse both the changed prose finding and the new credential.
+        content = content.replace(b'undeclared/missing/mixed/stale',
+                                  b'undeclared/missing/mixed/stale provider_api_key = "' +
+                                  secrets.token_hex(24).encode() + b'"')
+        changed = self.detect(content, name)
+        self.assertGreaterEqual(len(changed), 2)
+        self.assertTrue(all(disposition(item, entries) is None for item in changed))
+
     def test_hash_only_policy_metadata_is_not_a_credential_but_new_policy_file_key_is_detected(self):
         content = (ROOT / 'security/secret-exceptions.json').read_bytes()
         self.assertEqual(self.detect(content, 'security/secret-exceptions.json'), [])

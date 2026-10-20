@@ -510,6 +510,12 @@
       "cli/src/node/machine/transfer.rs": {
         "9bae143e3ea0cbff1089f61860c84d7f53379ddf289cc7fd170e70090809f5ec": 1
       },
+      "cli/src/node/managed_runtime.rs": {
+        "c19e6fe3c3f99956da7b3f82e6fbdfd00eca94c93555454d19741cdaa80edff3": 1
+      },
+      "cli/src/node/oauth/storage.rs": {
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+      },
       "cli/src/node/proxy_upload.rs": {
         "a30ba7f3df6efda15bddad633928bae25a79cc59cee1a5a50dcb34a5a3e0cdb5": 2
       },
@@ -518,10 +524,14 @@
         "c6f045553d00c05657978f16cdee1c1c4ecc6d981a9dfcc8cb88a3a25afddd26": 1
       },
       "cli/src/node/secret_operation.rs": {
-        "2053ec3d961da51ded8140c9e722217edee069cd19e940c33fc7557ad64c8fd3": 1
+        "2053ec3d961da51ded8140c9e722217edee069cd19e940c33fc7557ad64c8fd3": 1,
+        "57b8c9bdedf6af39c00657192441305083cb923b04ef2c8e3749075e235b1f58": 1
       },
       "cli/src/node/secret_snapshot.rs": {
         "8e6e680756aeeff330466486f24f8f10180e9548022cf9480c048fa5f104865f": 1
+      },
+      "cli/src/node/secret_transaction.rs": {
+        "2053ec3d961da51ded8140c9e722217edee069cd19e940c33fc7557ad64c8fd3": 1
       },
       "cli/src/node/ssh_node_exec.rs": {
         "35236414687f0e8a9e0b64421ac4985d63975b14dc884485e8b7fd6424b2bb80": 1,
@@ -593,15 +603,17 @@
         "source_files": {
           "backend/src/crypto/jwt.rs": "c665f3cb3171c8a0cbf4735427757a37b607218e13bfbc478298c5969dc51b3b",
           "backend/src/services/ssh_service.rs": "224f597c84cf6914bf33d3c0768f50eb3cb4ea372e39c0cb8ab364d135b2c065",
-          "backend/Cargo.toml": "83d9473411768c23903117991122e47cad702f89e90fd3050c781c26a4ef85a1",
-          "machine/Cargo.toml": "31be5b0796ef5e21c3e86540d1b8c43c1c4bca0844a8c5e64228aac9c6facf22",
           "machine/src/bootstrap.rs": "8009dbf45d88df140fa7771c7c74a51536d874c489f2f36e85f45e6c24e4a443"
         },
         "call_sites": [
           "backend/src/crypto/jwt.rs:273 dev key generation; request JWT provider backend/Cargo.toml aws_lc_rs",
           "backend/src/services/ssh_service.rs:307 Ed25519 CA; RSA public parse only",
           "machine/src/bootstrap.rs private operations are AWS-LC; rsa dev-only cross-provider tests"
-        ]
+        ],
+        "manifest_files": {
+          "backend/Cargo.toml": "2f70da3e00e6579ef641ee6a5e098e0ae3ee9544bd711dffe0fb8fbd80400e09",
+          "machine/Cargo.toml": "f54824f576c1b6b326768f6a4c96d9b3226dba3da369312d690cf23f766aa5d9"
+        }
       },
       "owner": "NyxID security maintainers",
       "expires": "2027-01-18",
@@ -632,7 +644,8 @@
         },
         "call_sites": [
           "cli/src/node/ssh_node_exec.rs:511-523 imported RSA SSH client auth; pinned owner-selected target sees signatures"
-        ]
+        ],
+        "manifest_files": {}
       },
       "owner": "NyxID security maintainers",
       "expires": "2027-01-18",
