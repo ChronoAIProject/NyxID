@@ -741,7 +741,6 @@ mod tests {
             crate::services::credential_record_service::mark_version(&mut versions, &keys, field);
         }
         UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: versions,
             id,
             user_id: user_id.to_string(),

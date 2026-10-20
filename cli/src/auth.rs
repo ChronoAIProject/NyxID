@@ -2094,11 +2094,12 @@ mod tests {
             });
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn password_mfa_persists_only_selected_profile_and_full_destination() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    #[test]
+    fn password_mfa_persists_only_selected_profile_and_full_destination() {
         let _home = PreflightHome::set();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
         let server = MockServer::start().await;
         Mock::given(path("/nyxid/api/v1/auth/login")).respond_with(ResponseTemplate::new(403)
             .set_body_json(serde_json::json!({"error_code":2002,"session_token":"private-challenge-00112233445566778899"})))
@@ -2137,13 +2138,15 @@ mod tests {
             Some("selected-refresh-result")
         );
         assert!(super::read_saved_token_for(None).is_none());
+        });
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn password_mfa_failure_preserves_all_profiles_and_success_replaces_only_selected() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    #[test]
+    fn password_mfa_failure_preserves_all_profiles_and_success_replaces_only_selected() {
         let _home = PreflightHome::set();
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
         let selected = Some("mfa-selected");
         let sibling = Some("mfa-sibling");
         for profile in [None, selected, sibling] {
@@ -2237,6 +2240,7 @@ mod tests {
             super::read_saved_base_url_for(selected).as_deref(),
             Some(base.as_str())
         );
+        });
     }
 
     #[tokio::test]

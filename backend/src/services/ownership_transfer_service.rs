@@ -912,11 +912,6 @@ pub async fn transfer_with_keys(
                     key_filter,
                     doc! { "$set": key_set },
                 );
-                let key_update = if let Some(keys) = keys {
-                    key_update.credential_keys(keys)
-                } else {
-                    key_update
-                };
                 let key_update = key_update.session(&mut *transaction)
                 .await?;
                 if key_update.matched_count != 1 {
@@ -990,10 +985,6 @@ pub async fn transfer_with_keys(
                 return Err(AppError::Conflict(
                     "The resource owner changed. Review a fresh transfer preview".into(),
                 ));
-            }
-            if kind == ResourceKind::Service {
-                let installed = db.collection::<Document>(SERVICES).find_one(doc! {"_id":&resource_id}).session(&mut **transaction).await?.ok_or_else(||AppError::Conflict("Catalog transfer changed".into()))?;
-                super::token_copy_admission::write_in_session(&db, keys, SERVICES, &installed, transaction).await?;
             }
             let receipt = OwnershipTransfer {
                 tool_transfer: reviewed.tool_transfer,

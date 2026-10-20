@@ -702,7 +702,6 @@ pub struct CreateIntent<'a> {
 
 pub async fn create(
     db: &Database,
-    keys: &crate::crypto::aes::EncryptionKeys,
     service: &DownstreamService,
     actor_id: &str,
     input: &SkillUpdate,
@@ -711,7 +710,6 @@ pub async fn create(
 ) -> AppResult<DownstreamService> {
     create_with_endpoints(
         db,
-        keys,
         service,
         actor_id,
         input,
@@ -726,7 +724,6 @@ pub async fn create(
 
 pub async fn create_with_endpoints(
     db: &Database,
-    keys: &crate::crypto::aes::EncryptionKeys,
     service: &DownstreamService,
     actor_id: &str,
     input: &SkillUpdate,
@@ -754,7 +751,6 @@ pub async fn create_with_endpoints(
     let endpoints = endpoints.to_vec();
     let context = (
         &transaction_db,
-        keys,
         &transaction_actor,
         &transaction_request,
         &transaction_fingerprint,
@@ -764,8 +760,7 @@ pub async fn create_with_endpoints(
         changed,
     );
     let committed = super::transaction_service::run_db_only(db, &context, |session, context| {
-        let &(db, keys, actor, request, fingerprint, service, endpoints, desired, changed) =
-            context;
+        let &(db, actor, request, fingerprint, service, endpoints, desired, changed) = context;
         Box::pin(async move {
             let actor_id = actor.as_str();
             let request_id = request.as_str();
@@ -861,14 +856,6 @@ pub async fn create_with_endpoints(
                         .session(&mut *session)
                         .await?;
                 }
-                super::token_copy_admission::installed_in_session(
-                    db,
-                    keys,
-                    SERVICES,
-                    &service.id,
-                    session,
-                )
-                .await?;
                 if !endpoints.is_empty() {
                     db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
                         crate::models::service_endpoint::COLLECTION_NAME,

@@ -148,7 +148,6 @@ pub mod oauth_broker_service;
 pub mod oauth_client_service;
 pub mod oauth_consent_request_service;
 pub mod oauth_flow;
-pub mod oauth_grant_lineage_service;
 pub mod oauth_resource_service;
 pub mod oauth_revocation;
 pub mod oauth_service;
@@ -177,6 +176,7 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub mod personal_erasure_registry;
 pub mod personal_erasure_service;
 pub(crate) mod platform_binding_service;
 pub(crate) mod platform_bot_authority;
@@ -486,7 +486,5 @@ pub mod default_header_service;
 pub(crate) mod record_storage;
 
 pub(crate) mod trigger_record_service;
-
-pub(crate) mod token_copy_admission;
 
 pub(crate) mod agent_login_record_service;

@@ -11771,7 +11771,6 @@ mod proxy_resolution_integration_tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,

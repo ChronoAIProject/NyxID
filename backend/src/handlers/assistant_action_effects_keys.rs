@@ -975,7 +975,6 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,

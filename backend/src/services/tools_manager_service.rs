@@ -130,7 +130,6 @@ pub(crate) async fn role_authority(
 #[cfg(test)]
 pub async fn commit_manager_update(
     db: &Database,
-    keys: &crate::crypto::aes::EncryptionKeys,
     observed: &DownstreamService,
     _actor: &str,
     fields: &Document,
@@ -139,7 +138,6 @@ pub async fn commit_manager_update(
 ) -> AppResult<DownstreamService> {
     super::catalog_mutation_service::commit_update(
         db,
-        Some(keys),
         observed,
         &super::catalog_mutation_service::Authority {
             actor: audit_actor.clone(),

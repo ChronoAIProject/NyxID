@@ -3037,7 +3037,7 @@ pub(crate) async fn accept_and_process_erasure_with_state(
                 accepted = true;
                 break;
             }
-            Err(AppError::Conflict(_))
+            Err(AppError::ErasurePreparing)
                 if erasure::prepare_one_for_test(db, &state.encryption_keys).await? => {}
             Err(error) => return Err(error),
         }
@@ -3099,7 +3099,6 @@ pub(crate) async fn create_api_key_with_id(
         crate::models::user_api_key::COLLECTION_NAME,
     )
     .insert_one(&api_key)
-    .credential_keys(encryption_keys)
     .await?;
     Ok(api_key)
 }

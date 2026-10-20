@@ -101,7 +101,7 @@ describe("Wave 4 account journeys", () => {
     expect(mockGet).toHaveBeenNthCalledWith(2, "/users/me/authorization");
     expect(mockGet).toHaveBeenCalledTimes(2);
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", {
-      actionRequestId: "delete-1", confirmEmail: "owner@example.com", deletionPolicyVersion: "machine-data",
+      actionRequestId: "delete-1", confirmEmail: "owner@example.com", deletionPolicyVersion: "machine-data-provider-revocation-v2",
     });
   });
 

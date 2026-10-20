@@ -197,11 +197,17 @@ pub async fn issue_observation_ticket(
     scope: HealthScope,
 ) -> AppResult<ObservationTicket> {
     #[cfg(test)]
-    if let Some(pause) = TICKET_ADMISSION_PAUSE.try_with(Clone::clone).ok() {
+    if let Ok(pause) = TICKET_ADMISSION_PAUSE.try_with(Clone::clone) {
         pause.entered.notify_one();
         pause.release.notified().await;
     }
-    let context = (db.clone(), scope, Utc::now(), Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+    let context = (
+        db.clone(),
+        scope,
+        Utc::now(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
     super::transaction_service::run_db_only(db, &context, |tx, (db, scope, now, observation_id, health_id)| {
         Box::pin(async move {
     super::erasure_admission::fence_in_session(db, &scope.owner_id, tx).await?;
@@ -242,7 +248,7 @@ pub async fn issue_observation_ticket(
     let health = db
         .collection::<ServicePoolMemberHealth>(HEALTH)
         .find_one_and_update(
-            scope_filter(&scope, pool_reset_generation, member_reset_generation),
+            scope_filter(scope, pool_reset_generation, member_reset_generation),
             doc! {
                 "$setOnInsert": {
                     "_id": health_id,

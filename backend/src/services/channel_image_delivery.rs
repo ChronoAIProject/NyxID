@@ -171,8 +171,9 @@ async fn claim_v2(
     audience: &str,
 ) -> AppResult<ImageClaim> {
     #[cfg(test)]
-    if let Some(pause) = CLAIM_ADMISSION_PAUSE.try_with(Clone::clone).ok() {
-        pause.entered.notify_one(); pause.release.notified().await;
+    if let Ok(pause) = CLAIM_ADMISSION_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
     }
     let id = image_delivery_id(owner, attachment, audience);
     let collection = db.collection::<NyxbotImageDelivery>(CLAIMS);
@@ -207,14 +208,15 @@ async fn claim_v2(
         })
     }).await;
     match admitted {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(error @ AppError::Conflict(_)) => return Err(error),
         // An indeterminate admission cannot authorize a provider send.
         Err(_) => return Ok(ImageClaim::Unknown),
     }
     #[cfg(test)]
-    if let Some(pause) = CLAIM_CAS_PAUSE.try_with(Clone::clone).ok() {
-        pause.entered.notify_one(); pause.release.notified().await;
+    if let Ok(pause) = CLAIM_CAS_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
     }
     let attempt = Uuid::new_v4().to_string();
     match collection
@@ -370,7 +372,6 @@ pub async fn sweep_orphans(db: &Database, cursor: &str, limit: i64) -> AppResult
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,7 +387,13 @@ mod tests {
         db.collection::<Document>(crate::models::user::COLLECTION_NAME)
             .update_one(doc! {"_id":"owner"},doc! {"$setOnInsert":bson::to_document(&crate::test_utils::test_user("owner",crate::models::user::UserType::Person)).unwrap()}).upsert(true).await.unwrap();
         db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-            .update_one(doc! {"_id":"conversation"},doc! {"$setOnInsert":{"user_id":"owner"}}).upsert(true).await.unwrap();
+            .update_one(
+                doc! {"_id":"conversation"},
+                doc! {"$setOnInsert":{"user_id":"owner"}},
+            )
+            .upsert(true)
+            .await
+            .unwrap();
     }
 
     fn legacy_row(
@@ -951,15 +958,28 @@ mod tests {
             }
             panic!("Failed to configure image write fault: {error}");
         }
-        admin.run_command(doc! {"configureFailPoint":"failCommand","mode":"off"}).await.unwrap();
+        admin
+            .run_command(doc! {"configureFailPoint":"failCommand","mode":"off"})
+            .await
+            .unwrap();
         let pause = std::sync::Arc::new(ImageClaimPause::default());
-        let acquire = CLAIM_CAS_PAUSE.scope(pause.clone(),claim(&db,"owner","conversation","A","rejected"));
+        let acquire = CLAIM_CAS_PAUSE.scope(
+            pause.clone(),
+            claim(&db, "owner", "conversation", "A", "rejected"),
+        );
         let inject = async {
-            tokio::time::timeout(std::time::Duration::from_secs(10),pause.entered.notified()).await.unwrap();
-            fail(false).await.unwrap(); pause.release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+                .await
+                .unwrap();
+            fail(false).await.unwrap();
+            pause.release.notify_one();
         };
-        let (outcome,()) = tokio::time::timeout(std::time::Duration::from_secs(15),async {tokio::join!(acquire,inject)}).await.unwrap();
-        assert!(matches!(outcome.unwrap(),ImageClaim::Unknown));
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(acquire, inject)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome.unwrap(), ImageClaim::Unknown));
         assert_eq!(
             read(&base, "owner", "A", "rejected")
                 .await
@@ -999,13 +1019,23 @@ mod tests {
             matches!(claim(&base,"owner","conversation","A","rejected").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sent)
         );
         let pause = std::sync::Arc::new(ImageClaimPause::default());
-        let acquire = CLAIM_CAS_PAUSE.scope(pause.clone(),claim(&db,"owner","conversation","B","committed"));
+        let acquire = CLAIM_CAS_PAUSE.scope(
+            pause.clone(),
+            claim(&db, "owner", "conversation", "B", "committed"),
+        );
         let inject = async {
-            tokio::time::timeout(std::time::Duration::from_secs(10),pause.entered.notified()).await.unwrap();
-            fail(true).await.unwrap(); pause.release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+                .await
+                .unwrap();
+            fail(true).await.unwrap();
+            pause.release.notify_one();
         };
-        let (outcome,()) = tokio::time::timeout(std::time::Duration::from_secs(15),async {tokio::join!(acquire,inject)}).await.unwrap();
-        assert!(matches!(outcome.unwrap(),ImageClaim::Unknown));
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::join!(acquire, inject)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome.unwrap(), ImageClaim::Unknown));
         assert!(
             matches!(claim(&base,"owner","conversation","B","committed").await.unwrap(),ImageClaim::Existing(row) if row.state==ImageDeliveryState::Sending)
         );
@@ -1019,7 +1049,10 @@ mod tests {
 
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct ImageClaimPause {pub entered: tokio::sync::Notify, pub release: tokio::sync::Notify}
+pub(crate) struct ImageClaimPause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static CLAIM_ADMISSION_PAUSE: std::sync::Arc<ImageClaimPause>;

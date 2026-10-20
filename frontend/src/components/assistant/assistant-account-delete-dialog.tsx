@@ -1,3 +1,4 @@
+import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { useRef, useState } from "react";
 import { z } from "zod";
 import { accountErasureSchema } from "@/schemas/account-erasure";
@@ -39,14 +40,14 @@ export function AssistantAccountDeleteDialog({
       if (confirmEmail.trim().toLowerCase() !== profile.email.trim().toLowerCase()) throw new Error("Type your account email exactly to continue.");
       const before = await api.get<unknown>("/users/me/authorization");
       assertSecretFreeReadBack(before);
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/delete", {
+      const response = responseSchema.parse(await withErasurePreparation(() => api.post<unknown>("/assistant/actions/org/account/delete", {
         actionRequestId,
         // Sent so the SERVER verifies the confirmation. The check above is a
         // usability guard only -- the effect route is mounted and reachable,
         // so a browser-side comparison is not a control.
         confirmEmail: confirmEmail.trim(),
         deletionPolicyVersion: ACCOUNT_DELETION_POLICY_VERSION,
-      }));
+      })));
       // Authority closes at acceptance. A subsequent 401 cannot attest erasure;
       // the durable response is the authoritative acceptance/progress result.
       setVerifiedUserId(response.resource.userId);

@@ -355,14 +355,10 @@ pub(crate) async fn migrate_snapshot(
     let decoded = decode(Some(keys), collection, id, owner, stored.as_deref()).await?;
     let replacement = encode_resolved(Some(keys), collection, id, owner, decoded).await?;
     let db = super::transaction_service::durable_database(db);
-    super::token_copy_admission::migrate_storage(
-        &db,
-        keys,
-        collection,
-        source,
-        &bson::doc! {"default_request_headers":bson::to_bson(&replacement).map_err(|_|invalid())?},
-    )
-    .await
+    Ok(db.collection::<bson::Document>(collection)
+        .update_one(super::record_storage::exact_document_predicate(source),
+            bson::doc! {"$set":{"default_request_headers":bson::to_bson(&replacement).map_err(|_|invalid())?}})
+        .await?.matched_count == 1)
 }
 
 /// Read the exact BSON array for a compare-and-swap. Typed legacy models add

@@ -53,9 +53,9 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
                 .build(),
         ])
         .await?;
+    super::personal_erasure_registry::ensure_indexes(db).await?;
     preparation::ensure_indexes(db).await?;
     issuance::ensure_indexes(db).await?;
-    super::token_copy_admission::ensure_indexes(db).await?;
     Ok(())
 }
 
@@ -67,7 +67,9 @@ pub async fn status(db: &Database, user_id: &str) -> AppResult<Option<PersonalEr
         .find_one(doc! {"user_id":user_id})
         .await?
     {
-        Some(job) => vendor::refresh(db, job).await.map(Some),
+        Some(job) => provider::refresh(db, vendor::refresh(db, job).await?)
+            .await
+            .map(Some),
         None => Ok(None),
     }
 }
@@ -106,7 +108,7 @@ pub async fn accept(
         ));
     }
     if !preparation::ready_or_enqueue(db, user_id).await? {
-        return Err(AppError::Conflict("Credential dependency preparation is running; retry deletion while your account remains usable".into()));
+        return Err(AppError::ErasurePreparing);
     }
     let claims = super::channel_bot_service::claim_owner_aurinko_lifecycle(db, user_id).await?;
     let result = accept_claimed(db, user_id, requested_by, owner_policy).await;
@@ -138,7 +140,9 @@ async fn guard_shared_provider_dependencies(
         ),
         (
             crate::models::oauth_state::COLLECTION_NAME,
-            doc! {"credential_user_id":user,"target_user_id":{"$ne":user,"$type":"string"},"expires_at":{"$gt":bson::DateTime::now()}},
+            doc! {"credential_user_id":user,
+            "$expr":{"$ne":[{"$ifNull":["$target_user_id","$user_id"]},user]},
+            "expires_at":{"$gt":bson::DateTime::now()}},
         ),
     ] {
         if db
@@ -152,17 +156,6 @@ async fn guard_shared_provider_dependencies(
             return Err(AppError::Conflict("Other owners still depend on your OAuth app credentials; reconnect or transfer those shared connections before deleting your account".into()));
         }
     }
-    guard_shared_credential_copies(db, user, tx).await
-}
-
-/// Existing connection transfers and legacy fan-out can retain one upstream
-/// credential under a different owner. Compare durable lineage AND exact
-/// opaque token copies; credential_user_id alone misses platform-app copies.
-async fn guard_shared_credential_copies(
-    db: &Database,
-    user: &str,
-    tx: &mut ClientSession,
-) -> AppResult<()> {
     preparation::require_ready_in_session(db, user, tx).await
 }
 
@@ -384,7 +377,13 @@ mod tests {
                 .await
                 .unwrap();
             assert!(matches!(
-                accept(&db, &owner, &owner, Some("machine-data")).await,
+                accept(
+                    &db,
+                    &owner,
+                    &owner,
+                    Some("machine-data-provider-revocation-v2")
+                )
+                .await,
                 Err(AppError::Conflict(_))
             ));
             super::tests::assert_account_preserved(
@@ -416,9 +415,14 @@ mod tests {
     #[tokio::test]
     async fn acceptance_is_durable_idempotent_and_does_not_claim_completion() {
         let (db, owner) = fixture().await;
-        let job = accept(&db, &owner, &owner, Some("machine-data"))
-            .await
-            .unwrap();
+        let job = accept(
+            &db,
+            &owner,
+            &owner,
+            Some("machine-data-provider-revocation-v2"),
+        )
+        .await
+        .unwrap();
         assert_eq!(job.status, ErasureStatus::Accepted);
         assert!(job.completed_at.is_none());
         assert!(
@@ -434,10 +438,15 @@ mod tests {
             .unwrap();
         assert!(!stored.is_active);
         assert_eq!(
-            accept(&db, &owner, &owner, Some("machine-data"))
-                .await
-                .unwrap()
-                .id,
+            accept(
+                &db,
+                &owner,
+                &owner,
+                Some("machine-data-provider-revocation-v2")
+            )
+            .await
+            .unwrap()
+            .id,
             job.id
         );
         assert_eq!(
@@ -467,8 +476,65 @@ mod tests {
 }
 
 #[cfg(test)]
-mod shared_dependency_tests {
+mod byo_dependency_tests {
     use super::*;
+    #[tokio::test]
+    async fn pending_byo_oauth_dependency_uses_effective_target_owner() {
+        for explicit_target in [false, true] {
+            let (db, person) = super::tests::fixture().await;
+            let other = uuid::Uuid::new_v4().to_string();
+            let states = db.collection::<Document>(crate::models::oauth_state::COLLECTION_NAME);
+            let source = db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id":&person})
+                .await
+                .unwrap()
+                .unwrap();
+            states.insert_one(doc! {
+                "_id":"pending-byo","credential_user_id":&person,
+                "user_id":if explicit_target {&person} else {&other},
+                "target_user_id":if explicit_target {Some(&other)} else {None},
+                "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(10))
+            }).await.unwrap();
+            assert!(matches!(accept(&db, &person, &person, None).await,
+                Err(AppError::Conflict(message)) if message.contains("Other owners still depend")));
+            super::tests::assert_account_preserved(
+                db.collection::<Document>(USERS)
+                    .find_one(doc! {"_id":&person})
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                source,
+            );
+            assert!(status(&db, &person).await.unwrap().is_none());
+            for collection in [
+                provider::EFFECTS,
+                crate::models::telemetry_erasure_job::COLLECTION_NAME,
+            ] {
+                assert_eq!(
+                    db.collection::<Document>(collection)
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            // An initiating actor is attribution. Only the target owner is a
+            // dependency on the person's client, and reconnecting releases it.
+            states
+                .update_one(
+                    doc! {"_id":"pending-byo"},
+                    doc! {"$set":{"user_id":&other,"target_user_id":&person}},
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                accept(&db, &person, &person, None).await.unwrap().status,
+                ErasureStatus::Accepted
+            );
+            db.drop().await.unwrap();
+        }
+    }
     #[tokio::test]
     async fn shared_byo_dependency_rejects_before_account_fence_or_personal_purge() {
         let (db, person) = super::tests::fixture().await;
@@ -488,7 +554,7 @@ mod shared_dependency_tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            accept(&db, &person, &person, Some("machine-data")).await,
+            accept(&db, &person, &person, Some("machine-data-provider-revocation-v2")).await,
             Err(AppError::Conflict(message)) if message.contains("Other owners still depend")
         ));
         super::tests::assert_account_preserved(
@@ -522,7 +588,7 @@ mod shared_dependency_tests {
 mod shared_copy_tests {
     use super::*;
     #[tokio::test]
-    async fn platform_app_shared_connection_and_legacy_ciphertext_copies_preserve_account() {
+    async fn platform_app_shared_connection_and_legacy_ciphertext_copies_never_block_acceptance() {
         for (same_connection, same_ciphertext) in [(true, false), (false, true)] {
             let (db, person) = super::tests::fixture().await;
             let org = uuid::Uuid::new_v4().to_string();
@@ -543,29 +609,25 @@ mod shared_copy_tests {
             key.insert_one(doc! {"_id":"personal-key","user_id":&person,"connection_id":"connection-a","provider_config_id":"provider","status":"active","access_token_encrypted":encrypted(7)}).await.unwrap();
             key.insert_one(doc! {"_id":"org-key","user_id":&org,"connection_id":if same_connection {"connection-a"} else {"connection-b"},"provider_config_id":"provider","status":"active","access_token_encrypted":encrypted(if same_ciphertext {7} else {8})}).await.unwrap();
             super::tests::finish_preparation(&db, &person).await;
-            let original = db
-                .collection::<Document>(USERS)
-                .find_one(doc! {"_id":&person})
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(matches!(
-                accept(&db, &person, &person, Some("machine-data")).await,
-                Err(AppError::Conflict(message)) if message.contains("related OAuth connection or token copy")
-            ));
-            super::tests::assert_account_preserved(
-                db.collection::<Document>(USERS)
-                    .find_one(doc! {"_id":&person})
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                original,
+            let org_source = key.find_one(doc! {"_id":"org-key"}).await.unwrap().unwrap();
+            let accepted = accept(
+                &db,
+                &person,
+                &person,
+                Some("machine-data-provider-revocation-v2"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(accepted.status, ErasureStatus::Accepted);
+            assert_eq!(
+                key.find_one(doc! {"_id":"org-key"}).await.unwrap().unwrap(),
+                org_source
             );
             assert_eq!(
                 key.count_documents(doc! {"status":"active"}).await.unwrap(),
                 2
             );
-            assert!(status(&db, &person).await.unwrap().is_none());
+            assert!(status(&db, &person).await.unwrap().is_some());
             db.drop().await.unwrap();
         }
     }

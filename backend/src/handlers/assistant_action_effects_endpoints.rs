@@ -957,7 +957,6 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,
@@ -1497,8 +1496,25 @@ mod tests {
         let Some((db, actor_id)) = prepare_database("asst_ext_delete_cascade").await else {
             return;
         };
-        let provider = grant_provider();
         let state = test_app_state(db.clone());
+        let remote = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path("/applications/test-app/grant"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&remote)
+            .await;
+        let mut provider = grant_provider();
+        provider.revocation.as_mut().unwrap().url = format!("{}/applications", remote.uri());
+        provider.client_id_encrypted =
+            Some(state.encryption_keys.encrypt(b"test-app").await.unwrap());
+        provider.client_secret_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-app-secret")
+                .await
+                .unwrap(),
+        );
         crate::test_utils::init_test_audit_chain_hmac_key();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
@@ -1625,16 +1641,29 @@ mod tests {
         assert_eq!(confirmed["replayed"], false);
         assert_eq!(confirmed["resource"]["externalKeyId"], primary_key);
 
-        // Consent permits local cascade teardown, but cannot make a delayed
-        // broad provider request safe against a successor upstream grant.
+        // The acknowledged same-owner cascade commits one durable grant
+        // obligation and sends one immediate upstream revocation.
         let effects = crate::services::personal_erasure_service::provider::EFFECTS;
-        for _ in 0..2 {
+        for _ in 0..100 {
             crate::services::personal_erasure_service::provider::drain_one(
                 &state.db,
                 &state.encryption_keys,
             )
             .await
             .unwrap();
+            if state
+                .db
+                .collection::<mongodb::bson::Document>(effects)
+                .count_documents(
+                    doc! {"user_id":&actor_id,"kind":"oauth_disconnect","status":"complete"},
+                )
+                .await
+                .unwrap()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
             state
@@ -1645,10 +1674,19 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert_eq!(state.db.collection::<mongodb::bson::Document>(effects)
-            .count_documents(doc! {"user_id":&actor_id,"kind":"oauth_disconnect",
-                "status":"operator_action","reason":"provider_grant_scope_requires_external_reconciliation",
-                "capability_encrypted":{"$exists":true}}).await.unwrap(), 2);
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(effects)
+                .count_documents(doc! {"user_id":&actor_id,"kind":"oauth_disconnect",
+                "status":"complete","reason":"provider_revocation_confirmed",
+                "capability_encrypted":{"$exists":false}})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(remote.received_requests().await.unwrap().len(), 1);
+        remote.verify().await;
 
         let (status, evidence) = request(
             app(state),

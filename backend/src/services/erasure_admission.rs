@@ -10,38 +10,6 @@ use mongodb::{ClientSession, Database};
 pub(crate) struct OwnerFenceCreationRace;
 
 pub(crate) const COLLECTION: &str = "personal_owner_write_fences";
-pub(crate) const CREDENTIAL_INVENTORY: &str = "credential_inventory_fences";
-const CREDENTIAL_INVENTORY_ID: &str = "global-v1";
-
-/// Before token-index cutover, serialize inventory observations with material
-/// writers. Once the bounded backfill is complete, token admission protects
-/// actual dispatch and unrelated owners no longer share a global write lock.
-pub(crate) async fn credential_inventory_in_session(
-    db: &Database,
-    tx: &mut ClientSession,
-    material_change: bool,
-) -> AppResult<i64> {
-    if super::token_copy_admission::discovery_complete_in_session(db, tx).await? {
-        // Distinct from every pre-cutover nonnegative inventory revision. It
-        // certifies the admission contract, never absence of live copies.
-        return Ok(-1);
-    }
-    let change = if material_change { 1_i64 } else { 0_i64 };
-    let row = db
-        .collection::<Document>(CREDENTIAL_INVENTORY)
-        .find_one_and_update(
-            doc! {"_id":CREDENTIAL_INVENTORY_ID},
-            doc! {"$inc":{"revision":change,"observation_fence":1_i64}},
-        )
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .session(tx)
-        .await?
-        .ok_or_else(|| AppError::Internal("Credential inventory fence is unavailable".into()))?;
-    row.get_i64("revision")
-        .map_err(|_| AppError::Internal("Invalid credential inventory revision".into()))
-}
-
 pub(crate) async fn fence_in_session(
     db: &Database,
     owner: &str,
@@ -130,7 +98,6 @@ pub(crate) async fn credential_change_in_session(
     tx: &mut ClientSession,
 ) -> AppResult<()> {
     fence_in_session(db, owner, tx).await?;
-    credential_inventory_in_session(db, tx, true).await?;
     db.collection::<Document>(crate::models::user::COLLECTION_NAME)
         .update_one(
             doc! {"_id":owner},
@@ -239,11 +206,25 @@ pub(crate) async fn insert_owned<T: serde::Serialize + Sync>(
 ) -> AppResult<mongodb::results::InsertOneResult> {
     let document = bson::to_document(row)
         .map_err(|_| AppError::Internal("Invalid owned metadata serialization".into()))?;
-    let context = (db.clone(), collection.to_owned(), owner.to_owned(), document);
-    super::transaction_service::run_db_only(db, &context, |tx,(db,collection,owner,document)| {
-        Box::pin(async move {
-            fence_in_session(db,owner,tx).await?;
-            Ok(db.collection::<Document>(collection).insert_one(document.clone()).session(tx).await?)
-        })
-    }).await
+    let context = (
+        db.clone(),
+        collection.to_owned(),
+        owner.to_owned(),
+        document,
+    );
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, (db, collection, owner, document)| {
+            Box::pin(async move {
+                fence_in_session(db, owner, tx).await?;
+                Ok(db
+                    .collection::<Document>(collection)
+                    .insert_one(document.clone())
+                    .session(tx)
+                    .await?)
+            })
+        },
+    )
+    .await
 }

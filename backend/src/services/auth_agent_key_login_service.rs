@@ -622,8 +622,17 @@ pub async fn approve(
     };
     let credential_id = Uuid::new_v4().to_string();
     let secret = credentials::generate_secret();
-    let encrypted = super::agent_login_record_service::encrypt(encryption,&row.id,actor,&key_id,&credential_id,secret.as_bytes()).await?;
-    let delivery_context_version = super::agent_login_record_service::version(encryption).map(i32::from);
+    let encrypted = super::agent_login_record_service::encrypt(
+        encryption,
+        &row.id,
+        actor,
+        &key_id,
+        &credential_id,
+        secret.as_bytes(),
+    )
+    .await?;
+    let delivery_context_version =
+        super::agent_login_record_service::version(encryption).map(i32::from);
     let mut session = db.client().start_session().await?;
     // Claim, key insertion, child issuance, and encrypted delivery are committed
     // together. A cancelled future or process crash cannot leave a partial grant.
@@ -808,9 +817,15 @@ async fn prepare_delivery(
     encryption: &EncryptionKeys,
     row: &AgentKeyLoginRequest,
 ) -> AppResult<Delivery> {
-    let credential = super::agent_login_record_service::decrypt(encryption,row).await?;
-    prepare_decoded_credential_delivery(db,row.credential_id.as_deref(),row.approved_user_id.as_deref(),
-        credential,row.key_was_created || row.key_created_by_approval).await
+    let credential = super::agent_login_record_service::decrypt(encryption, row).await?;
+    prepare_decoded_credential_delivery(
+        db,
+        row.credential_id.as_deref(),
+        row.approved_user_id.as_deref(),
+        credential,
+        row.key_was_created || row.key_created_by_approval,
+    )
+    .await
 }
 
 pub async fn prepare_credential_delivery(
@@ -821,15 +836,32 @@ pub async fn prepare_credential_delivery(
     encrypted: Option<&[u8]>,
     key_was_created: bool,
 ) -> AppResult<Delivery> {
-    let plaintext = Zeroizing::new(encryption.decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?).await?);
-    let credential = Zeroizing::new(std::str::from_utf8(&plaintext)
-        .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?.to_owned());
-    prepare_decoded_credential_delivery(db,credential_id,approved_user_id,credential,key_was_created).await
+    let plaintext = Zeroizing::new(
+        encryption
+            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
+            .await?,
+    );
+    let credential = Zeroizing::new(
+        std::str::from_utf8(&plaintext)
+            .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?
+            .to_owned(),
+    );
+    prepare_decoded_credential_delivery(
+        db,
+        credential_id,
+        approved_user_id,
+        credential,
+        key_was_created,
+    )
+    .await
 }
 
 async fn prepare_decoded_credential_delivery(
-    db: &Database, credential_id: Option<&str>, approved_user_id: Option<&str>,
-    credential: Zeroizing<String>, key_was_created: bool,
+    db: &Database,
+    credential_id: Option<&str>,
+    approved_user_id: Option<&str>,
+    credential: Zeroizing<String>,
+    key_was_created: bool,
 ) -> AppResult<Delivery> {
     let id = credential_id.ok_or(AppError::AgentKeyCredentialNotFound)?;
     let child = db

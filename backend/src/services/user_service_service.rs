@@ -1627,11 +1627,7 @@ pub async fn update_user_service_with_keys(
                 "$inc": { "state_version": 1_i64 },
             },
         );
-    let result = if let Some(keys) = encryption_keys {
-        result.credential_keys(keys).await?
-    } else {
-        result.await?
-    };
+    let result = result.await?;
 
     if result.matched_count == 0 {
         if default_request_headers.is_some() {

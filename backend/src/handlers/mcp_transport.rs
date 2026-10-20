@@ -3008,6 +3008,15 @@ async fn materialize_resource_content(
     Ok(vec![serde_json::json!({"type":"text","text":note})])
 }
 
+// Construct large child futures outside the dispatch poll frame. Wrapped
+// resource calls keep both universal and service dispatch frames on the stack.
+fn box_tool_future<'a, F>(make: impl FnOnce() -> F) -> futures::future::BoxFuture<'a, F::Output>
+where
+    F: std::future::Future + Send + 'a,
+{
+    Box::pin(make())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_service_tool<'a>(
     state: &'a AppState,
@@ -3098,7 +3107,9 @@ fn dispatch_service_tool<'a>(
             );
         }
 
-        if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
+        if let Some(response) =
+            box_tool_future(|| chat_service_gate(state, auth, service, request.id.clone())).await
+        {
             return response;
         }
         // Enforce API-key service scope before activation/execute -- scoped keys
@@ -3156,24 +3167,28 @@ fn dispatch_service_tool<'a>(
         {
             return refused;
         }
-        let mut auto_allowed = match webhook_service_gate(
-            state,
-            auth,
-            service,
-            endpoint,
-            &prepared,
-            tool_name,
-            &arguments,
-            request.id.clone(),
-        )
+        let mut auto_allowed = match box_tool_future(|| {
+            webhook_service_gate(
+                state,
+                auth,
+                service,
+                endpoint,
+                &prepared,
+                tool_name,
+                &arguments,
+                request.id.clone(),
+            )
+        })
         .await
         {
             Ok(auto) => auto,
             Err(refused) => return refused,
         };
         let operation = prepared.operation_descriptor();
-        match authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
-            .await
+        match box_tool_future(|| {
+            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
+        })
+        .await
         {
             Ok(Some(auto)) => {
                 auto_allowed = Some((
@@ -3340,9 +3355,12 @@ fn dispatch_service_tool<'a>(
                 "source_policy": refusal,
             }).to_string();
             }
-            service_tool_content(state, auth, tool_name, response).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
         } else if let Some((row, output)) = &resource {
-            let result = materialize_resource_content(state, auth, row, *output, response).await;
+            let result = box_tool_future(|| {
+                materialize_resource_content(state, auth, row, *output, response)
+            })
+            .await;
             match result {
                 Ok(content) => (content, false, None),
                 Err(error) => (
@@ -3355,7 +3373,7 @@ fn dispatch_service_tool<'a>(
                 ),
             }
         } else {
-            service_tool_content(state, auth, tool_name, response).await
+            box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await
         };
         if !is_error
             && !matches!(
@@ -3479,18 +3497,21 @@ async fn authorize_mcp_operation(
         return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
-        &state.db,
-        &approval_owner_user_id,
-        &target.service_owner_user_id,
-        &target.service_id,
-        operation,
-        auth.approval_requester_type(),
-        &auth.approval_requester_id(),
-        auth.auth_method == AuthMethod::Session,
-        target.is_auto_connected,
-        auth.chat.as_ref(),
-    )
+    let approval_requester_id = auth.approval_requester_id();
+    let (approval_outcome, automatic) = box_tool_future(|| {
+        approval_service::evaluate_for_chat(
+            &state.db,
+            &approval_owner_user_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            operation,
+            auth.approval_requester_type(),
+            &approval_requester_id,
+            auth.auth_method == AuthMethod::Session,
+            target.is_auto_connected,
+            auth.chat.as_ref(),
+        )
+    })
     .await
     .map_err(|e| {
         tool_result(
@@ -4341,7 +4362,9 @@ async fn handle_meta_call_tool(
         }
     };
 
-    if let Some(response) = chat_service_gate(state, auth, service, request_id.clone()).await {
+    if let Some(response) =
+        box_tool_future(|| chat_service_gate(state, auth, service, request_id.clone())).await
+    {
         return response;
     }
 
@@ -4374,23 +4397,29 @@ async fn handle_meta_call_tool(
     {
         return refused;
     }
-    let mut auto_allowed = match webhook_service_gate(
-        state,
-        auth,
-        service,
-        endpoint,
-        &prepared,
-        tool_name,
-        &inner_args,
-        request_id.clone(),
-    )
+    let mut auto_allowed = match box_tool_future(|| {
+        webhook_service_gate(
+            state,
+            auth,
+            service,
+            endpoint,
+            &prepared,
+            tool_name,
+            &inner_args,
+            request_id.clone(),
+        )
+    })
     .await
     {
         Ok(auto) => auto,
         Err(refused) => return refused,
     };
     let operation = prepared.operation_descriptor();
-    match authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await {
+    match box_tool_future(|| {
+        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone())
+    })
+    .await
+    {
         Ok(Some(auto)) => {
             auto_allowed = Some((
                 auto,
@@ -4540,7 +4569,8 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
-    let (content, is_error, failure) = service_tool_content(state, auth, tool_name, response).await;
+    let (content, is_error, failure) =
+        box_tool_future(|| service_tool_content(state, auth, tool_name, response)).await;
     if !is_error
         && !matches!(
             service.source,

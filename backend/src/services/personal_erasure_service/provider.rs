@@ -1,6 +1,6 @@
 //! Preserve exact revocation capability before removing source secrets. Token
-//! scope is combined with acceptance dependency guards; RFC7009 token scope
-//! alone does not establish that an upstream grant is unshared.
+//! scope and grant scope preserve the ordinary disconnect contract; potentially
+//! grant-wide effects use a single attempt with a bounded start window.
 use super::*;
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 pub(crate) const EFFECTS: &str = "personal_erasure_effects";
+pub(super) const RECEIPTS: &str = super::super::personal_erasure_registry::REVOCATION_RECEIPTS;
 const MAX_CAPABILITY: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -23,6 +24,8 @@ pub(crate) struct RevocationMaterial {
     scope: Option<oauth_revocation::RevocationScope>,
     #[serde(default)]
     unavailable_family: Option<String>,
+    #[serde(default)]
+    app_lineage: Option<String>,
     #[serde(default)]
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     client_id: Option<Zeroizing<String>>,
@@ -40,11 +43,13 @@ fn strip_provider_secrets(provider: &mut ProviderConfig) {
 }
 
 impl RevocationMaterial {
-    fn requires_grant_review(&self) -> bool {
-        self.provider
-            .as_ref()
-            .and_then(oauth_revocation::effective_revocation)
-            .is_some_and(|config| !oauth_revocation::verified_token_only(&config))
+    fn single_attempt(&self) -> bool {
+        self.scope == Some(oauth_revocation::RevocationScope::Grant)
+            || self
+                .provider
+                .as_ref()
+                .and_then(oauth_revocation::effective_revocation)
+                .is_some_and(|config| !oauth_revocation::verified_token_only(&config))
     }
     pub(crate) fn new(
         mut provider: ProviderConfig,
@@ -68,6 +73,20 @@ impl RevocationMaterial {
             provider: Some(provider),
             scope: None,
             unavailable_family: None,
+            app_lineage: Some(if byo {
+                use sha2::{Digest, Sha256};
+                format!(
+                    "byo:{}",
+                    hex::encode(Sha256::digest(
+                        client_id
+                            .as_ref()
+                            .map(|id| id.as_bytes())
+                            .unwrap_or_default()
+                    ))
+                )
+            } else {
+                "platform".to_owned()
+            }),
             expires_at: None,
             client_id,
             client_secret,
@@ -85,6 +104,7 @@ impl RevocationMaterial {
             provider: None,
             scope: None,
             unavailable_family: Some("unattributed_oauth".into()),
+            app_lineage: None,
             expires_at: None,
             client_id: None,
             client_secret: None,
@@ -102,6 +122,7 @@ impl RevocationMaterial {
             provider: None,
             scope: None,
             unavailable_family: Some("gcp_service_account".into()),
+            app_lineage: None,
             expires_at,
             client_id: None,
             client_secret: None,
@@ -242,71 +263,236 @@ pub(crate) async fn prepare_disconnect_effect(
     scope: oauth_revocation::RevocationScope,
     source_collection: &str,
     source_id: &str,
+    shared_effect_id: Option<&str>,
 ) -> AppResult<Document> {
     material.scope = Some(scope);
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = shared_effect_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let (ciphertext, version) =
         encrypt_capability(keys, &id, owner, &encode_capability(&material)?).await?;
     Ok(doc! {"_id":id,"user_id":owner,"kind":"oauth_disconnect",
     "source_collection":source_collection,"source_id":source_id,"status":"pending",
     "capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},
-    "context_version":version,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()})
+    "context_version":version,"scope":scope.as_str(),"single_attempt":material.single_attempt(),
+    "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()})
 }
 
+/// Receipts are metadata in a dedicated collection, keyed by the
+/// owner, token SHA-256 and the captured revocation authority. They carry no
+/// capability and are not independent remote obligations.
+fn receipt_id(owner: &str, token: &str, authority: &str) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(token.as_bytes()));
+    (
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("revocation-receipt:{owner}:{hash}:{authority}").as_bytes(),
+        )
+        .to_string(),
+        hash,
+    )
+}
+enum ReceiptClaim {
+    Confirmed,
+    Claimed(Document),
+    Busy,
+    Unconfirmed,
+}
+async fn claim_receipt(
+    db: &Database,
+    effect: &Document,
+    token: &str,
+    authority: &str,
+    single: bool,
+) -> AppResult<ReceiptClaim> {
+    let db = super::super::transaction_service::durable_database(db);
+    let result = super::super::transaction_service::run_db_only(
+        &db,
+        &(&db, effect, token, authority, single),
+        |tx, context| {
+            let &(db, effect, token, authority, single) = context;
+            Box::pin(claim_receipt_in_session(
+                db, effect, token, authority, single, tx,
+            ))
+        },
+    )
+    .await;
+    match result {
+        // A concurrent first claimant can win the unique receipt identity.
+        // Its definite duplicate-key abort must not commit our parent fence.
+        Err(AppError::DatabaseError(error))
+            if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==11000)
+                || matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code==11000) =>
+        {
+            Ok(ReceiptClaim::Busy)
+        }
+        other => other,
+    }
+}
+async fn claim_receipt_in_session(
+    db: &Database,
+    effect: &Document,
+    token: &str,
+    authority: &str,
+    single: bool,
+    tx: &mut ClientSession,
+) -> AppResult<ReceiptClaim> {
+    let owner = effect
+        .get_str("user_id")
+        .map_err(|_| AppError::Internal("Invalid revocation owner".into()))?;
+    let effect_id = effect
+        .get_str("_id")
+        .map_err(|_| AppError::Internal("Invalid revocation effect".into()))?;
+    // Serialize receipt creation with effect completion/reconciliation. A
+    // stale dispatch must not recreate owned metadata after final cleanup.
+    if db
+        .collection::<Document>(EFFECTS)
+        .update_one(
+            doc! {
+                "_id":effect_id,"user_id":owner,"status":"pending",
+                "lease_token":effect.get("lease_token").cloned(),
+                "$expr":{"$gt":["$lease_expires_at","$$NOW"]}
+            },
+            doc! {"$inc":{"receipt_claim_revision":1_i64}},
+        )
+        .session(&mut *tx)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Ok(ReceiptClaim::Busy);
+    }
+    let (id, hash) = receipt_id(owner, token, authority);
+    let receipt = db
+        .collection::<Document>(RECEIPTS)
+        .find_one(doc! {"_id":&id})
+        .session(&mut *tx)
+        .await?;
+    if receipt
+        .as_ref()
+        .is_some_and(|row| row.get_bool("confirmed") == Ok(true))
+    {
+        return Ok(ReceiptClaim::Confirmed);
+    }
+    let generation = retry_generation(effect);
+    if let Some(receipt) = receipt.as_ref()
+        && let Ok(original) = receipt.get_str("effect_id")
+        && original != effect_id
+    {
+        let previous = db
+            .collection::<Document>(EFFECTS)
+            .find_one(doc! {"_id":original,"user_id":owner})
+            .session(&mut *tx)
+            .await?;
+        if previous
+            .as_ref()
+            .is_some_and(|row| row.get_str("status") == Ok("pending"))
+        {
+            return Ok(ReceiptClaim::Busy);
+        }
+        // A duplicate cannot silently bypass another effect's exhausted
+        // budget. An explicit operator retry may take over its receipt lease.
+        if generation == 0 {
+            return Ok(ReceiptClaim::Unconfirmed);
+        }
+    }
+    if single
+        && let Some(receipt) = receipt.as_ref()
+        && receipt.get_bool("attempted") == Ok(true)
+        && !(generation > 0
+            && (receipt.get_str("effect_id") != Ok(effect_id)
+                || retry_generation(receipt) < generation))
+    {
+        return Ok(ReceiptClaim::Unconfirmed);
+    }
+    let mut predicate = match receipt.as_ref() {
+        Some(row) => super::super::record_storage::exact_document_predicate(row),
+        // MongoDB forbids $expr in an upsert predicate. The missing-kind
+        // condition makes a concurrent first claimant lose to the unique _id
+        // instead of overwriting the winner's live lease.
+        None => doc! {"_id":&id,"kind":{"$exists":false}},
+    };
+    if receipt.is_some() {
+        let available = doc! {"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]};
+        if let Some(exact) = predicate.remove("$expr") {
+            predicate.insert("$expr", doc! {"$and":[exact,available]});
+        } else {
+            predicate.insert("$expr", available);
+        }
+    }
+    let result=db.collection::<Document>(RECEIPTS).find_one_and_update(predicate,
+        vec![doc! {"$set":{"kind":"oauth_revocation_receipt","user_id":owner,"token_sha256":hash,"authority_digest":authority,
+            "effect_id":effect_id,"retry_generation":generation,"attempted":false,
+            "lease_token":effect.get("lease_token").cloned(),"lease_expires_at":effect.get("lease_expires_at").cloned(),
+            "updated_at":"$$NOW","created_at":{"$ifNull":["$created_at","$$NOW"]}}}])
+        .upsert(receipt.is_none()).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await;
+    match result {
+        Ok(Some(row)) => Ok(ReceiptClaim::Claimed(row)),
+        Ok(None) => Ok(ReceiptClaim::Busy),
+        Err(error) => Err(error.into()),
+    }
+}
+fn retry_generation(effect: &Document) -> i64 {
+    effect
+        .get_i64("retry_generation")
+        .unwrap_or_else(|_| i64::from(effect.get_i32("retry_generation").unwrap_or(0)))
+}
+async fn record_receipt(db: &Database, receipt: &Document, confirmed: bool) -> AppResult<()> {
+    db.collection::<Document>(RECEIPTS).update_one(doc! {"_id":receipt.get("_id").cloned(),
+        "lease_token":receipt.get("lease_token").cloned(),"$expr":{"$gt":["$lease_expires_at","$$NOW"]}},
+        doc! {"$set":{"confirmed":confirmed},"$unset":{"lease_token":"","lease_expires_at":""},"$currentDate":{"updated_at":true}}).await?;
+    Ok(())
+}
+enum RevocationDelivery {
+    Outcome(oauth_revocation::RevocationOutcome),
+    Busy,
+    Unconfirmed,
+}
+fn confirmed(outcome: &Option<TokenOutcome>, scope: oauth_revocation::RevocationScope) -> bool {
+    matches!(outcome, Some(TokenOutcome::Delivered))
+        || (scope == oauth_revocation::RevocationScope::Token
+            && matches!(outcome, Some(TokenOutcome::NotFound)))
+}
 async fn revoke_with_receipts(
     db: &Database,
     effect: &Document,
     material: &RevocationMaterial,
-) -> AppResult<Option<oauth_revocation::RevocationOutcome>> {
-    let id = effect
-        .get_str("_id")
-        .map_err(|_| AppError::Internal("Invalid effect identity".into()))?;
+) -> AppResult<RevocationDelivery> {
     let authority = material.authority()?;
-    let tokens: Vec<&str> = [
-        material.access_token.as_deref(),
-        material.refresh_token.as_deref(),
+    let owner = effect
+        .get_str("user_id")
+        .map_err(|_| AppError::Internal("Invalid revocation owner".into()))?;
+    let hashes: std::collections::BTreeSet<_> = [
+        material.access_token.as_ref(),
+        material.refresh_token.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .map(String::as_str)
+    .map(|token| receipt_id(owner, token, &authority).1)
     .collect();
-    let closure =
-        super::super::token_copy_admission::close_for_dispatch(db, id, &authority, &tokens).await?;
-    for owner in &closure.waiting_on {
-        let retained = db
-            .collection::<Document>(EFFECTS)
-            .find_one(doc! {"_id":owner})
-            .await?;
-        if retained
-            .as_ref()
-            .is_none_or(|effect| effect.get_str("status").ok() == Some("operator_action"))
-        {
-            return Err(AppError::Conflict(
-                "Equivalent token revocation requires reconciliation".into(),
-            ));
-        }
+    // Keep the per-owner dedup identity on the obligation itself. Receipt
+    // children coordinate delivery of the same identity across local copies.
+    let recorded = db.collection::<Document>(EFFECTS).update_one(doc! {
+        "_id":effect.get("_id").cloned(),"user_id":owner,"status":"pending",
+        "lease_token":effect.get("lease_token").cloned(),
+        "$expr":{"$gt":["$lease_expires_at","$$NOW"]}
+    },doc! {"$set":{"authority_digest":&authority,"token_sha256":hashes.into_iter().collect::<Vec<_>>()}}).await?;
+    if recorded.matched_count != 1 {
+        return Ok(RevocationDelivery::Busy);
     }
-    if !closure.waiting_on.is_empty() {
-        return Ok(None);
-    }
-    let confirmed = |outcome: &Option<TokenOutcome>| {
-        matches!(
-            outcome,
-            Some(TokenOutcome::Delivered | TokenOutcome::NotFound)
-        )
-    };
-    if material.scope == Some(oauth_revocation::RevocationScope::Grant) {
-        return Err(AppError::Conflict(
-            "Grant revocation requires external reconciliation".into(),
-        ));
-    }
+    let mut claims = Vec::new();
+    let mut access = None;
+    let mut refresh = None;
     let mut result = oauth_revocation::RevocationOutcome {
         style: material
             .provider
             .as_ref()
             .and_then(oauth_revocation::effective_revocation)
-            .map(|c| c.style),
-        scope: oauth_revocation::RevocationScope::Token,
+            .map(|config| config.style),
+        scope: material
+            .scope
+            .unwrap_or(oauth_revocation::RevocationScope::Token),
         access: None,
         refresh: None,
     };
@@ -317,43 +503,82 @@ async fn revoke_with_receipts(
         let Some(token) = token else {
             continue;
         };
-        // Reread after the preceding token receipt; access and refresh may be
-        // the same upstream capability. Never resend an already confirmed one.
-        let closure = super::super::token_copy_admission::close_for_dispatch(
-            db,
-            id,
-            &authority,
-            &[token.as_str()],
-        )
-        .await?;
-        let outcome = if closure.confirmed(token)? {
-            Some(TokenOutcome::Delivered)
-        } else {
-            let response = material
-                .revoke(
-                    is_access.then(|| token.clone()),
-                    (!is_access).then(|| token.clone()),
-                )
-                .await
-                .ok_or_else(|| AppError::Internal("Invalid revocation descriptor".into()))?;
-            let outcome = if is_access {
-                response.access
-            } else {
-                response.refresh
-            };
-            if confirmed(&outcome) {
-                super::super::token_copy_admission::confirm_result(db, id, &authority, token)
-                    .await?;
+        // One opaque token in both slots is one upstream capability.
+        if !is_access
+            && material
+                .access_token
+                .as_ref()
+                .is_some_and(|access| access.as_str() == token.as_str())
+        {
+            if result.access.is_some() {
+                result.refresh = result.access.clone();
             }
-            outcome
-        };
-        if is_access {
-            result.access = outcome;
-        } else {
-            result.refresh = outcome;
+            continue;
+        }
+        match claim_receipt(db, effect, token, &authority, material.single_attempt()).await? {
+            ReceiptClaim::Confirmed => {
+                if is_access {
+                    result.access = Some(TokenOutcome::Delivered)
+                } else {
+                    result.refresh = Some(TokenOutcome::Delivered)
+                }
+            }
+            ReceiptClaim::Claimed(receipt) => {
+                claims.push((is_access, receipt));
+                if is_access {
+                    access = Some(token.clone())
+                } else {
+                    refresh = Some(token.clone())
+                }
+            }
+            other => {
+                for (_, receipt) in &claims {
+                    record_receipt(db, receipt, false).await?;
+                }
+                return Ok(if matches!(other, ReceiptClaim::Busy) {
+                    RevocationDelivery::Busy
+                } else {
+                    RevocationDelivery::Unconfirmed
+                });
+            }
         }
     }
-    Ok(Some(result))
+    if access.is_some() || refresh.is_some() {
+        for (_, receipt) in &claims {
+            let changed = db.collection::<Document>(RECEIPTS).update_one(doc! {"_id":receipt.get("_id").cloned(),
+                "lease_token":receipt.get("lease_token").cloned(),"$expr":{"$gt":["$lease_expires_at","$$NOW"]}},
+                doc! {"$set":{"attempted":true}}).await?;
+            if changed.matched_count != 1 {
+                return Ok(RevocationDelivery::Unconfirmed);
+            }
+        }
+        let response = material
+            .revoke(access, refresh)
+            .await
+            .ok_or_else(|| AppError::Internal("Invalid revocation descriptor".into()))?;
+        let grant_confirmed = material.scope == Some(oauth_revocation::RevocationScope::Grant)
+            && (confirmed(&response.access, result.scope)
+                || confirmed(&response.refresh, result.scope));
+        for (is_access, receipt) in claims {
+            let outcome = if grant_confirmed {
+                Some(TokenOutcome::Delivered)
+            } else if is_access {
+                response.access.clone()
+            } else {
+                response.refresh.clone()
+            };
+            record_receipt(db, &receipt, confirmed(&outcome, result.scope)).await?;
+            if is_access {
+                result.access = outcome
+            } else {
+                result.refresh = outcome
+            }
+        }
+    }
+    if material.access_token.is_some() && material.access_token == material.refresh_token {
+        result.refresh = result.access.clone();
+    }
+    Ok(RevocationDelivery::Outcome(result))
 }
 
 // Allocate once; serialization cannot free earlier plaintext allocations during
@@ -450,9 +675,9 @@ pub(super) enum Pass {
     Action(&'static str),
 }
 
-/// One external effect or one source row per pass. Duplicate calls after an
-/// uncertain provider result repeat the same token revocation, never a broader
-/// grant. Completion requires the provider's supported confirmation semantics.
+/// One external effect or one source row per pass.
+/// Verified token-only effects retry within a bounded budget. Grant-capable
+/// effects use one near-immediate attempt. Completion requires a receipt.
 pub(super) async fn pass(
     db: &Database,
     keys: &EncryptionKeys,
@@ -479,14 +704,16 @@ pub(super) async fn pass(
         let _ = effect;
         return Ok(Pass::Action("provider_revocation_requires_reconciliation"));
     }
-    if let Some(effect) = claim_effect(db, Some(&job.user_id)).await? {
+    if let Ok(_permit) = oauth_revocation::try_acquire_revocation_permit()
+        && let Some(effect) = claim_effect(db, Some(&job.user_id)).await?
+    {
         deliver(db, keys, &effect).await?;
         return Ok(Pass::Pending);
     }
     if db
         .collection::<Document>(EFFECTS)
         .find_one(doc! {"user_id":&job.user_id,
-        "status":{"$in":["pending","waiting_token_result"]}})
+        "status":"pending"})
         .await?
         .is_some()
     {
@@ -539,7 +766,7 @@ pub(super) async fn pass(
     }
     if db
         .collection::<Document>(EFFECTS)
-        .find_one(doc! {"user_id":&job.user_id,"status":{"$ne":"complete"}})
+        .find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]})
         .await?
         .is_some()
     {
@@ -548,7 +775,7 @@ pub(super) async fn pass(
     if db
         .collection::<Document>(EFFECTS)
         .find_one(doc! {"user_id":&job.user_id,"status":"complete",
-        "completion_basis":"operator_recorded_unsupported_revocation_policy"})
+        "completion_basis":"operator_recorded_revocation_unavailable"})
         .await?
         .is_some()
     {
@@ -559,6 +786,59 @@ pub(super) async fn pass(
     Ok(Pass::Complete)
 }
 
+/// Re-open a stale completed provider checkpoint before exposing it to a reader.
+pub(super) async fn refresh(
+    db: &Database,
+    mut job: PersonalErasureJob,
+) -> AppResult<PersonalErasureJob> {
+    if job.status != ErasureStatus::Complete
+        && !job.domains.iter().any(|domain| {
+            domain.domain == "provider_credentials" && domain.status == DomainStatus::Complete
+        })
+    {
+        return Ok(job);
+    }
+    let outstanding = db
+        .collection::<Document>(EFFECTS)
+        .find_one(doc! {
+            "user_id":&job.user_id,
+            "$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]
+        })
+        .await?;
+    let Some(effect) = outstanding else {
+        return Ok(job);
+    };
+    let original = bson::to_bson(&job.domains)
+        .map_err(|_| AppError::Internal("Erasure evidence encoding failed".into()))?;
+    let action = effect.get_str("status") == Ok("operator_action");
+    if let Some(domain) = job
+        .domains
+        .iter_mut()
+        .find(|domain| domain.domain == "provider_credentials")
+    {
+        domain.status = if action {
+            DomainStatus::OperatorAction
+        } else {
+            DomainStatus::Pending
+        };
+        domain.completed_at = None;
+        domain.reason = Some("provider_revocation_requires_reconciliation".into());
+    }
+    job.status = if action {
+        ErasureStatus::OperatorAction
+    } else {
+        ErasureStatus::Pending
+    };
+    job.completed_at = None;
+    let updated = bson::to_bson(&job.domains)
+        .map_err(|_| AppError::Internal("Erasure evidence encoding failed".into()))?;
+    db.collection::<Document>(JOBS).update_one(doc! {"_id":&job.id,"domains":original,
+        "$expr":{"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]}},
+        vec![doc! {"$set":{"domains":{"$literal":updated},"status":if action {"operator_action"} else {"pending"},
+            "completed_at":bson::Bson::Null,"updated_at":"$$NOW","retry_at":"$$NOW","lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null}}]).await?;
+    Ok(job)
+}
+
 async fn preserve(
     db: &Database,
     keys: &EncryptionKeys,
@@ -567,36 +847,73 @@ async fn preserve(
     source: &Document,
 ) -> AppResult<()> {
     use sha2::{Digest, Sha256};
-    let material = super::super::unified_key_service::prepare_erasure_revocation(
-        db,
-        keys,
-        source
-            .get_str("user_id")
-            .map_err(|_| AppError::Internal("Invalid credential owner".into()))?,
-        collection,
-        source,
-    )
-    .await?;
+    let owner = source
+        .get_str("user_id")
+        .map_err(|_| AppError::Internal("Invalid credential owner".into()))?;
     let source_id = source
         .get_str("_id")
         .map_err(|_| AppError::Internal("Invalid revocation source".into()))?;
-    // Exact source snapshot makes a late successor a distinct effect, while a
-    // crash/retry before checkpoint reuses this immutable capability identity.
-    let source_bytes = bson::to_vec(source)
-        .map_err(|_| AppError::Internal("Invalid revocation source encoding".into()))?;
-    let id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
+    let plan = super::preparation::source_plan(db, &job.user_id, collection, source_id).await?;
+    let marker = plan.as_ref();
+    // Preserve the strongest live member before a shared grant effect can be
+    // dispatched. The plan contains metadata only, never credential material.
+    if let Some(marker) = marker.filter(|row| row.get_str("scope") == Ok("grant")) {
+        let representative_collection = marker
+            .get_str("representative_collection")
+            .map_err(|_| AppError::Internal("Missing grant representative".into()))?;
+        let representative_id = marker
+            .get_str("representative_id")
+            .map_err(|_| AppError::Internal("Missing grant representative".into()))?;
+        if (representative_collection != collection || representative_id != source_id)
+            && let Some(representative) = db.collection::<Document>(representative_collection)
+                .find_one(doc! {"_id":representative_id,"user_id":owner,"personal_erasure_preserved":{"$ne":true}}).await? {
+            return Box::pin(preserve(db, keys, job, representative_collection, &representative)).await;
+        }
+    }
+    let material = Box::pin(
+        super::super::unified_key_service::prepare_erasure_revocation(
+            db, keys, owner, collection, source,
+        ),
+    )
+    .await?;
+    let scope = if marker.and_then(|row| row.get_str("scope").ok()) == Some("grant") {
+        oauth_revocation::RevocationScope::Grant
+    } else {
+        oauth_revocation::RevocationScope::Token
+    };
+    let identity = if scope == oauth_revocation::RevocationScope::Grant {
+        format!(
+            "{}:{owner}:grant:{}",
+            job.id,
+            marker
+                .and_then(|row| row.get_str("group").ok())
+                .ok_or_else(|| AppError::Internal("Erasure grant group is unavailable".into()))?
+        )
+    } else {
         format!(
             "{}:{collection}:{source_id}:{}",
             job.id,
-            hex::encode(Sha256::digest(&source_bytes))
+            hex::encode(Sha256::digest(bson::to_vec(source).map_err(|_| {
+                AppError::Internal("Invalid revocation source encoding".into())
+            })?))
         )
-        .as_bytes(),
-    )
-    .to_string();
-    let encrypted = match material {
-        Some(material) => {
-            Some(encrypt_capability(keys, &id, &job.user_id, &encode_capability(&material)?).await?)
+    };
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes()).to_string();
+    let effect = match material {
+        Some(mut material) => {
+            material.scope = Some(scope);
+            if let Some(lineage) = marker.and_then(|row| row.get_str("app_lineage").ok()) {
+                material.app_lineage = Some(lineage.to_owned());
+            }
+            let (encrypted, version) =
+                encrypt_capability(keys, &id, &job.user_id, &encode_capability(&material)?).await?;
+            Some(
+                doc! {"_id":&id,"user_id":&job.user_id,"target_owner_id":owner,"source_collection":collection,"source_id":source_id,
+                "provider_config_id":material.provider.as_ref().map(|provider|provider.id.as_str()),
+                "kind":"oauth_token_revocation","status":"pending","capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+                "context_version":version,"scope":scope.as_str(),"single_attempt":material.single_attempt(),
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},
+            )
         }
         None => None,
     };
@@ -606,14 +923,17 @@ async fn preserve(
         .write_concern(WriteConcern::majority())
         .await?;
     let result:AppResult<()>=async {
-        if db.collection::<Document>(USERS).update_one(doc! {"_id":&job.user_id,"is_active":false,"platform_personal_deleting":true},doc! {"$inc":{"erasure_effect_fence":1_i64}}).session(&mut tx).await?.matched_count!=1 {return Err(AppError::Conflict("Erasure source authority changed".into()));}
-        let mut set=doc! {"personal_erasure_preserved":true,"status":"revoked"};
-        set.insert("error_message",bson::Bson::Null);
-        let changed=db.collection::<Document>(collection).update_one(doc! {"_id":source_id,"user_id":source.get_str("user_id").map_err(|_|AppError::Internal("Invalid credential owner".into()))?,"$expr":{"$eq":["$$ROOT",{"$literal":source}]}},doc! {"$set":set,"$unset":{"access_token_encrypted":"","refresh_token_encrypted":"","credential_encrypted":"","api_key_encrypted":"","user_oauth_client_id_encrypted":"","user_oauth_client_secret_encrypted":"","revocation_provenance":""}}).session(&mut tx).await?;
-        if changed.matched_count!=1 {return Err(AppError::Conflict("Revocation source changed".into()));}
-        super::super::token_copy_admission::remove_in_session(db, collection, source_id, &mut tx).await?;
-        if let Some((encrypted,version))=encrypted {
-            db.collection::<Document>(EFFECTS).insert_one(doc! {"_id":&id,"user_id":&job.user_id,"source_collection":collection,"source_id":source_id,"kind":"oauth_token_revocation","status":"pending","capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"context_version":version,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).session(&mut tx).await?;
+        if db.collection::<Document>(USERS).update_one(doc! {"_id":&job.user_id,"is_active":false,"platform_personal_deleting":true},doc! {"$inc":{"erasure_effect_fence":1_i64}}).session(&mut tx).await?.matched_count!=1 {
+            return Err(AppError::Conflict("Erasure source authority changed".into()));
+        }
+        if db.collection::<Document>(collection).update_one(super::super::record_storage::exact_document_predicate(source),
+            doc! {"$set":{"personal_erasure_preserved":true,"status":"revoked","error_message":bson::Bson::Null},
+                "$unset":{"access_token_encrypted":"","refresh_token_encrypted":"","credential_encrypted":"","api_key_encrypted":"",
+                    "user_oauth_client_id_encrypted":"","user_oauth_client_secret_encrypted":""}}).session(&mut tx).await?.matched_count!=1 {
+            return Err(AppError::Conflict("Revocation source changed".into()));
+        }
+        if let Some(effect)=effect.as_ref() {
+            db.collection::<Document>(EFFECTS).update_one(doc! {"_id":&id},doc! {"$setOnInsert":effect}).upsert(true).session(&mut tx).await?;
         }
         Ok(())
     }.await;
@@ -626,74 +946,31 @@ pub(crate) async fn schedule_disconnect(
     id: &str,
 ) -> AppResult<bool> {
     let durable = super::super::transaction_service::durable_database(db);
-    let Some(effect) = durable
-        .collection::<Document>(EFFECTS)
-        .find_one(doc! {"_id":id,"kind":"oauth_disconnect","status":"pending"})
-        .await?
-    else {
+    let Ok(permit) = oauth_revocation::try_acquire_revocation_permit() else {
+        return Ok(false);
+    };
+    let Some(effect) = claim_effect_matching(&durable, None, Some(id)).await? else {
         return Ok(false);
     };
     let plaintext = decrypt_capability(keys, &effect).await?;
     let material: RevocationMaterial = serde_json::from_slice(&plaintext)
-        .map_err(|_| AppError::Internal("Invalid preserved disconnect capability".into()))?;
-    if material.provider.is_none() || effect.get_bool("direct_remote_selected").ok() != Some(true) {
-        return Ok(false);
-    }
-    if material.scope == Some(oauth_revocation::RevocationScope::Grant)
-        || material.requires_grant_review()
-    {
-        if let Some(claimed) = claim_effect_matching(&durable, None, Some(id)).await? {
-            finish_effect(
-                &durable,
-                &claimed,
-                false,
-                Some("provider_grant_scope_requires_external_reconciliation"),
-            )
-            .await?;
-        }
+        .map_err(|_| AppError::Internal("Invalid disconnect capability".into()))?;
+    if let Some(reason) = preflight(&durable, keys, &effect, &material).await? {
+        finish_effect(&durable, &effect, false, Some(reason)).await?;
         return Ok(false);
     }
     if let Some(reason) = material.skip_reason() {
-        if let Some(claimed) = claim_effect_matching(&durable, None, Some(id)).await? {
-            material.audit(&durable, &claimed, reason, None, None).await;
-            finish_effect(&durable, &claimed, false, Some(reason)).await?;
-        }
+        material.audit(&durable, &effect, reason, None, None).await;
+        finish_effect(&durable, &effect, false, Some(reason)).await?;
         return Ok(false);
     }
-    let tokens: Vec<&str> = [
-        material.access_token.as_deref(),
-        material.refresh_token.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(String::as_str)
-    .collect();
-    let authority = material.authority()?;
-    match super::super::token_copy_admission::close_for_dispatch(&durable, id, &authority, &tokens)
-        .await
-    {
-        Ok(closure) if closure.waiting_on.is_empty() => {}
-        _ => return Ok(false),
-    }
-    let Ok(permit) = oauth_revocation::try_acquire_revocation_permit() else {
-        return Ok(false);
-    };
-    let Some(claimed) = claim_effect_matching(&durable, None, Some(id)).await? else {
-        return Ok(false);
-    };
     tokio::spawn(async move {
         let _permit = permit;
-        // Failure leaves the original majority-committed intent and ciphertext
-        // available after the lease expires; no raw capability lives only here.
-        let _ = deliver_material(&durable, &claimed, material).await;
+        let _ = deliver_material(&durable, &effect, material).await;
     });
     Ok(true)
 }
-
 async fn deliver(db: &Database, keys: &EncryptionKeys, effect: &Document) -> AppResult<()> {
-    // Authentication, missing-key and malformed storage failures retain their
-    // exact capability and become independently actionable, never a global
-    // scheduler error that prevents unrelated jobs from being claimed.
     let material = match decrypt_capability(keys, effect).await {
         Ok(plaintext) => serde_json::from_slice::<RevocationMaterial>(&plaintext).ok(),
         Err(_) => None,
@@ -707,16 +984,68 @@ async fn deliver(db: &Database, keys: &EncryptionKeys, effect: &Document) -> App
         )
         .await;
     };
+    if let Some(reason) = preflight(db, keys, effect, &material).await? {
+        return finish_effect(db, effect, false, Some(reason)).await;
+    }
     deliver_material(db, effect, material).await
 }
-
+const GRANT_REVOCATION_START_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
+fn window_origin(effect: &Document) -> Option<chrono::DateTime<chrono::Utc>> {
+    let created = effect.get_datetime("created_at").ok()?.to_chrono();
+    Some(
+        effect
+            .get_datetime("retry_armed_at")
+            .map(|time| time.to_chrono().max(created))
+            .unwrap_or(created),
+    )
+}
+async fn successor_present(
+    db: &Database,
+    keys: &EncryptionKeys,
+    effect: &Document,
+    material: &RevocationMaterial,
+    origin: chrono::DateTime<chrono::Utc>,
+) -> AppResult<bool> {
+    use futures::TryStreamExt;
+    let Some(provider) = material.provider.as_ref() else {
+        return Ok(false);
+    };
+    let owner = effect
+        .get_str("target_owner_id")
+        .or_else(|_| effect.get_str("user_id"))
+        .map_err(|_| AppError::Internal("Invalid revocation owner".into()))?;
+    let expected = material.app_lineage.as_deref().unwrap_or(if material.byo {
+        "unknown"
+    } else {
+        "platform"
+    });
+    for collection in [
+        crate::models::user_api_key::COLLECTION_NAME,
+        crate::models::user_provider_token::COLLECTION_NAME,
+    ] {
+        let mut cursor = db
+            .collection::<Document>(collection)
+            .find(doc! {"user_id":owner,"provider_config_id":&provider.id,
+            "status":{"$ne":"revoked"},"personal_erasure_preserved":{"$ne":true},
+            "created_at":{"$gt":bson::DateTime::from_chrono(origin)}})
+            .await?;
+        while let Some(source) = cursor.try_next().await? {
+            let group = super::super::unified_key_service::erasure_credential_group(
+                db, keys, collection, &source,
+            )
+            .await?;
+            if group.get_str("app_lineage") == Ok(expected) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
 async fn deliver_material(
     db: &Database,
     effect: &Document,
     material: RevocationMaterial,
 ) -> AppResult<()> {
-    let required_access = material.access_token.is_some();
-    let required_refresh = material.refresh_token.is_some();
     if material.provider.is_none() {
         let reason = match material.unavailable_family.as_deref() {
             Some("gcp_service_account") => {
@@ -727,65 +1056,16 @@ async fn deliver_material(
         };
         return finish_effect(db, effect, false, Some(reason)).await;
     }
-    // Current-token inequality and locally distinct authorizations do not prove
-    // that a grant-wide provider operation cannot affect retained upstream
-    // authorizations. Keep the capability and require external reconciliation;
-    // never silently widen a token-scoped erasure request into that operation.
-    if material.scope == Some(oauth_revocation::RevocationScope::Grant)
-        || material.requires_grant_review()
-    {
-        return finish_effect(
-            db,
-            effect,
-            false,
-            Some("provider_grant_scope_requires_external_reconciliation"),
-        )
-        .await;
-    }
     if let Some(reason) = material.skip_reason() {
         material.audit(db, effect, reason, None, None).await;
         return finish_effect(db, effect, false, Some(reason)).await;
     }
-    let tokens: Vec<&str> = [
-        material.access_token.as_deref(),
-        material.refresh_token.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(String::as_str)
-    .collect();
-    if tokens.is_empty() || tokens.iter().any(|token| token.is_empty()) {
-        return finish_effect(
-            db,
-            effect,
-            false,
-            Some("preserved_capability_unavailable_or_invalid"),
-        )
-        .await;
-    }
-    if super::super::token_copy_admission::results_confirmed(db, &material.authority()?, &tokens)
-        .await?
-    {
-        let mut observed = effect.clone();
-        observed.insert("attempts", attempts(effect).saturating_sub(1).max(0));
-        return finish_effect(db, &observed, true, None).await;
-    }
-    if effect.get_str("kind").ok() == Some("oauth_disconnect")
-        && effect.get_bool("direct_remote_selected").ok() != Some(true)
-    {
-        return wait_for_token_result(db, effect).await;
-    }
-    let outcome = match revoke_with_receipts(db, effect, &material).await {
-        Ok(Some(outcome)) => outcome,
-        Ok(None) => return wait_for_token_result(db, effect).await,
-        Err(_) => {
-            return finish_effect(
-                db,
-                effect,
-                false,
-                Some("credential_copy_isolation_requires_external_reconciliation"),
-            )
-            .await;
+    let single = material.single_attempt();
+    let outcome = match revoke_with_receipts(db, effect, &material).await? {
+        RevocationDelivery::Outcome(outcome) => outcome,
+        RevocationDelivery::Busy => return defer_effect(db, effect).await,
+        RevocationDelivery::Unconfirmed => {
+            return finish_effect(db, effect, false, Some("grant_scope_unconfirmed")).await;
         }
     };
     material
@@ -803,39 +1083,65 @@ async fn deliver_material(
                 .map(super::super::unified_key_service::token_outcome_name),
         )
         .await;
-    let confirmed = |outcome: &Option<TokenOutcome>| {
-        matches!(
-            outcome,
-            Some(TokenOutcome::Delivered | TokenOutcome::NotFound)
-        )
+    let complete = if material.scope == Some(oauth_revocation::RevocationScope::Grant) {
+        // Request-scoped grant endpoints (GitHub, Meta) have one access-token
+        // receipt; RFC7009 reports both supplied token outcomes.
+        confirmed(&outcome.access, outcome.scope) || confirmed(&outcome.refresh, outcome.scope)
+    } else {
+        (material.access_token.is_none() || confirmed(&outcome.access, outcome.scope))
+            && (material.refresh_token.is_none() || confirmed(&outcome.refresh, outcome.scope))
     };
-    let complete = (!required_access || confirmed(&outcome.access))
-        && (!required_refresh || confirmed(&outcome.refresh));
-    let missing = (required_access && outcome.access.is_none())
-        || (required_refresh && outcome.refresh.is_none());
-    let action = missing
-        || (material.scope == Some(oauth_revocation::RevocationScope::Grant) && !complete)
-        || [&outcome.access, &outcome.refresh]
-            .into_iter()
-            .any(|o| matches!(o, Some(TokenOutcome::Skipped(_))));
-    finish_effect(
-        db,
-        effect,
-        complete,
-        action.then_some("provider_revocation_not_supported_or_credentials_missing"),
-    )
-    .await
+    let permanent = [&outcome.access, &outcome.refresh]
+        .into_iter()
+        .any(|outcome| matches!(outcome, Some(TokenOutcome::PermanentFailure)));
+    let action = if !complete && permanent {
+        Some("provider_revocation_permanent_failure")
+    } else if !complete && single {
+        Some("grant_scope_unconfirmed")
+    } else if [&outcome.access, &outcome.refresh]
+        .into_iter()
+        .any(|value| matches!(value, Some(TokenOutcome::Skipped(_))))
+    {
+        Some("provider_revocation_not_supported_or_credentials_missing")
+    } else {
+        None
+    };
+    finish_effect(db, effect, complete, action).await
+}
+async fn defer_effect(db: &Database, effect: &Document) -> AppResult<()> {
+    db.collection::<Document>(EFFECTS).update_one(doc! {"_id":effect.get("_id").cloned(),"status":"pending",
+        "lease_token":effect.get("lease_token").cloned(),"$expr":{"$gt":["$lease_expires_at","$$NOW"]}},
+        vec![doc! {"$set":{"reason":"equivalent_revocation_in_flight",
+            "attempts":attempts(effect).saturating_sub(1).max(0),"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
+            "retry_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":10}},"updated_at":"$$NOW"}}]).await?;
+    Ok(())
 }
 
-async fn wait_for_token_result(db: &Database, effect: &Document) -> AppResult<()> {
-    db.collection::<Document>(EFFECTS).update_one(doc! {
-        "_id":effect.get_str("_id").map_err(|_|AppError::Internal("Invalid effect identity".into()))?,
-        "status":"pending","lease_token":effect.get_str("lease_token").map_err(|_|AppError::Internal("Invalid effect lease".into()))?,
-        "$expr":{"$gt":["$lease_expires_at","$$NOW"]},
-    },vec![doc! {"$set":{"status":"waiting_token_result","reason":"equivalent_revocation_in_flight",
-        "attempts":attempts(effect).saturating_sub(1).max(0),"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,
-        "retry_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":10}},"updated_at":"$$NOW"}}]).await?;
-    Ok(())
+async fn preflight(
+    db: &Database,
+    keys: &EncryptionKeys,
+    effect: &Document,
+    material: &RevocationMaterial,
+) -> AppResult<Option<&'static str>> {
+    if material.single_attempt() {
+        // Claim increments attempts. A reclaimed dispatch can have completed at
+        // the provider before its receipt was committed, so it cannot be sent again.
+        let reason = if attempts(effect) > 1 {
+            Some("grant_scope_unconfirmed")
+        } else if let Some(origin) = window_origin(effect) {
+            if chrono::Utc::now() > origin + GRANT_REVOCATION_START_WINDOW {
+                Some("grant_scope_window_elapsed")
+            } else if successor_present(db, keys, effect, material, origin).await? {
+                Some("grant_scope_successor_present")
+            } else {
+                None
+            }
+        } else {
+            Some("grant_scope_window_elapsed")
+        };
+        return Ok(reason);
+    }
+    Ok(None)
 }
 
 const MAX_DELIVERY_ATTEMPTS: i64 = 8;
@@ -852,7 +1158,7 @@ async fn claim_effect_matching(
     owner: Option<&str>,
     id: Option<&str>,
 ) -> AppResult<Option<Document>> {
-    let mut filter = doc! {"status":{"$in":["pending","waiting_token_result"]},"$expr":{"$and":[
+    let mut filter = doc! {"status":"pending","$expr":{"$and":[
         {"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]},
         {"$lte":[{"$ifNull":["$retry_at",bson::DateTime::from_millis(0)]},"$$NOW"]}
     ]}};
@@ -915,6 +1221,24 @@ async fn finish_effect(
     Ok(())
 }
 
+fn unavailable_resolution_allowed(reason: &str) -> bool {
+    matches!(
+        reason,
+        "preserved_capability_unavailable_or_invalid"
+            | "provider_revocation_retry_exhausted"
+            | "provider_revocation_not_supported_or_credentials_missing"
+            | "provider_revocation_permanent_failure"
+            | "gcp_service_account_access_token_has_no_individual_revocation"
+            | "skipped_decrypt_failed"
+            | "skipped_not_configured"
+            | "skipped_no_token"
+            | "skipped_no_credentials"
+            | "skipped_unsupported_auth"
+            | "skipped_grant_only"
+            | "skipped_unsupported_style"
+    )
+}
+
 /// One explicit operator disposition, bound to the round shown by the metadata
 /// endpoint. A recorded request is idempotent even after that round exhausts.
 #[derive(Deserialize)]
@@ -928,8 +1252,8 @@ pub(crate) struct EffectReconciliationRequest {
 }
 
 /// Authenticated admin/operator layer supplies actor authority. Evidence is a
-/// bounded reference hash, not credential text. This API cannot assert that an
-/// unconfirmed supported revocation succeeded.
+/// bounded reference hash, not credential text. External confirmation is an
+/// audited operator attestation, including when the capability cannot be read.
 pub(crate) async fn reconcile_effect(
     db: &Database,
     keys: &EncryptionKeys,
@@ -1011,64 +1335,36 @@ pub(crate) async fn reconcile_effect(
     let next_generation = generation
         .checked_add(1)
         .ok_or_else(|| AppError::Conflict("Effect retry generation exhausted".into()))?;
-    let plaintext = decrypt_capability(keys, &effect).await?;
-    let mut material: RevocationMaterial = serde_json::from_slice(&plaintext)
-        .map_err(|_| AppError::Internal("Preserved capability is invalid".into()))?;
-    let current = if let Some(provider) = material.provider.as_ref() {
-        db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
-            .find_one(doc! {"_id":&provider.id})
-            .await?
-    } else {
-        None
-    };
-    let supported = |provider: &ProviderConfig| {
-        oauth_revocation::effective_revocation(provider).is_some_and(|config| {
-            matches!(config.style.as_str(), "rfc7009" | "github" | "self_bearer")
-        })
-    };
     let mut set = doc! {"status":"pending","reason":bson::Bson::Null,"lease_token":bson::Bson::Null,"lease_expires_at":bson::Bson::Null,"attempts":0_i64,"retry_at":bson::Bson::Null,
-    "retry_generation":next_generation,"last_reconciliation_key_hash":&key_hash,
+    "retry_armed_at":bson::DateTime::now(),"retry_generation":next_generation,"last_reconciliation_key_hash":&key_hash,
     "last_reconciliation_request_digest":&request_digest};
     if action == "record_external_revocation_confirmed" {
-        let grant_review = material.requires_grant_review()
-            && effect.get_str("reason").ok()
-                == Some("provider_grant_scope_requires_external_reconciliation");
-        let unattributed = material.provider.is_none()
-            && material.unavailable_family.as_deref() == Some("unattributed_oauth")
-            && effect.get_str("reason").ok()
-                == Some("oauth_provider_unknown_requires_external_reconciliation");
-        let copy_review = matches!(
-            effect.get_str("kind").ok(),
-            Some("oauth_token_revocation" | "oauth_issuance")
-        ) && effect.get_str("reason").ok()
-            == Some("credential_copy_isolation_requires_external_reconciliation");
-        if !grant_review && !unattributed && !copy_review {
-            return Err(AppError::Conflict(
-                "Effect does not await external grant reconciliation".into(),
-            ));
-        }
-        set.extend(doc! {"status":"complete","reason":"external_grant_revocation_confirmed",
-            "completion_basis":"operator_confirmed_external_grant_revocation","remote_revocation_confirmed":true});
+        set.extend(doc! {"status":"complete","reason":"external_revocation_confirmed",
+            "completion_basis":"operator_confirmed_external_revocation","remote_revocation_confirmed":true});
     } else if action == "record_remote_revocation_unavailable" {
-        // No transport-failure attestation. A supported immutable/current
-        // configuration must be retried or repaired, never declared erased.
-        if material.provider.as_ref().is_some_and(supported)
-            || current.as_ref().is_some_and(supported)
+        // GCP service-account mint receipts retain their issuance reason. Their
+        // captured family still proves there is no individual token-revocation
+        // endpoint, including when the encrypted response cannot be read.
+        if !unavailable_resolution_allowed(effect.get_str("reason").unwrap_or(""))
+            && effect.get_str("credential_family") != Ok("gcp_service_account")
         {
             return Err(AppError::Conflict(
-                "Supported revocation must be confirmed; repair configuration and retry".into(),
-            ));
-        }
-        if material.provider.is_none()
-            && material.unavailable_family.as_deref() != Some("gcp_service_account")
-        {
-            return Err(AppError::Conflict(
-                "Unknown revocation family requires repair".into(),
+                "This effect requires external confirmation or an explicit retry".into(),
             ));
         }
         set.extend(doc! {"status":"complete","reason":"remote_revocation_unavailable",
-            "completion_basis":"operator_recorded_unsupported_revocation_policy","remote_revocation_confirmed":false});
+            "completion_basis":"operator_recorded_revocation_unavailable","remote_revocation_confirmed":false});
     } else if action == "retry_with_current_provider_config" {
+        let plaintext = decrypt_capability(keys, &effect).await?;
+        let mut material: RevocationMaterial = serde_json::from_slice(&plaintext)
+            .map_err(|_| AppError::Internal("Preserved capability is invalid".into()))?;
+        let current = if let Some(provider) = material.provider.as_ref() {
+            db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+                .find_one(doc! {"_id":&provider.id})
+                .await?
+        } else {
+            None
+        };
         let current = current
             .ok_or_else(|| AppError::Conflict("Provider configuration is missing".into()))?;
         // BYO credentials remain bound to their historical lineage. Platform
@@ -1088,6 +1384,7 @@ pub(crate) async fn reconcile_effect(
             material.client_secret = resolved.client_secret;
         }
         material.provider = Some(current);
+        set.insert("single_attempt", material.single_attempt());
         if let Some(provider) = material.provider.as_mut() {
             strip_provider_secrets(provider);
         }
@@ -1123,11 +1420,10 @@ pub(crate) async fn reconcile_effect(
             {"$eq":["$$ROOT",{"$literal":&effect}]},
             {"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]}
         ]});
-        let changed=db.collection::<Document>(EFFECTS).update_one(predicate,doc! {"$set":set.clone()}).session(&mut *tx).await?;
+        let mut update=doc! {"$set":set.clone()};
+        if matches!(action,"record_remote_revocation_unavailable" | "record_external_revocation_confirmed") {update.insert("$unset",doc! {"capability_encrypted":""});}
+        let changed=db.collection::<Document>(EFFECTS).update_one(predicate,update).session(&mut *tx).await?;
         if changed.matched_count!=1 {return Err(AppError::Conflict("Revocation effect changed; reload evidence".into()));}
-        if matches!(action,"record_remote_revocation_unavailable" | "record_external_revocation_confirmed") {
-            db.collection::<Document>(EFFECTS).update_one(doc! {"_id":effect_id,"status":"complete"},doc! {"$unset":{"capability_encrypted":""}}).session(&mut *tx).await?;
-        }
         let key=super::super::audit_service::audit_chain_hmac_key().ok_or_else(||AppError::Internal("Audit chain is unavailable".into()))?;
         super::super::audit_service::log_actor_event_in_session(db,&mut *tx,key,&super::super::audit_service::AuditActor {user_id:actor.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"user.account.erasure_provider_reconciled",serde_json::json!({"target_user_id":user,"effect_id":effect_id,"action":action,"expected_retry_generation":generation,"request_digest":request_digest,"evidence_sha256":hex::encode(Sha256::digest(evidence_reference.as_bytes())),"remote_revocation_confirmed":action=="record_external_revocation_confirmed"})).await?;
         // Requeue the parent in the same transaction. Only the domain adapter
@@ -1332,78 +1628,16 @@ mod reconciliation_tests {
     }
 }
 
-pub(super) const DUPLICATE_SETTLEMENT_INDEX: &str = "provider_effect_duplicate_settlement";
-
-// Share the exact eligibility contract with the partial index. Only unresolved
-// duplicates participate; retained terminal evidence cannot grow this walk.
-pub(super) fn duplicate_settlement_filter() -> Document {
-    doc! {"$or":[{"status":"operator_action","reason":"credential_copy_isolation_requires_external_reconciliation"},
-    {"status":"waiting_token_result"}]}
-}
-
-async fn settle_confirmed_duplicate(db: &Database, keys: &EncryptionKeys) -> AppResult<()> {
-    let Some(effect) = db
-        .collection::<Document>(EFFECTS)
-        .find_one(duplicate_settlement_filter())
-        .sort(doc! {"duplicate_checked_at":1,"_id":1})
-        .await?
-    else {
-        return Ok(());
-    };
-    let checked: AppResult<bool> = async {
-        let plaintext = decrypt_capability(keys, &effect).await?;
-        let material: RevocationMaterial = serde_json::from_slice(&plaintext)
-            .map_err(|_| AppError::Internal("Invalid preserved capability".into()))?;
-        let tokens: Vec<&str> = [
-            material.access_token.as_deref(),
-            material.refresh_token.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(String::as_str)
-        .collect();
-        super::super::token_copy_admission::results_confirmed(db, &material.authority()?, &tokens)
-            .await
-    }
-    .await;
-    let filter = doc! {"_id":effect.get("_id").cloned().unwrap_or(bson::Bson::Null),"status":effect.get("status").cloned().unwrap_or(bson::Bson::Null),
-    "capability_encrypted":effect.get("capability_encrypted").cloned().unwrap_or(bson::Bson::Null)};
-    if checked.unwrap_or(false) {
-        let context = (
-            db,
-            &filter,
-            effect
-                .get_str("user_id")
-                .map_err(|_| AppError::Internal("Invalid effect owner".into()))?,
-        );
-        super::super::transaction_service::run_db_only(db,&context,|tx,context| {
-            let &(db,filter,owner)=context;
-            Box::pin(async move {
-                let changed=db.collection::<Document>(EFFECTS).update_one(filter.clone(),doc! {
-                    "$set":{"status":"complete","reason":"provider_revocation_confirmed",
-                        "completion_basis":"equivalent_authority_token_results","completed_at":bson::DateTime::now()},
-                    "$unset":{"capability_encrypted":""},
-                }).session(&mut *tx).await?;
-                if changed.matched_count==1 { super::issuance::wake_in_session(db,owner,tx).await?; }
-                Ok(())
-            })
-        }).await?;
-    } else {
-        db.collection::<Document>(EFFECTS)
-            .update_one(filter, doc! {"$currentDate":{"duplicate_checked_at":true}})
-            .await?;
-    }
-    Ok(())
-}
-
 /// Independently drain authenticated requeues, including rejected reconnects
 /// with no personal-erasure intent. Remote effects never require inventing one.
 pub(crate) async fn drain_one(db: &Database, keys: &EncryptionKeys) -> AppResult<()> {
     let db = super::super::transaction_service::durable_database(db);
+    let Ok(_permit) = oauth_revocation::try_acquire_revocation_permit() else {
+        return Ok(());
+    };
     if let Some(effect) = claim_effect(&db, None).await? {
         deliver(&db, keys, &effect).await?;
     }
-    settle_confirmed_duplicate(&db, keys).await?;
     Ok(())
 }
 
@@ -1489,74 +1723,8 @@ pub(crate) async fn rewrap_capability_snapshot(
 mod scheduling_tests {
     use super::*;
     use axum::{Router, http::StatusCode, routing::post};
+    use futures::TryStreamExt;
 
-    fn has_stage(value: &bson::Bson, stage: &str) -> bool {
-        match value {
-            bson::Bson::Document(doc) => {
-                doc.get_str("stage").ok() == Some(stage)
-                    || doc.values().any(|value| has_stage(value, stage))
-            }
-            bson::Bson::Array(values) => values.iter().any(|value| has_stage(value, stage)),
-            _ => false,
-        }
-    }
-
-    #[tokio::test]
-    async fn duplicate_settlement_partial_index_bounds_mixed_retained_effects_without_sort() {
-        let (db, owner) = super::super::tests::fixture().await;
-        let effects = db.collection::<Document>(EFFECTS);
-        let mut rows: Vec<Document> = (0..256)
-            .map(|i| {
-                doc! {"_id":format!("retained-{i:03}"),"user_id":&owner,
-                "status":if i%2==0 {"complete"} else {"operator_action"},
-                "reason":"provider_outcome_uncertain"}
-            })
-            .collect();
-        rows.extend([
-            doc! {"_id":"eligible-old-operator","status":"operator_action",
-            "reason":"credential_copy_isolation_requires_external_reconciliation",
-            "duplicate_checked_at":bson::DateTime::from_millis(1)},
-            doc! {"_id":"eligible-waiting","status":"waiting_token_result",
-            "duplicate_checked_at":bson::DateTime::from_millis(2)},
-        ]);
-        effects.insert_many(rows).await.unwrap();
-        let first = effects
-            .find_one(duplicate_settlement_filter())
-            .sort(doc! {"duplicate_checked_at":1,"_id":1})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.get_str("_id"), Ok("eligible-old-operator"));
-        // Explain the actual one-item filter/order using its declared index.
-        // Hinting makes the assertion independent of tiny-fixture cost choices;
-        // the partial index must satisfy both eligibility and order without a
-        // blocking sort or a scan through unrelated retained evidence.
-        let explain = db
-            .run_command(doc! {"explain":{
-            "find":EFFECTS,"filter":duplicate_settlement_filter(),
-            "sort":{"duplicate_checked_at":1,"_id":1},"limit":1,
-            "hint":DUPLICATE_SETTLEMENT_INDEX},"verbosity":"executionStats"})
-            .await
-            .unwrap();
-        let plan = bson::Bson::Document(explain.clone());
-        assert!(has_stage(&plan, "IXSCAN"));
-        assert!(!has_stage(&plan, "SORT"));
-        assert!(!has_stage(&plan, "COLLSCAN"));
-        let stats = explain.get_document("executionStats").unwrap();
-        assert_eq!(stats.get_i32("nReturned"), Ok(1));
-        assert!(stats.get_i32("totalDocsExamined").unwrap() <= 2);
-        db.drop().await.unwrap();
-    }
-
-    async fn activate_discovery(db: &Database, keys: &EncryptionKeys) {
-        super::super::super::token_copy_admission::begin_discovery(db, true)
-            .await
-            .unwrap();
-        while super::super::super::token_copy_admission::discover_one(db, keys)
-            .await
-            .unwrap()
-        {}
-    }
     fn mock_provider(id: &str, url: String) -> ProviderConfig {
         bson::from_document(doc! {
             "_id":id,"slug":id,"name":id,"provider_type":"oauth2","is_active":true,
@@ -1579,17 +1747,17 @@ mod scheduling_tests {
             Some(access.to_owned().into()),
             refresh.map(|s| s.to_owned().into()),
         );
-        let mut effect = prepare_disconnect_effect(
+        let effect = prepare_disconnect_effect(
             keys,
             owner,
             material,
             oauth_revocation::RevocationScope::Token,
             "user_api_keys",
             "removed-source",
+            None,
         )
         .await
         .unwrap();
-        effect.insert("direct_remote_selected", true);
         let id = effect.get_str("_id").unwrap().to_owned();
         db.collection::<Document>(EFFECTS)
             .insert_one(effect)
@@ -1598,11 +1766,61 @@ mod scheduling_tests {
         id
     }
     async fn deliver_id(db: &Database, keys: &EncryptionKeys, id: &str) {
+        db.collection::<Document>(EFFECTS)
+            .update_one(doc! {"_id":id}, doc! {"$unset":{"retry_at":""}})
+            .await
+            .unwrap();
         let effect = claim_effect_matching(db, None, Some(id))
             .await
             .unwrap()
             .unwrap();
         deliver(db, keys, &effect).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn simultaneous_first_receipt_claims_keep_one_live_dispatch_lease() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let provider = mock_provider("receipt-race", "http://127.0.0.1/revoke".into());
+        let mut effects = Vec::new();
+        for _ in 0..2 {
+            let id =
+                queue_token_effect(&db, &keys, &owner, provider.clone(), "same-token", None).await;
+            effects.push(
+                claim_effect_matching(&db, None, Some(&id))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let (first, second) = tokio::join!(
+            claim_receipt(&db, &effects[0], "same-token", "same-authority", false),
+            claim_receipt(&db, &effects[1], "same-token", "same-authority", false)
+        );
+        let winner = match (first.unwrap(), second.unwrap()) {
+            (ReceiptClaim::Claimed(row), ReceiptClaim::Busy)
+            | (ReceiptClaim::Busy, ReceiptClaim::Claimed(row)) => row,
+            _ => panic!("equivalent obligations must have exactly one receipt lease"),
+        };
+        let receipts: Vec<Document> = db
+            .collection::<Document>(RECEIPTS)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(receipts, vec![winner]);
+        assert!(receipts[0].get_datetime("lease_expires_at").unwrap() > &bson::DateTime::now());
+        let parent = effects
+            .iter()
+            .find(|effect| effect.get_str("_id") == receipts[0].get_str("effect_id"))
+            .unwrap();
+        assert_eq!(
+            receipts[0].get_datetime("lease_expires_at"),
+            parent.get_datetime("lease_expires_at")
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1613,7 +1831,6 @@ mod scheduling_tests {
         };
         let (db, owner) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
-        activate_discovery(&db, &keys).await;
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1700,7 +1917,6 @@ mod scheduling_tests {
         };
         let (db, owner) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
-        activate_discovery(&db, &keys).await;
         let a = Arc::new(AtomicUsize::new(0));
         let b = Arc::new(AtomicUsize::new(0));
         let access = Arc::new(AtomicUsize::new(0));
@@ -1769,24 +1985,17 @@ mod scheduling_tests {
             None,
         )
         .await;
-        db.collection::<Document>(EFFECTS)
-            .update_one(
-                doc! {"_id":&unrelated},
-                doc! {"$set":{"direct_remote_selected":false}},
-            )
-            .await
-            .unwrap();
         deliver_id(&db, &keys, &unrelated).await;
-        settle_confirmed_duplicate(&db, &keys).await.unwrap();
+
         let held = db
             .collection::<Document>(EFFECTS)
             .find_one(doc! {"_id":&unrelated})
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(held.get_str("status"), Ok("waiting_token_result"));
-        assert!(held.contains_key("capability_encrypted"));
-        assert_eq!(a.load(Ordering::SeqCst), 1);
+        assert_eq!(held.get_str("status"), Ok("complete"));
+        assert!(!held.contains_key("capability_encrypted"));
+        assert_eq!(a.load(Ordering::SeqCst), 2);
         let pp = mock_provider("partial", format!("{base}/partial"));
         let first = queue_token_effect(
             &db,
@@ -1814,7 +2023,7 @@ mod scheduling_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(blocked.get_str("status"), Ok("waiting_token_result"));
+        assert_eq!(blocked.get_str("status"), Ok("pending"));
         assert!(blocked.contains_key("capability_encrypted"));
         accept_refresh.store(true, Ordering::SeqCst);
         db.collection::<Document>(EFFECTS)
@@ -1822,9 +2031,7 @@ mod scheduling_tests {
             .await
             .unwrap();
         deliver_id(&db, &keys, &first).await;
-        for _ in 0..3 {
-            settle_confirmed_duplicate(&db, &keys).await.unwrap();
-        }
+        deliver_id(&db, &keys, &second).await;
         assert_eq!(
             access.load(Ordering::SeqCst),
             1,
@@ -1853,7 +2060,6 @@ mod scheduling_tests {
         };
         let (db, owner) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
-        activate_discovery(&db, &keys).await;
         let sends = Arc::new(AtomicUsize::new(0));
         let count = sends.clone();
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -1891,22 +2097,6 @@ mod scheduling_tests {
         .await;
         let second =
             queue_token_effect(&db, &keys, &owner, provider, "duplicate-token", None).await;
-        db.collection::<Document>(EFFECTS)
-            .update_one(
-                doc! {"_id":&second},
-                doc! {"$set":{"direct_remote_selected":false}},
-            )
-            .await
-            .unwrap();
-        deliver_id(&db, &keys, &second).await;
-        let waiting = db
-            .collection::<Document>(EFFECTS)
-            .find_one(doc! {"_id":&second})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(waiting.get_str("status"), Ok("waiting_token_result"));
-        assert_eq!(attempts(&waiting), 0);
         let task_db = db.clone();
         let task_id = first.clone();
         let delivery = tokio::spawn(async move {
@@ -1916,6 +2106,15 @@ mod scheduling_tests {
         tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .unwrap();
+        deliver_id(&db, &keys, &second).await;
+        let waiting = db
+            .collection::<Document>(EFFECTS)
+            .find_one(doc! {"_id":&second})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.get_str("status"), Ok("pending"));
+        assert_eq!(attempts(&waiting), 0);
         assert_eq!(sends.load(Ordering::SeqCst), 1);
         let pending = db
             .collection::<Document>(EFFECTS)
@@ -1923,13 +2122,14 @@ mod scheduling_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(pending.get_str("status"), Ok("waiting_token_result"));
+        assert_eq!(pending.get_str("status"), Ok("pending"));
         release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(10), delivery)
             .await
             .unwrap()
             .unwrap();
-        settle_confirmed_duplicate(&db, &keys).await.unwrap();
+
+        deliver_id(&db, &keys, &second).await;
         assert_eq!(sends.load(Ordering::SeqCst), 1);
         assert_eq!(
             db.collection::<Document>(EFFECTS)
@@ -1945,7 +2145,7 @@ mod scheduling_tests {
     }
 
     #[tokio::test]
-    async fn grant_wide_revocation_requires_scoped_external_evidence_without_sending() {
+    async fn unverified_token_revocation_attempts_once_then_requires_scoped_external_evidence() {
         let (db, user) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
         let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1954,18 +2154,18 @@ mod scheduling_tests {
             "/revoke",
             post(move || {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async { StatusCode::OK }
+                async { StatusCode::SERVICE_UNAVAILABLE }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/revoke", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        for configuration in [
+        for (index,configuration) in [
             doc! {"revocation":{"style":"rfc7009","url":&url,"auth":"none","request_encoding":"form","revokes_grant":true}},
             doc! {"revocation":{"style":"rfc7009","url":&url,"auth":"none","request_encoding":"form","revokes_grant":false}},
             doc! {"revocation":{"style":"rfc7009","url":&url,"auth":"none","request_encoding":"form"}},
             doc! {"revocation_url":&url},
-        ] {
+        ].into_iter().enumerate() {
             let mut source = doc! {
                 "_id":"grant-provider","slug":"grant-provider","name":"Grant Provider","provider_type":"oauth2",
                 "is_active":true,"created_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
@@ -1976,14 +2176,14 @@ mod scheduling_tests {
             let material = RevocationMaterial::new(
                 provider,
                 None,
-                Some("independent-access".to_owned().into()),
+                Some(format!("independent-access-{index}").into()),
                 None,
             );
             let (encrypted, version) =
                 encrypt_capability(&keys, &id, &user, &encode_capability(&material).unwrap())
                     .await
                     .unwrap();
-            db.collection::<Document>(EFFECTS).insert_one(doc! {"_id":&id,"user_id":&user,"status":"pending","context_version":version,
+            db.collection::<Document>(EFFECTS).insert_one(doc! {"_id":&id,"user_id":&user,"status":"pending","created_at":bson::DateTime::now(),"context_version":version,
             "capability_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"updated_at":bson::DateTime::now()}).await.unwrap();
             drain_one(&db, &keys).await.unwrap();
             let effect = db
@@ -1995,10 +2195,10 @@ mod scheduling_tests {
             assert_eq!(effect.get_str("status"), Ok("operator_action"));
             assert_eq!(
                 effect.get_str("reason"),
-                Ok("provider_grant_scope_requires_external_reconciliation")
+                Ok("grant_scope_unconfirmed")
             );
             assert!(effect.contains_key("capability_encrypted"));
-            assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), index+1);
             assert!(
                 reconcile_effect(&db, &keys, "operator", &uuid::Uuid::new_v4().to_string(), &crate::services::personal_erasure_service::provider::EffectReconciliationRequest { effect_id: id.to_string(), action: ("record_external_revocation_confirmed").to_string(), evidence_reference: ("support-ticket").to_string(), expected_retry_generation: 0, idempotency_key: uuid::Uuid::new_v4().to_string() })
                 .await
@@ -2028,10 +2228,10 @@ mod scheduling_tests {
             assert_eq!(effect.get_str("status"), Ok("complete"));
             assert_eq!(
                 effect.get_str("completion_basis"),
-                Ok("operator_confirmed_external_grant_revocation")
+                Ok("operator_confirmed_external_revocation")
             );
             assert!(!effect.contains_key("capability_encrypted"));
-            assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), index+1);
         }
         server.abort();
         db.drop().await.unwrap();
@@ -2041,13 +2241,6 @@ mod scheduling_tests {
     async fn failing_owner_backs_off_other_owner_drains_and_corrupt_capability_is_actionable() {
         let (db, user) = super::super::tests::fixture().await;
         let keys = crate::test_utils::test_encryption_keys();
-        super::super::super::token_copy_admission::begin_discovery(&db, true)
-            .await
-            .unwrap();
-        while super::super::super::token_copy_admission::discover_one(&db, &keys)
-            .await
-            .unwrap()
-        {}
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/revoke", listener.local_addr().unwrap());
         let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2332,6 +2525,723 @@ mod scheduling_tests {
             );
         }
         server.abort();
+        db.drop().await.unwrap();
+    }
+    async fn queue_scoped_effect(
+        db: &Database,
+        keys: &EncryptionKeys,
+        owner: &str,
+        provider: ProviderConfig,
+        scope: oauth_revocation::RevocationScope,
+        token: &str,
+    ) -> String {
+        let credentials = ResolvedOAuthCredentials {
+            app_source: super::super::super::oauth_app_source::OAuthAppSource::Platform,
+            client_id: "test-app".to_owned().into(),
+            client_secret: None,
+            credential_user_id: None,
+        };
+        let effect = prepare_disconnect_effect(
+            keys,
+            owner,
+            RevocationMaterial::new(
+                provider,
+                Some(credentials),
+                Some(token.to_owned().into()),
+                None,
+            ),
+            scope,
+            "user_api_keys",
+            "removed-source",
+            None,
+        )
+        .await
+        .unwrap();
+        let id = effect.get_str("_id").unwrap().to_owned();
+        db.collection::<Document>(EFFECTS)
+            .insert_one(effect)
+            .await
+            .unwrap();
+        id
+    }
+    async fn effect_row(db: &Database, id: &str) -> Document {
+        db.collection::<Document>(EFFECTS)
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    async fn counting_server() -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent = count.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/revoke",
+                    post(move || {
+                        sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { StatusCode::SERVICE_UNAVAILABLE }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        (url, count, server)
+    }
+    #[tokio::test]
+    async fn grant_and_default_rfc7009_each_get_one_attempt_per_explicit_retry_round() {
+        use std::sync::atomic::Ordering;
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (url, sent, server) = counting_server().await;
+        for (index, scope) in [
+            oauth_revocation::RevocationScope::Grant,
+            oauth_revocation::RevocationScope::Token,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut provider = mock_provider(&format!("single-{index}"), url.clone());
+            provider.revocation.as_mut().unwrap().effect_scope = None;
+            provider.client_id_encrypted = Some(keys.encrypt(b"test-app").await.unwrap());
+            db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            let id = queue_scoped_effect(
+                &db,
+                &keys,
+                &owner,
+                provider,
+                scope,
+                &format!("single-token-{index}"),
+            )
+            .await;
+            let before = sent.load(Ordering::SeqCst);
+            deliver_id(&db, &keys, &id).await;
+            let row = effect_row(&db, &id).await;
+            assert_eq!(row.get_str("status"), Ok("operator_action"));
+            assert_eq!(row.get_str("reason"), Ok("grant_scope_unconfirmed"));
+            assert_eq!(attempts(&row), 1);
+            assert_eq!(sent.load(Ordering::SeqCst), before + 1);
+            assert!(
+                claim_effect_matching(&db, None, Some(&id))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            for (generation, action) in ["retry", "retry_with_current_provider_config"]
+                .into_iter()
+                .enumerate()
+            {
+                // The old source is outside the automatic start window. Only
+                // the explicit operator action opens a fresh, bounded window.
+                db.collection::<Document>(EFFECTS).update_one(doc! {"_id":&id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::hours(1))}}).await.unwrap();
+                reconcile_effect(
+                    &db,
+                    &keys,
+                    &owner,
+                    &owner,
+                    &EffectReconciliationRequest {
+                        effect_id: id.clone(),
+                        action: action.into(),
+                        expected_retry_generation: generation as i64,
+                        idempotency_key: uuid::Uuid::new_v4().to_string(),
+                        evidence_reference: "fixture://operator-reviewed-successor-risk".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                let armed = effect_row(&db, &id).await;
+                assert_eq!(attempts(&armed), 0);
+                assert_eq!(armed.get_str("status"), Ok("pending"));
+                assert!(
+                    armed.get_datetime("retry_armed_at").unwrap()
+                        > armed.get_datetime("created_at").unwrap()
+                );
+                assert_eq!(
+                    window_origin(&armed),
+                    Some(armed.get_datetime("retry_armed_at").unwrap().to_chrono())
+                );
+                deliver_id(&db, &keys, &id).await;
+                let finished = effect_row(&db, &id).await;
+                assert_eq!(finished.get_str("status"), Ok("operator_action"));
+                assert_eq!(finished.get_str("reason"), Ok("grant_scope_unconfirmed"));
+                assert_eq!(attempts(&finished), 1);
+                assert_eq!(sent.load(Ordering::SeqCst), before + generation + 2);
+                assert!(
+                    claim_effect_matching(&db, None, Some(&id))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn single_attempt_window_successor_and_reclaimed_claim_prevent_provider_calls() {
+        use std::sync::atomic::Ordering;
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (url, sent, server) = counting_server().await;
+        for scope in [
+            oauth_revocation::RevocationScope::Grant,
+            oauth_revocation::RevocationScope::Token,
+        ] {
+            for reason in [
+                "grant_scope_window_elapsed",
+                "grant_scope_successor_present",
+                "grant_scope_unconfirmed",
+            ] {
+                let provider_id = uuid::Uuid::new_v4().to_string();
+                let mut provider = mock_provider(&provider_id, url.clone());
+                provider.revocation.as_mut().unwrap().effect_scope = None;
+                db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
+                    .insert_one(&provider)
+                    .await
+                    .unwrap();
+                let id = queue_scoped_effect(
+                    &db,
+                    &keys,
+                    &owner,
+                    provider,
+                    scope,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .await;
+                if reason == "grant_scope_window_elapsed" {
+                    db.collection::<Document>(EFFECTS).update_one(doc! {"_id":&id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::minutes(6))}}).await.unwrap();
+                } else if reason == "grant_scope_successor_present" {
+                    let origin = chrono::Utc::now() - chrono::Duration::seconds(1);
+                    db.collection::<Document>(EFFECTS)
+                        .update_one(
+                            doc! {"_id":&id},
+                            doc! {"$set":{"created_at":bson::DateTime::from_chrono(origin)}},
+                        )
+                        .await
+                        .unwrap();
+                    db.collection::<Document>(crate::models::user_provider_token::COLLECTION_NAME).insert_one(doc! {
+                        "_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"provider_config_id":&provider_id,
+                        "token_type":"oauth2","status":"active","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+                    }).await.unwrap();
+                } else {
+                    let claimed = claim_effect_matching(&db, None, Some(&id))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(attempts(&claimed), 1);
+                    db.collection::<Document>(EFFECTS)
+                        .update_one(
+                            doc! {"_id":&id},
+                            doc! {"$set":{"lease_expires_at":bson::DateTime::from_millis(0)}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                deliver_id(&db, &keys, &id).await;
+                let row = effect_row(&db, &id).await;
+                assert_eq!(row.get_str("status"), Ok("operator_action"));
+                assert_eq!(row.get_str("reason"), Ok(reason));
+                assert!(row.contains_key("capability_encrypted"));
+                assert_eq!(sent.load(Ordering::SeqCst), 0);
+            }
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn identical_tokens_of_different_owners_do_not_share_receipts() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (url, sent, server) = counting_server().await;
+        let provider = mock_provider("owner-dedup", url);
+        for owner in [&owner, "another-owner"] {
+            let id =
+                queue_token_effect(&db, &keys, owner, provider.clone(), "identical-token", None)
+                    .await;
+            deliver_id(&db, &keys, &id).await;
+            let row = effect_row(&db, &id).await;
+            assert_eq!(row.get_str("status"), Ok("pending"));
+            assert_eq!(row.get_str("user_id"), Ok(owner));
+            assert_eq!(row.get_array("token_sha256").unwrap().len(), 1);
+            assert!(row.get_str("authority_digest").is_ok());
+        }
+        assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            db.collection::<Document>(RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            2
+        );
+        server.abort();
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn completed_erasure_cannot_hide_unresolved_or_secret_holding_effects() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let job = super::super::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        for (state, capability) in [
+            ("pending", false),
+            ("operator_action", false),
+            ("complete", true),
+        ] {
+            let mut completed = job.clone();
+            completed.status = ErasureStatus::Complete;
+            completed.completed_at = Some(chrono::Utc::now());
+            for domain in &mut completed.domains {
+                domain.status = DomainStatus::Complete;
+            }
+            db.collection::<PersonalErasureJob>(JOBS)
+                .replace_one(doc! {"_id":&job.id}, &completed)
+                .await
+                .unwrap();
+            let mut effect = doc! {"_id":"unresolved-effect","user_id":&owner,"kind":"oauth_disconnect","status":state};
+            if capability {
+                effect.insert(
+                    "capability_encrypted",
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: vec![1, 2],
+                    },
+                );
+            }
+            db.collection::<Document>(EFFECTS)
+                .replace_one(doc! {"_id":"unresolved-effect"}, effect)
+                .upsert(true)
+                .await
+                .unwrap();
+            let refreshed = refresh(&db, completed).await.unwrap();
+            assert_ne!(refreshed.status, ErasureStatus::Complete);
+            assert!(refreshed.completed_at.is_none());
+            assert_ne!(
+                db.collection::<Document>(JOBS)
+                    .find_one(doc! {"_id":&job.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_str("status"),
+                Ok("complete")
+            );
+        }
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn confirmed_revocation_receipts_do_not_block_final_personal_erasure() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (db, owner) = super::super::tests::fixture().await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let sent = Arc::new(AtomicUsize::new(0));
+        let counter = sent.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/revoke",
+                    post(move || {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        async { StatusCode::OK }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let id = queue_token_effect(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            mock_provider("complete", url),
+            "complete-token",
+            None,
+        )
+        .await;
+        super::super::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        let stale_dispatch = claim_effect_matching(&db, None, Some(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        deliver(&db, &state.encryption_keys, &stale_dispatch)
+            .await
+            .unwrap();
+        let completed = effect_row(&db, &id).await;
+        assert_eq!(completed.get_str("status"), Ok("complete"));
+        let authority = completed.get_str("authority_digest").unwrap();
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            db.collection::<Document>(RECEIPTS)
+                .count_documents(doc! {"user_id":&owner,"confirmed":true})
+                .await
+                .unwrap(),
+            1
+        );
+        for _ in 0..240 {
+            db.collection::<Document>(JOBS)
+                .update_many(doc! {}, doc! {"$set":{"retry_at":bson::DateTime::now()}})
+                .await
+                .unwrap();
+            super::super::process_one(&state).await.unwrap();
+            if db
+                .collection::<Document>(USERS)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap()
+                .is_none()
+                && crate::services::telemetry_erasure_service::completion_evidence(&db, &owner)
+                    .await
+                    .unwrap()
+                    .is_none()
+            {
+                crate::services::telemetry_erasure_service::drain_once(
+                    &db,
+                    &crate::telemetry::erasure::ErasureClients::default(),
+                )
+                .await
+                .unwrap();
+                crate::services::telemetry_erasure_service::operator_reconcile_empty_inventory(
+                    &db,
+                    &owner,
+                    "operator",
+                    "fixture://history",
+                    "Synthetic deployment never configured telemetry",
+                )
+                .await
+                .unwrap();
+            }
+            if super::super::status(&db, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == ErasureStatus::Complete
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            super::super::status(&db, &owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            ErasureStatus::Complete
+        );
+        assert!(
+            db.collection::<Document>(USERS)
+                .find_one(doc! {"_id":&owner})
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            claim_receipt(&db, &stale_dispatch, "complete-token", authority, false)
+                .await
+                .unwrap(),
+            ReceiptClaim::Busy
+        ));
+        assert_eq!(
+            db.collection::<Document>(RECEIPTS)
+                .count_documents(doc! {"user_id":&owner})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn github_not_found_confirms_only_token_scope_including_receipt_reuse() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/applications/{{client_id}}/{{scope}}",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(|| async { StatusCode::NOT_FOUND }),
+            )
+            .await
+            .unwrap();
+        });
+        for scope in [
+            oauth_revocation::RevocationScope::Grant,
+            oauth_revocation::RevocationScope::Token,
+        ] {
+            for _ in 0..2 {
+                let mut provider = mock_provider("github-confirmation", url.clone());
+                let config = provider.revocation.as_mut().unwrap();
+                config.style = "github".into();
+                config.revokes_grant = true;
+                let material = RevocationMaterial::new(
+                    provider,
+                    Some(ResolvedOAuthCredentials {
+                        app_source: super::super::super::oauth_app_source::OAuthAppSource::Platform,
+                        client_id: "app".to_string().into(),
+                        client_secret: Some("secret".to_string().into()),
+                        credential_user_id: None,
+                    }),
+                    Some("missing-token".to_string().into()),
+                    None,
+                );
+                let effect = prepare_disconnect_effect(
+                    &keys,
+                    &owner,
+                    material,
+                    scope,
+                    "user_api_keys",
+                    "removed",
+                    None,
+                )
+                .await
+                .unwrap();
+                let id = effect.get_str("_id").unwrap().to_owned();
+                db.collection::<Document>(EFFECTS)
+                    .insert_one(effect)
+                    .await
+                    .unwrap();
+                deliver_id(&db, &keys, &id).await;
+                let effect = effect_row(&db, &id).await;
+                assert_eq!(
+                    effect.get_str("status"),
+                    Ok(if scope == oauth_revocation::RevocationScope::Grant {
+                        "operator_action"
+                    } else {
+                        "complete"
+                    })
+                );
+                if scope == oauth_revocation::RevocationScope::Grant {
+                    assert_eq!(effect.get_str("reason"), Ok("grant_scope_unconfirmed"));
+                }
+            }
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_operator_reason_has_audited_terminal_resolution_without_decryption() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        for reason in [
+            "grant_scope_unconfirmed",
+            "grant_scope_window_elapsed",
+            "grant_scope_successor_present",
+            "preserved_capability_unavailable_or_invalid",
+            "provider_revocation_retry_exhausted",
+            "provider_revocation_not_supported_or_credentials_missing",
+            "provider_revocation_permanent_failure",
+            "oauth_provider_unknown_requires_external_reconciliation",
+            "gcp_service_account_access_token_has_no_individual_revocation",
+            "skipped_decrypt_failed",
+            "skipped_not_configured",
+            "skipped_no_token",
+            "skipped_no_credentials",
+            "skipped_unsupported_auth",
+            "skipped_grant_only",
+            "skipped_unsupported_style",
+            "provider_issuance_not_installed",
+            "provider_outcome_uncertain",
+        ] {
+            for action in [
+                "record_external_revocation_confirmed",
+                "record_remote_revocation_unavailable",
+            ] {
+                let id = uuid::Uuid::new_v4().to_string();
+                let mut effect = doc! {"_id":&id,"user_id":&owner,"status":"operator_action","reason":reason,
+                "capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![0_u8;4]}};
+                if matches!(
+                    reason,
+                    "provider_issuance_not_installed" | "provider_outcome_uncertain"
+                ) {
+                    effect.insert("credential_family", "gcp_service_account");
+                }
+                db.collection::<Document>(EFFECTS)
+                    .insert_one(effect)
+                    .await
+                    .unwrap();
+                let request = EffectReconciliationRequest {
+                    effect_id: id.clone(),
+                    action: action.into(),
+                    evidence_reference: "evidence://operator-reviewed".into(),
+                    expected_retry_generation: 0,
+                    idempotency_key: uuid::Uuid::new_v4().to_string(),
+                };
+                let result = reconcile_effect(&db, &keys, "operator", &owner, &request).await;
+                if action == "record_remote_revocation_unavailable"
+                    && (reason.starts_with("grant_scope_")
+                        || reason == "oauth_provider_unknown_requires_external_reconciliation")
+                {
+                    assert!(matches!(result, Err(AppError::Conflict(_))));
+                    db.collection::<Document>(EFFECTS)
+                        .delete_one(doc! {"_id":id})
+                        .await
+                        .unwrap();
+                } else {
+                    result.unwrap();
+                    let effect = effect_row(&db, &id).await;
+                    assert_eq!(
+                        effect.get_str("status"),
+                        Ok("complete"),
+                        "{reason}: {action}"
+                    );
+                    assert!(!effect.contains_key("capability_encrypted"));
+                    reconcile_effect(&db, &keys, "operator", &owner, &request)
+                        .await
+                        .unwrap();
+                    assert_eq!(db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).count_documents(doc! {"event_type":"user.account.erasure_provider_reconciled","event_data.effect_id":&id}).await.unwrap(),1);
+                }
+            }
+        }
+        for status in ["pending", "complete", "operator_action"] {
+            let id = uuid::Uuid::new_v4().to_string();
+            db.collection::<Document>(EFFECTS)
+                .insert_one(doc! {"_id":&id,"user_id":&owner,"status":status,"lease_expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(5)),"lease_token":"held-dispatch"})
+                .await
+                .unwrap();
+            assert!(matches!(
+                reconcile_effect(
+                    &db,
+                    &keys,
+                    "operator",
+                    &owner,
+                    &EffectReconciliationRequest {
+                        effect_id: id,
+                        action: "record_external_revocation_confirmed".into(),
+                        evidence_reference: "ticket".into(),
+                        expected_retry_generation: 0,
+                        idempotency_key: uuid::Uuid::new_v4().to_string()
+                    }
+                )
+                .await,
+                Err(AppError::Conflict(_))
+            ));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supported_permanent_failure_has_an_unavailable_resolution() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/revoke", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/revoke", post(|| async { StatusCode::UNAUTHORIZED })),
+            )
+            .await
+            .unwrap();
+        });
+        let id = queue_token_effect(
+            &db,
+            &keys,
+            &owner,
+            mock_provider("permanent", url),
+            "obsolete-app-token",
+            None,
+        )
+        .await;
+        deliver_id(&db, &keys, &id).await;
+        assert_eq!(
+            effect_row(&db, &id).await.get_str("reason"),
+            Ok("provider_revocation_permanent_failure")
+        );
+        reconcile_effect(
+            &db,
+            &keys,
+            "operator",
+            &owner,
+            &EffectReconciliationRequest {
+                effect_id: id.clone(),
+                action: "record_remote_revocation_unavailable".into(),
+                evidence_reference: "evidence://app-removed".into(),
+                expected_retry_generation: 0,
+                idempotency_key: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let effect = effect_row(&db, &id).await;
+        assert_eq!(effect.get_str("status"), Ok("complete"));
+        assert_eq!(effect.get_bool("remote_revocation_confirmed"), Ok(false));
+        assert!(!effect.contains_key("capability_encrypted"));
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bulk_retry_rearms_only_explicitly_verified_token_effects() {
+        let (db, owner) = super::super::tests::fixture().await;
+        let mut job = super::super::accept(&db, &owner, &owner, None)
+            .await
+            .unwrap();
+        for checkpoint in &mut job.domains {
+            if checkpoint.domain == "provider_credentials" {
+                checkpoint.status = DomainStatus::OperatorAction;
+            }
+        }
+        db.collection::<Document>(JOBS).update_one(doc! {"_id":&job.id},doc! {"$set":{"status":"operator_action","domains":bson::to_bson(&job.domains).unwrap()}}).await.unwrap();
+        for (id, single) in [
+            ("single", Some(true)),
+            ("bounded", Some(false)),
+            ("legacy", None),
+        ] {
+            let mut effect = doc! {"_id":id,"user_id":&owner,"kind":"oauth_token_revocation","status":"operator_action","reason":"grant_scope_window_elapsed","attempts":1_i64,
+            "capability_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![0_u8;4]}};
+            if let Some(single) = single {
+                effect.insert("single_attempt", single);
+            }
+            db.collection::<Document>(EFFECTS)
+                .insert_one(effect)
+                .await
+                .unwrap();
+        }
+        let single = effect_row(&db, "single").await;
+        let legacy = effect_row(&db, "legacy").await;
+        super::super::worker::retry_domain(
+            &db,
+            "operator",
+            &owner,
+            &super::super::worker::DomainRetryRequest {
+                domain: "provider_credentials".into(),
+                job_id: job.id,
+                expected_retry_generation: 0,
+                idempotency_key: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(effect_row(&db, "single").await, single);
+        assert_eq!(effect_row(&db, "legacy").await, legacy);
+        let bounded = effect_row(&db, "bounded").await;
+        assert_eq!(bounded.get_str("status"), Ok("pending"));
+        assert_eq!(attempts(&bounded), 0);
+        assert_eq!(retry_generation(&bounded), 1);
         db.drop().await.unwrap();
     }
 }

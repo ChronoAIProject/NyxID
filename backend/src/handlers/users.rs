@@ -281,6 +281,8 @@ pub struct DeleteAccountResponse {
     pub accepted_at: String,
     pub completed_at: Option<String>,
     pub domains: Vec<ErasureDomainResponse>,
+    pub effects: Vec<super::admin::ErasureEffectResponse>,
+    pub next_effect_after: Option<String>,
 }
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureDomainResponse {
@@ -290,9 +292,21 @@ pub struct ErasureDomainResponse {
     pub reason: Option<String>,
     pub completed_at: Option<String>,
 }
-impl From<crate::models::personal_erasure::PersonalErasureJob> for DeleteAccountResponse {
-    fn from(job: crate::models::personal_erasure::PersonalErasureJob) -> Self {
-        Self {
+impl DeleteAccountResponse {
+    pub(crate) async fn from_job(
+        db: &mongodb::Database,
+        job: crate::models::personal_erasure::PersonalErasureJob,
+    ) -> AppResult<Self> {
+        let effects =
+            crate::services::personal_erasure_service::issuance::outcomes(db, &job.user_id, None)
+                .await?;
+        let next_effect_after = (effects.len() == 64).then(|| effects.last().unwrap().id.clone());
+        Ok(Self {
+            effects: effects
+                .into_iter()
+                .map(super::admin::ErasureEffectResponse::from)
+                .collect(),
+            next_effect_after,
             job_id: job.id,
             status: job.status,
             accepted_at: job.accepted_at.to_rfc3339(),
@@ -308,7 +322,7 @@ impl From<crate::models::personal_erasure::PersonalErasureJob> for DeleteAccount
                     completed_at: d.completed_at.map(|v| v.to_rfc3339()),
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -552,7 +566,7 @@ pub async fn delete_me(
     // Acceptance closes authority immediately. Remote/local work continues
     // durably; analytics must not describe this transition as completed.
     let _ = tele;
-    Ok(Json(job.into()))
+    Ok(Json(DeleteAccountResponse::from_job(&state.db, job).await?))
 }
 
 #[cfg(test)]
@@ -1333,6 +1347,8 @@ mod tests {
             accepted_at: "2025-06-15T14:00:00+00:00".to_string(),
             completed_at: None,
             domains: vec![],
+            effects: vec![],
+            next_effect_after: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
 

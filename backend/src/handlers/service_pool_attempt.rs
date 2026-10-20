@@ -873,6 +873,13 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database(label).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let auth = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &auth.user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let request_id = uuid::Uuid::new_v4().to_string();
         let metadata = PoolAttemptAccounting {
             pool_id: "pool".into(),

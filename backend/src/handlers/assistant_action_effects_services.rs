@@ -717,16 +717,10 @@ async fn commit_service_rotate(
     let service_id = request.user_service_id.clone();
     let predecessor_id_for_tx = predecessor_id.clone();
     let successor_for_tx = successor.clone();
-    let encryption_keys = state.encryption_keys.clone();
     crate::services::service_history::transaction::run(&db.clone(), async move |session| {
         let operation: AppResult<()> = async {
-            user_api_key_service::insert_api_key_in_session(
-                &db,
-                &encryption_keys,
-                &mut *session,
-                &successor_for_tx,
-            )
-            .await?;
+            user_api_key_service::insert_api_key_in_session(&db, &mut *session, &successor_for_tx)
+                .await?;
             user_service_service::commit_user_service_mutation(
                 &db,
                 &mut *session,
@@ -1153,7 +1147,6 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_epoch: 1,

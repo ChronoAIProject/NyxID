@@ -235,7 +235,7 @@ async fn persist_rules(
     };
     let rules_bson = bson::to_bson(rules).map_err(|e| AppError::Internal(e.to_string()))?;
     crate::services::catalog_mutation_service::commit_update(&state.db,
-        Some(&state.encryption_keys),service,&authority,
+        service,&authority,
         &doc! {"anonymous_endpoints":rules_bson,"updated_at":bson::DateTime::from_chrono(Utc::now())},
         &doc! {"_id":&service.id},state.audit_chain_hmac_key.as_ref().as_ref()).await?;
     Ok(())

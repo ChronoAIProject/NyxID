@@ -1262,15 +1262,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::admin_encrypted_records::findings),
         )
         .route(
-            "/token-admission",
-            get(handlers::admin_token_admission::status)
-                .post(handlers::admin_token_admission::start),
-        )
-        .route(
-            "/token-admission/{generation}/advance",
-            post(handlers::admin_token_admission::advance),
-        )
-        .route(
             "/billing-ledger/verify",
             get(handlers::admin::verify_billing_ledger),
         )

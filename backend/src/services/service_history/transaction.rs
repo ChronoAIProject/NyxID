@@ -5,7 +5,9 @@ use mongodb::{ClientSession, Database, error::Result};
 pub(super) struct ConcurrentHeadCreation;
 pub(super) fn retryable(error: &mongodb::error::Error) -> bool {
     error.contains_label("TransientTransactionError")
-        || error.get_custom::<crate::services::erasure_admission::OwnerFenceCreationRace>().is_some()
+        || error
+            .get_custom::<crate::services::erasure_admission::OwnerFenceCreationRace>()
+            .is_some()
         || error.get_custom::<ConcurrentHeadCreation>().is_some()
         || error
             .get_custom::<crate::services::audit_chain_service::AuditHeadCollision>()

@@ -444,7 +444,6 @@ async fn mint_and_store_inner(
             None,
             super::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .update_one(predicate, doc! {"$set":set})
-                .credential_keys(encryption_keys)
                 .routine_refresh()
                 .into_future(),
         ),
@@ -725,7 +724,6 @@ mod tests {
     fn make_gcp_key(sa_json_enc: Vec<u8>) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -948,7 +946,7 @@ mod tests {
         assert_eq!(resolved.get_bool("remote_revocation_confirmed"), Ok(false));
         assert_eq!(
             resolved.get_str("completion_basis"),
-            Ok("operator_recorded_unsupported_revocation_policy")
+            Ok("operator_recorded_revocation_unavailable")
         );
         assert!(!resolved.contains_key("capability_encrypted"));
         assert!(

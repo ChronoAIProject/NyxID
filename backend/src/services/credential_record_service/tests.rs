@@ -21,7 +21,7 @@ async fn legacy_array_cas_strict_readiness_and_rewrap_preserve_authority() {
         crate::models::user_provider_token::COLLECTION_NAME,
         crate::models::user_api_key::COLLECTION_NAME,
     ] {
-        let mut source = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"credential_epoch":17_i64,"state_version":9_i64,"status":"active","provider_config_id":"provider","connection_id":"connection","grant_lineage_id":"preserved-lineage","updated_at":bson::DateTime::now()};
+        let mut source = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"credential_epoch":17_i64,"state_version":9_i64,"status":"active","provider_config_id":"provider","connection_id":"connection","opaque_metadata_id":"preserved-metadata","updated_at":bson::DateTime::now()};
         for field in fields(collection).unwrap() {
             let encrypted = keys
                 .encrypt(format!("distinctive-material-{field}").as_bytes())
@@ -97,7 +97,7 @@ async fn legacy_array_cas_strict_readiness_and_rewrap_preserve_authority() {
             "status",
             "provider_config_id",
             "connection_id",
-            "grant_lineage_id",
+            "opaque_metadata_id",
             "updated_at",
         ] {
             assert_eq!(migrated.get(field), source.get(field));

@@ -204,7 +204,7 @@ pub async fn import_api_key(
             let encrypted = super::credential_record_service::encrypt(encryption, TOKENS, &id, &user, "api_key_encrypted", api_key.as_bytes()).await?;
             let mut versions = Default::default();
             super::credential_record_service::mark_version(&mut versions, encryption, "api_key_encrypted");
-            let token = UserProviderToken {grant_lineage:None,secret_context_versions: versions, id:id.clone(),user_id:user.clone(),provider_config_id:provider.id.clone(),
+            let token = UserProviderToken {secret_context_versions: versions, id:id.clone(),user_id:user.clone(),provider_config_id:provider.id.clone(),
                 connection_id:None,credential_user_id:None,token_type:"api_key".into(),access_token_encrypted:None,
                 refresh_token_encrypted:None,token_scopes:None,expires_at:None,api_key_encrypted:Some(encrypted.clone()),
                 status:"active".into(),state_version:1,last_refreshed_at:None,last_used_at:None,error_message:None,

@@ -142,9 +142,15 @@ pub(crate) async fn migrate_snapshot(
     let db = super::transaction_service::durable_database(db);
     let set = doc! {FIELD: bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},
     "secret_context_versions":bson::to_bson(&candidate.secret_context_versions).map_err(|_|invalid())?};
-    let changed =
-        super::token_copy_admission::migrate_storage(&db, keys, COLLECTION_NAME, source, &set)
-            .await?;
+    let changed = db
+        .collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            super::record_storage::exact_document_predicate(source),
+            doc! {"$set":set},
+        )
+        .await?
+        .matched_count
+        == 1;
     if let Some(winner) = db
         .collection::<Document>(COLLECTION_NAME)
         .find_one(doc! {"_id":&row.id})

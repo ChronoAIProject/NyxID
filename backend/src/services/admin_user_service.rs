@@ -578,13 +578,13 @@ pub async fn force_password_reset(
 }
 
 /// Explicit owner acknowledgement required before accepting Machine erasure.
-pub const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data";
+pub const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data-provider-revocation-v2";
 pub const ACCOUNT_DELETION_POLICY_HEADER: &str = "x-nyxid-account-deletion-policy";
 
 pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
     if policy != ACCOUNT_DELETION_POLICY_VERSION {
         return Err(AppError::ValidationError(
-            "Confirm the current account deletion policy, including all managed Machine data"
+            "Confirm the current account deletion policy, including provider revocation and all managed Machine data"
                 .into(),
         ));
     }
@@ -1318,6 +1318,12 @@ mod tests {
                 .unwrap();
         }
         let state = test_app_state(db.clone());
+        // Startup installs erasure indexes before requests. Include that empty
+        // bookkeeping schema in the baseline so every request mutation remains
+        // covered by the exact snapshot comparison below.
+        crate::services::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
         let before = snapshot(&db).await;
         assert!(matches!(
             crate::test_utils::accept_and_process_admin_erasure(&db, &admin_id, &org_id).await,

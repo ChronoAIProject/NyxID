@@ -10,7 +10,7 @@ Runtime and implementation status remain in the
 
 Only `UserType::Person` uses personal erasure. Organization users must use the
 existing organization lifecycle. Admin removal must not grant owner-confirmed
-Machine workspace destruction: preserve the existing explicit `machine-data`
+Machine workspace destruction: preserve the existing explicit `machine-data-provider-revocation-v2`
 policy boundary and retain required Machine lifecycle evidence.
 
 Before accepting an intent, check and fence every prerequisite that can reject
@@ -25,7 +25,28 @@ must be replaced by transactional acceptance or a reversible preparation phase.
 | Calls, SMS and email | Preserve settlement/active-effect guards. Do not discard billing or delivery evidence to make a guard pass. Existing Aurinko cleanup and call owner-admission contracts need preparation that does not strand a rejected account. |
 | Oracle pools | Reuse pool lifecycle admission, active-task/command guards, tombstone, credential invalidation, mandatory chained audit and bounded durable cleanup. No forced abandonment. Settle expired commands using the existing bounded contract. |
 | Managed Machines | Preserve owner policy, lifecycle version, revocation outbox and remote cleanup evidence. An admin may fence execution without authorizing indefinite workspace destruction. |
-| Remote provider grants | Build the existing unified-key `DisconnectPlan` with OAuth app lineage and sibling/blast-radius checks before purging source credentials. Personal erasure cannot revoke an org/shared grant solely because the person supplied its credential. |
+| Remote provider grants | Group the person's own live keys/tokens by provider and OAuth app lineage, using the same owner and lineage rules as ordinary disconnect. Other owners' local rows are never targeted. A grant-wide provider call can invalidate another owner's imported copy of that upstream grant, as ordinary disconnect can. |
+| BYO OAuth clients | Refuse acceptance while another owner's live provider token or pending OAuth state references the person's OAuth client credentials. Those owners must reconnect or remove the dependency. A token copy held by another owner never blocks acceptance. |
+
+Preparation is bounded and keys only on the person's
+`credential_dependency_revision`; it does not close account authority. While
+it runs, self/admin deletion returns HTTP 409, `12801 erasure_preparing`.
+Web and CLI back off and retry that specific response. Unrelated owners'
+credential imports do not invalidate the snapshot. A ready snapshot is checked
+again in the acceptance transaction. Scope plans are generation-bound metadata
+children in `personal_erasure_preparations`, keyed by source collection and ID;
+preparation never stamps live credential rows. Bounded cleanup removes old
+generations before a new scan, and local erasure removes all preparation data.
+Planning pages and superseded-row cleanup commit atomically with their
+generation and lease check; stale workers cannot alter successor plans.
+For a grant group, preservation selects its newest refresh-token member, else
+its newest access-token member, before creating the shared effect. This keeps
+one bounded source transaction while preventing a stale access-only sibling
+from supplying the group's revocation capability. Only Delivered confirms a
+Grant effect; NotFound alone requires `grant_scope_unconfirmed`. Token effects
+accept Delivered or NotFound. Bulk domain retries rearm only effects explicitly
+classified `single_attempt: false`; single-attempt retries use the per-effect
+reconciliation disclosure.
 
 ## Durable phases and completion
 
@@ -51,6 +72,58 @@ completion. An operator can see pending/action-needed evidence through an
 authenticated, authorized surface. No unauthenticated status link is a bearer
 grant. Retained immutable evidence is described as retained, not erased.
 
+Provider source removal and its encrypted revocation intent commit atomically.
+A group produces one `Grant` effect when effective revocation has
+`revokes_grant` and at least one member is non-legacy; otherwise it produces
+one `Token` effect per credential. Grant-wide-only providers use `Grant`.
+The deletion confirmation discloses that supported provider authorizations,
+including the person's other connections sharing a grant, will be revoked;
+unsupported or unconfirmed outcomes remain visible in deletion status.
+
+Grant effects, and token effects whose provider is not `verified_token_only`,
+get at most one automatic attempt within five minutes of
+`max(created_at, retry_armed_at)`. Immediately before dispatch, a live key/token
+of the same owner, provider and OAuth app lineage created after that origin
+prevents dispatch (`grant_scope_successor_present`). An elapsed window becomes
+`grant_scope_window_elapsed`; an uncertain/failed attempt or lease reclaim
+after a prior claim becomes `grant_scope_unconfirmed`. All require operator
+action. Only explicit `retry` or `retry_with_current_provider_config`, bound to
+`expected_retry_generation` and an idempotency key, records `retry_armed_at`
+and re-arms one attempt. The successor check runs again. **Any authorization
+granted since at the provider for this OAuth app will also be revoked**;
+re-arming is an explicit operator decision disclosed in the response, admin UI
+and CLI prompt.
+
+Only token effects on `verified_token_only` providers retain bounded automatic
+retries with backoff. That classification requires explicit `TokenOnly` with
+`revokes_grant: false`, or GitHub request scope; default RFC 7009 does not
+qualify. Dedup and receipt matching are per owner, token SHA-256 and captured
+revocation-authority digest. Obligation identity stays in
+`personal_erasure_effects`; delivery receipts live separately in
+`personal_erasure_revocation_receipts` (exact `user_id` ownership). The erasure
+registry classifies receipts as Delete at final source cleanup, in bounded
+pages, after every provider obligation completes. Receipts never participate
+in effect status queries and remain available throughout provider draining.
+Receipt creation commits with a write to the live effect lease in one bounded
+transaction, so stale dispatch cannot recreate receipts after final cleanup.
+A receipt lease expires with its parent effect lease and cannot extend dispatch
+authority.
+
+`complete` requires a confirmed provider receipt or an audited operator
+resolution with an evidence reference. `record_external_revocation_confirmed`
+is available for every `operator_action` reason, including unreadable preserved
+capabilities. `record_remote_revocation_unavailable` also resolves unsupported
+revocation, unavailable capabilities, and exhausted or permanent failures;
+this records an exception and does not claim provider confirmation. Pending or
+in-flight effects cannot be resolved. Only `retry_with_current_provider_config`
+decrypts capability material during reconciliation. Both resolutions and automatic completion remove
+`capability_encrypted` in that same update. Unresolved `operator_action` keeps
+the encrypted capability for an explicit retry or resolution. Personal erasure
+cannot report complete while any effect is pending, unresolved, or retains
+capability ciphertext. The DELETE acceptance response includes a bounded page
+of effect outcomes; the admin erasure GET paginates all outcomes, including
+completed live-user disconnects when no erasure job exists. Receipt metadata is stored separately from the obligation list.
+
 ## Ownership and lifecycle rules
 
 These groups require concrete bounded adapters and regression evidence. The
@@ -60,7 +133,7 @@ rules or authorize blanket deletion.
 | Group | Ownership / action | Retained or shared state |
 | --- | --- | --- |
 | Account authority | Person `_id`; session, challenge, refresh, approval, code, pairing, MCP and OAuth authority rows join the person or an owned key. Revoke/fence first, purge only after no remaining consumer needs their evidence. | Immutable security audit stays intact. OAuth client/grant relations can belong to other people. |
-| Unified services / API keys | `user_services`, `user_endpoints`, `user_api_keys`, key credentials and agent service bindings use real polymorphic ownership and child joins. Reuse disconnect/revocation lifecycle and preserve encrypted retry material before purge. | `credential_user_id` is not necessarily resource ownership. Do not remove org-owned connections or grant siblings without their lifecycle/confirmation contract. |
+| Unified services / API keys | `user_services`, `user_endpoints`, `user_api_keys`, key credentials and agent service bindings use real polymorphic ownership and child joins. Reuse disconnect/revocation lifecycle and preserve encrypted retry material before purge. | `credential_user_id` is not necessarily resource ownership. Do not remove org-owned connections. All of the person's same-grant connections are already within personal erasure scope. |
 | Provider credentials | Person-owned `user_provider_credentials` and provider tokens plus states bound to actual credential/target owner. Revoke token or grant according to supported provider semantics, with durable outcomes. | `provider_configs` and `platform_credentials` are shared configuration; creator/updater attribution is not ownership. |
 | Nodes | Person-owned `nodes`, bindings, registration tokens and pending deliveries. Reuse node lifecycle/remote-Machine guards and close active WS/proxy authority across replicas before record removal. | Org-owned bindings may route through a personal physical node; remove the personal node capability without deleting org services. Recipient E2E ciphertext has its own expiry/owner contract. |
 | Machine / saved login | Owner-confirmed Machine lifecycle, saved logins and setup/desktop/update metadata. Preserve signed remote deletion basis, version fences and outbox until cleanup resolves. | Jobs, operations, billing and lifecycle evidence remain as required by existing retention and remote revocation. Admin removal does not silently erase workspaces. |

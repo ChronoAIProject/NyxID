@@ -350,7 +350,6 @@ mod tests {
     fn oauth_key(user_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             id: Uuid::new_v4().to_string(),
@@ -556,7 +555,6 @@ mod tests {
 
         let now = Utc::now();
         let token = UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id,

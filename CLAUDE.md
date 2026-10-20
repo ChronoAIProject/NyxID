@@ -59,6 +59,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 
 - 12600 service concurrency: 12600 `ServiceConcurrencyLimited` (HTTP 429, `Retry-After: 1`); client capacity rejection, never a server fault.
 - 12700 `ToolOperationNotPublished` (HTTP 404): unpublished or unknown operation on a tool offering.
+- 12800-12801: 12800 `ManagedExecutionPending` (HTTP 409), 12801 `ErasurePreparing` (HTTP 409, `erasure_preparing`).
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns

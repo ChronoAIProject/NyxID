@@ -154,7 +154,6 @@ pub async fn create_api_key(
     let api_key = build_api_key(encryption_keys, user_id, params).await?;
     crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .insert_one(&api_key)
-        .credential_keys(encryption_keys)
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)?;
     Ok(api_key)
@@ -291,17 +290,7 @@ pub(crate) async fn build_api_key_with_id(
         None
     };
 
-    let grant_lineage = if matches!(params.credential_type, "oauth2" | "device_code") {
-        super::oauth_grant_lineage_service::from_material(
-            params.provider_config_id.unwrap_or(""),
-            access_token,
-            params.refresh_token,
-        )?
-    } else {
-        None
-    };
     let api_key = UserApiKey {
-        grant_lineage,
         secret_context_versions: versions,
         oauth_app_observation: None,
         credential_source,
@@ -338,7 +327,6 @@ pub(crate) async fn build_api_key_with_id(
 /// encrypt and validate before any write occurs.
 pub async fn insert_api_key_in_session(
     db: &Database,
-    encryption_keys: &EncryptionKeys,
     session: &mut crate::services::service_history::transaction::Transaction,
     api_key: &UserApiKey,
 ) -> AppResult<()> {
@@ -346,7 +334,6 @@ pub async fn insert_api_key_in_session(
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
     collection
         .insert_one(api_key)
-        .credential_keys(encryption_keys)
         .session(session)
         .await
         .map_err(super::api_key_mutation_service::map_transaction_error)?;
@@ -409,7 +396,7 @@ pub async fn create_api_key_from_provider_token(
     super::service_history::transaction::run_send(
         &transaction_db,
         encryption_keys,
-        move |session, encryption_keys| {
+        move |session, _encryption_keys| {
             let db = db.clone();
             let filter = filter.clone();
             let provider_token = provider_token.clone();
@@ -459,7 +446,6 @@ pub async fn create_api_key_from_provider_token(
                 }
                     collection
                         .insert_one(&api_key)
-                        .credential_keys(encryption_keys)
                         .session(&mut *session)
                         .await?;
                     Ok(api_key.clone())
@@ -530,11 +516,6 @@ pub(crate) async fn api_key_from_provider_token(
     .await?;
 
     let api_key = UserApiKey {
-        grant_lineage: super::oauth_grant_lineage_service::for_token(
-            encryption_keys,
-            provider_token,
-        )
-        .await?,
         secret_context_versions: versions,
         oauth_app_observation: (credential_type == "oauth2").then(|| {
             OAuthAppSource::from_credential_owner(provider_token.credential_user_id.as_deref())
@@ -694,11 +675,6 @@ async fn rebound_provider_fields(
             .map_err(|_| AppError::Internal("Invalid credential version map".into()))?,
     );
     set.insert("source_id", &token.id);
-    set.insert(
-        "grant_lineage",
-        bson::to_bson(&super::oauth_grant_lineage_service::for_token(keys, token).await?)
-            .map_err(|_| AppError::Internal("Invalid OAuth grant provenance".into()))?,
-    );
     Ok(set)
 }
 
@@ -728,7 +704,6 @@ pub(crate) async fn replace_provider_api_key_in_transaction(
                 doc! {"_id":&key.id,"user_id":&key.user_id},
                 vec![doc! {"$set":literal}],
             )
-            .credential_keys(encryption_keys)
             .session(&mut *session)
             .await?;
     }
@@ -807,7 +782,7 @@ async fn sync_provider_token_to_api_keys_impl(
                     super::service_history::collection::<UserApiKey>(&db,COLLECTION_NAME).update_one(filter,vec![doc! {"$set":literal}])
                 } else { super::service_history::collection::<UserApiKey>(&db,COLLECTION_NAME).update_one(filter,doc! {"$set":set}) };
                 let write=if routine_refresh {write.routine_refresh()}else{write};
-                if write.credential_keys(encryption_keys).session(&mut *session).await?.matched_count!=1 {return Err(AppError::Conflict("Credential changed during provider synchronization".into()));}
+                if write.session(&mut *session).await?.matched_count!=1 {return Err(AppError::Conflict("Credential changed during provider synchronization".into()));}
                 Ok(())
             }.await;
             super::api_key_mutation_service::transaction_result(result)
@@ -861,13 +836,6 @@ pub async fn write_oauth_tokens_to_key(
     let key: UserApiKey = bson::from_document(raw.clone())
         .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
     let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
-    let grant_lineage = super::oauth_grant_lineage_service::install_on_key(
-        encryption_keys,
-        &key,
-        access_token,
-        refresh_token,
-    )
-    .await?;
     let mut versions = key.secret_context_versions.clone();
     let access_enc = records::encrypt(
         encryption_keys,
@@ -900,8 +868,6 @@ pub async fn write_oauth_tokens_to_key(
 
     let mut set_doc = doc! {
         "credential_type": "oauth2",
-        "grant_lineage":{"$literal":bson::to_bson(&grant_lineage)
-            .map_err(|_|AppError::Internal("Invalid OAuth grant provenance".into()))?},
         "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
         "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
         "expires_at": optional_datetime_bson(expires_at),
@@ -960,7 +926,6 @@ pub async fn write_oauth_tokens_to_key(
                     doc! { "$unset": ["oauth_attempt_nonce"] },
                 ],
             )
-            .credential_keys(encryption_keys)
             .into_future(),
     )
     .await??;
@@ -1007,13 +972,6 @@ pub async fn write_chat_oauth_tokens_to_key(
     let key: UserApiKey = bson::from_document(raw.clone())
         .map_err(|_| AppError::Internal("Invalid credential storage".into()))?;
     let predicate = records::exact_source_filter(COLLECTION_NAME, &raw)?;
-    let grant_lineage = super::oauth_grant_lineage_service::install_on_key(
-        encryption_keys,
-        &key,
-        access_token,
-        refresh_token,
-    )
-    .await?;
     let mut versions = key.secret_context_versions.clone();
     let access_enc = records::encrypt(
         encryption_keys,
@@ -1045,8 +1003,6 @@ pub async fn write_chat_oauth_tokens_to_key(
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut set_doc = doc! {
         "credential_type": "oauth2",
-        "grant_lineage":{"$literal":bson::to_bson(&grant_lineage)
-            .map_err(|_|AppError::Internal("Invalid OAuth grant provenance".into()))?},
         "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
         "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
         "expires_at": optional_datetime_bson(expires_at),
@@ -1084,7 +1040,6 @@ pub async fn write_chat_oauth_tokens_to_key(
                     doc! { "$unset": ["oauth_attempt_nonce"] },
                 ],
             )
-            .credential_keys(encryption_keys)
             .into_future(),
     )
     .await??;
@@ -2029,18 +1984,6 @@ pub async fn update_api_key(
             bytes: encrypted,
         };
         if existing.credential_type == "oauth2" {
-            let lineage = super::oauth_grant_lineage_service::install_on_key(
-                encryption_keys,
-                &existing,
-                cred,
-                None,
-            )
-            .await?;
-            set_doc.insert(
-                "grant_lineage",
-                doc! {"$literal":bson::to_bson(&lineage)
-                .map_err(|_|AppError::Internal("Invalid OAuth grant provenance".into()))?},
-            );
             set_doc.insert("credential_encrypted", bson::Bson::Null);
             set_doc.insert("access_token_encrypted", encrypted_bson);
             set_doc.insert("refresh_token_encrypted", bson::Bson::Null);
@@ -2068,12 +2011,10 @@ pub async fn update_api_key(
     let result = if credential.is_some() {
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
             .update_one(predicate, vec![doc! { "$set": set_doc }])
-            .credential_keys(encryption_keys)
             .await?
     } else {
         crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
             .update_one(predicate, doc! { "$set": set_doc })
-            .credential_keys(encryption_keys)
             .await?
     };
 
@@ -2259,7 +2200,6 @@ mod tests {
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
@@ -2343,7 +2283,6 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -2376,7 +2315,6 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: org_id.clone(),
@@ -2470,7 +2408,6 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
@@ -3098,7 +3035,6 @@ mod tests {
     async fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
         let now = Utc::now();
         UserProviderToken {
-            grant_lineage: None,
             secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -3538,7 +3474,6 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -3662,7 +3597,6 @@ mod tests {
         // Insert a legacy provider token to sync from.
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
@@ -3762,7 +3696,6 @@ mod tests {
         // the Pass 1 trap the reconcile logic must NOT take.
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
@@ -4100,7 +4033,6 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -4178,7 +4110,6 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -4308,7 +4239,6 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
@@ -4394,7 +4324,6 @@ mod tests {
 
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: user_id.clone(),
@@ -4488,7 +4417,6 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
-                grant_lineage: None,
                 secret_context_versions: Default::default(),
                 oauth_app_observation: None,
                 credential_source: None,
@@ -4566,7 +4494,6 @@ mod tests {
         for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
             db.collection::<UserApiKey>(super::COLLECTION_NAME)
                 .insert_one(UserApiKey {
-                    grant_lineage: None,
                     secret_context_versions: Default::default(),
                     oauth_app_observation: None,
                     credential_source: None,
