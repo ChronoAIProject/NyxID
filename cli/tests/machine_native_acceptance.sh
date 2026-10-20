@@ -28,8 +28,14 @@ python3 "$test_directory/machine_probe_acceptance.py" --disposable \
 mkdir -p /var/lib/nyxid-machine/m13-profile
 fixture_directory=$(mktemp -d /var/lib/nyxid-machine/.w94-adversarial-XXXXXX)
 chmod 0755 "$fixture_directory"
+# Fixed-name /tmp and /dev/shm sentinels also need a fresh fixture. Keep the
+# launcher/script outside those mounts, then replace only this harness's views.
+cp "$test_directory/machine_context_spike/check.py" "$fixture_directory/check.py"
+cp "$NYXID_TEST_CONTEXT_SPIKE" "$fixture_directory/launcher"
 echo "Adversarial fixture directory=$fixture_directory"
 unshare --mount --propagation private /bin/sh -eu -c '
   mount --bind "$1" /var/lib/nyxid-machine/m13-profile
-  exec python3 "$2" --disposable --native-profile --launcher "$3"
-' acceptance "$fixture_directory" "$test_directory/machine_context_spike/check.py" "$NYXID_TEST_CONTEXT_SPIKE"
+  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
+  mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
+  exec python3 "$1/check.py" --disposable --native-profile --launcher "$1/launcher"
+' acceptance "$fixture_directory"
