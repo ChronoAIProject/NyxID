@@ -1,11 +1,19 @@
 import copy
 import io
+import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import publication_contract as contract
+
+spec = importlib.util.spec_from_file_location('publication_plan', Path(__file__).with_name('make-publication-plan.py'))
+planner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(planner)
 
 
 def dist_fixture():
@@ -48,6 +56,27 @@ def records(plan):
 
 
 class PublicationContractTests(unittest.TestCase):
+    def test_plan_identity_uses_exact_checkout_ownership_trust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'checkout'
+            root.mkdir()
+            def git(*arguments):
+                return planner.exporter.git(root, *arguments).decode().strip()
+            git('init')
+            (root / 'source').write_text('fixture')
+            git('add', 'source')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@local.invalid', 'commit', '-m', 'fixture')
+            expected = git('rev-parse', 'HEAD'), int(git('show', '-s', '--format=%ct', 'HEAD'))
+            env = {**planner.exporter.git_environment(), 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1'}
+            denied = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], env=env, capture_output=True)
+            if denied.returncode == 0:  # Older Focal Git lacks the test switch.
+                self.assertEqual(os.geteuid(), 0)
+                for path in [root, *root.rglob('*')]: os.lchown(path, 1001, 1001)
+                denied = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], env=env, capture_output=True)
+            self.assertIn(b'dubious ownership', denied.stderr)
+            with patch.object(planner.exporter, 'git_environment', return_value=env):
+                self.assertEqual(planner.checkout_identity(root), expected)
+
     def test_source_archive_cannot_be_omitted_or_switch_back_to_git_archive(self):
         for change in ({"source-tarball": True}, {"extra-artifacts": []},
                        {"extra-artifacts": [{"build": ["git", "archive"], "artifacts": ["source.tar.gz"]}]}):

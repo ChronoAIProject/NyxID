@@ -3,8 +3,9 @@
 
 These are package-layer tests, not final application image/SBOM evidence. The
 exact COPY/ARG/ENV/RUN instructions through the last APT call in each stage are
-retained. Test-only MACHINE_IMAGE consumes the machine desktop prefix built in
-this same run. No remote image is pushed, tagged or promoted.
+retained. Test-only MACHINE_IMAGE consumes an in-build machine desktop prefix;
+the isolated BuildKit builder cannot see Docker engine-local tags. No remote
+image is pushed, tagged or promoted.
 """
 import argparse
 from pathlib import Path
@@ -24,7 +25,12 @@ def prefixes(root):
         for stage in parsed:
             if any(INSTALLER in raw for raw in stage.body):
                 result.append((name, stage.name, projection(stage, parsed)))
-    # The derived test-image prefixes inherit this same build's package bytes.
+    desktop = next(text for name, stage, text in result if (name, stage) == ('cli/Dockerfile.machine', 'desktop'))
+    for index, (name, stage, text) in enumerate(result):
+        parsed = stages(text)
+        if parsed[0].base == '${MACHINE_IMAGE}':
+            result[index] = (name, stage, ''.join(parsed[0].arguments) + desktop + ''.join(parsed[0].body))
+    # Derived test images inherit the exact desktop package instructions above.
     result.sort(key=lambda item: (item[:2] != ("cli/Dockerfile.machine", "desktop"), item[:2]))
     return result
 
@@ -55,7 +61,7 @@ def run(args):
                 tag = "nyxid-apt-machine:ci"
             command = ["docker", "buildx", "build", "--load", "--no-cache", "--provenance=false",
                        "--platform", args.platform, "--file", str(dockerfile), "--tag", tag,
-                       "--build-arg", "MACHINE_IMAGE=nyxid-apt-machine:ci", str(ROOT)]
+                       "--build-arg", "MACHINE_IMAGE=desktop", str(ROOT)]
             log = args.output / (label + ".log")
             with log.open("w") as output:
                 result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=2400)

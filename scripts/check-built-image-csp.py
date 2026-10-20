@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from urllib.error import URLError
@@ -84,6 +85,20 @@ def probe(base, dist):
     print(f'Packaged worklet served: {worklets[0].name}, sha256={hashlib.sha256(data).hexdigest()}', flush=True)
 
 
+def transport_module(source):
+    # The source export is immutable evidence. Importing its fixture must not
+    # add __pycache__ (including on a failed import) to the verified inventory.
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location('packaged_transport', source / 'frontend/scripts/production-policy-server.py')
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        return fixture
+    finally:
+        sys.dont_write_bytecode = previous
+
+
 def run(image, browser_image, source, output, arch, commit, epoch):
     output.mkdir(parents=True, exist_ok=False)
     with image_container(image) as (container, info):
@@ -92,9 +107,7 @@ def run(image, browser_image, source, output, arch, commit, epoch):
         copy(container, '/usr/share/nginx/html/.', dist)
         verify_frontend(dist, source, commit, epoch)
         image_id = info['Id']
-    spec = importlib.util.spec_from_file_location('packaged_transport', source / 'frontend/scripts/production-policy-server.py')
-    fixture = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fixture)
+    fixture = transport_module(source)
     server = ThreadingHTTPServer(('127.0.0.1', 18489), fixture.transport(dist))
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()

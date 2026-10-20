@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """Materialize complete expected subject coverage before building/publishing."""
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 
 from publication_contract import ROOT, dist_contract, image_contract, load_json, validate_plan
+
+
+spec = importlib.util.spec_from_file_location('publication_source_export', Path(__file__).with_name('export-build-source.py'))
+exporter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(exporter)
+
+
+def checkout_identity(root):
+    # Reuse isolated, exact-path ownership trust for GitHub container jobs.
+    # Never alter global safe.directory or trust an unrelated checkout.
+    commit = exporter.head_commit(root)
+    epoch = int(exporter.git(root, 'show', '-s', '--format=%ct', commit).decode().strip())
+    return commit, epoch
 
 
 if __name__ == "__main__":
@@ -14,8 +28,7 @@ if __name__ == "__main__":
     parser.add_argument("--dist-plan", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    epoch = int(subprocess.check_output(["git", "show", "-s", "--format=%ct", "HEAD"], cwd=ROOT, text=True).strip())
+    commit, epoch = checkout_identity(ROOT)
     if args.producer == "cli":
         if not args.dist_plan:
             parser.error("CLI requires the actual validated --dist-plan")

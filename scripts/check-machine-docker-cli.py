@@ -17,6 +17,7 @@ from urllib.request import urlopen
 import uuid
 
 from image_artifacts import copy, image_container
+from machine_fixture_tls import generate as generate_tls
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL = 'ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest'
@@ -58,13 +59,8 @@ def observe_docker(directory):
 
 @contextmanager
 def fixture(directory, gateway):
-    certificate, key = directory / 'ca.pem', directory / 'tls.key'
-    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-                    '-subj', '/CN=NyxID local Docker CI transport',
-                    '-addext', f'subjectAltName=IP:127.0.0.1,IP:{gateway}',
-                    '-keyout', str(key), '-out', str(certificate)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    key.chmod(0o600)
-    process = subprocess.Popen(['node', str(ROOT / 'scripts/machine_docker_fixture.mjs'), str(certificate), str(key)],
+    certificate, leaf, key = generate_tls(directory, gateway)
+    process = subprocess.Popen(['node', str(ROOT / 'scripts/machine_docker_fixture.mjs'), str(leaf), str(key)],
                                stdout=subprocess.PIPE, text=True)
     try:
         ready, _, _ = select.select([process.stdout], [], [], 15)

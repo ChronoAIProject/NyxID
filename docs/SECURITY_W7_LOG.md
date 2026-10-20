@@ -207,3 +207,15 @@
 - Final scan: 215 history + 112 tree, 327 reviewed, 0 unresolved; two new progress-prose identities receive exact monthly/current or annual/immutable dispositions; build-input policy passed.
 - Reviewed committed A/B changes through 7c05214fb: retain 9723cedf9's test_utils binding; add only AES-GCM custody and Ed25519 witness-test operation entries, with no RSA-reference change; Linux/KMS graph/source checks passed.
 - Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Vulnerability Scan Catalog Freshness, Mobile, Backend Test, CLI Test, Rust Features/KMS and Artifact Packaging identity/image scans.
+
+## Hosted CI repair — run 39362062126
+- Serve a distinct CA-signed CA:false/serverAuth leaf with loopback/gateway SANs; trust only the disposable CA; Node/Python use the same generator.
+- Complete the isolated Playwright runtime import closure; fixture imports cannot write Python bytecode into authenticated source exports.
+- Publication-plan identity reuses exact-checkout isolated Git trust; the Focal rustup HOME diagnostic was nonfatal, while bare Git was the blocker.
+- Derived APT prefix tests consume the real desktop package prefix inside the same BuildKit build, without resolving an engine-local tag remotely.
+- Local commands: test-machine-docker-cli.py17/17; node --test scripts/test-machine-docker-fixture.mjs7/7; test-built-image-csp.py13/13; isolated Playwright --list2/2 required cases.
+- Local commands: test-apt-inputs.py22/22; test_publication_contract.py11/11; test-export-build-source.py16/16; test-build-inputs.py20/20.
+- Local commands: .github/scripts unittest discovery28/28; test-packaging-workflows.py14/14; test-workflow-yaml.py9/9; check-build-inputs.py and diff --check passed.
+- Total: 157 unit/policy/protocol tests passed, 0 final failures; Docker execution remains hosted evidence. No Cargo build or D harness/probe changes.
+- APK durable-present is PR continue-on-error and excluded from apk-pass; CI Pipeline remains gated on APK policy/replay/layers.
+- Required PR evidence: Artifact Packaging Policy; Machine Docker CLI E2E; Built Image Worklet CSP (both); CLI Archive Identity (aarch64 GNU); APT Policy/Dockerfile Layers (both); Detect Changes.

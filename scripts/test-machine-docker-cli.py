@@ -3,6 +3,8 @@
 import importlib.util
 import copy
 from pathlib import Path
+import ssl
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -56,6 +58,42 @@ class FixtureAcceptance(unittest.TestCase):
                 self.assertEqual(current['connections'], 0)
                 self.assertEqual(current['requests'], 0)
                 self.assertNotIn(info['registration_token'], str(current))
+
+    def test_distinct_server_leaf_chain_constraints_and_gateway_san(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ca, leaf, key = checks.generate_tls(directory, '172.17.0.1')
+            self.assertNotEqual(ca.read_bytes(), leaf.read_bytes())
+            ca_text, leaf_text = [subprocess.check_output(['openssl', 'x509', '-in', str(path), '-noout', '-text'], text=True)
+                                  for path in (ca, leaf)]
+            self.assertIn('CA:TRUE', ca_text)
+            self.assertIn('CA:FALSE', leaf_text)
+            self.assertIn('TLS Web Server Authentication', leaf_text)
+            self.assertIn('IP Address:127.0.0.1', leaf_text)
+            self.assertIn('IP Address:172.17.0.1', leaf_text)
+            self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((directory / 'ca.key').stat().st_mode & 0o777, 0o600)
+            subprocess.run(['openssl', 'verify', '-CAfile', str(ca), '-purpose', 'sslserver', str(leaf)],
+                           check=True, capture_output=True)
+            # A server-only leaf cannot also serve as a client certificate.
+            self.assertNotEqual(subprocess.run(['openssl', 'verify', '-CAfile', str(ca), '-purpose', 'sslclient', str(leaf)],
+                                               capture_output=True).returncode, 0)
+
+    def test_served_leaf_requires_our_ca_and_matching_ip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with checks.fixture(directory, '172.17.0.1') as (info, ca, state):
+                state()  # Real TLS to loopback with CA-only trust succeeds.
+                import socket
+                for context, hostname in ((ssl.create_default_context(), '127.0.0.1'),
+                                          (ssl.create_default_context(cafile=str(ca)), 'wrong.fixture.invalid')):
+                    with self.subTest(hostname=hostname), socket.create_connection(('127.0.0.1', info['port'])) as connection:
+                        with self.assertRaises(ssl.SSLCertVerificationError):
+                            context.wrap_socket(connection, server_hostname=hostname)
+
+    def test_gateway_cannot_inject_certificate_extensions(self):
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(ValueError):
+            checks.generate_tls(Path(temporary), '127.0.0.1\nbasicConstraints=CA:TRUE')
 
     def test_expected_real_fixture_state_is_required(self):
         self.assertEqual(checks.wait_for(lambda: self.state(), lambda item: item['statuses'] == 1)['registrations'], 1)

@@ -140,6 +140,21 @@ class DockerPolicy(unittest.TestCase):
         self.assertIn('chmod 0700 /opt/nyxid-apt', text)
         self.assertIn(INSTALLER + ' ubuntu:noble -- libdbus-1-dev', text)
 
+    def test_derived_images_use_in_build_desktop_instead_of_engine_local_tag(self):
+        cases = images.prefixes(ROOT)
+        desktop = next(text for name, stage, text in cases if (name, stage) == ('cli/Dockerfile.machine', 'desktop'))
+        derived = [text for name, _, text in cases if name in ('cli/tests/Dockerfile.machine', 'cli/tests/Dockerfile.updater-browser')]
+        self.assertEqual(len(derived), 2)
+        for text in derived:
+            with self.subTest(text=text[-200:]):
+                parsed = stages(text)
+                self.assertEqual(len(parsed), 2)
+                self.assertEqual(parsed[0].name, 'desktop')
+                self.assertEqual(parsed[1].base, '${MACHINE_IMAGE}')
+                self.assertIn(desktop, text)
+                self.assertEqual(text.count(INSTALLER), desktop.count(INSTALLER) + 1)
+                self.assertNotIn('nyxid-apt-machine:ci', text)
+
     def test_raw_apt_variants_rejected(self):
         for command in ('apt-get install curl', 'apt -y install curl', '/usr/bin/apt-get -o Foo=bar update'):
             self.dockerfile.write_text(self.valid + 'RUN ' + command + '\n')

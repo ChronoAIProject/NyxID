@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -144,6 +145,48 @@ class ServedArtifact(unittest.TestCase):
 
 
 class BrowserInputs(unittest.TestCase):
+    def test_fixture_import_preserves_exact_export_and_bytecode_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            fixture = source / 'frontend/scripts/production-policy-server.py'
+            fixture.parent.mkdir(parents=True)
+            for body in ('VALUE = 42\n', 'raise ValueError("fixture import failed")\n'):
+                fixture.write_text(body)
+                before = {path.relative_to(source): path.read_bytes() for path in source.rglob('*') if path.is_file()}
+                with patch.object(sys, 'dont_write_bytecode', False):
+                    if body.startswith('raise'):
+                        with self.assertRaisesRegex(ValueError, 'import failed'): csp.transport_module(source)
+                    else:
+                        self.assertEqual(csp.transport_module(source).VALUE, 42)
+                    self.assertFalse(sys.dont_write_bytecode)
+                after = {path.relative_to(source): path.read_bytes() for path in source.rglob('*') if path.is_file()}
+                self.assertEqual(before, after)
+
+    def test_isolated_browser_copies_complete_runtime_import_closure(self):
+        import re
+        root = Path(__file__).resolve().parents[1]
+        text = (root / 'frontend/Dockerfile.policy-tests').read_text()
+        available = set()
+        for line in text.splitlines():
+            if line.startswith('COPY frontend/'):
+                for source in line.split()[1:-1]:
+                    path = root / source
+                    available.update(path.rglob('*') if path.is_dir() else [path])
+        pending = list((root / 'frontend/e2e-production').glob('*.spec.ts'))
+        visited = set()
+        while pending:
+            path = pending.pop().resolve()
+            if path in visited: continue
+            visited.add(path)
+            self.assertIn(path, available, f'isolated browser runner omits {path.relative_to(root)}')
+            # Type-only imports are erased by Playwright's TS transform.
+            for relative in re.findall(r'''(?m)^import\s+(?!type\b)(?:[^;]*?\sfrom\s+)?["'](\.[^"']+)["']''', path.read_text()):
+                target = path.parent / relative
+                resolved = next((candidate.resolve() for candidate in (target, target.with_suffix('.ts'), target.with_suffix('.mjs'))
+                                 if candidate.is_file()), None)
+                self.assertIsNotNone(resolved, f'unresolved runtime import {relative} from {path}')
+                pending.append(resolved)
+
     def test_digest_and_locked_playwright_versions_match_and_are_maintained(self):
         root = Path(__file__).resolve().parents[1]
         text = (root / 'frontend/Dockerfile.policy-tests').read_text()

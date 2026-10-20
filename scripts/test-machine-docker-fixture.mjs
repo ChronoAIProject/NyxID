@@ -6,20 +6,20 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {once} from 'node:events';
+import {fileURLToPath} from 'node:url';
 import {startFixture} from './machine_docker_fixture.mjs';
 const {WebSocket} = createRequire(new URL('../cli/tests/updater-npm/package.json', import.meta.url))('ws');
-let directory, certificate, key;
+let directory, certificate, ca, key;
 before(() => {
   directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyxid-local-wss-'));
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-    '-subj', '/CN=NyxID local fixture unit test', '-addext', 'subjectAltName=IP:127.0.0.1',
-    '-keyout', path.join(directory, 'key'), '-out', path.join(directory, 'cert')], {stdio: 'ignore'});
-  certificate = fs.readFileSync(path.join(directory, 'cert'));
-  key = fs.readFileSync(path.join(directory, 'key'));
+  execFileSync('python3', [fileURLToPath(new URL('./machine_fixture_tls.py', import.meta.url)), directory, '127.0.0.1']);
+  ca = fs.readFileSync(path.join(directory, 'ca.pem'));
+  certificate = fs.readFileSync(path.join(directory, 'tls.pem'));
+  key = fs.readFileSync(path.join(directory, 'tls.key'));
 });
 after(() => fs.rmSync(directory, {recursive: true, force: true}));
 async function connect(fixture) {
-  const socket = new WebSocket(`wss://127.0.0.1:${fixture.port}/api/v1/nodes/ws`, {ca: certificate});
+  const socket = new WebSocket(`wss://127.0.0.1:${fixture.port}/api/v1/nodes/ws`, {ca});
   await once(socket, 'open');
   return socket;
 }
