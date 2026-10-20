@@ -18,6 +18,7 @@ use crate::{
 
 /// Caller projection accepts only a reviewed static action and typed identities.
 /// Stored Mongo models are deliberately not accepted as enqueue input.
+#[derive(Clone)]
 pub struct AuditEvent {
     pub operation_id: String,
     pub stage: AuditStage,
@@ -84,6 +85,39 @@ pub async fn enqueue_in_session(
     event_id: &str,
     event: &AuditEvent,
 ) -> AppResult<String> {
+    enqueue(db, session, event_id, event, None).await
+}
+
+/// Preferred T/O entrypoint: admission and the actual capacity reservation are
+/// in the caller's business transaction. Identical replays need no new slot.
+pub async fn enqueue_admitted_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    runtime: &super::audit_runtime::AuditRuntime,
+    tier: super::audit_runtime::policy::AuditTier,
+    event_id: &Uuid,
+    event: &AuditEvent,
+) -> AppResult<String> {
+    enqueue(
+        db,
+        session,
+        &event_id.to_string(),
+        event,
+        Some((runtime, tier)),
+    )
+    .await
+}
+
+async fn enqueue(
+    db: &Database,
+    session: &mut ClientSession,
+    event_id: &str,
+    event: &AuditEvent,
+    admission: Option<(
+        &super::audit_runtime::AuditRuntime,
+        super::audit_runtime::policy::AuditTier,
+    )>,
+) -> AppResult<String> {
     let event = event.safe_projection();
     uuid(event_id)?;
     validate(&event)?;
@@ -122,6 +156,9 @@ pub async fn enqueue_in_session(
             }
         }
         return Ok(existing.id);
+    }
+    if let Some((runtime, tier)) = admission {
+        runtime.require_new_in_session(db, session, tier, 1).await?;
     }
     let order = state
         .next_order
@@ -203,32 +240,10 @@ pub fn spawn_materializer(db: Database, key: Arc<zeroize::Zeroizing<[u8; 32]>>) 
 /// Bounded local materialization. Its CAS and pending-row marker are in the same
 /// transaction as the audit row; none of these writes release witness capacity.
 pub async fn materialize_one(db: &Database, key: &[u8]) -> AppResult<bool> {
-    let mut session = db.client().start_session().await?;
-    for attempt in 0..8 {
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(super::audit_state_service::majority())
-            .await?;
-        let result = materialize_in_session(db, &mut session, key).await;
-        let result = match result {
-            Ok(changed) => super::audit_state_service::commit(&mut session)
-                .await
-                .map(|()| changed)
-                .map_err(AppError::from),
-            Err(error) => Err(error),
-        };
-        match result {
-            Err(AppError::DatabaseError(error))
-                if error.contains_label("TransientTransactionError") && attempt < 7 =>
-            {
-                let _ = session.abort_transaction().await;
-                tokio::time::sleep(std::time::Duration::from_millis(5 << attempt.min(5))).await;
-            }
-            result => return result,
-        }
-    }
-    unreachable!("last materialization attempt returns")
+    super::audit_runtime::transaction::run(db, &(db, key), |session, (db, key)| {
+        Box::pin(materialize_in_session(db, session, key))
+    })
+    .await
 }
 
 #[cfg(test)]

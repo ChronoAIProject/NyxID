@@ -11,6 +11,7 @@ pub use diagnostics::{AuditDiagnostics, AuditRuntime};
 pub use monitor::spawn_monitor;
 pub use relay::WitnessRelay;
 pub mod policy;
+pub mod transaction;
 pub(super) use evidence::load_in_session;
 pub use evidence::{ExternalAuditEvidence, external_evidence};
 

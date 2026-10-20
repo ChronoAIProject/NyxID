@@ -4,7 +4,6 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
 use mongodb::bson::doc;
-use rand::Rng;
 use serde::Serialize;
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -17,7 +16,6 @@ type HmacSha256 = Hmac<Sha256>;
 pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 const RECORD_SEPARATOR: u8 = 0x1e;
-const MAX_APPEND_ATTEMPTS: usize = 8;
 pub const DEFAULT_VERIFY_LIMIT: i64 = 10_000;
 pub const MAX_VERIFY_LIMIT: i64 = 10_000;
 
@@ -101,38 +99,36 @@ pub async fn append_chained_entry(
     entry: AuditLog,
     key: &[u8],
 ) -> Result<AuditLog, mongodb::error::Error> {
-    let mut session = db.client().start_session().await?;
-    for attempt in 1..=MAX_APPEND_ATTEMPTS {
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(super::audit_state_service::majority())
-            .await?;
-        let result =
-            super::audit_state_service::append_in_session(db, &mut session, entry.clone(), key)
-                .await;
-        let result = match result {
-            Ok(inserted) => super::audit_state_service::commit(&mut session)
-                .await
-                .map(|()| inserted),
-            Err(AppError::DatabaseError(error)) => Err(error),
-            Err(error) => Err(mongodb::error::Error::custom(error)),
-        };
-        match result {
-            Ok(inserted) => return Ok(inserted),
-            Err(error) => {
-                let _ = session.abort_transaction().await;
-                if attempt == MAX_APPEND_ATTEMPTS
-                    || (!error.contains_label("TransientTransactionError")
-                        && !is_duplicate_key_error(&error))
-                {
-                    return Err(error);
-                }
-                sleep_before_retry(attempt).await;
-            }
-        }
-    }
-    unreachable!("last append attempt always returns")
+    append_chained_entry_observed(db, entry, key, |_, _| {}).await
+}
+
+pub(super) async fn append_chained_entry_observed<O>(
+    db: &mongodb::Database,
+    entry: AuditLog,
+    key: &[u8],
+    observe: O,
+) -> Result<AuditLog, mongodb::error::Error>
+where
+    O: FnMut(u32, u32) + Send,
+{
+    super::audit_runtime::transaction::run_observed(
+        db,
+        &(db, entry, key),
+        |session, (db, entry, key)| {
+            Box::pin(super::audit_state_service::append_in_session(
+                db,
+                session,
+                entry.clone(),
+                key,
+            ))
+        },
+        observe,
+    )
+    .await
+    .map_err(|error| match error {
+        AppError::DatabaseError(error) => error,
+        error => mongodb::error::Error::custom(error),
+    })
 }
 
 /// The caller owns the business transaction and its retries. The audit row,
@@ -471,20 +467,6 @@ fn truncate_to_bson_millis(ts: DateTime<Utc>) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(ts.timestamp_millis())
         .single()
         .expect("timestamp_millis from DateTime<Utc> is valid")
-}
-
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
-    matches!(
-        error.kind.as_ref(),
-        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
-            if write_error.code == 11000
-    )
-}
-
-async fn sleep_before_retry(attempt: usize) {
-    let base_ms = 5_u64.saturating_mul(1_u64 << attempt.min(5));
-    let jitter_ms = rand::thread_rng().gen_range(0..=10);
-    tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
 }
 
 pub fn derive_audit_chain_hmac_key(

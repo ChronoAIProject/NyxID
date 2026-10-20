@@ -3,6 +3,7 @@ use crate::test_utils::connect_transaction_test_database;
 use futures::TryStreamExt;
 
 const KEY: [u8; 32] = [2; 32];
+pub(crate) static FAIL_COMMAND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn entry() -> AuditLog {
     AuditLog {
@@ -344,6 +345,7 @@ async fn restart_rejects_wrong_chain_key_or_changed_tail() {
 
 #[tokio::test]
 async fn unknown_commit_acknowledgment_retries_same_transaction_and_event_identity() {
+    let _guard = FAIL_COMMAND.lock().await;
     use mongodb::event::{EventHandler, command::CommandEvent};
     use std::sync::{Arc, Mutex};
 

@@ -290,16 +290,19 @@ impl AuditRuntime {
     }
 
     async fn uncertain_effect(&self, db: &Database, operation: &str) -> AppResult<()> {
-        let mut session = db.client().start_session().await?;
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(audit_state_service::majority())
-            .await?;
-        self.finish_effect_in_session(db, &mut session, operation, AuditStage::Uncertain)
-            .await?;
-        audit_state_service::commit(&mut session).await?;
-        Ok(())
+        super::transaction::run(
+            db,
+            &(self, db, operation),
+            |session, (runtime, db, operation)| {
+                Box::pin(runtime.finish_effect_in_session(
+                    db,
+                    session,
+                    operation,
+                    AuditStage::Uncertain,
+                ))
+            },
+        )
+        .await
     }
 
     /// No lease expiry or retrieved claim authorizes resend. Any ambiguous

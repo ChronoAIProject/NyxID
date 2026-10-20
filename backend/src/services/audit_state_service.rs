@@ -453,17 +453,9 @@ pub fn majority() -> mongodb::options::WriteConcern {
 
 /// Retrying the same commit cannot allocate another event on an unknown result.
 pub async fn commit(session: &mut ClientSession) -> mongodb::error::Result<()> {
-    for attempt in 0..8 {
-        match session.commit_transaction().await {
-            Err(error) if error.contains_label("UnknownTransactionCommitResult") && attempt < 7 => {
-                continue;
-            }
-            result => return result,
-        }
-    }
-    unreachable!("last commit attempt always returns")
+    super::audit_runtime::transaction::commit(session).await
 }
 
 #[cfg(test)]
 #[path = "audit_state_tests.rs"]
-mod tests;
+pub(super) mod tests;

@@ -13,10 +13,7 @@ use uuid::Uuid;
 use crate::{
     errors::{AppError, AppResult},
     models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage, SystemAuditActor},
-    services::{
-        audit_outbox_service::{self, AuditEvent},
-        audit_state_service,
-    },
+    services::audit_outbox_service::{self, AuditEvent},
 };
 
 use super::{
@@ -106,11 +103,11 @@ pub fn spawn_monitor(db: Database, runtime: Arc<AuditRuntime>) {
 
 async fn commit_transition(
     db: &Database,
+    runtime: &AuditRuntime,
     operation_id: &str,
     event_id: &str,
     key: TransitionKey,
 ) -> AppResult<()> {
-    let mut session = db.client().start_session().await?;
     let event = AuditEvent {
         operation_id: operation_id.to_owned(),
         stage: AuditStage::Committed,
@@ -131,36 +128,26 @@ async fn commit_transition(
         },
         target_id: None,
     };
-    for attempt in 0..8 {
-        session
-            .start_transaction()
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .write_concern(audit_state_service::majority())
-            .await?;
-        let result = match audit_outbox_service::enqueue_in_session(
-            db,
-            &mut session,
-            event_id,
-            &event,
-        )
-        .await
-        {
-            Ok(_) => audit_state_service::commit(&mut session)
-                .await
-                .map_err(AppError::from),
-            Err(error) => Err(error),
-        };
-        match result {
-            Err(AppError::DatabaseError(error))
-                if attempt < 7 && error.contains_label("TransientTransactionError") =>
-            {
-                let _ = session.abort_transaction().await;
-                tokio::task::yield_now().await;
-            }
-            result => return result,
-        }
-    }
-    unreachable!("last transition attempt returns")
+    let id = Uuid::parse_str(event_id).map_err(|_| AppError::AuditIntegrityConflict)?;
+    super::transaction::run(
+        db,
+        &(db, runtime, id, event),
+        |session, (db, runtime, id, event)| {
+            Box::pin(async move {
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    runtime,
+                    super::policy::AuditTier::Narrowing,
+                    id,
+                    event,
+                )
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 /// One monitor owns each runtime. It retains replay identities across unknown
@@ -187,7 +174,7 @@ pub(super) async fn record_transition(db: &Database, runtime: &AuditRuntime) -> 
             .map(|p| (p.operation_id.clone(), p.event_id.clone(), p.key))
     };
     if let Some((operation, event, state)) = planned {
-        commit_transition(db, &operation, &event, state).await?;
+        commit_transition(db, runtime, &operation, &event, state).await?;
         let mut monitor = runtime.monitor.lock().expect("audit monitor poisoned");
         let pending = monitor.pending.take().expect("single runtime monitor");
         monitor.last = Some(pending.key);
@@ -228,6 +215,7 @@ fn log_alarm(report: &AuditDiagnostics) {
 mod tests {
     use super::*;
     use crate::models::audit_outbox::{PENDING_COLLECTION_NAME, PendingAuditEvent};
+    use crate::services::audit_state_service;
     use mongodb::bson::doc;
 
     #[test]
