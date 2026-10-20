@@ -1125,7 +1125,13 @@ impl EgressAttachment {
     pub fn label(&self) -> &str {
         match self {
             Self::User(row) => &row.label,
-            Self::Tool(_) => "tool-image.png",
+            Self::Tool(row) => match row.content_type.as_str() {
+                "image/jpeg" => "tool-image.jpg",
+                "image/gif" => "tool-image.gif",
+                "image/webp" => "tool-image.webp",
+                "image/png" => "tool-image.png",
+                _ => "tool-image",
+            },
         }
     }
     pub fn content_type(&self) -> &str {

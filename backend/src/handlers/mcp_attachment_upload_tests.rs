@@ -681,9 +681,9 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
         user_id: u.f.owner.clone(),
         conversation_id: u.f.row.id.clone(),
         turn_id: u.f.chat.turn_id.clone().unwrap(),
-        content_type: "image/png".into(),
-        size: 3,
-        data_encrypted: u.f.state.encryption_keys.encrypt(b"PNG").await.unwrap(),
+        content_type: "image/jpeg".into(),
+        size: 4,
+        data_encrypted: u.f.state.encryption_keys.encrypt(b"JPEG").await.unwrap(),
         created_at: chrono::Utc::now(),
     };
     u.f.state
@@ -732,7 +732,21 @@ async fn lark_attachment_tool_images_keep_producing_turn_and_origin_without_fall
         let response = call(&u, &auth, meta, args(&image.id)).await;
         assert_eq!(response["result"]["isError"], false, "{response}");
     }
-    assert_eq!(u.server.received_requests().await.unwrap().len(), 2);
+    let requests = u.server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body = String::from_utf8(request.body).unwrap();
+        assert!(
+            body.contains("name=\"file_name\"\r\n\r\ntool-image.jpg\r\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "filename=\"tool-image.jpg\"\r\nContent-Type: image/jpeg\r\n\r\nJPEG\r\n"
+            ),
+            "{body}"
+        );
+    }
     u.f.state.db.drop().await.unwrap();
 }
 
