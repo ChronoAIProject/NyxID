@@ -33,7 +33,7 @@ enum Probe {
 async fn run_probes<F, Fut>(mut evidence: Evidence, mut run: F) -> Evidence
 where
     F: FnMut(Probe) -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
     if evidence
         .landlock_abi
@@ -43,17 +43,28 @@ where
     {
         return evidence;
     }
-    evidence.command_seccomp = Some(run(Probe::CommandSeccomp).await);
-    if evidence.command_seccomp != Some(true) {
-        return evidence;
+    for probe in [
+        Probe::CommandSeccomp,
+        Probe::Landlock,
+        Probe::SecureBrowser,
+        Probe::DeveloperBrowser,
+    ] {
+        let result = run(probe).await;
+        let succeeded = result.is_ok();
+        if let Err(error) = result {
+            evidence.probe_timed_out = error.is::<super::process::ProbeTimeout>();
+        }
+        match probe {
+            Probe::CommandSeccomp => evidence.command_seccomp = Some(succeeded),
+            Probe::Landlock => evidence.landlock_enforced = Some(succeeded),
+            Probe::SecureBrowser | Probe::DeveloperBrowser => {
+                evidence.managed_browser_sandbox = Some(succeeded);
+            }
+        }
+        if !succeeded {
+            break;
+        }
     }
-    evidence.landlock_enforced = Some(run(Probe::Landlock).await);
-    if evidence.landlock_enforced != Some(true) {
-        return evidence;
-    }
-    let secure = run(Probe::SecureBrowser).await;
-    let developer = secure && run(Probe::DeveloperBrowser).await;
-    evidence.managed_browser_sandbox = Some(secure && developer);
     evidence
 }
 
@@ -178,8 +189,8 @@ pub(super) async fn observe(
         evidence.managed_browser_configured = Some(config.managed_browser.is_some());
         run_probes(evidence, |probe| async move {
             match probe {
-                Probe::CommandSeccomp => process::probe_command_seccomp(command).await.is_ok(),
-                Probe::Landlock => process::context_sandbox::probe(command).await.is_ok(),
+                Probe::CommandSeccomp => process::probe_command_seccomp(command).await,
+                Probe::Landlock => process::context_sandbox::probe(command).await,
                 Probe::SecureBrowser | Probe::DeveloperBrowser => {
                     let identity = if probe == Probe::SecureBrowser {
                         Some(secure)
@@ -187,10 +198,8 @@ pub(super) async fn observe(
                         developer
                     };
                     match (config.managed_browser.as_ref(), identity) {
-                        (Some(browser), Some(identity)) => {
-                            probe_browser(browser, identity).await.is_ok()
-                        }
-                        _ => false,
+                        (Some(browser), Some(identity)) => probe_browser(browser, identity).await,
+                        _ => anyhow::bail!("separated_browser_identity_missing"),
                     }
                 }
             }
@@ -275,7 +284,11 @@ mod tests {
             let mut calls = Vec::new();
             let evidence = run_probes(prerequisites(), |probe| {
                 calls.push(probe);
-                std::future::ready(probe != *failed)
+                std::future::ready(if probe == *failed {
+                    Err(anyhow::anyhow!("test probe denied"))
+                } else {
+                    Ok(())
+                })
             })
             .await;
             assert_eq!(calls, probes[..=index]);
@@ -297,7 +310,7 @@ mod tests {
         let mut calls = Vec::new();
         let evidence = run_probes(prerequisites(), |probe| {
             calls.push(probe);
-            std::future::ready(true)
+            std::future::ready(Ok(()))
         })
         .await;
         assert!(evidence.support().available);
@@ -310,6 +323,34 @@ mod tests {
                 Probe::DeveloperBrowser
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn each_probe_timeout_is_advertised_distinctly_and_stops_later_probes() {
+        for timed_out in [
+            Probe::CommandSeccomp,
+            Probe::Landlock,
+            Probe::SecureBrowser,
+            Probe::DeveloperBrowser,
+        ] {
+            let mut calls = Vec::new();
+            let evidence = run_probes(prerequisites(), |probe| {
+                calls.push(probe);
+                std::future::ready(if probe == timed_out {
+                    Err(super::super::process::ProbeTimeout.into())
+                } else {
+                    Ok(())
+                })
+            })
+            .await;
+            assert_eq!(calls.last(), Some(&timed_out));
+            assert!(evidence.probe_timed_out);
+            assert!(!evidence.support().available);
+            assert_eq!(
+                evidence.support().reason.as_deref(),
+                Some("separated_probe_timeout")
+            );
+        }
     }
 
     #[tokio::test]

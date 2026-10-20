@@ -336,9 +336,45 @@ fn deny_agent_namespaces() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Own the child until it is reaped, including on timeout and output overflow.
-/// Kill-on-drop also covers cancellation of the caller's future.
 #[cfg(any(target_os = "linux", test))]
+#[derive(Debug, thiserror::Error)]
+#[error("separated_probe_timeout")]
+pub(super) struct ProbeTimeout;
+
+#[cfg(any(target_os = "linux", test))]
+struct ProbeGroup(i32);
+
+#[cfg(any(target_os = "linux", test))]
+impl ProbeGroup {
+    fn kill(&mut self) -> std::io::Result<()> {
+        if self.0 == 0 {
+            return Ok(());
+        }
+        if unsafe { libc::kill(-self.0, libc::SIGKILL) } == 0 {
+            self.0 = 0;
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            self.0 = 0;
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Drop for ProbeGroup {
+    fn drop(&mut self) {
+        // Cancellation must also sweep helpers, rather than just the parent.
+        let _ = self.kill();
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+/// Own the child until it is reaped, including on timeout and output overflow.
+/// Kill-on-drop and the group guard also cover cancellation of the caller.
 pub(super) async fn probe_output(mut command: Command) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     const OUTPUT_LIMIT: u64 = 64 * 1024;
@@ -349,6 +385,8 @@ pub(super) async fn probe_output(mut command: Command) -> Result<Vec<u8>> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let mut child = command.spawn()?;
+    // Keep the group ID even after wait() has consumed the parent's PID.
+    let mut group = ProbeGroup(child.id().context("separated_probe_pid_missing")? as i32);
     let mut stdout = child
         .stdout
         .take()
@@ -368,23 +406,18 @@ pub(super) async fn probe_output(mut command: Command) -> Result<Vec<u8>> {
         Ok(output)
     })
     .await;
+    // A successful Chromium parent can leave zygotes/helpers behind too.
+    let swept = group.kill();
+    if child.id().is_some() {
+        let killed = child.start_kill();
+        child.wait().await?;
+        killed?;
+    }
+    swept?;
     match result {
         Ok(Ok(output)) => Ok(output),
-        result => {
-            if let Some(pid) = child.id() {
-                // Browser probes may have renderer children in the same group.
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGKILL);
-                }
-                let killed = child.start_kill();
-                child.wait().await?;
-                killed?;
-            }
-            match result {
-                Ok(error) => error,
-                Err(_) => bail!("separated_probe_timeout"),
-            }
-        }
+        Ok(error) => error,
+        Err(_) => Err(ProbeTimeout.into()),
     }
 }
 
@@ -461,6 +494,39 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn successful_probe_sweeps_surviving_grandchildren() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("grandchild");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "/bin/sleep 30 </dev/null >/dev/null 2>&1 & echo $! > \"$1\"; printf success; exit 0",
+                "probe",
+            ])
+            .arg(&pid_file);
+        assert_eq!(probe_output(command).await.unwrap(), b"success");
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Allow init to reap the killed orphan. The production probe itself
+        // must have returned successfully, rather than timing out on stdout.
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("probe grandchild survived successful parent exit");
+    }
 
     #[tokio::test]
     async fn timed_out_probe_is_killed_and_reaped() {

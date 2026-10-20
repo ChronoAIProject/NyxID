@@ -890,6 +890,7 @@ impl Runtime {
             exact_cancel: true,
             separated: Some(separation_evidence.support()),
             separation_evidence: Some(separation_evidence),
+            separation_choice: self.config.separation_choice,
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self

@@ -70,6 +70,8 @@ pub struct MachineProfile {
     pub separated: Option<context::Support>,
     /// Live mechanism evidence for new setup selection; absent on older nodes.
     pub separation_evidence: Option<context::Evidence>,
+    /// Recorded setup intent for new assignments; absent on older profiles.
+    pub separation_choice: Option<context::Choice>,
     pub os: String,
     pub arch: String,
     pub roots: Vec<String>,

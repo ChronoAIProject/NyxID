@@ -158,10 +158,26 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
                 }),
             };
             status["commands_isolated"] = serde_json::json!(commands_isolated);
+            status["separation_choice"] = serde_json::json!(config.machine.separation_choice);
             println!("{}", serde_json::to_string_pretty(&status)?);
             eprintln!(
                 "Read-only status: cached daemon observation; no browsers or live probes started."
             );
+            if let Some(reason) = cached
+                .as_ref()
+                .and_then(|row| row.profile.separated.as_ref())
+                .and_then(|support| support.reason.as_deref())
+            {
+                eprintln!(
+                    "{reason}: {}",
+                    nyxid_machine::context::unavailable_message(reason)
+                );
+            }
+            if config.machine.separation_choice.is_none() {
+                eprintln!(
+                    "No intent recorded for new assignments. Existing assignments keep their stored mode. Rerun node setup with --separation automatic, require-separated or shared-legacy to choose."
+                );
+            }
             if config.machine.agent_user.is_none() {
                 eprintln!(
                     "Saved logins require managed browser policies and owner opt-in on the Assistant → Machines page. Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM."

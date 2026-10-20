@@ -31,6 +31,8 @@ pub struct Evidence {
     pub managed_browser_sandbox: Option<bool>,
     /// Diagnostic only: actual browser launch decides support under AppArmor.
     pub apparmor_userns_restricted: Option<bool>,
+    /// Diagnostic classification of a failed probe; never evidence of support.
+    pub probe_timed_out: bool,
 }
 
 // v1 probed namespaces before exec and could not observe AppArmor's browser
@@ -45,6 +47,9 @@ impl Evidence {
         }
         if self.os != "linux" {
             return Some("separated_requires_linux");
+        }
+        if self.probe_timed_out {
+            return Some("separated_probe_timeout");
         }
         if self.landlock_abi.is_none_or(|abi| abi < MIN_LANDLOCK_ABI) {
             return Some("separated_requires_landlock_abi_6");
@@ -90,6 +95,57 @@ pub enum Choice {
     Automatic,
     RequireSeparated,
     SharedLegacy,
+}
+
+impl Choice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::RequireSeparated => "require_separated",
+            Self::SharedLegacy => "shared_legacy",
+        }
+    }
+}
+
+pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Use a separate machine container or VM per agent for full isolation.";
+
+/// Fixed, actionable text suitable for CLI, API and tool responses. Never
+/// include probe output, browser contents or a node-supplied diagnostic here.
+pub fn unavailable_message(reason: &str) -> &'static str {
+    match reason {
+        "separated_probe_timeout" => {
+            "A separation capability probe exceeded its five-second bound. A cold Chromium start can cause this; rerun setup when the host is less busy. Separation remains unavailable until every probe succeeds."
+        }
+        "separated_requires_linux" => {
+            "This runtime supports per-agent separation only on Linux; macOS has no supported per-agent sandbox. Use a supported Linux host."
+        }
+        "separated_requires_separate_users" => {
+            "Separation requires a root supervisor with distinct non-root command, secure-browser and developer-browser users. On Linux, rerun setup with sudo and --separate-users."
+        }
+        "separated_requires_landlock_abi_6" => {
+            "Separation requires working Landlock ABI 6 or newer. Upgrade the Linux kernel or use a supported host."
+        }
+        "separated_requires_managed_browser" => {
+            "Separation requires a configured managed Chromium executable. Install Chromium and rerun setup with --browser and managed browser policies enabled."
+        }
+        "separated_seccomp_probe_failed" => {
+            "The command user's seccomp policy could not be confirmed. Check the host security policy before retrying setup."
+        }
+        "separated_landlock_probe_failed" => {
+            "The command user's Landlock enforcement could not be confirmed. Check the host security policy before retrying setup."
+        }
+        "separated_browser_sandbox_probe_failed" => {
+            "The managed Chromium sandbox could not be confirmed under both browser users. Check the configured executable and its AppArmor user-namespace policy before retrying setup."
+        }
+        "separated_probe_version_unsupported"
+        | "separated_capabilities_not_reported"
+        | "separated_probe_evidence_incomplete" => {
+            "The node has not reported complete supported separation evidence. Upgrade or reconnect the node and rerun setup to confirm its capabilities."
+        }
+        _ => {
+            "Separation is unavailable. Check the node's capability report and rerun setup on a supported host."
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,6 +374,7 @@ mod tests {
             landlock_enforced: Some(true),
             managed_browser_sandbox: Some(true),
             apparmor_userns_restricted: None,
+            probe_timed_out: false,
         }
     }
 
@@ -343,6 +400,29 @@ mod tests {
         assert_eq!(Choice::default(), Choice::Automatic);
         assert_eq!(Mode::Separated.as_str(), "separated");
         assert_eq!(Mode::SharedLegacy.as_str(), "shared_legacy");
+    }
+
+    #[test]
+    fn timeout_is_distinct_actionable_and_cannot_confirm_support() {
+        let report = Evidence {
+            probe_timed_out: true,
+            ..confirmed()
+        };
+        assert_eq!(
+            report.support().reason.as_deref(),
+            Some("separated_probe_timeout")
+        );
+        for choice in [Choice::Automatic, Choice::RequireSeparated] {
+            assert_eq!(
+                select_new(choice, Some(&report)),
+                Err("separated_probe_timeout")
+            );
+        }
+        let message = unavailable_message("separated_probe_timeout");
+        assert!(message.contains("five-second") && message.contains("rerun"));
+        for warning in ["node tokens", "signing secrets", "stored credentials"] {
+            assert!(SHARED_LEGACY_WARNING.contains(warning));
+        }
     }
 
     #[test]

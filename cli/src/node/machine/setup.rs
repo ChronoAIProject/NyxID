@@ -1,6 +1,7 @@
 //! One command registers, enables local authority and starts the node service.
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
+use nyxid_machine::context::{Choice, Mode};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -41,6 +42,10 @@ pub struct Setup {
     /// Linux VM: create separate browser/agent users and a system supervisor (run with sudo).
     #[arg(long)]
     pub separate_users: bool,
+    /// Intent for new agent assignments. New setups default to automatic and
+    /// require confirmed support; shared-legacy explicitly accepts shared access.
+    #[arg(long, value_enum)]
+    pub separation: Option<Separation>,
     /// Used by the machine image, which supplies the two users and display.
     #[arg(long, hide = true)]
     pub container: bool,
@@ -58,6 +63,109 @@ pub struct Setup {
     pub config: Option<String>,
     #[arg(long, env = "NYXID_PROFILE")]
     pub profile: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Separation {
+    Automatic,
+    RequireSeparated,
+    SharedLegacy,
+}
+
+impl From<Separation> for Choice {
+    fn from(value: Separation) -> Self {
+        match value {
+            Separation::Automatic => Self::Automatic,
+            Separation::RequireSeparated => Self::RequireSeparated,
+            Separation::SharedLegacy => Self::SharedLegacy,
+        }
+    }
+}
+
+fn setup_choice(
+    requested: Option<Separation>,
+    existing: Option<&nyxid_machine::config::Config>,
+) -> Option<Choice> {
+    requested.map(Choice::from).or_else(|| {
+        existing
+            .and_then(|config| config.separation_choice)
+            .or_else(|| {
+                // Rerunning setup against an existing machine must not change its
+                // prior intent, including profiles predating recorded selections.
+                let already_enabled = existing.is_some_and(|config| {
+                    config.shell || config.files || config.computer || config.browser_enabled()
+                });
+                (!already_enabled).then_some(Choice::Automatic)
+            })
+    })
+}
+
+fn selection_error(reason: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{reason}: {} To explicitly accept shared legacy access, rerun setup with --separation shared-legacy after reviewing this warning: {}",
+        nyxid_machine::context::unavailable_message(reason),
+        nyxid_machine::context::SHARED_LEGACY_WARNING,
+    )
+}
+
+/// Reject known unsupported configurations before pairing/registration. The
+/// real mechanism probes still decide support after provisioning completes.
+fn preflight_selection(
+    choice: Option<Choice>,
+    linux: bool,
+    supervisor: u32,
+    separate_users_requested: bool,
+    managed_browser_requested: bool,
+    existing: Option<&nyxid_machine::config::Config>,
+) -> Result<()> {
+    if choice.is_none() || choice == Some(Choice::SharedLegacy) {
+        return Ok(());
+    }
+    let reason = if !linux {
+        Some("separated_requires_linux")
+    } else if supervisor != 0
+        || (!separate_users_requested
+            && !existing.is_some_and(|config| {
+                config.agent_user.is_some()
+                    && config.browser_user.is_some()
+                    && config.effective_dev_browser_user().is_some()
+            }))
+    {
+        Some("separated_requires_separate_users")
+    } else if !managed_browser_requested
+        && !existing.is_some_and(|config| config.managed_browser.is_some())
+    {
+        Some("separated_requires_managed_browser")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(selection_error(reason));
+    }
+    Ok(())
+}
+
+async fn verify_selection(config: &nyxid_machine::config::Config) -> Result<Option<Mode>> {
+    let Some(choice) = config.separation_choice else {
+        return Ok(None);
+    };
+    if choice == Choice::SharedLegacy {
+        return Ok(Some(Mode::SharedLegacy));
+    }
+    let identity = |name| {
+        super::process::Identity::resolve(name)
+            .map_err(|_| selection_error("separated_requires_separate_users"))
+    };
+    let command = identity(config.agent_user.as_deref())?;
+    let secure = identity(config.browser_user.as_deref())?;
+    let developer = config
+        .effective_dev_browser_user()
+        .map(|name| identity(Some(name)))
+        .transpose()?;
+    let evidence = super::separation::observe(config, &command, &secure, developer.as_ref()).await;
+    nyxid_machine::context::select_new(choice, Some(&evidence))
+        .map(Some)
+        .map_err(selection_error)
 }
 
 #[derive(Deserialize)]
@@ -137,18 +245,32 @@ pub async fn run(mut args: Setup) -> Result<()> {
     if !shell && !files && !args.computer && args.browser != Some(true) {
         bail!("Choose --machine (commands and files), --browser or --computer");
     }
-    eprintln!(
-        "Recommended: use the machine container or set up a VM with --separate-users. Agents act with their OS user's full access; prompt injection is possible."
-    );
-    if shell && !separated {
-        eprintln!(
-            "Not isolated: agent commands can read this node's stored credentials, signing secret and node token, including its config and local credential store. File-tool workspace limits do not constrain the shell. You may proceed, but prefer the container or --separate-users."
-        );
-    }
     if config_path.exists() && token.is_some() {
         bail!(
             "This profile is already registered. Use machine enable or choose another --profile."
         );
+    }
+    let existing = config_path
+        .exists()
+        .then(|| crate::node::config::NodeConfig::load(&config_path))
+        .transpose()?;
+    let choice = setup_choice(
+        args.separation,
+        existing.as_ref().map(|config| &config.machine),
+    );
+    preflight_selection(
+        choice,
+        cfg!(target_os = "linux"),
+        unsafe { libc::geteuid() },
+        separated,
+        args.browser.unwrap_or(args.computer) && !args.skip_browser_policy,
+        existing.as_ref().map(|config| &config.machine),
+    )?;
+    eprintln!(
+        "Agents act with their OS user's access; prompt injection is possible. Use a separate machine container or VM per agent for full isolation."
+    );
+    if choice == Some(Choice::SharedLegacy) || (choice.is_none() && shell && !separated) {
+        eprintln!("{}", nyxid_machine::context::SHARED_LEGACY_WARNING);
     }
     if !config_path.exists() {
         let token = match token {
@@ -168,6 +290,12 @@ pub async fn run(mut args: Setup) -> Result<()> {
             .await?;
     }
     let mut config = crate::node::config::NodeConfig::load(&config_path)?;
+    if config.machine.separation_choice != choice {
+        // Retain attempted automatic/required intent even if later provisioning
+        // or probes fail, so retrying cannot reinterpret it as legacy consent.
+        config.machine.separation_choice = choice;
+        config.save(&config_path)?;
+    }
     let data_dir = if separated {
         let (agent, browser) = if args.container {
             (
@@ -282,6 +410,20 @@ pub async fn run(mut args: Setup) -> Result<()> {
                 "Saved-login filling is unavailable because managed policies were not installed. Run setup again when ready to approve the admin installation."
             );
         }
+    }
+    let config = crate::node::config::NodeConfig::load(&config_path)?;
+    match (
+        config.machine.separation_choice,
+        verify_selection(&config.machine).await?,
+    ) {
+        (Some(choice), Some(mode)) => eprintln!(
+            "New-assignment selection: {} ({}). Existing assignments retain their stored mode; owner authorization is still required.",
+            choice.as_str(),
+            mode.as_str(),
+        ),
+        _ => eprintln!(
+            "Existing machine retained without a new-assignment selection. Existing assignments keep their stored mode. Use --separation automatic, require-separated or shared-legacy to record intent for new assignments."
+        ),
     }
     if !separated {
         if args.computer && cfg!(target_os = "linux") {
@@ -646,6 +788,112 @@ fn systemd_quote(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setup_args(extra: &[&str]) -> Setup {
+        use crate::cli::{Cli, Commands, NodeCommands};
+        use clap::Parser;
+        let mut args = vec!["nyxid", "node", "setup", "--machine"];
+        args.extend_from_slice(extra);
+        match Cli::try_parse_from(args).unwrap().command {
+            Commands::Node {
+                command: NodeCommands::Setup(args),
+            } => args,
+            _ => panic!("expected node setup"),
+        }
+    }
+
+    #[test]
+    fn new_setup_defaults_to_automatic_but_existing_profiles_preserve_intent() {
+        use nyxid_machine::config::Config;
+        assert_eq!(
+            setup_choice(setup_args(&[]).separation, None),
+            Some(Choice::Automatic)
+        );
+        assert_eq!(
+            setup_choice(None, Some(&Config::default())),
+            Some(Choice::Automatic)
+        );
+        let mut existing = Config {
+            shell: true,
+            ..Default::default()
+        };
+        assert_eq!(setup_choice(None, Some(&existing)), None);
+        for stored in [
+            Choice::Automatic,
+            Choice::RequireSeparated,
+            Choice::SharedLegacy,
+        ] {
+            existing.separation_choice = Some(stored);
+            assert_eq!(setup_choice(None, Some(&existing)), Some(stored));
+            for (flag, wanted) in [
+                ("automatic", Choice::Automatic),
+                ("require-separated", Choice::RequireSeparated),
+                ("shared-legacy", Choice::SharedLegacy),
+            ] {
+                let args = setup_args(&["--separation", flag]);
+                assert_eq!(setup_choice(args.separation, Some(&existing)), Some(wanted));
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_setup_requires_explicit_legacy_choice_before_registration() {
+        for choice in [Some(Choice::Automatic), Some(Choice::RequireSeparated)] {
+            for (linux, uid, users, browser, reason) in [
+                (false, 0, true, true, "separated_requires_linux"),
+                (true, 501, true, true, "separated_requires_separate_users"),
+                (true, 0, false, true, "separated_requires_separate_users"),
+                (true, 0, true, false, "separated_requires_managed_browser"),
+            ] {
+                let error = preflight_selection(choice, linux, uid, users, browser, None)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.starts_with(reason));
+                assert!(error.contains("--separation shared-legacy"));
+                for word in ["node tokens", "signing secrets", "stored credentials"] {
+                    assert!(error.contains(word));
+                }
+            }
+            assert!(preflight_selection(choice, true, 0, true, true, None).is_ok());
+        }
+        for choice in [None, Some(Choice::SharedLegacy)] {
+            assert!(preflight_selection(choice, false, 501, false, false, None).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_new_setup_fails_before_creating_registration_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut args = setup_args(&[]);
+        args.config = Some(directory.path().to_string_lossy().into_owned());
+        args.url = "ws://127.0.0.1:9/api/v1/nodes/ws".into();
+        args.token = Some("nyx_nreg_validation_fixture_only".into());
+        args.no_daemon = true;
+        let error = run(args).await.unwrap_err().to_string();
+        assert!(
+            error.starts_with(if cfg!(target_os = "linux") {
+                "separated_requires_separate_users"
+            } else {
+                "separated_requires_linux"
+            }),
+            "{error}"
+        );
+        assert!(!directory.path().join("config.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_and_unselected_existing_setup_do_not_infer_separation() {
+        let mut config = nyxid_machine::config::Config::default();
+        assert_eq!(verify_selection(&config).await.unwrap(), None);
+        config.separation_choice = Some(Choice::SharedLegacy);
+        let encoded = toml::to_string(&config).unwrap();
+        let config = toml::from_str(&encoded).unwrap();
+        assert_eq!(
+            verify_selection(&config).await.unwrap(),
+            Some(Mode::SharedLegacy)
+        );
+    }
+
     #[test]
     fn node_only_machine_preset_has_no_old_alias() {
         use crate::cli::Cli;

@@ -614,10 +614,11 @@ and content they encounter can contain prompt injection. Workspace roots
 constrain file tools and command working directories; they do not sandbox a
 shell command.
 
-On a machine you already have access to, run:
+On a supported Linux host, install Chromium and the desktop prerequisites below,
+then run:
 
 ```sh
-nyxid node setup --machine --computer
+sudo nyxid node setup --machine --computer --separate-users
 ```
 
 Without a token this prints an expiring pairing code and link. Open the link
@@ -628,6 +629,46 @@ profile's launchd or systemd daemon. `--profile NAME` isolates node identities.
 `--root DIR` can be repeated; the default workspace is `~/nyxid-workspace`.
 `--token` is supported for the page-generated command. Existing `register` and
 `daemon install` commands still work.
+
+New machine setups record `automatic` intent for new agent assignments. Setup
+confirms Linux Landlock ABI 6 or newer, the root supervisor and three distinct
+non-root users, the command seccomp filter, actual Landlock enforcement, and
+the configured Chromium's namespace/PID/network/seccomp sandbox under both
+browser users. A configured username or kernel version alone is insufficient.
+The browser probe uses a fresh profile and the actual executable, including its
+AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
+
+| Setup option | New-assignment intent |
+|---|---|
+| Omitted on a new setup, or `--separation automatic` | Choose separated only after every supported mechanism is confirmed; otherwise stop with a reason. |
+| `--separation require-separated` | Require confirmed separation; never fall back to shared access. |
+| `--separation shared-legacy` | Explicitly accept shared legacy access after reviewing the warning below. |
+
+On macOS or another unsupported configuration, automatic/required setup stops
+before pairing when the missing prerequisite is already known. To deliberately
+use a single-user host, run `nyxid node setup --machine --computer --separation
+shared-legacy`. **Shared legacy access gives agent commands the full access of
+their OS user. A misbehaving or prompt-injected agent may read node tokens,
+signing secrets and stored credentials accessible to that user, including the
+node config and local credential store. Workspace roots constrain file tools
+and working directories, not the shell.** Use a separate machine container or VM
+per agent for full isolation. Supported `separated` mode retains the residual
+risks in [MACHINE_AGENT_ISOLATION.md](MACHINE_AGENT_ISOLATION.md).
+
+Probes have a five-second bound. `separated_probe_timeout` means the host did not
+confirm support in time; a cold Chromium start can cause this. Rerun setup when
+the host is less busy. Setup kills probe helpers and reaps the parent after
+success, failure or timeout. Failed automatic/required intent remains recorded
+so a retry cannot silently become legacy consent, and setup does not start the
+daemon after failed verification.
+
+Rerunning setup against an enabled older machine preserves its absent intent
+unless `--separation` is supplied. Stored agent assignments always retain their
+mode. A selection records intent for future assignments; owner authorization
+and the existing feature gates still apply. `machine status` shows the recorded
+intent and cached probe reason without launching a browser. Upgrade the server
+to the W9.4 selection contract before relying on a node's advertised intent;
+older servers do not enforce the new selection field.
 
 ```sh
 nyxid node machine enable                    # commands and files
@@ -687,7 +728,10 @@ sudo nyxid node setup --machine --computer --separate-users --root /srv/workspac
 
 Setup creates profile-specific users and a system supervisor service. The
 supervisor running as root does not authorize commands as root: children drop
-to the configured users. A single-user host remains supported.
+to the configured users. Per-agent separation additionally requires the live
+capability checks above. Single-user setups require explicit `--separation
+shared-legacy`; this flag does not remove browser/command OS-user separation
+from an existing `--separate-users` installation.
 
 ### Connected services, files and desktop
 
