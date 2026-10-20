@@ -415,3 +415,37 @@ sharding recommendation remain pending validation.
 | coverage | `services::assistant_service_execution::tests::managed::actual_managed_http_and_mcp_success_settles_once_and_records_one_receipt` | 30.873 | 27.818 | 1.11 |
 | coverage | `services::platform_key_service::tests::inactive_org_rows_preserve_disabled_connections_and_replace_tombstones` | 29.954 | 26.335 | 1.14 |
 | coverage | `services::platform_key_service::tests::inactive_personal_rows_preserve_disabled_connections_and_replace_tombstones` | 29.759 | 25.719 | 1.16 |
+
+## PM decision: build once and partition Backend Test
+
+PM accepted the remaining durable-audit cost as inherent: keep the majority+
+journal commit, retry budgets and 90-minute job limit. CORE-B owns the CI change:
+a single `cargo nextest archive` build, two parallel archive consumers with
+`--partition hash:1/2` / `hash:2/2`, independent Mongo services, and an aggregate
+job that fails if either partition fails. Further micro-optimization and a new
+300-test before/after build are no longer prerequisites for returning to W8.
+
+Nextest 0.9.146 fixes hash partitioning to XXH64 of the UTF-8 test name with seed
+zero, modulo the partition count. Applying that assignment to the hosted top 40
+Backend durations gives this projection:
+
+| Partition | Top-40 tests | Top-40 summed seconds | Projected test minutes |
+| --- | ---: | ---: | ---: |
+| hash:1/2 | 15 | 676.448 | 31.8 |
+| hash:2/2 | 25 | 1544.923 | 35.4 |
+
+The model uses baseline aggregate time 13412.114 s times the observed 1.203
+common-test ratio, splits the remaining workload evenly, and divides each
+partition by four effective concurrent slots (consistent with measured summed
+process time / test wall time). Plan roughly 35–40 minutes per test partition,
+plus archive transfer and Mongo setup; the separate build remains about 20–23
+minutes. The 219.929-second longest test belongs to partition 2. These are
+estimates from the top-40 imbalance, not measured partition completion times.
+
+Partitioning adds no dependency on in-process ordering: nextest already starts
+each test in its own process. Fixtures initialize their own run/UUID-scoped
+databases; scoped failCommand uses the per-host lock and a unique appName.
+Independent partition Mongo services share neither fixture state nor failpoints.
+Subprocess tests launch their current executable within their owning test and
+partition. The artifact consumer must preserve the archive's executable/resource
+layout; CI acceptance still requires both complete partitions to pass.
