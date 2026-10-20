@@ -30,6 +30,13 @@ command += ['--container'] if args.container else ['--config', args.config]
 environment = {key: value for key, value in os.environ.items() if not key.startswith('NYXID_')}
 for sample in range(args.samples):
     result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+    # Never print private browser/OS errors or arbitrary subprocess output.
+    # These production labels identify the failed observation before assertions.
+    for line in result.stderr.splitlines():
+        if re.fullmatch(r'browser_probe_failure reason=[a-z_]+ errno=(?:[0-9]+|unknown)', line) or re.fullmatch(
+            r'separation_probe mechanism=\w+ elapsed_ms=\d+ outcome=failed', line
+        ):
+            print(f'probe_failure sample={sample + 1} {line}', flush=True)
     assert result.returncode == 0, f'capability probe command failed (exit {result.returncode})'
     evidence = json.loads(result.stdout)
     assert evidence.get('version') == 3 and evidence.get('os') == 'linux'

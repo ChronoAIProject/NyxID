@@ -75,10 +75,11 @@ for stronger separation; containers still share their host kernel.** Never label
 #### W9.4 new-assignment selection
 
 Node setup records the owner's `automatic`, `require_separated`, or
-`shared_legacy` intent. New server assignments use current v2 capability evidence;
-the older support boolean, missing evidence and unknown evidence versions cannot
-establish support. Automatic and required intent select `separated` only when the
-supported mechanisms are positively observed and context creation is enabled.
+`shared_legacy` intent. New server assignments use current v3 capability evidence;
+the older support boolean, v1/v2 reports, missing evidence and unknown evidence
+versions cannot establish support. Automatic and required intent select
+`separated` only when the supported mechanisms are positively observed and
+context creation is enabled.
 Otherwise the assignment is denied with an actionable `selection_required` state.
 An omitted choice never selects legacy. An explicit legacy choice is available on
 unsupported and older hosts after the owner reviews the complete warning in
