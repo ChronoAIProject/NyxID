@@ -277,6 +277,17 @@ async fn lark_base_write_succeeded_replay_uses_logical_digest_before_any_provide
     assert!(
         matches!(ledger::claim(&db,&again,&photos).await.unwrap(),ledger::Claim::Replay(record) if record=="record")
     );
+    again.principal.epoch += 1;
+    again.principal.credential_id = "rotated credential".into();
+    assert!(
+        matches!(ledger::claim(&db,&again,&photos).await.unwrap(),ledger::Claim::Replay(record) if record=="record")
+    );
+    again
+        .contract_digests
+        .insert("composite".into(), "new contract".into());
+    assert!(
+        matches!(ledger::claim(&db,&again,&photos).await.unwrap(),ledger::Claim::Replay(record) if record=="record")
+    );
     again.logical_request_sha256 = "changed amount/assignment".into();
     assert!(ledger::claim(&db, &again, &photos).await.is_err());
     let stored = db
@@ -287,6 +298,8 @@ async fn lark_base_write_succeeded_replay_uses_logical_digest_before_any_provide
         .unwrap();
     assert_eq!(stored.attempt, row.attempt);
     assert_eq!(stored.state, WriteState::Succeeded);
+    assert_eq!(stored.principal, row.principal);
+    assert_eq!(stored.contract_digests, row.contract_digests);
     assert_eq!(
         db.collection::<LarkBaseWritePhoto>(PHOTOS)
             .count_documents(doc! {"write_id":&row.id})

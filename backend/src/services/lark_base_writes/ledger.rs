@@ -60,7 +60,7 @@ pub(super) async fn claim(
             if let Some(row) = &existing {
                 let same_authority = row.principal == proposed.principal && row.contract_digests == proposed.contract_digests;
                 if row.state == WriteState::Succeeded {
-                    if !same_authority || row.logical_request_sha256 != proposed.logical_request_sha256 { return Err(conflict(row)); }
+                    if row.logical_request_sha256 != proposed.logical_request_sha256 { return Err(conflict(row)); }
                     return Ok(Claim::Replay(row.record_id.clone().ok_or_else(|| conflict(row))?));
                 }
                 if row.state == WriteState::Dispatching && row.deadline_at <= Utc::now() {

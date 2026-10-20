@@ -459,6 +459,50 @@ async fn lark_base_write_new_upload_same_bytes_replays_after_original_deletion_a
 }
 
 #[tokio::test]
+async fn lark_base_write_success_replay_after_credential_rotation_makes_no_provider_calls() {
+    let u = setup("base_replay_rotation").await;
+    let auth = authenticate(&u.f).await;
+    assert_eq!(
+        payload(&call(&u, &auth, false, args(&u.attachment_id)).await)["record_id"],
+        "rec_receipt"
+    );
+    let before = ledger(&u).await;
+    assert_eq!(requests(&u).await.len(), 3);
+    u.f.state
+        .db
+        .collection::<bson::Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&before.principal.credential_id},
+            doc! {"$inc":{"credential_epoch":1i64}},
+        )
+        .await
+        .unwrap();
+    let fresh_auth = authenticate(&u.f).await;
+    let replay = call(&u, &fresh_auth, true, args(&u.attachment_id)).await;
+    assert_eq!(payload(&replay)["record_id"], "rec_receipt", "{replay}");
+    assert_eq!(payload(&replay)["already_created"], true, "{replay}");
+    assert_eq!(requests(&u).await.len(), 3);
+    let after = ledger(&u).await;
+    assert_eq!(after.attempt, before.attempt);
+    assert_eq!(after.principal, before.principal);
+    assert_eq!(after.client_token, before.client_token);
+    assert_eq!(
+        bson::to_bson(&after.files).unwrap(),
+        bson::to_bson(&before.files).unwrap()
+    );
+    assert_eq!(
+        u.f.state
+            .db
+            .collection::<bson::Document>(crate::models::lark_base_write_photo::COLLECTION_NAME)
+            .count_documents(doc! {"write_id":&after.id,"attempt":&before.attempt})
+            .await
+            .unwrap(),
+        1
+    );
+    cleanup(u).await;
+}
+
+#[tokio::test]
 async fn lark_base_write_page_two_resolves_photo_and_invalid_loop_or_malformed_page_tokens_fail_closed()
  {
     use wiremock::matchers::query_param;
