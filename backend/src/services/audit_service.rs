@@ -8,7 +8,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+use crate::models::audit_log::AuditLog;
 use crate::mw::auth::AuthUser;
 use crate::services::audit_chain_service;
 
@@ -203,25 +203,7 @@ pub async fn log_actor_event_in_transaction(
     if let Some(key) = audit_chain_hmac_key() {
         return log_actor_event_in_session(db, session, key, actor, event_type, event_data).await;
     }
-    // Match the existing pre-initialization behavior of write_audit_entry.
-    let entry = build_audit_entry(
-        Some(actor.user_id.clone()),
-        event_type.into(),
-        Some(event_data),
-        actor.ip_address.clone(),
-        actor.user_agent.clone(),
-        actor.api_key_id.clone(),
-        actor.api_key_name.clone(),
-    );
-    tracing::warn!(
-        event_type,
-        "audit-chain HMAC key is not initialized; writing legacy unchained audit entry"
-    );
-    db.collection::<AuditLog>(AUDIT_LOG)
-        .insert_one(entry)
-        .session(session)
-        .await?;
-    Ok(())
+    Err(crate::errors::AppError::AuditNotInitialized)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -255,24 +237,14 @@ async fn write_audit_entry(
     entry: AuditLog,
     event_type: String,
 ) -> Result<(), mongodb::error::Error> {
-    let result = if let Some(key) = audit_chain_hmac_key() {
-        audit_chain_service::append_chained_entry(&db, entry, key).await
-    } else {
-        tracing::warn!(
-            event_type = %event_type,
-            "audit-chain HMAC key is not initialized; writing legacy unchained audit entry"
-        );
-        match db
-            .collection::<AuditLog>(AUDIT_LOG)
-            .insert_one(&entry)
-            .await
-        {
-            Ok(_) => Ok(entry),
-            Err(error) => Err(error),
-        }
+    let result = match audit_chain_hmac_key() {
+        Some(key) => audit_chain_service::append_chained_entry(&db, entry, key).await,
+        None => Err(mongodb::error::Error::custom(
+            crate::errors::AppError::AuditNotInitialized,
+        )),
     };
-    if let Err(e) = &result {
-        tracing::error!(event_type = %event_type, error = %e, "Failed to write audit log");
+    if result.is_err() {
+        tracing::error!(event_type = %event_type, "Failed to durably write audit log");
     }
     #[cfg(test)]
     if let Ok(inserted) = &result {

@@ -45,8 +45,20 @@ pub enum AuditChainStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditEvidenceStatus {
+    Unwitnessed,
+    Unverified,
+    Broken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditChainVerifyReport {
+    /// Local HMAC/link result; external continuity has its own categorical status.
+    #[serde(rename = "local_status")]
     pub status: AuditChainStatus,
+    #[serde(rename = "status")]
+    pub evidence_status: AuditEvidenceStatus,
     pub checked_count: u64,
     pub pre_chain_count: u64,
     pub head_seq: Option<i64>,
@@ -85,78 +97,52 @@ pub fn prepare_chained_entry(
 
 pub async fn append_chained_entry(
     db: &mongodb::Database,
-    mut entry: AuditLog,
+    entry: AuditLog,
     key: &[u8],
 ) -> Result<AuditLog, mongodb::error::Error> {
-    let collection = db.collection::<AuditLog>(AUDIT_LOG);
-    let mut last_error = None;
-
+    let mut session = db.client().start_session().await?;
     for attempt in 1..=MAX_APPEND_ATTEMPTS {
-        let tail = read_tail(db).await?;
-        let (seq, prev_hash) = match tail {
-            Some(tail) => (tail.seq + 1, tail.entry_hash),
-            None => (1, GENESIS_PREV_HASH.to_string()),
+        session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(super::audit_state_service::majority())
+            .await?;
+        let result =
+            super::audit_state_service::append_in_session(db, &mut session, entry.clone(), key)
+                .await;
+        let result = match result {
+            Ok(inserted) => super::audit_state_service::commit(&mut session)
+                .await
+                .map(|()| inserted),
+            Err(AppError::DatabaseError(error)) => Err(error),
+            Err(error) => Err(mongodb::error::Error::custom(error)),
         };
-
-        if let Err(error) = prepare_chained_entry(&mut entry, seq, prev_hash, key) {
-            return Err(mongodb::error::Error::custom(error.to_string()));
-        }
-
-        match collection.insert_one(&entry).await {
-            Ok(_) => return Ok(entry),
-            Err(error) if is_duplicate_key_error(&error) => {
-                if let Some(existing) = collection.find_one(doc! { "_id": &entry.id }).await? {
-                    if immutable_entry_matches(&existing, &entry)
-                        && existing.seq.is_some()
-                        && existing.prev_hash.is_some()
-                        && existing.entry_hash.as_ref().is_some_and(|hash| {
-                            compute_entry_hash(&existing, key)
-                                .is_ok_and(|expected| &expected == hash)
-                        })
-                    {
-                        return Ok(existing);
-                    }
-                    return Err(mongodb::error::Error::custom(
-                        "Audit UUID already exists with different immutable content",
-                    ));
-                }
-                if attempt == MAX_APPEND_ATTEMPTS {
+        match result {
+            Ok(inserted) => return Ok(inserted),
+            Err(error) => {
+                let _ = session.abort_transaction().await;
+                if attempt == MAX_APPEND_ATTEMPTS
+                    || (!error.contains_label("TransientTransactionError")
+                        && !is_duplicate_key_error(&error))
+                {
                     return Err(error);
                 }
-                last_error = Some(error);
                 sleep_before_retry(attempt).await;
             }
-            Err(error) => return Err(error),
         }
     }
-
-    Err(last_error
-        .unwrap_or_else(|| mongodb::error::Error::custom("audit chain append exhausted retries")))
+    unreachable!("last append attempt always returns")
 }
 
-/// Append alongside a policy mutation. The caller retries the enclosing
-/// transaction on conflicts; an audit failure must abort the mutation too.
+/// The caller owns the business transaction and its retries. The audit row,
+/// persistent head and delivery reservation join that exact session.
 pub async fn append_chained_entry_in_session(
     db: &mongodb::Database,
     session: &mut mongodb::ClientSession,
-    mut entry: AuditLog,
+    entry: AuditLog,
     key: &[u8],
 ) -> AppResult<()> {
-    let collection = db.collection::<AuditLog>(AUDIT_LOG);
-    let tail = collection
-        .find_one(doc! {"seq": {"$exists": true}})
-        .sort(doc! {"seq": -1})
-        .session(&mut *session)
-        .await?;
-    let (seq, hash) = match tail {
-        Some(tail) => (
-            tail.seq.unwrap_or(0) + 1,
-            tail.entry_hash.unwrap_or_default(),
-        ),
-        None => (1, GENESIS_PREV_HASH.to_owned()),
-    };
-    prepare_chained_entry(&mut entry, seq, hash, key)?;
-    collection.insert_one(entry).session(&mut *session).await?;
+    super::audit_state_service::append_in_session(db, session, entry, key).await?;
     Ok(())
 }
 
@@ -202,11 +188,49 @@ pub async fn verify_chain(
         )));
     }
 
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .await?;
     let collection = db.collection::<AuditLog>(AUDIT_LOG);
     let pre_chain_count = collection
         .count_documents(doc! { "seq": { "$exists": false } })
+        .session(&mut session)
         .await?;
-    let tail = read_tail(db).await?;
+    let tail = read_tail(db, &mut session).await?;
+    let durable = db
+        .collection::<crate::models::audit_state::AuditState>(
+            crate::models::audit_state::COLLECTION_NAME,
+        )
+        .find_one(doc! {"singleton": true})
+        .session(&mut session)
+        .await?;
+    if let Some(state) = &durable {
+        let actual_seq = tail.as_ref().map_or(0, |t| t.seq);
+        let actual_hash = tail
+            .as_ref()
+            .map_or(GENESIS_PREV_HASH, |t| t.entry_hash.as_str());
+        if actual_seq != state.head_seq || actual_hash != state.head_hash {
+            return Ok(broken_report(
+                0,
+                pre_chain_count,
+                Some(state.head_seq),
+                Some(state.head_hash.clone()),
+                AuditChainBreak {
+                    break_seq: actual_seq.min(state.head_seq).saturating_add(1),
+                    break_kind: AuditChainBreakKind::Gap,
+                    expected: state.head_seq.to_string(),
+                    actual: actual_seq.to_string(),
+                },
+            ));
+        }
+    }
+    let evidence_status = if durable.as_ref().is_some_and(|s| s.witness_enrolled) {
+        AuditEvidenceStatus::Unverified
+    } else {
+        AuditEvidenceStatus::Unwitnessed
+    };
     let head_seq = tail.as_ref().map(|tail| tail.seq);
     let head_hash = tail.map(|tail| tail.entry_hash);
 
@@ -215,20 +239,20 @@ pub async fn verify_chain(
         filter.insert("seq", doc! { "$gte": from_seq, "$lte": to_seq });
     }
 
-    let entries: Vec<AuditLog> = collection
+    let mut cursor = collection
         .find(filter)
         .sort(doc! { "seq": 1 })
         .limit(limit)
-        .await?
-        .try_collect()
+        .session(&mut session)
         .await?;
+    let entries: Vec<AuditLog> = cursor.stream(&mut session).try_collect().await?;
 
     let mut checked_count = 0_u64;
     let mut expected_seq = from_seq;
     let mut expected_prev_hash = if from_seq == 1 {
         GENESIS_PREV_HASH.to_string()
     } else {
-        match load_entry_by_seq(db, from_seq - 1).await? {
+        match load_entry_by_seq(db, &mut session, from_seq - 1).await? {
             Some(previous) => previous.entry_hash.unwrap_or_default(),
             None => {
                 return Ok(broken_report(
@@ -313,6 +337,7 @@ pub async fn verify_chain(
 
     Ok(AuditChainVerifyReport {
         status: AuditChainStatus::Ok,
+        evidence_status,
         checked_count,
         pre_chain_count,
         head_seq,
@@ -322,16 +347,16 @@ pub async fn verify_chain(
     })
 }
 
-async fn read_tail(db: &mongodb::Database) -> Result<Option<ChainTail>, mongodb::error::Error> {
+async fn read_tail(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+) -> Result<Option<ChainTail>, mongodb::error::Error> {
     let tail = db
         .collection::<AuditLog>(AUDIT_LOG)
-        .find(doc! { "seq": { "$exists": true } })
-        .sort(doc! { "seq": -1 })
-        .limit(1)
-        .await?
-        .try_next()
+        .find_one(doc! { "seq": { "$exists": true } })
+        .sort(doc! {"seq": -1})
+        .session(session)
         .await?;
-
     Ok(tail.and_then(|entry| {
         Some(ChainTail {
             seq: entry.seq?,
@@ -342,10 +367,12 @@ async fn read_tail(db: &mongodb::Database) -> Result<Option<ChainTail>, mongodb:
 
 async fn load_entry_by_seq(
     db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
     seq: i64,
 ) -> Result<Option<AuditLog>, mongodb::error::Error> {
     db.collection::<AuditLog>(AUDIT_LOG)
-        .find_one(doc! { "seq": seq })
+        .find_one(doc! {"seq": seq})
+        .session(session)
         .await
 }
 
@@ -358,6 +385,7 @@ fn broken_report(
 ) -> AuditChainVerifyReport {
     AuditChainVerifyReport {
         status: AuditChainStatus::Broken,
+        evidence_status: AuditEvidenceStatus::Broken,
         checked_count,
         pre_chain_count,
         head_seq,

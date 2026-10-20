@@ -51,8 +51,13 @@ pub struct EncryptionHealthResponse {
 ///
 /// Returns service health status. Used by load balancers and monitoring.
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
+    let status = match crate::services::audit_state_service::load(&state.db).await {
+        Ok(head) if head.witness_enrolled => "unverified",
+        Ok(_) => "unwitnessed",
+        Err(_) => "unavailable",
+    };
     Json(HealthResponse {
-        status: "ok".to_string(),
+        status: status.to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         commit: env!("NYXID_GIT_HASH").to_string(),
         encryption: EncryptionHealthResponse {
@@ -161,6 +166,19 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_audit_health_is_explicitly_unwitnessed_and_missing_state_is_unavailable() {
+        let db = crate::test_utils::connect_transaction_test_database("audit_health_local").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let response = health_check(State(state.clone())).await;
+        assert_eq!(response.0.status, "unwitnessed");
+        db.collection::<mongodb::bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .delete_many(mongodb::bson::doc! {})
+            .await
+            .unwrap();
+        assert_eq!(health_check(State(state)).await.0.status, "unavailable");
+    }
 
     // ---- HealthResponse serialization ----
 

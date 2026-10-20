@@ -157,6 +157,15 @@ pub enum AppError {
     #[error("Security rollout is not ready; inspect admin security readiness")]
     SecurityReadinessUnavailable,
 
+    #[error("Durable audit state is not initialized")]
+    AuditNotInitialized,
+
+    #[error("Initial audit cutover requires drained old writers and AUDIT_CUTOVER_DRAINED=true")]
+    AuditCutoverRequired,
+
+    #[error("Audit chain identity or history conflicts with durable state")]
+    AuditIntegrityConflict,
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -809,6 +818,9 @@ impl AppError {
             Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AuditNotInitialized
+            | Self::AuditCutoverRequired
+            | Self::AuditIntegrityConflict => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
@@ -1035,6 +1047,9 @@ impl AppError {
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::SecurityReadinessUnavailable => 12900,
+            Self::AuditNotInitialized => 13000,
+            Self::AuditCutoverRequired => 13001,
+            Self::AuditIntegrityConflict => 13002,
             Self::VoiceProviderUnavailable => 12501,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
@@ -1301,6 +1316,9 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
+            Self::AuditNotInitialized => "audit_not_initialized",
+            Self::AuditCutoverRequired => "audit_cutover_required",
+            Self::AuditIntegrityConflict => "audit_integrity_conflict",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",

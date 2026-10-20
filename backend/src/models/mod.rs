@@ -10,6 +10,8 @@ pub mod assistant_action_receipt;
 pub mod assistant_resource;
 pub mod assistant_wire_log;
 pub mod audit_log;
+pub mod audit_outbox;
+pub mod audit_state;
 pub mod auth_device_code;
 pub mod authorization_code;
 pub mod billing_ledger;

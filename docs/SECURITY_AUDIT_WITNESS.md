@@ -6,6 +6,58 @@ provides the protocol, client and sink. Application readiness, outbox delivery,
 verification, retention, HMAC transitions and caller admission are subsequent W8
 integrations; installing this executable alone does not activate those controls.
 
+## W8-4 rollout decisions
+
+PM condition C1 makes durable local audit unconditional and independent witness
+deployment optional. With no witness configured or previously enrolled, startup,
+authentication and ordinary work continue on the transactional persistent head
+and outbox. Health, Integrity and verification must call this state `unwitnessed`;
+local HMAC continuity is not external verification. Tests use the same local
+mode unless they explicitly provision a witness. No test constructor creates a
+fresh witness proof or overrides configured-witness admission.
+
+The first adoption of an existing v1 chain requires draining every old writer
+and setting `AUDIT_CUTOVER_DRAINED=true`. Initialization verifies the original
+chain and atomically records its unchanged boundary. The acknowledgment is
+consumed by this cutover, rather than required on each subsequent boot. A fresh
+database needs no drain acknowledgment. Old binaries cannot safely be restarted
+against the persistent head/outbox protocol. Their absence is an operator
+assertion; observations cannot discover an unregistered old process.
+
+Without a witness, `AUDIT_CHAIN_ID` may be omitted and the first initialization
+persists a UUID v4. For later independent enrollment, retain and independently
+provision that exact identity. A configured witness never automatically enrolls
+or resets itself from MongoDB, and removing its configuration after enrollment
+must report unavailable instead of reverting to optional unwitnessed mode.
+
+PM condition C2 requires separate approval before coding configured-witness
+admission. Proposed defaults are 60 seconds fresh contact, 30 seconds oldest
+unacknowledged reservation and 10,000 pending events. The pending decision table
+is recorded in the living inventory; no policy implementation is implied by
+the head/outbox foundation. S3 compliance-mode Object Lock is scheduled as
+W8-3b after W8-5, including retained-version anti-shadowing and storage-level
+writer-denial tests.
+
+The first W8-4 implementation group supplies local allocation and reservations:
+`audit_chain_state` is the sole allocator for direct and caller-session appends;
+the audit row, head advance and hash-only `audit_outbox` reservation share one
+transaction. `audit_pending_events` accepts a typed principal/owner/stage,
+UUID identities and a reviewed static action, with operation/stage uniqueness.
+Its local materializer appends and marks the pending row in one transaction.
+Neither materialization nor compaction releases unacknowledged capacity. Index
+setup and compatibility migrations run after the allocator is initialized.
+The original v1 canonical bytes and existing business transactions are retained.
+
+This group does not yet connect the external relay or implement configured
+witness admission. Categorical evidence is available in local verification and
+health; the admin Integrity DTO/UI must also carry it before W8-4 is complete.
+The immutable external cursor, replica/protocol observations, protected intent
+dispatch and caller conversions remain explicit integration work. The local
+head detects disagreement with a deleted tail, but a coordinated Mongo rollback
+still requires independently authenticated witness evidence. Until W8-5 adds a
+protected retention boundary, deleting the head row is corruption, including
+an empty surviving tail; append cannot infer a replacement sequence.
+
 ## Authority and threat model
 
 Provision a dedicated sink host, service UID and private group, with storage and

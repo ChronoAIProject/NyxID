@@ -396,13 +396,11 @@ async fn server_main() {
     }
 
     // Connect to database
+    let audit_config = services::audit_runtime::AuditConfig::from_env()
+        .expect("Invalid durable audit configuration");
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
-    services::assistant_nyxagent::warn_at_startup(&db).await;
-    services::assistant_access_policy::ensure_cutover(&db)
-        .await
-        .expect("Failed to read the immutable assistant skill-routing cutover");
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -419,8 +417,10 @@ async fn server_main() {
     // Derive HMAC keys kept in process memory only. The JWT private key file
     // contents are the universal fallback so KMS deployments without
     // `ENCRYPTION_KEY` still start.
-    let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
-        .expect("Failed to read JWT private key for HMAC seed");
+    let jwt_private_key_pem = zeroize::Zeroizing::new(
+        std::fs::read(&config.jwt_private_key_path)
+            .expect("Failed to read JWT private key for HMAC seed"),
+    );
     let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
         config.cli_pairing_hmac_key.as_deref(),
         config.encryption_key.as_deref(),
@@ -437,6 +437,27 @@ async fn server_main() {
     );
     services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
     let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
+    services::audit_state_service::initialize(
+        &db,
+        audit_chain_hmac_key.as_ref().as_ref(),
+        &audit_config,
+    )
+    .await
+    .expect("Durable audit initialization failed; inspect audit cutover diagnostics");
+    tracing::warn!("Audit witness is not configured; durable local audit is unwitnessed");
+    // Index setup also contains compatibility data migrations. None may run
+    // before the common audit allocator and process key are available.
+    db::ensure_indexes(&db)
+        .await
+        .expect("Failed to verify MongoDB indexes and compatibility migrations");
+    services::audit_outbox_service::spawn_materializer(db.clone(), audit_chain_hmac_key.clone());
+    db::run_startup_migrations(&db)
+        .await
+        .expect("Startup data migrations failed");
+    services::assistant_nyxagent::warn_at_startup(&db).await;
+    services::assistant_access_policy::ensure_cutover(&db)
+        .await
+        .expect("Failed to read the immutable assistant skill-routing cutover");
     // Keys the receipt fingerprints that cover caller-supplied material.
     // Receipts are stored, so an unkeyed digest of a low-entropy value would
     // be an offline oracle against a database snapshot.

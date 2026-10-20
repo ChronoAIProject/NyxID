@@ -63,7 +63,8 @@ pub type DbHandle = Database;
 /// Create a configured MongoDB connection and return the database handle.
 ///
 /// Parses the connection string, configures the connection pool, verifies
-/// connectivity with a ping, and ensures all required indexes exist.
+/// connectivity and transaction support. Index/compatibility setup runs after
+/// audit initialization because several index migrations also mutate data.
 pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::error::Error> {
     let mut client_options = ClientOptions::parse(&config.database_url).await?;
 
@@ -88,16 +89,18 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     tracing::info!("MongoDB connection established");
 
     require_transactions(&db).await?;
-    ensure_indexes(&db).await?;
-    tracing::info!("MongoDB indexes verified");
-
-    backfill_downstream_service_types(&db).await?;
-    migrate_legacy_api_spec_url(&db).await?;
-    crate::services::oracle_pool_service::migrate_legacy_default_model_label(&db).await?;
-    migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
-    backfill_onboarding_state(&db).await?;
-
     Ok(db)
+}
+
+/// Business migrations run only after the durable audit runtime is initialized.
+pub async fn run_startup_migrations(db: &Database) -> Result<(), mongodb::error::Error> {
+    backfill_downstream_service_types(db).await?;
+    migrate_legacy_api_spec_url(db).await?;
+    crate::services::oracle_pool_service::migrate_legacy_default_model_label(db).await?;
+    migrate_remove_org_scoped_feature_flag_overrides(db).await?;
+    backfill_onboarding_state(db).await?;
+
+    Ok(())
 }
 
 /// Service configuration changes require an atomic mutation + history journal.

@@ -451,15 +451,24 @@ If all three sources are missing, the backend refuses to start with a clear erro
 
 Otherwise the automatic derivation chain is safe: local deployments derive from `ENCRYPTION_KEY`, KMS deployments derive from the JWT signing key.
 
-## Audit Log Hash Chain (Optional)
+## Durable Audit Log and Optional Independent Witness
 
-The independently deployed `nyxid-audit-witness` uses protected files and CLI flags, with no new production environment variables in W8-3. Enrollment, public-pin custody, TLS/storage prerequisites and the separation threat model are in [SECURITY_AUDIT_WITNESS.md](SECURITY_AUDIT_WITNESS.md). Its server readiness/outbox integration remains a later W8 batch.
+The independently deployed `nyxid-audit-witness` uses protected files and CLI flags. Enrollment, public-pin custody, TLS/storage prerequisites and the separation threat model are in [SECURITY_AUDIT_WITNESS.md](SECURITY_AUDIT_WITNESS.md). The local persistent head and transactional delivery reservations are active; configured external relay, readiness and admission integration remain pending W8-4 work.
 
 NyxID audit-log rows created after this feature is enabled are tamper-evident. Each chained row carries `seq`, `prev_hash`, and `entry_hash`; `entry_hash` is an HMAC-SHA256 over a canonical encoding of the row content and the previous row's hash. The HMAC key stays in process memory and is never written to MongoDB, so a database-only attacker cannot recompute a valid chain after editing, deleting, inserting, or reordering chained rows.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUDIT_CHAIN_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for audit-log hash chaining. Generate with `openssl rand -hex 32`. Set this when you need to rotate the audit-chain key independently of both `ENCRYPTION_KEY` and the JWT signing key, or when deployment policy forbids deriving secondary HMAC keys from those sources. |
+| `AUDIT_CHAIN_ID` | *(persisted UUID v4 on first local initialization)* | Optional fixed UUID v4 for the audit chain. All replicas must agree. Later independent witness enrollment must use this exact persisted identity; a changed UUID never resets history. |
+| `AUDIT_CUTOVER_DRAINED` | `false` | Set to `true` for the first upgrade over an existing v1 audit chain, after draining all old HTTP, worker, scheduler and maintenance writers. The verified cutover is persisted; subsequent boots do not require this flag. A fresh database does not require acknowledgment. Do not restart old binaries after cutover. |
+
+The persistent head, append transaction and delivery outbox are always active.
+No witness is required for local development or existing deployments to operate:
+without witness configuration, the security state is explicitly `unwitnessed`.
+This means local HMAC continuity, not independently verified history. Witness
+freshness/backlog admission policy applies only to configured/enrolled witnesses.
+See [the rollout decisions](SECURITY_AUDIT_WITNESS.md#w8-4-rollout-decisions).
 
 ### Key selection rules
 

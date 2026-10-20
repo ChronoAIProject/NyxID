@@ -214,6 +214,10 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     );
 
     let db = client.database(&db_name);
+    init_test_audit_chain_hmac_key();
+    crate::services::audit_state_service::initialize(&db, &[2; 32], &Default::default())
+        .await
+        .expect("initialize local unwitnessed test audit head");
     // Ordinary tests start after a fresh-install cutover. Migration tests remove
     // this marker explicitly to exercise pending/legacy installations.
     db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
@@ -274,6 +278,10 @@ pub(crate) async fn connect_test_database_with_command_handler(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
     );
     let db = client.database(&db_name);
+    init_test_audit_chain_hmac_key();
+    crate::services::audit_state_service::initialize(&db, &[2; 32], &Default::default())
+        .await
+        .expect("initialize local unwitnessed test audit head");
     // Ordinary tests start after a fresh-install cutover. Migration tests remove
     // this marker explicitly to exercise pending/legacy installations.
     db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(

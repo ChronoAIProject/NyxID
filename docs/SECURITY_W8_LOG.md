@@ -65,3 +65,15 @@
 - Planning documents only; no W8-4 code or shared registry edits. Caller statuses remain 57 pending / 1 tested; no caller integration inferred from accepted witness tests.
 - Documentation checks: inline Python assertions for 58 workflow statuses, accepted merge/placement, W8-3b order and 15-line log-section bound; `git diff --check`. No build/runtime rerun for this planning-only update.
 - PM gate: request grouped shared-file approval and wait before implementing W8-4; explicit pathspec commit contains only this log and the inventory.
+
+## W8-4a — local persistent head and transactional reservations (2026-10-20)
+
+- Authorized W8-4 shared-file group at `1707e6712`; shared `royal-sage`, branch `security-review-remediation-report`; explicit pathspec only, no merge/push/deploy.
+- Direct/caller-session appends share one persisted head CAS, audit row and hash-only delivery reservation; stable retry identity, same-commit uncertain-result retries, majority+journal for runtime-owned transactions; v1 canonical bytes unchanged.
+- Typed deferred events accept UUID identities, explicit person/system principal, owner/stage and static reviewed action; operation/stage uniqueness; local materialization commits row/head/marker together and never releases witness capacity.
+- Initial existing-v1 adoption verifies original history and requires drain acknowledgment once; fresh local genesis needs none; all index/compatibility setup and later startup mutations follow allocator initialization. Missing key/head never falls back to unchained or surviving-tail allocation.
+- C1: witness-free local operation remains available as unwitnessed; health/local verify distinguish evidence from local continuity. Test constructors initialize only ordinary local state. Audit config parses separately, avoiding seven unrelated AppConfig fixture edits.
+- Added 17 focused tests: atomic abort/commit, replay/conflict, concurrency, cutover/restart/tamper, uncertain commit, materialization/recovery, safe projections and categorical health; execution pending compilation on own Mongo 8 replica port 50012, nofile 60000.
+- Preliminary both-KMS `cargo check` passed before final outbox edits; final replica tests and all-target Clippy remain pending, with no pass/count claim. Superseded test compilation exposed seven AppConfig literals; resolved within owned files, then own superseded compilers terminated.
+- Scoped `rustfmt --edition 2024 --config skip_children=true --check` and `git diff --check` passed.
+- External relay/readiness, sticky pinned enrollment, protected intent/claim integration, Integrity DTO/UI and workflow conversions remain pending; no W8-4 completion claim. C2 admission table and admin handler edit await PM approval; fixture requests withdrawn.
