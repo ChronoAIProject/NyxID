@@ -243,6 +243,7 @@ pub struct ApiClient {
     /// a specific API key and must not silently fall back to the user's
     /// saved session access token on the `profile`.
     refresh_disabled: bool,
+    write_refresh_disabled: bool,
     agent_key_auth: bool,
     login_generation: Option<String>,
 }
@@ -269,6 +270,7 @@ impl ApiClient {
             access_token,
             profile,
             refresh_disabled: agent_key_auth,
+            write_refresh_disabled: false,
             agent_key_auth,
             login_generation,
         })
@@ -283,6 +285,7 @@ impl ApiClient {
                 access_token: resolved.token,
                 profile: auth.profile.clone(),
                 refresh_disabled: true,
+                write_refresh_disabled: false,
                 agent_key_auth: false,
                 login_generation: None,
             });
@@ -342,6 +345,12 @@ impl ApiClient {
     /// access token for the profile.
     pub fn without_token_refresh(mut self) -> Self {
         self.refresh_disabled = true;
+        self
+    }
+
+    /// Preserve read refresh while refusing automatic replay of mutations.
+    pub fn without_write_refresh(mut self) -> Self {
+        self.write_refresh_disabled = true;
         self
     }
 
@@ -508,7 +517,10 @@ impl ApiClient {
             .with_context(|| format!("POST {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .post(&url)
@@ -539,7 +551,10 @@ impl ApiClient {
             .with_context(|| format!("PUT {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .put(&url)
@@ -571,7 +586,10 @@ impl ApiClient {
             .with_context(|| format!("PATCH {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .patch(&url)
@@ -607,7 +625,10 @@ impl ApiClient {
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .delete(&url)
@@ -644,7 +665,10 @@ impl ApiClient {
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .delete(&url)
@@ -700,7 +724,10 @@ impl ApiClient {
             .with_context(|| format!("DELETE {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             resp = self
                 .client
                 .delete(&url)
@@ -728,7 +755,10 @@ impl ApiClient {
             .with_context(|| format!("POST {path} failed"))?;
 
         self.reject_agent_key_unauthorized(&resp)?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && !self.write_refresh_disabled
+            && self.try_refresh_token().await
+        {
             let resp = self
                 .client
                 .post(&url)
@@ -752,6 +782,47 @@ impl ApiClient {
             let body = resp.text().await.unwrap_or_default();
             Err(ApiError::new(format!("POST {path}"), status, body).into())
         }
+    }
+
+    /// Streamable HTTP MCP uses the root /mcp route. Calls never replay on 401.
+    pub(crate) async fn mcp_request(
+        &mut self,
+        session: Option<&str>,
+        version: &str,
+        body: &serde_json::Value,
+        read: bool,
+    ) -> Result<reqwest::Response> {
+        let response = self.mcp_request_once(session, version, body).await?;
+        self.reject_agent_key_unauthorized(&response)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && read
+            && self.try_refresh_token().await
+        {
+            return self.mcp_request_once(session, version, body).await;
+        }
+        Ok(response)
+    }
+
+    async fn mcp_request_once(
+        &self,
+        session: Option<&str>,
+        version: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response> {
+        let mut request = self
+            .client
+            .post(format!("{}/mcp", self.base_url_root()))
+            .bearer_auth(&self.access_token)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", version)
+            .json(body);
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request
+            .send()
+            .await
+            .context("MCP request failed; inspect execution state before retrying a call")
     }
 
     pub async fn proxy_request(

@@ -1,0 +1,29 @@
+{
+  "endpoints": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "service_id": "00000000-0000-4000-8000-000000000001",
+      "name": "chat_completions",
+      "method": "POST",
+      "path": "/ai/openai/chat/completions",
+      "is_active": true,
+      "request_content_type": "application/json",
+      "request_body_required": true,
+      "request_body_schema": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "enum": [
+              "org/model:1"
+            ]
+          },
+          "max_tokens": {
+            "type": "integer",
+            "maximum": 1024
+          }
+        }
+      }
+    }
+  ]
+}
