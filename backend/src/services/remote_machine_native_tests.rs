@@ -900,7 +900,7 @@ async fn native_node_uncertainty_and_replacement_are_latched_before_new_bootstra
 }
 
 #[tokio::test]
-async fn native_delete_present_finalizers_and_retained_pv_keep_cleanup_and_quota_pending() {
+async fn native_delete_waits_for_object_gc_without_observing_retained_pv() {
     let f = fixture("native_delete_retained").await;
     f.start().await;
     {
@@ -911,50 +911,49 @@ async fn native_delete_present_finalizers_and_retained_pv_keep_cleanup_and_quota
     f.record().await.unwrap();
     let original_pvc = f.cluster.lock().unwrap().pvc.clone().unwrap();
     let original_pv = f.cluster.lock().unwrap().pv.clone().unwrap();
+    // Setup/running observation may GET the known PV. The narrowed contract
+    // below applies to the actual delete/retry path, after that setup.
+    let requests_before_delete = f._server.received_requests().await.unwrap().len();
     let deleting = f.action(LifecycleAction::Delete).await;
-    let operation_id = deleting.active_operation_id.as_deref().unwrap();
     f.apply_delete_until_controller_progress().await;
     f.reconcile_delete_suspension();
-    f.make_original_delete_due().await;
-    let error = f.manager.observe(&f.current().await).await.unwrap_err();
-    assert!(
-        matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_original_volume_retained"),
-        "Retain is discovered before any Sandbox DELETE: {error}"
-    );
-    f.assert_delete_pending_before_destructive_effects(operation_id, deleting.authorization_state)
-        .await;
-    {
+    for _ in 0..2 {
+        f.make_original_delete_due().await;
+        assert!(matches!(f.manager.observe(&f.current().await).await,
+            Err(crate::errors::AppError::Conflict(reason)) if reason == "delete_sandbox_gc_pending"));
+        let current = f.current().await;
+        assert_eq!(current.active_operation_id, deleting.active_operation_id);
+        assert!(!current.writer_admitted);
+        assert_eq!(current.authorization_state, deleting.authorization_state);
+        assert_eq!(current.cleanup_state, "pending");
+        f.slot_retained().await;
         let cluster = f.cluster.lock().unwrap();
+        assert!(cluster.delete_requested);
         assert_eq!(cluster.pvc.as_ref(), Some(&original_pvc));
         assert_eq!(cluster.pv.as_ref(), Some(&original_pv));
-        assert!(cluster.sandbox.as_ref().unwrap()["metadata"]["deletionTimestamp"].is_null());
+        assert!(cluster.sandbox.as_ref().unwrap()["metadata"]["deletionTimestamp"].is_string());
     }
-    // A later due pass must keep the same operation and original data. The
-    // fixture cannot run Sandbox GC because no DELETE has been accepted.
+    // Independent GC removes Sandbox/Pod/PVC. The retained PV is unqueried and
+    // remains present; success describes only the v2 object cascade.
+    f.cluster.lock().unwrap().finish_delete(false);
     f.make_original_delete_due().await;
-    let error = f.manager.observe(&f.current().await).await.unwrap_err();
-    assert!(
-        matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_original_volume_retained"),
-        "a retry preserves the selected Retain obligation: {error}"
-    );
-    f.assert_delete_pending_before_destructive_effects(operation_id, deleting.authorization_state)
-        .await;
-    // Simulate an independent exact PV read returning NotFound, without
-    // inventing a Sandbox DELETE/GC transition or rewriting its Retain policy.
-    f.cluster.lock().unwrap().pv = None;
-    f.make_original_delete_due().await;
-    let error = f.manager.observe(&f.current().await).await.unwrap_err();
-    assert!(
-        matches!(error, crate::errors::AppError::Conflict(ref reason) if reason == "delete_original_volume_retained"),
-        "PV NotFound cannot convert the original Retain policy into Delete reclamation: {error}"
-    );
-    f.assert_delete_pending_before_destructive_effects(operation_id, deleting.authorization_state)
-        .await;
+    f.manager.observe(&f.current().await).await.unwrap();
+    let deleted = f.current().await;
+    assert_eq!(deleted.resource_state, ResourceState::Deleted);
+    assert_eq!(deleted.billing_state, BillingState::Closed);
     assert_eq!(
-        f.current().await.native_pv_reclaim_policy.as_deref(),
-        Some("Retain")
+        deleted.delete_recovery.as_ref().unwrap().storage,
+        crate::models::remote_machine::DeleteStorageDisposition::SandboxCascadeObserved
     );
-    assert_eq!(f.cluster.lock().unwrap().pvc.as_ref(), Some(&original_pvc));
+    assert_eq!(f.cluster.lock().unwrap().pv.as_ref(), Some(&original_pv));
+    let requests = f._server.received_requests().await.unwrap();
+    assert!(requests.iter().skip(requests_before_delete).all(|request| {
+        let path = request.url.path();
+        !path.contains("/persistentvolumes")
+            && !path.contains("/volumeattachments")
+            && path != "/api/v1/pods"
+            && (request.method.as_str() != "DELETE" || path.contains("/sandboxes/"))
+    }));
     f.db.drop().await.unwrap();
 }
 

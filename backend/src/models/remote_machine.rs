@@ -177,8 +177,8 @@ pub enum MachineDeletionSource {
 /// running, bootstrap, replacement, resume or rekey authority.
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DeleteRecoveryProgress {
-    /// Version 1 is Agent Sandbox/Kubernetes control-plane authority only.
-    /// Unversioned legacy external-fact evidence must be observed again.
+    /// Version 2 proves Sandbox/known namespace-child absence, not storage release.
+    /// Version 1 and unversioned cleanup milestones require fresh v2 observation.
     #[serde(default)]
     pub evidence_version: i64,
     pub evidence_id: String,
@@ -249,6 +249,9 @@ pub enum DeleteStorageDisposition {
     /// Complete Kubernetes inventories show the original resources released.
     /// This makes no claim about provisioning history or physical disk erasure.
     ControlPlaneReleased,
+    /// v2: the original Sandbox and known namespaced children are absent.
+    /// PVs, attachments and physical storage release were not observed.
+    SandboxCascadeObserved,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]

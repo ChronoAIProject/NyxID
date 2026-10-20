@@ -14,7 +14,7 @@ This directory implements the owner’s 2026-10-14 complete Machine revision5 sc
 It contains source manifests and read-only deployment checks; local verification
 has not deployed them to a selected cluster. Agent Sandbox remains the only
 Pod/PVC controller. NyxID creates, patches, observes and deletes Sandbox objects
-and reads their associated Pods, Nodes, PVCs and PVs.
+and reads their associated Pods, Nodes and PVCs. Storage cleanup belongs to GC, storage controllers and CSI.
 
 The vendored CRD is pinned to Agent Sandbox commit
 `86ad94178a85aa26788077a55894cdc234c5ea6a`; verify `upstream/SHA256` before use.
@@ -226,8 +226,8 @@ is distinct from the Kubernetes ServiceAccount `nyxid-machine-manager` in the
 example RBAC. That binding does **not** establish access for a Google principal.
 Before environment acceptance, an operator must record the actual authenticated
 principal, its least-privilege Sandbox writes, namespaced Pod/PVC GET/LIST and
-UID/resourceVersion-preconditioned cleanup DELETE, Node/PV GET, cluster PV and
-VolumeAttachment LIST, StorageClass GET/LIST, TokenReview and diagnostic permissions,
+UID/resourceVersion-preconditioned Sandbox DELETE, Node/PV GET,
+StorageClass GET/LIST, TokenReview and diagnostic permissions,
 API reachability, trusted CA and hostname. Inventory the permissions in the
 existing manifests/probes against that principal. This change grants no IAM or
 RBAC roles and does not authorize modifying the target environment. Real Google
@@ -289,30 +289,9 @@ Pod deletion followed by NotFound cannot authorize a successor. Use the existing
 retry/operator handling path after investigating the underlying resource; do
 not clear the guard by inventing a stop timestamp.
 
-Delete immediately revokes access and retains its original owner-authorized
-operation. Completion uses original-identity-bound Kubernetes cleanup results
-from the normal Agent Sandbox/Kubernetes lifecycle: applicable persisted
-control-plane workload evidence, original Sandbox/Pod/PVC and bound-PV release,
-complete related Pod/claim/PV/VolumeAttachment inventories, terminal NyxID
-creation dispatches and accounting. Pending claims do not need to become Bound.
-Direct runtime history, CSI request-terminal logs and GCE disk facts are not
-required; no direct GCE/CSI/CRI API or cloud credential permission is added.
-Present resources, finalizers, identity conflicts, claim users, attachments and
-Retain/unknown policy keep their cleanup responsibility and relevant quota.
-Normal API release is not a physical shutdown, never-provisioned or
-cloud-erasure claim. Cleanup and accounting retry separately, while final
-deleted state, operation success and slot release wait for both. Unknown runtime
-periods are not universally charged, and later top-ups do not fund uncapped
-residual costs.
+Delete immediately revokes access and retains the original owner-authorized operation. Evidence v2 requires correctly attributed control-plane stop/absence evidence, terminal NyxID creation responsibilities, original Sandbox and known namespace child absence, and accounting finality. Manager requests a UID/resourceVersion-protected Suspended patch, then explicit Foreground Sandbox DELETE. Agent Sandbox controller owns workload management and Kubernetes GC owns child deletion. Manager never deletes Pod/PVC objects or queries PV/VolumeAttachment inventories. Workload/accounting failures retain their existing fences; independent safe Sandbox cleanup can proceed during accounting failure.
 
-Pod discovery reads every page in the original validated namespace through
-`/api/v1/namespaces/{namespace}/pods` (`nyxid-machine` for the Manager), without
-a label selector or an all-namespace Pod request. A Pod using the original claim
-still blocks when it has no NyxID labels or uses a volume name other than
-`workspace`. All returned namespace identities are validated before filtering.
-PVC discovery remains namespaced; PV and VolumeAttachment inventories remain
-cluster-scoped. Later-page failures return no partial inventory and cannot
-authorize deletion or finalization.
+Pod/PVC discovery is read-only, bounded and scoped to the original namespace, without label filtering. Known original children, unrelated claim users, replacement UIDs, foreign ownership and incomplete inventories remain pending. Manager never repairs ownerReferences, removes finalizers, forces deletion or changes reclaim policy. GC/finalizer incidents belong to operators. Retain volumes and backend storage remain governed by reclaim policy and storage monitoring; deleted does not mean disks are erased or storage objects are absent.
 
 For typed Pod/PVC/PV/VolumeAttachment Lists, the validated outer kind/apiVersion
 supplies item TypeMeta only when those fields are absent. Explicit matching
@@ -354,22 +333,20 @@ Initial absence of the original Sandbox and Pods can establish
 original identities and terminal NyxID creation work; one 404 is insufficient.
 Its actual observation time is the accounting upper bound, with generation zero
 and empty resourceVersion representing no live object. Paid settlement rechecks
-original-work terminality. Legacy cloud disk handles remain discovery hints and
-do not require external proof when Kubernetes cleanup is complete; actual
-Kubernetes PV/claim/CSI identity conflicts still block.
+original-work terminality. Historical PV/CSI fields retain historical meaning;
+they neither block the v2 storage-unobserved contract nor prove completion.
 
 Finalized Machine tombstones also receive bounded, fair continued scans under
 that same original delete authorization, current evidence version and persisted
 control-plane workload-evidence gate, reusing the same cleanup orchestration.
 Each pass handles at most eight tombstones with four concurrent scans and a
-45-second per-scan timeout. Late original Sandbox/Pod/PVC cleanup uses retained
-UID, owner and claim bindings; Pod DELETE also requires the full original tuple
-and UID/resourceVersion. PVs wait for normal GC/reclaim and receive no direct
-DELETE. Read failures, incomplete inventories and conflicting or replacement
-resources remain blockers. The Machine stays deleted and the original operation
-stays Succeeded; cleanup progress becomes pending while a late resource or
-blocker remains and returns to complete after inventories clear. These scans do
-not reopen execution, rerun settlement or move funds or slots again. The
+45-second per-scan timeout. Late original Sandbox cleanup retains original UID,
+owner, operation and UID/resourceVersion bindings and uses Foreground deletion.
+Late original Pod/PVC objects remain GC responsibilities; Manager only records
+pending diagnostics. Read failures, incomplete inventories and replacement or
+foreign resources remain blockers. The Machine stays deleted and the original
+operation stays Succeeded. These scans never reopen execution, rerun settlement
+or move funds or slots again. The
 existing investigation inventory is a read-only diagnostic view, not the cleanup
 scanner.
 
@@ -431,7 +408,24 @@ Native quarantine also appears in this existing inventory as `native_runtime_unc
 
 `healthcheck.sh` requires `kubectl` and Python 3 (standard library only) on the
 operator machine; Python is not an extra workload service or Pod dependency.
-It performs read-only API discovery, required RBAC, admission,
+Before any Manager check it loads the same configured backend credential route
+(`NYXID_REMOTE_MACHINE_KUBE_API`, `NYXID_REMOTE_MACHINE_KUBE_AUTH_MODE=token_file`,
+`NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE`, and optional CA file) into a disposable
+0600 kubeconfig, runs `kubectl auth whoami -o json`, and requires the resulting
+principal to equal `NYXID_MACHINE_MANAGER_PRINCIPAL` (defaulting to the
+configured `nyxid-machine-manager` service account). It never uses `--as` or
+the operator's identity for Manager checks. Metadata authentication mode is
+rejected by this shell check; use the backend's live readiness/API checks for
+that mode. Operator-context reads remain a separate route for infrastructure
+and admission diagnostics.
+Ordinary `kubectl auth can-i` returns `yes`/exit 0 for an allow and
+`no`/exit 1 for a denial; `--quiet` only suppresses the answer. A nonzero
+exit alone does not prove denial: API/credential errors can also exit 1.
+Forbidden-permission probes require exit 1 with exactly `no`; errors and
+qualified denial answers (including authorization evaluation errors) fail
+closed with `manager_permission_check_unavailable`. No healthy marker is
+emitted in that case.
+It then performs read-only API discovery, required RBAC, admission,
 quota/limit configuration, explicit or cluster-default StorageClass selection
 and optional RuntimeClass existence checks. Missing provider configuration, RuntimeClass,
 kubelet monitor or detailed Deployment selection does not make it fail.
@@ -449,19 +443,25 @@ The deletion request scopes are the following existing API dependencies:
 | Scope | API group / resource | Verbs |
 |---|---|---|
 | Original `nyxid-machine` namespace | `agents.x-k8s.io / sandboxes` | get, list, create, patch, delete |
-| Original `nyxid-machine` namespace | core / pods | get, list, delete |
-| Original `nyxid-machine` namespace | core / persistentvolumeclaims | get, list, delete |
-| Cluster | core / persistentvolumes | get, list |
-| Cluster | `storage.k8s.io / volumeattachments` | list |
+| Original `nyxid-machine` namespace | core / pods | get, list |
+| Original `nyxid-machine` namespace | core / persistentvolumeclaims | get, list |
 
-The read-only healthcheck requires namespace Pod LIST, not all-namespace Pod
-LIST, and retains PV/VolumeAttachment and Pod/PVC DELETE permission checks at
-their existing scopes. A missing required permission still fails the check and
-blocks runtime cleanup observation; a 403 does not establish absence. The table
-does not configure production RBAC or bind the actual backend identity.
-Existing Node Lease checks and optional Controller Deployment diagnostics do not
-become additional deletion-completion gates. Operators remain responsible for
-the target identity's authorization and selected-cluster acceptance.
+The read-only healthcheck verifies necessary namespace reads and Sandbox writes
+with the actual configured Manager token and authenticated principal, and rejects Pod/PVC DELETE, PV LIST,
+VolumeAttachment LIST and all-namespace Pod LIST. PV GET remains for independent
+known-PV investigation; unused VolumeAttachment GET is omitted. Check the effective
+union of all bindings; administrator credentials or shared controller identities
+invalidate this acceptance. Controller/GC/CSI retain independent identities and
+permissions. Existing Node/Lease and StorageClass reads remain unchanged.
+
+Drain old Manager workers before upgrading to `evidence_version=2` and before
+applying reduced RBAC. `SandboxCascadeObserved` (`sandbox_cascade_observed`)
+means original Sandbox/known namespace children absent and storage unobserved;
+it never synthesizes historical `ControlPlaneReleased` evidence. Pending legacy
+records require fresh v2 cleanup observations, retaining only valid attributed
+v1 first-stop accounting evidence. Finalized tombstone upgrades do not reopen
+operations or repeat financial/slot effects. See the recovery document for the
+full version transition and the local acceptance record for actual test results.
 
 `render-observer-rbac.py` is an optional offline renderer for that exact
 Deployment observer. Its optional `--telemetry-node` selections add only exact

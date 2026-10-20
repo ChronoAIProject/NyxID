@@ -1769,6 +1769,7 @@ impl SandboxApi {
 
     /// Delete acceptance is not completion evidence. The server evaluates both
     /// preconditions atomically; 404 only skips this precise resource's DELETE.
+    /// Foreground propagation leaves dependent-object cleanup to Kubernetes GC.
     pub async fn delete_if_identity(
         &self,
         namespace: &str,
@@ -1824,8 +1825,17 @@ impl SandboxApi {
     ) -> Result<bool> {
         validate_identity_token(expected_uid)?;
         validate_identity_token(expected_resource_version)?;
-        let request = self.client.delete(url).header(header::CONTENT_TYPE, "application/json")
-            .json(&json!({"preconditions":{"uid":expected_uid,"resourceVersion":expected_resource_version}}));
+        let mut options = json!({"preconditions": {
+            "uid": expected_uid, "resourceVersion": expected_resource_version
+        }});
+        if kind == ObservationResourceKind::Sandbox {
+            options["propagationPolicy"] = json!("Foreground");
+        }
+        let request = self
+            .client
+            .delete(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&options);
         let context = ObservationContext::new(kind, ObservationVerb::Delete);
         let response = self.observation_send(request, context).await?;
         if response.status() == StatusCode::NOT_FOUND {
@@ -3165,9 +3175,15 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(header("authorization", "Bearer test-token"))
-            .and(body_json(
-                json!({"preconditions":{"uid":"original-uid","resourceVersion":"7"}}),
-            ))
+            .and(|request: &wiremock::Request| {
+                let mut expected = json!({"preconditions": {
+                    "uid": "original-uid", "resourceVersion": "7"
+                }});
+                if request.url.path().contains("/sandboxes/") {
+                    expected["propagationPolicy"] = json!("Foreground");
+                }
+                request.body_json::<Value>().ok().as_ref() == Some(&expected)
+            })
             .respond_with(|request: &wiremock::Request| {
                 if request.url.path().ends_with("/absent") {
                     ResponseTemplate::new(404)
@@ -3223,6 +3239,65 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_foreground_delete_preserves_status_and_never_cleans_children() {
+        for status in [202, 404, 409] {
+            let server = MockServer::start().await;
+            Mock::given(method("DELETE"))
+                .and(path(
+                    "/apis/agents.x-k8s.io/v1beta1/namespaces/nyxid-machine/sandboxes/original",
+                ))
+                .and(body_json(json!({
+                    "preconditions": {"uid": "original-uid", "resourceVersion": "7"},
+                    "propagationPolicy": "Foreground"
+                })))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let api = SandboxApi::new(server.uri().parse().unwrap(), None).unwrap();
+            let result = api
+                .delete_if_identity("nyxid-machine", "original", "original-uid", "7")
+                .await;
+            match status {
+                202 => assert!(result.unwrap()),
+                404 => assert!(!result.unwrap()),
+                409 => {
+                    let error = result.unwrap_err();
+                    let diagnostic = observation_error(&error);
+                    assert_eq!(diagnostic.error_kind, ObservationErrorKind::HttpStatus);
+                }
+                _ => unreachable!(),
+            }
+            // DELETE acceptance/absence/conflict never triggers child deletes,
+            // storage inventories, or an unconditional retry against a new UID.
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(
+                ResponseTemplate::new(202).set_delay(std::time::Duration::from_millis(100)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let api = SandboxApi::with_client(server.uri().parse().unwrap(), None, client).unwrap();
+        let error = api
+            .delete_if_identity("nyxid-machine", "original", "original-uid", "7")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            observation_error(&error).error_kind,
+            ObservationErrorKind::Timeout
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

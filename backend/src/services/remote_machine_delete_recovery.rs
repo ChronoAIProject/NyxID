@@ -9,7 +9,7 @@ pub(crate) fn basis_digest(machine: &ManagedMachine) -> Option<String> {
     Some(hex::encode(Sha256::digest(bson::to_vec(basis).ok()?)))
 }
 
-pub(crate) const EVIDENCE_VERSION: i64 = 1;
+pub(crate) const EVIDENCE_VERSION: i64 = 2;
 const CONTROL_PLANE_SOURCE: &str = "sandbox-kubernetes-control-plane";
 
 pub(crate) fn binding_matches(machine: &ManagedMachine, progress: &DeleteRecoveryProgress) -> bool {
@@ -105,32 +105,7 @@ pub(crate) fn storage_is_final(
 ) -> bool {
     binding_matches(machine, progress)
         && progress.resources_complete
-        && progress.storage == DeleteStorageDisposition::ControlPlaneReleased
-        && known_storage_obligations_covered(machine, progress)
-}
-
-/// Historical fields remain readable as known resource identities, never as
-/// authority that provisioning terminated or a cloud disk was erased.
-fn known_storage_obligations_covered(
-    machine: &ManagedMachine,
-    progress: &DeleteRecoveryProgress,
-) -> bool {
-    let volume_matches = match &progress.volume {
-        Some(v) => {
-            v.reclaim_policy == "Delete"
-                && machine.native_pv_name.as_deref() == Some(v.pv_name.as_str())
-                && machine.native_pv_uid.as_deref() == Some(v.pv_uid.as_str())
-                && machine.native_pv_reclaim_policy.as_deref() == Some("Delete")
-        }
-        None => {
-            machine.native_pv_name.is_none()
-                && machine.native_pv_uid.is_none()
-                && machine.native_pv_reclaim_policy.is_none()
-        }
-    };
-    // Legacy cloud/provisioner hints are retained for investigation only.
-    // Historical external handles cannot create a new external-proof gate.
-    volume_matches
+        && progress.storage == DeleteStorageDisposition::SandboxCascadeObserved
 }
 
 use super::{
@@ -138,18 +113,14 @@ use super::{
     remote_machine_service as lifecycle,
 };
 use crate::errors::{AppError, AppResult};
-use crate::models::remote_machine::{
-    COLLECTION_NAME as MACHINES, DeleteStopEvidence, DeleteVolumeIdentity,
-};
+use crate::models::remote_machine::{COLLECTION_NAME as MACHINES, DeleteStopEvidence};
 use chrono::{DateTime, Utc};
 use mongodb::{
     Database,
     bson::{self, Document, doc},
     options::ReturnDocument,
 };
-use nyxid_machine_updater::sandbox::{
-    OwnedResourceObservation, PersistentVolumeObservation, SandboxObservation,
-};
+use nyxid_machine_updater::sandbox::{OwnedResourceObservation, SandboxObservation};
 
 fn delete_projection(machine: &ManagedMachine) -> ManagedMachine {
     let mut projected = machine.clone();
@@ -163,12 +134,19 @@ async fn finalized_authorized(manager: &Manager, machine: &ManagedMachine) -> Ap
         .as_ref()
         .ok_or_else(|| pending("delete_late_cleanup_evidence_missing"))?;
     let projected = delete_projection(machine);
+    // A v1 tombstone may be re-observed under v2 without reopening its
+    // financial or lifecycle terminal state. Validate only its historical stop
+    // here; fresh object inventories must establish the new completion marker.
+    let mut historical = progress.clone();
+    if historical.evidence_version == 1 {
+        historical.evidence_version = EVIDENCE_VERSION;
+    }
     if machine.resource_state != ResourceState::Deleted
         || machine.writer_admitted
         || machine.billing_state != crate::models::remote_machine::BillingState::Closed
         || machine.authorization_state != crate::models::remote_machine::AuthorizationState::Revoked
         || !lifecycle::has_owner_deletion_basis(machine)
-        || !stop_is_valid(&projected, progress)
+        || !stop_is_valid(&projected, &historical)
         || machine.cleanup_evidence_digest.as_deref() != Some(progress.evidence_id.as_str())
     {
         return Err(pending("delete_late_cleanup_authority_mismatch"));
@@ -278,7 +256,7 @@ async fn advance_inner(manager: &Manager, snapshot: &ManagedMachine) -> AppResul
         // Manager scan keeps resolving late Kubernetes resources without
         // reopening execution, the operation, accounting or the free slot.
         finalized_authorized(manager, &machine).await?;
-        let result = recover_resources(manager, &mut machine).await;
+        let result = recover_resources(manager, &mut machine, None).await;
         if let Err(error) = &result
             && let Some(code) = observation_error_code(error)
         {
@@ -351,186 +329,13 @@ async fn pending_attempt(
     if machine.sandbox_uid.is_none() {
         manager.observe_delete_resource(machine).await?;
     }
-    // An already valid ordinary stop remains ordinary authority. Retain its
-    // real source operation when delete only relabels an already stopped CR.
-    if super::remote_machine_native::predecessor_stopped(machine)
-        && machine.pvc_name.is_some()
-        && machine.pvc_uid.is_some()
-        && machine.native_pv_name.is_some()
-        && machine.native_pv_uid.is_some()
-        && machine.native_pv_reclaim_policy.is_some()
-    {
-        if let Some(machine) = prepare_ordinary_stop(manager, machine, claim_id).await? {
-            return manager.finish_ordinary_native_delete(&machine).await;
-        }
-        return Ok(());
-    }
-    recover_resources(manager, machine).await
-}
-
-/// Bind a previously established ordinary stop to this delete without
-/// relabelling its controller observation or adding host/cloud prerequisites.
-async fn prepare_ordinary_stop(
-    manager: &Manager,
-    machine: &mut ManagedMachine,
-    claim_id: &str,
-) -> AppResult<Option<ManagedMachine>> {
-    let mut progress = initial_progress(machine)?;
-    progress.resources_complete = false;
-    let native = machine
-        .native_observation
-        .as_ref()
-        .ok_or_else(|| pending("delete_ordinary_stop_missing"))?
-        .clone();
-    let sandbox = manager
-        .api
-        .get(&machine.sandbox_namespace, &machine.sandbox_name)
-        .await
-        .map_err(|error| api_pending(machine, error))?;
-    if let Some(sandbox) = &sandbox {
-        if !sandbox_matches(machine, sandbox) {
-            block(
-                manager,
-                machine,
-                &mut progress,
-                "delete_sandbox_identity_conflict",
-            )
-            .await?;
-        }
-        if !sandbox.desired_suspended || sandbox.shutdown_time.is_some() {
-            // A real spec transition receives its own generation anchor and
-            // controller observation through the existing ordinary verifier.
-            manager.observe_delete_resource(machine).await?;
-            return Ok(None);
-        }
-        if sandbox.operation_id != machine.active_operation_id {
-            let intent = super::remote_machine_adapter::intent(
-                machine,
-                &progress.operation_id,
-                manager.storage_class.as_deref(),
-                false,
-                &manager.bootstrap_base_url,
-            );
-            *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
-            live_before_effect(&manager.db, machine).await?;
-            manager
-                .api
-                .suspend_if_identity(
-                    &intent,
-                    machine
-                        .sandbox_uid
-                        .as_deref()
-                        .ok_or_else(|| pending("delete_sandbox_identity_missing"))?,
-                    sandbox
-                        .resource_version
-                        .as_deref()
-                        .ok_or_else(|| pending("delete_sandbox_revision_missing"))?,
-                )
-                .await
-                .map_err(|error| api_pending(machine, error))?;
-            return Ok(None);
-        }
-        if !sandbox.suspended || sandbox.observed_generation != sandbox.generation {
-            block(
-                manager,
-                machine,
-                &mut progress,
-                "delete_current_suspension_unconfirmed",
-            )
-            .await?;
-        }
-    }
-    if progress.stop.is_none() {
-        progress.stop = Some(DeleteStopEvidence {
-            kind: DeleteStopKind::OrdinaryNative,
-            source_operation_id: Some(native.operation_id.clone()),
-            evidence_ref: native.evidence_ref.clone(),
-            source: "kubernetes-native".into(),
-            observed_at: native.observed_at,
-            sandbox_generation: native.sandbox_generation,
-            sandbox_resource_version: native.sandbox_resource_version.clone(),
-        });
-    }
-    retain_known_volume(machine, &mut progress);
-    let pvc = discover_original_claim(manager, machine, &mut progress).await?;
-    discover_original_volume(manager, machine, &mut progress, pvc.as_ref()).await?;
-    let resolved_observation = progress
-        .blocker
-        .as_deref()
-        .filter(|code| observation_error_code(&pending(code)).is_some())
-        .map(str::to_owned);
-    progress.blocker = None;
-    *machine = if let Some(code) = resolved_observation {
-        save_observation_progress(&manager.db, machine, &mut progress, claim_id, &code).await?
-    } else {
-        save(&manager.db, machine, &mut progress, Document::new()).await?
-    };
-    Ok(Some(machine.clone()))
-}
-
-/// Called only after the established ordinary cleanup contract checked exact
-/// Sandbox/Pod/PVC/PV absence and Delete reclaim semantics. It shares the same
-/// private final transaction while retaining that narrower native contract.
-pub(crate) async fn finalize_ordinary_evidence(
-    manager: &Manager,
-    snapshot: &ManagedMachine,
-) -> AppResult<()> {
-    let db = &manager.db;
-    let mut machine = snapshot.clone();
-    let mut progress = initial_progress(&machine)?;
-    if !matches!(
-        progress.stop.as_ref().map(|s| &s.kind),
-        Some(DeleteStopKind::OrdinaryNative)
-    ) || !stop_is_valid(&machine, &progress)
-    {
-        return Err(pending("delete_ordinary_stop_mismatch"));
-    }
-    progress.creation_terminal =
-        operations::creation_responsibilities_terminal(db, &machine).await?;
-    if !progress.creation_terminal {
-        return block(manager, &machine, &mut progress, "creation_result_unknown").await;
-    }
-    if !known_storage_obligations_covered(&machine, &progress) {
-        return block(
-            manager,
-            &machine,
-            &mut progress,
-            "delete_known_volume_identity_unresolved",
-        )
-        .await;
-    }
-    progress.resources_complete = true;
-    if machine.pvc_name.is_none() || machine.pvc_uid.is_none() || progress.volume.is_none() {
-        return block(
-            manager,
-            &machine,
-            &mut progress,
-            "delete_provisioning_identity_missing",
-        )
-        .await;
-    }
-    progress.storage = DeleteStorageDisposition::ControlPlaneReleased;
-    progress.blocker = None;
-    // Preserve the established resource-only milestone during accounting
-    // outages. Final machine, operation and slot state still wait below.
-    let cleanup = doc! {"cleanup_state":"complete","cleanup_evidence_digest":&progress.evidence_id};
-    machine = save(db, &machine, &mut progress, cleanup).await?;
-    if super::remote_machine_runtime::require_accounting_final(db, &machine)
-        .await
-        .is_err()
-    {
-        return block(manager, &machine, &mut progress, "accounting_pending").await;
-    }
-    super::remote_machine_native::finalize_persisted_delete(db, &machine).await?;
-    Ok(())
+    recover_resources(manager, machine, Some(claim_id)).await
 }
 
 fn initial_progress(machine: &ManagedMachine) -> AppResult<DeleteRecoveryProgress> {
     if let Some(progress) = &machine.delete_recovery {
         if !tuple_matches(&delete_projection(machine), progress)
-            || !matches!(progress.evidence_version, 0 | EVIDENCE_VERSION)
-            || (machine.resource_state == ResourceState::Deleted
-                && progress.evidence_version != EVIDENCE_VERSION)
+            || !matches!(progress.evidence_version, 0 | 1 | EVIDENCE_VERSION)
         {
             return Err(pending("delete_evidence_binding_conflict"));
         }
@@ -538,8 +343,16 @@ fn initial_progress(machine: &ManagedMachine) -> AppResult<DeleteRecoveryProgres
         if progress.evidence_version != EVIDENCE_VERSION {
             // Keep exact known identities/conflicts but require current
             // control-plane observation and inventories for every milestone.
+            // v1's correctly attributed stop remains the first accounting
+            // boundary. Its storage/completion milestone never proves v2.
+            let mut historical = progress.clone();
+            historical.evidence_version = EVIDENCE_VERSION;
+            if progress.evidence_version != 1
+                || !stop_is_valid(&delete_projection(machine), &historical)
+            {
+                progress.stop = None;
+            }
             progress.evidence_version = EVIDENCE_VERSION;
-            progress.stop = None;
             progress.creation_terminal = false;
             progress.resources_complete = false;
             progress.storage = DeleteStorageDisposition::ProvisioningUnknown;
@@ -621,7 +434,7 @@ fn save_filter(machine: &ManagedMachine) -> AppResult<Document> {
     "deletion_basis":bson::to_bson(&machine.deletion_basis).map_err(|_|pending("delete_evidence_encoding_failed"))?})
 }
 
-/// Clear the resolved paired diagnostic at the ordinary observation milestone.
+/// Clear the resolved paired diagnostic at the complete observation milestone.
 /// A successor snapshot or lost original retry claim aborts both writes. A
 /// different current operation cause remains visible as observation progresses.
 async fn save_observation_progress(
@@ -806,26 +619,6 @@ pub(crate) async fn live_before_effect(db: &Database, machine: &ManagedMachine) 
     Ok(())
 }
 
-fn retain_known_volume(machine: &ManagedMachine, progress: &mut DeleteRecoveryProgress) {
-    if progress.volume.is_none()
-        && let (Some(name), Some(uid), Some(policy)) = (
-            &machine.native_pv_name,
-            &machine.native_pv_uid,
-            &machine.native_pv_reclaim_policy,
-        )
-    {
-        progress.volume = Some(DeleteVolumeIdentity {
-            pv_name: name.clone(),
-            pv_uid: uid.clone(),
-            reclaim_policy: policy.clone(),
-            csi_driver: None,
-            csi_handle: None,
-            immutable_disk_id: None,
-        });
-        progress.storage = DeleteStorageDisposition::Provisioned;
-    }
-}
-
 async fn storage_observation_error<T>(
     manager: &Manager,
     machine: &ManagedMachine,
@@ -937,6 +730,17 @@ async fn retain_original_claim_identity(
     {
         return Err(pending("delete_multiple_pvc_identity_conflict"));
     }
+    // Re-observing an already retained identity is read-only. In particular,
+    // it must not advance the machine before the paired retry-claim fence.
+    if machine.pvc_uid == p.uid
+        && machine.pvc_name.as_deref() == Some(p.name.as_str())
+        && progress.pvc_uid == p.uid
+        && p.volume_name
+            .as_ref()
+            .is_none_or(|name| machine.native_pv_name.as_ref() == Some(name))
+    {
+        return Ok(());
+    }
     let mut bindings = doc! {"pvc_name": &p.name, "pvc_uid": &p.uid};
     if let Some(name) = &p.volume_name {
         machine.native_pv_name = Some(name.clone());
@@ -949,183 +753,25 @@ async fn retain_original_claim_identity(
     Ok(())
 }
 
-/// A present exact PV has the same obligations as a list candidate, even
-/// when a removed or reassigned claimRef made it escape the claim selector.
-fn current_volume_identity(
-    machine: &ManagedMachine,
-    pvc: Option<&OwnedResourceObservation>,
-    volume: &PersistentVolumeObservation,
-    previous: Option<&DeleteVolumeIdentity>,
-) -> AppResult<DeleteVolumeIdentity> {
-    if volume.claim_uid != machine.pvc_uid
-        || volume.claim_namespace.as_deref() != Some(machine.sandbox_namespace.as_str())
-        || volume.claim_name != machine.pvc_name
-        || machine.pvc_uid.is_none()
-        || machine.pvc_name.is_none()
-        || volume.uid.is_none()
-        || machine
-            .native_pv_uid
-            .as_ref()
-            .is_some_and(|uid| volume.uid.as_ref() != Some(uid))
-        || machine
-            .native_pv_name
-            .as_ref()
-            .is_some_and(|name| &volume.name != name)
-        || pvc
-            .and_then(|p| p.volume_name.as_ref())
-            .is_some_and(|name| &volume.name != name)
-    {
-        return Err(pending("delete_pv_claim_identity_conflict"));
-    }
-    let identity = DeleteVolumeIdentity {
-        pv_name: volume.name.clone(),
-        pv_uid: volume.uid.clone().unwrap_or_default(),
-        reclaim_policy: volume.reclaim_policy.clone().unwrap_or_default(),
-        csi_driver: volume.csi_driver.clone(),
-        csi_handle: volume.csi_volume_handle.clone(),
-        immutable_disk_id: previous.and_then(|old| old.immutable_disk_id.clone()),
-    };
-    if machine
-        .native_pv_reclaim_policy
-        .as_ref()
-        .is_some_and(|policy| &identity.reclaim_policy != policy)
-        || previous.is_some_and(|old| {
-            old.pv_name != identity.pv_name
-                || old.pv_uid != identity.pv_uid
-                || old.reclaim_policy != identity.reclaim_policy
-                || old
-                    .csi_driver
-                    .as_ref()
-                    .is_some_and(|driver| identity.csi_driver.as_ref() != Some(driver))
-                || old
-                    .csi_handle
-                    .as_ref()
-                    .is_some_and(|handle| identity.csi_handle.as_ref() != Some(handle))
-        })
-    {
-        return Err(pending("delete_volume_identity_conflict"));
-    }
-    Ok(identity)
-}
-
-async fn discover_original_volume(
-    manager: &Manager,
-    machine: &mut ManagedMachine,
-    progress: &mut DeleteRecoveryProgress,
-    pvc: Option<&OwnedResourceObservation>,
-) -> AppResult<Option<PersistentVolumeObservation>> {
-    match discover_original_volume_inner(manager, machine, progress, pvc).await {
-        Ok(pv) => Ok(pv),
-        Err(error) => storage_observation_error(manager, machine, progress, error).await,
-    }
-}
-
-async fn discover_original_volume_inner(
-    manager: &Manager,
-    machine: &mut ManagedMachine,
-    progress: &mut DeleteRecoveryProgress,
-    pvc: Option<&OwnedResourceObservation>,
-) -> AppResult<Option<PersistentVolumeObservation>> {
-    // A missing claim UID prevents adopting a PV, not observing same-name
-    // conflicts. The identity verifier below still requires the original UID.
-    let candidates = if let Some(name) = &machine.pvc_name {
-        manager
-            .api
-            .persistent_volumes_for_claim(
-                &machine.sandbox_namespace,
-                name,
-                machine.pvc_uid.as_deref(),
-            )
-            .await
-            .map_err(|error| api_pending(machine, error))?
-    } else {
-        Vec::new()
-    };
-    if candidates.len() > 1 {
-        return Err(pending("delete_multiple_original_volume_candidates"));
-    }
-    let candidate = candidates.first().cloned();
-    let mut identity = candidate
-        .as_ref()
-        .map(|pv| current_volume_identity(machine, pvc, pv, progress.volume.as_ref()))
-        .transpose()?;
-    let exact_name = machine
-        .native_pv_name
-        .clone()
-        .or_else(|| progress.volume.as_ref().map(|v| v.pv_name.clone()))
-        .or_else(|| candidate.as_ref().map(|v| v.name.clone()))
-        .or_else(|| pvc.and_then(|p| p.volume_name.clone()));
-    let exact = if let Some(name) = exact_name {
-        manager
-            .api
-            .persistent_volume(&name)
-            .await
-            .map_err(|error| api_pending(machine, error))?
-    } else {
-        None
-    };
-    if let Some(pv) = &exact {
-        identity = Some(current_volume_identity(
-            machine,
-            pvc,
-            pv,
-            identity.as_ref().or(progress.volume.as_ref()),
-        )?);
-    }
-    // Any present exact object must also pass the verifier before a candidate
-    // identity is committed. Conflicts keep every prior anchor intact.
-    if let Some(identity) = identity {
-        let bindings = doc! {
-            "native_pv_name": &identity.pv_name,
-            "native_pv_uid": &identity.pv_uid,
-            "native_pv_reclaim_policy": &identity.reclaim_policy,
-        };
-        machine.native_pv_name = Some(identity.pv_name.clone());
-        machine.native_pv_uid = Some(identity.pv_uid.clone());
-        machine.native_pv_reclaim_policy = Some(identity.reclaim_policy.clone());
-        progress.volume = Some(identity);
-        progress.storage = DeleteStorageDisposition::Provisioned;
-        *machine = save(&manager.db, machine, progress, bindings).await?;
-    }
-    if let Some(volume) = &progress.volume {
-        if volume.reclaim_policy != "Delete" {
-            progress.storage = DeleteStorageDisposition::Retained;
-            return Err(pending("delete_original_volume_retained"));
-        }
-        if !manager
-            .api
-            .volume_attachments(&volume.pv_name)
-            .await
-            .map_err(|error| api_pending(machine, error))?
-            .is_empty()
-        {
-            return Err(pending("delete_volume_attachment_present"));
-        }
-    } else if machine.native_pv_uid.is_some()
-        || machine.native_pv_name.is_some()
-        || pvc.is_some_and(|p| p.volume_name.is_some())
-    {
-        return Err(pending("delete_original_volume_chain_missing"));
-    }
-    if !known_storage_obligations_covered(machine, progress) {
-        return Err(pending("delete_known_volume_identity_unresolved"));
-    }
-    Ok(exact.or(candidate))
-}
-
+/// Re-observe the original Sandbox and namespace children under the delete
+/// authority; storage inventories and child deletion are outside this contract.
 fn recover_resources<'a>(
     manager: &'a Manager,
     machine: &'a mut ManagedMachine,
+    claim_id: Option<&'a str>,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-    Box::pin(recover_resources_inner(manager, machine))
+    Box::pin(recover_resources_inner(manager, machine, claim_id))
 }
 
-async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine) -> AppResult<()> {
+async fn recover_resources_inner(
+    manager: &Manager,
+    machine: &mut ManagedMachine,
+    claim_id: Option<&str>,
+) -> AppResult<()> {
     let mut progress = initial_progress(machine)?;
     // A retained completion is historical evidence until this pass has
     // completed its current inventory. Persist pending before any new effect.
     progress.resources_complete = false;
-    retain_known_volume(machine, &mut progress);
     if machine
         .native_uncertainty
         .as_deref()
@@ -1231,56 +877,6 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         )
         .await;
     }
-    if machine.resource_state == ResourceState::Deleted && !pods.is_empty() {
-        if pods.len() != 1 || !stop_is_valid(&delete_projection(machine), &progress) {
-            return block(
-                manager,
-                machine,
-                &mut progress,
-                "delete_pod_identity_conflict",
-            )
-            .await;
-        }
-        let pod = &pods[0];
-        if pod.runtime_generation.as_deref()
-            != Some(machine.runtime_generation.to_string().as_str())
-            || pod.credential_epoch.as_deref()
-                != Some(machine.credential_epoch.to_string().as_str())
-            || pod.writer_fence.as_deref() != Some(machine.writer_fence.as_str())
-            || pod.uid != machine.pod_uid
-            || machine
-                .native_pod_name
-                .as_ref()
-                .is_some_and(|name| name != &pod.name)
-        {
-            return block(
-                manager,
-                machine,
-                &mut progress,
-                "delete_pod_identity_conflict",
-            )
-            .await;
-        }
-        progress.resources_complete = false;
-        *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
-        live_before_effect(&manager.db, machine).await?;
-        manager
-            .api
-            .delete_resource_if_identity(
-                &machine.sandbox_namespace,
-                "pods",
-                &pod.name,
-                pod.uid
-                    .as_deref()
-                    .ok_or_else(|| pending("delete_pod_identity_missing"))?,
-                pod.resource_version
-                    .as_deref()
-                    .ok_or_else(|| pending("delete_pod_revision_missing"))?,
-            )
-            .await
-            .map_err(|error| api_pending(machine, error))?;
-        return block(manager, machine, &mut progress, "delete_pod_gc_pending").await;
-    }
     if let Some(name) = &machine.native_pod_name
         && let Some(pod) = manager
             .api
@@ -1302,13 +898,12 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
     if !pods.is_empty() {
         return block(manager, machine, &mut progress, "delete_pod_still_present").await;
     }
-    // Pending claims and exact persisted PVs share the same current verifier.
-    let pv = discover_original_volume(manager, machine, &mut progress, pvc.as_ref()).await?;
     let current_creation_terminal =
         operations::creation_responsibilities_terminal(&manager.db, machine).await?;
-    if machine.resource_state != ResourceState::Deleted {
-        progress.creation_terminal = current_creation_terminal;
-    }
+    // Retain the terminal-work milestone that authorized the first absence
+    // stop. Fresh responsibilities still gate completion below, including on
+    // tombstone scans; they cannot replace that first accounting boundary.
+    progress.creation_terminal |= current_creation_terminal;
     if progress.stop.is_none() {
         if super::remote_machine_native::predecessor_stopped(machine) {
             let o = machine
@@ -1370,8 +965,17 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         }
     }
     progress.resources_complete = false;
+    let resolved_observation = progress
+        .blocker
+        .as_deref()
+        .filter(|code| observation_error_code(&pending(code)).is_some())
+        .map(str::to_owned);
     progress.blocker = None;
-    *machine = save(&manager.db, machine, &mut progress, Document::new()).await?;
+    *machine = if let (Some(claim_id), Some(code)) = (claim_id, resolved_observation) {
+        save_observation_progress(&manager.db, machine, &mut progress, claim_id, &code).await?
+    } else {
+        save(&manager.db, machine, &mut progress, Document::new()).await?
+    };
     if !stop_is_valid(&delete_projection(machine), &progress) {
         return block(
             manager,
@@ -1413,43 +1017,16 @@ async fn recover_resources_inner(manager: &Manager, machine: &mut ManagedMachine
         return block(manager, machine, &mut progress, "delete_sandbox_gc_pending").await;
     }
     if let Some(pvc) = &pvc {
-        if pvc.deletion_timestamp.is_some() {
-            return block(
-                manager,
-                machine,
-                &mut progress,
-                "delete_pvc_finalizer_pending",
-            )
-            .await;
-        }
-        live_before_effect(&manager.db, machine).await?;
-        manager
-            .api
-            .delete_resource_if_identity(
-                &machine.sandbox_namespace,
-                "persistentvolumeclaims",
-                &pvc.name,
-                pvc.uid
-                    .as_deref()
-                    .ok_or_else(|| pending("delete_pvc_identity_missing"))?,
-                pvc.resource_version
-                    .as_deref()
-                    .ok_or_else(|| pending("delete_pvc_revision_missing"))?,
-            )
-            .await
-            .map_err(|error| api_pending(machine, error))?;
-        return block(manager, machine, &mut progress, "delete_pvc_gc_pending").await;
+        let code = if pvc.deletion_timestamp.is_some() {
+            "delete_pvc_finalizer_pending"
+        } else {
+            "delete_pvc_gc_pending"
+        };
+        return block(manager, machine, &mut progress, code).await;
     }
-    if pv.is_some() {
-        return block(
-            manager,
-            machine,
-            &mut progress,
-            "delete_original_pv_csi_pending",
-        )
-        .await;
-    }
-    progress.storage = DeleteStorageDisposition::ControlPlaneReleased;
+    // Only namespace objects were observed. No PV/CSI release or erasure
+    // assertion is made by the v2 Sandbox lifecycle contract.
+    progress.storage = DeleteStorageDisposition::SandboxCascadeObserved;
     progress.resources_complete = true;
     if !current_creation_terminal {
         return block(manager, machine, &mut progress, "creation_result_unknown").await;

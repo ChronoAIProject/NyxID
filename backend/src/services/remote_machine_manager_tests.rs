@@ -370,7 +370,13 @@ async fn finalized_delete_scan_is_bounded_and_rotates_blocked_tombstones_indepen
         let evidence_id = uuid::Uuid::new_v4().to_string();
         tombstone.cleanup_evidence_digest = Some(evidence_id.clone());
         tombstone.delete_recovery = Some(DeleteRecoveryProgress {
-            evidence_version: crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION,
+            // Old successful rows must enter the same fair, read-only scan
+            // so the versioned object contract can be freshly observed.
+            evidence_version: if index % 2 == 0 {
+                1
+            } else {
+                crate::services::remote_machine_delete_recovery::EVIDENCE_VERSION
+            },
             evidence_id,
             operation_id: tombstone.active_operation_id.clone().unwrap(),
             owner_id: tombstone.owner_id.clone(),
@@ -399,7 +405,7 @@ async fn finalized_delete_scan_is_bounded_and_rotates_blocked_tombstones_indepen
                 sandbox_generation: 0,
                 sandbox_resource_version: String::new(),
             }),
-            storage: DeleteStorageDisposition::ControlPlaneReleased,
+            storage: DeleteStorageDisposition::SandboxCascadeObserved,
             creation_terminal: true,
             resources_complete: true,
             blocker: None,

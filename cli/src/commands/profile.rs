@@ -8,7 +8,7 @@ use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ProfileCommands};
 
 const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data";
-const ACCOUNT_DELETION_DISCLOSURE: &str = "Deleting your account deletes all your managed Machines and their data, including every paused /workspace disk. This is irreversible: no snapshots or restore are available. Resource cleanup can remain pending until verified. Machine task safety metadata is retained for 30 days after the job ends, operation history for 90 days after completion, and necessary cleanup and settlement evidence until finality. Required security audit and financial records follow the platform's retention policy.";
+const ACCOUNT_DELETION_DISCLOSURE: &str = "Deleting your account queues deletion of all your managed Machines and their data, including every paused /workspace disk. This is irreversible: no snapshots or restore are available. Access to Machine work and job output is blocked immediately. Resource cleanup targets 24 hours; cleanup can remain pending until verified. Verification requires applicable control-plane stop or absence, Sandbox object-cascade checks, creation obligations and accounting are verified. Delays escalate to operators. Underlying storage follows its reclaim policy; physical storage release is not verified. The cleanup target is not a guaranteed erasure deadline. Machine task safety metadata is retained for 30 days after the job ends, operation history for 90 days after completion, and necessary cleanup and settlement evidence until finality. Required security audit and financial records follow the platform's retention policy.";
 
 fn confirm_account_deletion(
     yes: bool,
