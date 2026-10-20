@@ -1582,3 +1582,30 @@ Executed cargo test -p nyxid-cli with package test debug=0/codegen-units=256 and
 Frontend npm run build exits0; npm test -- --maxWorkers=1:6255/0/0 in586 files; npm run lint:0errors/33warnings. Native nginx microphone/worklet and enforcing-CSP negatives:2/0/0; final pinned-image/credential-page parity remains open.
 Backend all-target both-KMS Clippy exits101 on four CLI WIP needless_borrow diagnostics; supplementary backend-bin Clippy exits0. CLI all-target Clippy exits101:18 dead_code+4 needless_borrow; untouched for Batch2. Format/diff checks pass.
 All23 non-document node/package WIP paths retain saved bytes/modes except main's expected Dockerfile COPY line; none committed. Logs/target:/tmp/nyxid-w5w9-codex-b0.SPJwrX. No push/publication; Batch1 verdict pending before any Batch2 commit.
+
+## Writes-only approvals — 2026-10-20 (awaiting PM review)
+
+Feature2e41f8efc; API/design/rollout docs9e8e7805f. Requested worker-log-only rewrite isf3cdae70b; the two ledgers remain untracked.
+Absent preference is Writes only; stored true/false retain All/Off. Lazy creation preserves absence; unmarked unreleased W9.3 true rows retain true because owner choice cannot be distinguished.
+HTTP/MCP use trusted effects, unknown is Write; inference uses the existing closed stateless catalog contract. Internal admitted NyxAgent transport is Read; callbacks retain independent checks. SSH/machine, Deny, Session, org, scheduled/durable controls remain.
+Web/mobile/CLI expose Writes only (default), All requests, Off; legacy boolean writes retain All/Off semantics. No per-service fixture exemptions were removed.
+Both-KMS cargo test --no-run exits0; copied executable --exact selected names --test-threads=2:573/0/0 in2963.38s, including every original54 and Batch1 twelve. Nine first-pass cases overlap; no Mongo skip diagnostics.
+Three detached readiness-heartbeat teardown tasks panic at security_readiness_service.rs:350 on Mongo215/database-being-dropped; originating tests pass. These diagnostics remain separate from harness totals.
+All six prior timing failures rerun serially3x on the original binary:18/0/0; hosted Linux run39346438958 passes all six. PM closed their investigation. Original full9509/6/11 remains recorded; no bounds/assertions/ignores changed.
+CLI cargo test -p nyxid-cli:1778/0/7 existing ignored. Frontend npm test -- --maxWorkers=1:6258/0/0; npm run build exits0; npm run lint:0errors/33existing warnings.
+Mobile npm test:52/0/0; npm run typecheck exits0. Production backend-bin both-KMS Clippy exits0; dirty-tree all-target Clippy finds only node-WIP lints, left untouched.
+Committed-only CI fix32cddd4f8 adds the CLI test-library encryption namespace re-export; unrelated node WIP is excluded. Exact CI all-target/workspace/both-KMS Clippy passes on committed1b8722613 plus the fix: exit0, zero diagnostics,5531.78s on macOS.
+CLAUDE.md/docs/ENV.md patch is prepared but unapplied pending PM shared-file permission. Logs/target:/tmp/nyxid-w5w9-codex-b0.SPJwrX. No Batch2 code or publication.
+
+## Writes-only hosted follow-up — 2026-10-20 (awaiting PM review)
+
+Method-override guard and real-Mongo rejection control4fa83f0e9; stale proxy/inference API wording8f68142b6. Only explicit owned pathspecs committed.
+Frozen backend163cf7625 plus the correction builds both-KMS; current correction bytes match its source. Native Apple ld emits the existing compact-unwind size warning; build exits0.
+Exact selected binary run124/0/0 in863.98s includes all original54 and Batch1 twelve; zero readiness teardown panics.
+Hosted-three normal run: invocation1/0/0, capacity recovery5/0/0, capacity heartbeat5/0/0; zero Pending approvals/observer errors. Heartbeat captures6–7 persisted timestamps; original slot/retry assertions pass.
+Controlled explicit-All injection reproduces invocation running!=completed at:3788; Pending access_token POST /v1/responses, read verb, exact fixture owner/service. This intentional diagnostic fails1 test; unset writes-only completes with no settings/approval rows.
+Capacity fixtures retain Session auth; both test bodies and runtime service match hosted9ec8f8599. The final slow-body first_byte_timeout is an original expected assertion. No bounds/assertions/ignores changed.
+Own isolated all-target Clippy stopped at PM shared-build-policy change; no result claimed. LLVM build uses shared target/jobs4/incremental0/dev-debug0/test-debug0, no profile overrides, RUSTFLAGS=-Dwarnings; exit0 with the native Apple compact-unwind warning (linker_messages explicitly ignores -Dwarnings).
+Instrumented invocation via cargo llvm-cov test --locked -p nyxid --no-report passes1/0/0. Reusing its copied instrumented binary --exact --test-threads=1 gives capacity recovery3/0/0 and heartbeat3/0/0; six nonzero llvm-profdata profiles verified.
+Instrumented recovery durations85.96/93.10/71.30s; heartbeat61.63/61.49/61.70s. Zero Pending/observer errors; heartbeat6–7 timestamps. Historical coverage timing cause remains unproven; hosted Linux decides full concurrency.
+Two harness CLI preflights rejected arguments before compilation/tests; the next queued Cargo run was stopped without building, then the successful instrumented artifact was reused. CLAUDE/ENV patch awaits shared-file permission. No Batch2 code or push.
