@@ -12,6 +12,13 @@ use zeroize::Zeroizing;
 
 pub(crate) static PROCESS_LOCK: ProcessLock = ProcessLock::new();
 
+/// Optional overrides for the monitored client only. Defaults retain the URI's
+/// driver policy; selecting false permits exact uncertain-write assertions.
+#[derive(Default)]
+pub(crate) struct GuardOptions {
+    pub(crate) retry_writes: Option<bool>,
+}
+
 /// One fault script, with one private client and server-global ownership.
 /// Clone database() for the operations under test; unrelated clients can never
 /// consume this script's injections. Keep the guard through all assertions.
@@ -123,6 +130,14 @@ impl Guard {
         base: &mongodb::Database,
         handler: Option<EventHandler<CommandEvent>>,
     ) -> Self {
+        Self::acquire_with(base, handler, GuardOptions::default()).await
+    }
+
+    pub(crate) async fn acquire_with(
+        base: &mongodb::Database,
+        handler: Option<EventHandler<CommandEvent>>,
+        guard_options: GuardOptions,
+    ) -> Self {
         let ownership = PROCESS_LOCK.lock().await;
         let uri = Zeroizing::new(
             super::TEST_DB_PINNED_URI
@@ -135,6 +150,9 @@ impl Guard {
             .await
             .unwrap();
         super::local_test_connection(&mut options);
+        if let Some(retry_writes) = guard_options.retry_writes {
+            options.retry_writes = Some(retry_writes);
+        }
         // A Started observer owns the only command connection until that
         // command completes. Another operation cannot consume its new fault.
         options.max_pool_size = Some(1);
@@ -310,6 +328,55 @@ fn open_lock(path: &std::path::Path) -> File {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn audit_fail_command_retry_writes_override_surfaces_one_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let base = super::super::connect_transaction_test_database("fault_no_retry").await;
+        for retries in [true, false] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let observed = attempts.clone();
+            let mut guard = Guard::acquire_with(
+                &base,
+                Some(EventHandler::callback(move |event| {
+                    if let CommandEvent::Started(event) = event
+                        && event.command_name == "insert"
+                    {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                })),
+                GuardOptions {
+                    retry_writes: Some(retries),
+                },
+            )
+            .await;
+            guard
+                .arm(
+                    doc! {"times": 1},
+                    doc! {
+                        "failCommands": ["insert"], "errorCode": 91,
+                        "errorLabels": ["RetryableWriteError"],
+                    },
+                )
+                .await
+                .unwrap();
+            let result = guard
+                .database()
+                .collection::<Document>("business")
+                .insert_one(doc! {"_id": format!("retry-{retries}")})
+                .await;
+            guard.disarm().await.unwrap();
+            assert_eq!(attempts.load(Ordering::SeqCst), if retries { 2 } else { 1 });
+            assert_eq!(result.is_ok(), retries);
+            assert_eq!(
+                base.collection::<Document>("business")
+                    .count_documents(doc! {"_id": format!("retry-{retries}")})
+                    .await
+                    .unwrap(),
+                u64::from(retries)
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audit_fail_command_observer_reserves_the_single_connection_against_same_client_race() {

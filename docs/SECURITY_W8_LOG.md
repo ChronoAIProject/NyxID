@@ -261,3 +261,10 @@
 - Same executable rechecks: scoped helper4/0/0, process lock1/0/0, bounded runtime retry1/0/0, service-history coordinator3/0/0. These filters overlap other gate evidence. Existing 32-body/8-commit bounds and failure assertions remain intact.
 - Gate: C's backend all-target both-KMS Clippy drivers14811/14815 at22:05:52/53 → exit0 at22:10:20, zero diagnostics, required shared env/nofile60000. Scoped rustfmt/check, whitespace and RSA committed/working-tree guards pass; no pin delta. No new Cargo queued.
 - Evidence: ~/Library/Caches/nyxid-w8-core/evidence/post-reboot-{teardown,helper,helper-lock,runtime-retry,history-retry}.log. GuardOptions and FIFO excluded; this commit compiles without either successor slice.
+
+## W8 coordinator — additive scoped-fault client options (2026-10-20)
+
+- Added Guard::acquire_with(base, handler, GuardOptions { retry_writes: Some(false) }); acquire retains its existing signature and delegates to unchanged URI defaults. Cross-process ownership, unique appName, both one-connection pools, controller and reset behavior are preserved.
+- Reused C's successor all-target both-KMS backend Clippy --no-deps -- -D warnings: backend drivers22:23:54–56, exit0 at22:30:15, zero diagnostics; after final helper edit22:11:19. Required shared env, nofile60000; no B Cargo queued.
+- Reused successor test compiler28510 (start22:31:04). Direct audit_fail_command_retry_writes_override_surfaces_one_attempt --nocapture --test-threads=1 on own Mongo50012: 1 passed / 0 failed / 0 ignored,10.46s. With retries enabled exactly two insert attempts succeed; disabled exactly one fails and stores no row.
+- Scoped rustfmt/check and whitespace pass. Evidence: ~/Library/Caches/nyxid-w8-core/evidence/successor-quiet-helper-option.log. FIFO, heartbeat follow-up and foreign lane migrations excluded; this additive prerequisite compiles independently.
