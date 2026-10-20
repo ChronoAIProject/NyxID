@@ -208,9 +208,7 @@ export function ChannelBotsManager({
                   <p className="text-11 text-destructive">
                     {row.delivery_status === "failing"
                       ? "Messages are not reaching the agent: "
-                      : row.delivery_status === "interrupted"
-                        ? "Attachment processing was interrupted: "
-                        : "Some attachments could not be processed: "}
+                      : "Attachment problem: "}
                     {row.delivery_reason ?? "delivery failed"}
                     {row.delivery_failed_at
                       ? ` (${formatRelativeTime(row.delivery_failed_at)})`

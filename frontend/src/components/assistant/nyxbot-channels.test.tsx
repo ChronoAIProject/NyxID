@@ -29,8 +29,8 @@ function mount(status?: string, reason?: string) {
 
 it.each([
   ["failing", "Messages are not reaching the agent", "the gateway never passed it on"],
-  ["interrupted", "Attachment processing was interrupted", "a photo was interrupted before processing"],
-  ["media_failed", "Some attachments could not be processed", "a photo or file exceeded the size limit"],
+  ["interrupted", "Attachment problem", "a photo was interrupted before processing"],
+  ["media_failed", "Attachment problem", "a photo or file exceeded the size limit"],
 ])("shows %s with its server reason and existing error style", (status, title, reason) => {
   mount(status, reason);
   const line = screen.getByText(new RegExp(title));
@@ -40,5 +40,5 @@ it.each([
 
 it.each([undefined, "ok"])("keeps legacy and healthy status %s quiet", (status) => {
   mount(status);
-  expect(screen.queryByText(/Messages are not reaching|processing was interrupted|could not be processed/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Messages are not reaching|Attachment problem/)).not.toBeInTheDocument();
 });
