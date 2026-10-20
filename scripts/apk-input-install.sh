@@ -57,7 +57,9 @@ trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 # the actual transaction into an isolated copy of the package database first.
 # It has no mutable repositories/cache and executes no scripts or triggers.
 # This root contains only package state/keyrings, never the live filesystem.
-mkdir -p "$work/root/lib" "$work/root/etc"
+# APK 2 opens its static-cache parent even with --no-cache. Supply the empty
+# layout in scratch; no live cache, indexes or network are made available.
+mkdir -p "$work/root/lib" "$work/root/etc" "$work/root/var/cache/apk"
 cp -R /lib/apk "$work/root/lib/apk"
 cp -R /etc/apk "$work/root/etc/apk"
 apk --root "$work/root" --no-network --no-cache --repositories-file /dev/null \

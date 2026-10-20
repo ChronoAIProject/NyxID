@@ -76,6 +76,8 @@ jobs:
       - name: Reject stale frozen inputs before scheduled image checks
         if: github.event_name == 'schedule'
         run: python3 scripts/check-build-input-freshness.py
+      - name: Real root APT sandbox with transport CA under a private input parent
+        run: sudo -n python3 scripts/test-apt-sandbox.py
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build every actual APT stage prefix without publishing
         run: >-

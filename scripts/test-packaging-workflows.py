@@ -89,6 +89,18 @@ def require_gates(data):
                 "['image']['tagged'] is True", "actual == receipt['image']['id']")):
         raise ValueError('PR hosted desktop must exercise mandatory operator verification before tagging')
     targets = {item['target'] for item in jobs['archives']['strategy']['matrix']['include']}
+    archive_job = jobs['archives']
+    if any(item['runner'] != 'macos-latest' for item in archive_job['strategy']['matrix']['include']
+           if item['target'].endswith('apple-darwin')):
+        raise ValueError('both Apple archives need the current macOS SDK runner')
+    archive_source = next(step for step in archive_job['steps'] if step.get('id') == 'source')
+    if 'commit=$(python3 scripts/export-build-source.py head)' not in archive_source['run'] or \
+            'git rev-parse' in archive_source['run']:
+        raise ValueError('container archive identity must use exact-path Git ownership trust')
+    if not any('xcrun' in step.get('run', '') and "< 26" in step['run'] and
+               step.get('if') == "contains(matrix.target, 'apple-darwin')" and not step.get('continue-on-error')
+               for step in archive_job['steps']):
+        raise ValueError('locked Apple Metal bridge requires a current macOS SDK check')
     policy = json.loads((ROOT / 'security/publication-policy.json').read_text())
     if targets != set(policy['cli']['targets']) or 'run-dist-build.py' not in str(jobs['archives']['steps']) or \
             'check-cli-archive-identity.py' not in str(jobs['archives']['steps']):
@@ -105,6 +117,21 @@ def require_gates(data):
 class PackagingWorkflows(unittest.TestCase):
     def test_current_workflows_require_actual_packaging(self):
         require_gates(workflows())
+
+    def test_old_apple_runner_bare_container_git_and_missing_sdk_check_rejected(self):
+        for mutation in ('runner', 'git', 'sdk'):
+            data = workflows()
+            job = data['artifact-packaging']['jobs']['archives']
+            if mutation == 'runner':
+                next(item for item in job['strategy']['matrix']['include']
+                     if item['target'] == 'x86_64-apple-darwin')['runner'] = 'macos-15-intel'
+            elif mutation == 'git':
+                source = next(step for step in job['steps'] if step.get('id') == 'source')
+                source['run'] = source['run'].replace('python3 scripts/export-build-source.py head', 'git rev-parse HEAD')
+            else:
+                job['steps'] = [step for step in job['steps'] if 'xcrun' not in step.get('run', '')]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                require_gates(data)
 
     def test_worklet_gate_cannot_be_missing_conditional_or_warning_only(self):
         for mutation in ('missing', 'conditional', 'warning', 'ignore', 'arch'):

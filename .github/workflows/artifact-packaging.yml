@@ -342,7 +342,7 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
           - target: x86_64-apple-darwin
-            runner: macos-15-intel
+            runner: macos-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             container: buildpack-deps:focal@sha256:2de32588f72f63229c83e3f08529cc15db231b2d95412ab4c30ad49d7cd99591
@@ -376,9 +376,19 @@ jobs:
       - name: Export exact committed CLI inputs
         id: source
         run: |
-          commit=$(git rev-parse HEAD)
+          commit=$(python3 scripts/export-build-source.py head)
           python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/cli-source" --commit "$commit"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Require the macOS SDK used by the locked Metal bridge
+        if: contains(matrix.target, 'apple-darwin')
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          version = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'], text=True).strip()
+          if int(version.split('.')[0]) < 26:
+              raise SystemExit('The locked apple-metal Swift bridge requires macOS SDK 26 or newer; found ' + version)
+          print('macOS SDK ' + version)
+          PY
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: dist-${{ matrix.target }}

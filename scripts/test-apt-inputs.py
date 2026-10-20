@@ -137,6 +137,7 @@ class DockerPolicy(unittest.TestCase):
         self.assertEqual(text.count('test ! -s /etc/ssl/certs/ca-certificates.crt'), 2)
         self.assertIn('ubuntu:24.04@sha256:', text)
         self.assertIn('security/apt-transport-ca.pem', text)
+        self.assertIn('chmod 0700 /opt/nyxid-apt', text)
         self.assertIn(INSTALLER + ' ubuntu:noble -- libdbus-1-dev', text)
 
     def test_raw_apt_variants_rejected(self):

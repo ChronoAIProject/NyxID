@@ -35,7 +35,7 @@ def minimal_ubuntu(root):
     base = next(s.base for s in stages((root / 'cli/Dockerfile.machine').read_text()) if s.name == 'desktop')
     from apt_inputs import INPUTS
     return 'FROM ' + base + ' AS runtime\nCOPY ' + ' '.join(INPUTS) + ' /opt/nyxid-apt/\n' + \
-        'RUN test ! -s /etc/ssl/certs/ca-certificates.crt && ' + INSTALLER + \
+        'RUN chmod 0700 /opt/nyxid-apt && test ! -s /etc/ssl/certs/ca-certificates.crt && ' + INSTALLER + \
         ' ubuntu:noble -- libdbus-1-dev && test ! -s /etc/ssl/certs/ca-certificates.crt\n'
 
 

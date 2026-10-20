@@ -58,6 +58,12 @@ set +e
 sh /input/apk-input-install.sh "$1" /case/catalog.tsv "$2" /case/archives
 status=$?
 set -e
+# Only download mode creates writable root-owned output through /case. Return
+# that output to the caller even on verification failure so host cleanup works.
+# Install mode's archive bind mount is deliberately read-only: never chown it.
+if [ "$1" = --download ] && [ -d /case/archives ]; then
+  chown -R "$4:$5" /case/archives
+fi
 cp /lib/apk/db/installed /case/after.db
 if [ "$3" = success ]; then
   [ "$status" = 0 ]
@@ -85,11 +91,15 @@ fi
         command += ['-v', str(folder / 'archives') + ':/case/archives:ro']
     if phase == 'offline':
         command += ['--network=none']
-    command += [base, '-ec', shell, 'replay', mode, base, expected]
+    command += [base, '-ec', shell, 'replay', mode, base, expected, str(os.getuid()), str(os.getgid())]
     with log.open('w') as output:
         result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=600)
     if result.returncode:
         raise ValueError('APK case failed: ' + str(log) + '\n' + log.read_text()[-10000:])
+    if mode == '--download' and (folder / 'archives').is_dir():
+        for path in [folder / 'archives', *(folder / 'archives').iterdir()]:
+            if (path.stat().st_uid, path.stat().st_gid) != (os.getuid(), os.getgid()):
+                raise ValueError('APK replay download output was not returned to the host user: ' + str(path))
 
 
 def run(args):

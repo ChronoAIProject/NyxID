@@ -101,6 +101,7 @@ class SourceExport(unittest.TestCase):
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("dubious ownership", denied.stderr)
         with mock.patch.object(exporter, "git_environment", return_value=env):
+            self.assertEqual(exporter.head_commit(self.root), self.commit_id)
             destination, receipt = self.exported()
             self.assertEqual(exporter.verify(destination, self.commit_id), receipt)
             other = self.directory / "unrelated"
@@ -125,6 +126,21 @@ class SourceExport(unittest.TestCase):
             nested.mkdir()
             with self.assertRaisesRegex(ValueError, "Git boundary"):
                 exporter.has_git_tree(nested)
+
+    def test_initial_commit_cli_ignores_inherited_git_identity(self):
+        result = subprocess.run(
+            ['python3', str(ROOT / 'scripts/export-build-source.py'), 'head', '--root', str(self.root)],
+            env={**os.environ, 'GIT_DIR': str(self.directory / 'absent.git'),
+                 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory', 'GIT_CONFIG_VALUE_0': '*'},
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), self.commit_id)
+        for operation in ('export', 'verify'):
+            result = subprocess.run(
+                ['python3', str(ROOT / 'scripts/export-build-source.py'), operation, '--root', str(self.root)],
+                capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('require --destination and --commit', result.stderr)
 
     def test_literal_star_root_cannot_expand_trust_to_sibling_repositories(self):
         star = self.directory / "*"

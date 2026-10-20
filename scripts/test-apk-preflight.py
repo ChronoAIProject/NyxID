@@ -7,12 +7,14 @@ that neither a failed scratch transaction nor a wrong inventory touches the
 live package state.
 """
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,7 +70,11 @@ elif 'add' in args:
     assert args[args.index('--repositories-file') + 1] == '/dev/null'
     if scratch:
         assert '--no-scripts' in args
-        target = Path(args[args.index('--root') + 1]) / 'lib/apk/db/installed'
+        scratch_root = Path(args[args.index('--root') + 1])
+        # APK 2 requires these parents even when --no-cache is set.
+        assert (scratch_root / 'var/cache/apk').is_dir()
+        assert not list((scratch_root / 'var/cache/apk').iterdir())
+        target = scratch_root / 'lib/apk/db/installed'
         # Confirm the scratch transaction starts from the actual base DB.
         assert target.read_bytes() == (root / 'live/lib/apk/db/installed').read_bytes()
         if os.environ['CASE'] == 'solver-failure':
@@ -147,6 +153,68 @@ fixture\t2-r0\tx86_64\t{checksum}\thttps://github.com/ChronoAIProject/NyxID/rele
         self.assertIn('APK final inventory mismatch', result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ['scratch', 'live'])
         self.assertFalse((self.root / 'receipts').exists())
+
+
+class ReplayOwnership(unittest.TestCase):
+    """Execute the replay wrapper shell; only the Docker boundary is replaced."""
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('apk_replay', ROOT / 'scripts/test-apk-replay.py')
+        self.replay = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.replay)
+        temporary = tempfile.TemporaryDirectory(prefix='apk-replay-owner-')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.folder = self.root / 'case'
+        self.folder.mkdir()
+        for name in ('input', 'lib/apk/db', 'bin', 'records'):
+            (self.root / name).mkdir(parents=True)
+        (self.root / 'lib/apk/db/installed').write_text('unchanged base DB')
+        self.chowns = self.root / 'chowns'
+        chown = self.root / 'bin/chown'
+        chown.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.chowns) + '"\n')
+        chown.chmod(0o755)
+
+    def invoke(self, mode, expected, failure=False):
+        if mode == '--install':
+            (self.folder / 'archives').mkdir()
+        installer = self.root / 'input/apk-input-install.sh'
+        installer.write_text('#!/bin/sh\n' + (
+            'mkdir -p "$4"\nprintf "verified fixture" > "$4/fixture.apk"\n' if mode == '--download' else '') +
+            ('exit 1\n' if failure else 'exit 0\n'))
+        real_run = subprocess.run
+
+        def docker(command, **kwargs):
+            self.assertEqual(command[:2], ['docker', 'run'])
+            if mode == '--install':
+                self.assertIn(str(self.folder / 'archives') + ':/case/archives:ro', command)
+            shell = command[command.index('-ec') + 1]
+            for original, replacement in (
+                ('/lib/apk/db/installed', str(self.root / 'lib/apk/db/installed')),
+                ('/usr/share/nyxid/build-inputs/apk', str(self.root / 'records')),
+                ('/case', str(self.folder)), ('/input', str(self.root / 'input')),
+            ):
+                shell = shell.replace(original, replacement)
+            return real_run(['sh', '-ec', shell, *command[command.index('-ec') + 2:]],
+                            env={**os.environ, 'PATH': str(self.root / 'bin') + os.pathsep + os.environ['PATH']},
+                            **kwargs)
+
+        with mock.patch.object(self.replay.subprocess, 'run', side_effect=docker):
+            self.replay.invoke('fixture-base', 'amd64', self.folder, mode, expected, self.root / 'run.log', 'offline')
+
+    def test_successful_download_returns_directory_to_host_before_cleanup(self):
+        self.invoke('--download', 'download-success')
+        self.assertEqual(self.chowns.read_text().splitlines(),
+                         ['-R', str(os.getuid()) + ':' + str(os.getgid()), str(self.folder / 'archives')])
+        shutil.rmtree(self.folder / 'archives')
+
+    def test_failed_download_also_returns_output_to_host(self):
+        self.invoke('--download', 'failure', failure=True)
+        self.assertTrue(self.chowns.is_file())
+        shutil.rmtree(self.folder / 'archives')
+
+    def test_install_does_not_chown_read_only_archives(self):
+        self.invoke('--install', 'success')
+        self.assertFalse(self.chowns.exists())
 
 
 if __name__ == '__main__':

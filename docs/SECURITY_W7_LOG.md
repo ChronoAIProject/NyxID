@@ -142,3 +142,16 @@
 - Local: CLI harness11, WSS7, wiring13, credential21, identity16, wrapper15, CSP11, Node identity4, CI helpers26, pins20, YAML9 (153 passed/0 failed).
 - All Artifact Packaging policy commands, workflow YAML/permissions/input policies, Python/Node syntax and diff checks pass.
 - Actual engine/image execution requires Machine Docker CLI E2E on the PR; no local Docker, Rust/backend build, push, tag or remote workflow run.
+
+## Urgent CI repair — efa50f512 / run 39355352247
+- Read the completed failing job logs: APT CA path traversal, root-owned replay downloads, APK 2 scratch cache layout, arm64 container Git ownership and Intel runner SDK.
+- Copy the checksum-verified CA into the installer's 0755 work directory as 0644, recheck it, and retain mandatory TLS/signature/hash checks for all callers.
+- Add real root/_apt acquisition below a 0700 input parent, signed metadata/native-index checks and unchanged host dpkg state; both PR APT layer jobs require it.
+- Minimal Ubuntu Docker regression also hides original CA inputs behind 0700; no system trust-store injection or verification bypass.
+- Return only writable replay downloads to the host UID/GID, including failures; never chown read-only installs. APK 2 scratch roots get an empty var/cache/apk.
+- Resolve the initial archive commit through isolated exact-path Git trust; both Apple targets use the current runner, with an SDK >=26 gate matching locked Metal APIs.
+- Local: helpers28, APT21, APK84, source16, packaging14, pins20, YAML9, catalogs29, exported-runner7, dist6 = 234 passed / 0 failed.
+- Input/YAML/reusable-permission policies, Python/shell syntax and focused diff checks pass; original update/install failure cases remain required.
+- Real Linux sandbox and Docker/image/archive execution require PR CI; local Lima access awaits PM coordination with D. No local application/backend build.
+- Missing APK durable release confirmed loud but non-blocking on PRs; scheduled durability remains required. Provisioning is still a maintainer step.
+- Commit excludes all C-5 scanner drafts and other streams' files; no push, merge, secrets, tags or remote workflow execution.

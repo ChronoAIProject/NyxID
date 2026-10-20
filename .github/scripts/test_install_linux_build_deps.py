@@ -81,7 +81,13 @@ assert options["APT::Get::AllowUnauthenticated"] == "false"
 assert options["Acquire::AllowInsecureRepositories"] == "false"
 assert options["Acquire::https::Verify-Peer"] == "true"
 assert options["Acquire::https::Verify-Host"] == "true"
-assert options["Acquire::https::CaInfo"] == str(Path(os.environ["TEST_ROOT"]) / "security/apt-transport-ca.pem")
+original_ca = Path(os.environ["TEST_ROOT"]) / "security/apt-transport-ca.pem"
+ca = Path(options["Acquire::https::CaInfo"])
+assert ca != original_ca
+assert ca == Path(options["Dir::State::lists"]).parent / "transport-ca.pem"
+assert ca.read_bytes() == original_ca.read_bytes()
+assert ca.stat().st_mode & 0o777 == 0o644
+assert ca.parent.stat().st_mode & 0o777 == 0o755
 operation = "update" if "update" in args else ("download" if "--download-only" in args else "install")
 if operation != "update":
     assert "install" in args and "--no-install-recommends" in args
@@ -134,6 +140,23 @@ if operation == "update":
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.arguments.read_text().splitlines().count("ripgrep"), 2)
+
+    def test_private_input_parent_uses_verified_readable_transport_copy(self):
+        self.root.chmod(0o700)
+        (self.root / 'security').chmod(0o700)
+        (self.root / 'security/apt-transport-ca.pem').chmod(0o600)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ['update', 'download', 'install'])
+
+    def test_changed_transport_copy_stops_before_update(self):
+        self.stub('cp', '''/bin/cp "$@"
+case "$2" in */transport-ca.pem) printf corrupt >> "$2" ;; esac
+''')
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('APT transport CA copy checksum mismatch', result.stderr)
+        self.assertFalse(self.calls.exists())
 
     def test_update_failure_stops_before_install(self):
         result = self.invoke("update")

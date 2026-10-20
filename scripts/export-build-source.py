@@ -119,6 +119,15 @@ def clean_identity(root, expected):
     return {"commit": commit, "epoch": int(epoch), "tree": tree}
 
 
+def head_commit(root):
+    # Resolve the initial identity through the same exact-path trust boundary
+    # as export, including runner-owned checkouts in root-run build containers.
+    commit = git(root, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("unsupported source commit identity")
+    return commit
+
+
 def relative(value):
     path = PurePosixPath(value)
     if not value or path.is_absolute() or str(path) != value or \
@@ -390,13 +399,20 @@ def verify(destination, expected, generated=()):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("export", "verify"))
+    parser.add_argument("operation", choices=("head", "export", "verify"))
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--destination", type=Path, required=True)
-    parser.add_argument("--commit", required=True)
+    parser.add_argument("--destination", type=Path)
+    parser.add_argument("--commit")
     parser.add_argument("--generated", action="append", default=[],
                         help="reviewed build-output directory, verification only")
     args = parser.parse_args()
+    if args.operation == "head":
+        if args.destination or args.commit or args.generated:
+            parser.error("head only accepts the source root")
+        print(head_commit(args.root))
+        return
+    if not args.destination or not args.commit:
+        parser.error("export and verify require --destination and --commit")
     if args.operation == "export":
         if args.generated:
             parser.error("source export cannot exclude tracked inputs")

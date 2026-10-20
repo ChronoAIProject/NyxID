@@ -55,6 +55,13 @@ transport_digest=$(awk -f "$snapshot_script_dir/apt-transport-ca.awk" "$transpor
     || fail 'invalid APT transport CA provenance'
 printf '%s  %s\n' "$transport_digest" "$transport_ca" | sha256sum -c - >/dev/null \
     || fail 'APT transport CA bundle checksum mismatch'
+# Hosted checkout parents may be private to the runner. APT's _apt acquisition
+# user must traverse the public temporary directory, never the source checkout.
+cp "$transport_ca" "$work/transport-ca.pem"
+chmod 0644 "$work/transport-ca.pem"
+transport_ca=$work/transport-ca.pem
+printf '%s  %s\n' "$transport_digest" "$transport_ca" | sha256sum -c - >/dev/null \
+    || fail 'APT transport CA copy checksum mismatch'
 
 mkdir "$work/lists" "$work/lists/partial" "$work/archives" "$work/archives/partial"
 sources=$work/sources.list
