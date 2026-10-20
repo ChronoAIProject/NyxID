@@ -2481,6 +2481,7 @@ async fn nyxagent_route_group_rejects_developer_apps_and_accepts_first_party_cli
     let app = router.with_state(state.clone());
     let tokens = crate::services::token_service::create_session_and_issue_tokens(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         OWNER,
@@ -3573,6 +3574,7 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
     let app = router.with_state(state.clone());
     let tokens = crate::services::token_service::create_session_and_issue_tokens(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         OWNER,
@@ -3850,6 +3852,7 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
         .unwrap();
     let foreign = crate::services::token_service::create_session_and_issue_tokens(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &foreign,

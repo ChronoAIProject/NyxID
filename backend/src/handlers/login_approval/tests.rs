@@ -22,15 +22,32 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
         .await
         .unwrap();
     let totp = if mfa {
-        let setup = mfa_service::setup_totp(&db, &state.encryption_keys, &actor_id, &email)
-            .await
-            .unwrap();
+        let setup = mfa_service::setup_totp(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &state.encryption_keys,
+            &mfa_service::MfaActor {
+                user_id: actor_id.clone(),
+                principal: crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: actor_id.clone(),
+                },
+            },
+            &email,
+        )
+        .await
+        .unwrap();
         let totp = totp_rs::TOTP::from_url(setup.qr_code_url).unwrap();
         mfa_service::verify_totp_setup(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &state.encryption_keys,
             &setup.factor_id,
-            &actor_id,
+            &mfa_service::MfaActor {
+                user_id: actor_id.clone(),
+                principal: crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: actor_id.clone(),
+                },
+            },
             &totp.generate_current().unwrap(),
         )
         .await
@@ -163,6 +180,7 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
         let state = test_app_state(db.clone());
         device::approve(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &state.config,
             &state.jwt_keys,
             &state.encryption_keys,
@@ -221,6 +239,7 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
         assert!(matches!(
             device::poll_and_claim(
                 &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
                 state.auth_device_hmac_key.as_slice(),
                 app_request["device_code"].as_str().unwrap()
             )

@@ -27,6 +27,7 @@ pub struct SocialTokenExchangeResponse {
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_social_token(
     db: &mongodb::Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
     jwks_cache: &JwksCache,
@@ -39,6 +40,7 @@ pub async fn exchange_social_token(
 ) -> AppResult<SocialTokenExchangeResponse> {
     let result = exchange_social_token_inner(
         db,
+        runtime,
         config,
         jwt_keys,
         jwks_cache,
@@ -120,6 +122,7 @@ struct SocialTokenExchangeInner {
 #[allow(clippy::too_many_arguments)]
 async fn exchange_social_token_inner(
     db: &mongodb::Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
     jwks_cache: &JwksCache,
@@ -164,7 +167,7 @@ async fn exchange_social_token_inner(
 
     // Step 5: Issue full NyxID token set
     let tokens = token_service::create_session_and_issue_tokens(
-        db, config, jwt_keys, &user.id, None, // no IP from token exchange
+        db, runtime, config, jwt_keys, &user.id, None, // no IP from token exchange
         None, // no user agent
     )
     .await?;
@@ -543,6 +546,7 @@ mod tests {
         let jwt_keys = cached_test_jwt_keys();
         let err = match exchange_social_token_inner(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &config,
             &jwt_keys,
             &jwks_cache,
@@ -579,6 +583,7 @@ mod tests {
         let jwt_keys = cached_test_jwt_keys();
         let err = match exchange_social_token_inner(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &config,
             &jwt_keys,
             &jwks_cache,

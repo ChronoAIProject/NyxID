@@ -3372,6 +3372,7 @@ async fn deletion_closes_owner_admission_before_pending_check_and_remains_retrya
     let s = active_session(&f, "deletion-pending").await;
     let error = crate::services::admin_user_service::delete_user_cascade(
         &f.state.db,
+        &f.state.audit_runtime,
         &Uuid::new_v4().to_string(),
         &f.b.user_id,
     )
@@ -3421,6 +3422,7 @@ async fn deletion_closes_owner_admission_before_pending_check_and_remains_retrya
         .unwrap();
     crate::services::admin_user_service::delete_user_cascade(
         &f.state.db,
+        &f.state.audit_runtime,
         &Uuid::new_v4().to_string(),
         &f.b.user_id,
     )
@@ -3451,7 +3453,12 @@ async fn deletion_and_sms_send_preparation_serialize_without_orphan_effect_ident
     let admin = Uuid::new_v4().to_string();
     let (admitted, deletion) = tokio::join!(
         session::insert_sms_send(&f.state, &f.b, &s, &send),
-        crate::services::admin_user_service::delete_user_cascade(&f.state.db, &admin, &f.b.user_id),
+        crate::services::admin_user_service::delete_user_cascade(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &admin,
+            &f.b.user_id
+        ),
     );
     assert!(
         deletion.is_err(),
@@ -3484,6 +3491,7 @@ async fn deletion_and_sms_send_preparation_serialize_without_orphan_effect_ident
         assert!(
             crate::services::admin_user_service::delete_user_cascade(
                 &f.state.db,
+                &f.state.audit_runtime,
                 &admin,
                 &f.b.user_id
             )
@@ -3744,7 +3752,12 @@ async fn late_authenticated_receipts_cannot_recreate_data_after_binding_or_owner
                 send: None,
             },
         ),
-        crate::services::admin_user_service::delete_user_cascade(&f.state.db, &admin, &f.b.user_id),
+        crate::services::admin_user_service::delete_user_cascade(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &admin,
+            &f.b.user_id
+        ),
     );
     deleted.unwrap();
     // Either ordering is valid; the person cascade removes every receipt

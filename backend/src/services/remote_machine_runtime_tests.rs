@@ -521,6 +521,7 @@ async fn deleted_owner_retains_paid_liability_until_native_stop_and_local_settle
     assert!(held > Credits::ZERO);
     crate::services::admin_user_service::delete_current_user_cascade(
         &f.db,
+        &crate::test_utils::test_app_state(f.db.clone()).audit_runtime,
         &f.owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
     )

@@ -205,9 +205,25 @@ async fn complete_identity(
     let ip = resolve_client_ip(headers, addr, state)?.to_string();
     let ua = extract_user_agent(headers);
     let (row, session) = if let Some(request) = app_request {
-        service::verify_app(&state.db, row, request, &ip, ua.as_deref()).await?
+        service::verify_app(
+            &state.db,
+            &state.audit_runtime,
+            row,
+            request,
+            &ip,
+            ua.as_deref(),
+        )
+        .await?
     } else {
-        service::verify(&state.db, row, trusted_authentication, &ip, ua.as_deref()).await?
+        service::verify(
+            &state.db,
+            &state.audit_runtime,
+            row,
+            trusted_authentication,
+            &ip,
+            ua.as_deref(),
+        )
+        .await?
     };
     let (mut result_headers, body) = private(response(state, &row).await?);
     if let Some(session) = session {
@@ -454,6 +470,7 @@ pub async fn approve(
             } else {
                 device::approve(
                     &state.db,
+                    &state.audit_runtime,
                     &state.config,
                     &state.jwt_keys,
                     &state.encryption_keys,

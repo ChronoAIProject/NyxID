@@ -787,10 +787,15 @@ async fn api_key_listing_neither_provisions_nor_reconciles_inventory() {
                 .is_some()
         );
     }
-    let session =
-        crate::services::token_service::create_session(&f.state.db, &f.person, None, None)
-            .await
-            .unwrap();
+    let session = crate::services::token_service::create_session(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &f.person,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let cookie = format!("nyx_session={}", session.session_token);
     let (status, _, body) = f
         .request("GET", "/api/v1/keys", Some(("cookie", &cookie)), None)
@@ -854,10 +859,15 @@ async fn api_key_detail_reads_leave_pending_oauth_placeholders_untouched() {
             );
         }
     }
-    let session =
-        crate::services::token_service::create_session(&f.state.db, &f.person, None, None)
-            .await
-            .unwrap();
+    let session = crate::services::token_service::create_session(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &f.person,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let cookie = format!("nyx_session={}", session.session_token);
     let (status, _, body) = f
         .request(

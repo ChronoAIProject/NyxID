@@ -595,6 +595,7 @@ async fn pending_expiry_is_not_retained_and_owner_purge_removes_tombstones() {
     );
     crate::services::admin_user_service::delete_current_user_cascade(
         &state.db,
+        &state.audit_runtime,
         &owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
     )

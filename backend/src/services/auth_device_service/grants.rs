@@ -126,6 +126,7 @@ pub async fn approve_with_agent_key(
 
 pub async fn poll_agent_key(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     device_code: &str,
@@ -139,7 +140,7 @@ pub async fn poll_agent_key(
         return Err(non_pending_approve_error(row.status));
     }
     if row.expires_at <= Utc::now() {
-        expire(db, &collection, &row).await?;
+        expire(db, runtime, &collection, &row).await?;
         return Err(AppError::AuthDeviceCodeExpired);
     }
     let grant = row
@@ -183,6 +184,7 @@ pub async fn poll_agent_key(
 
 pub(super) async fn expire(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     collection: &Collection<AuthDeviceCode>,
     row: &AuthDeviceCode,
 ) -> AppResult<()> {
@@ -199,7 +201,16 @@ pub(super) async fn expire(
         .await?;
     if let Some(row) = claimed {
         if let Some(id) = row.approved_session_id.as_deref() {
-            token_service::revoke_session(db, id, None).await?;
+            token_service::revoke_session(
+                db,
+                runtime,
+                id,
+                crate::models::audit_outbox::AuditPrincipal::System {
+                    actor: crate::models::audit_outbox::SystemAuditActor::Expiry,
+                },
+                None,
+            )
+            .await?;
         }
         if let Some(grant) = row.agent_key_grant {
             credentials::revoke(
@@ -219,13 +230,16 @@ pub(super) async fn expire(
     Ok(())
 }
 
-pub async fn sweep_expired(db: &Database) -> AppResult<()> {
+pub async fn sweep_expired(
+    db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
+) -> AppResult<()> {
     for supports_grant_choice in [false, true] {
         let collection = collection_for_protocol(db, supports_grant_choice);
         let mut rows = collection.find(doc! {"status": {"$in": ["pending", "approved", "expired"]},
         "expires_at": {"$lte": bson::DateTime::from_chrono(Utc::now())}, "purge_at": Bson::Null}).await?;
         while let Some(row) = rows.try_next().await? {
-            if let Err(error) = expire(db, &collection, &row).await {
+            if let Err(error) = expire(db, runtime, &collection, &row).await {
                 tracing::error!(request_id = %row.id, error_code = error.error_code(), "auth_device expiry cleanup failed");
             }
         }

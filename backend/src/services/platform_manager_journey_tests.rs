@@ -2227,6 +2227,7 @@ async fn retired_owner_or_control_authority_can_logout_to_public_without_revival
                 .unwrap();
             super::super::platform_personal_owner_lifecycle::retire(
                 &j.state.db,
+                &j.state.audit_runtime,
                 &j.owner,
                 reason == PersonalRevocationReason::OwnerDeleted,
             )

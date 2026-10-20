@@ -249,6 +249,51 @@ pub async fn fence_protected_reference(
     Ok(())
 }
 
+/// Refresh issuance and consent revocation share this source-row write fence.
+/// The caller prepares the fence identity outside its transaction retry loop.
+pub async fn fence_protected_reference_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    user_id: &str,
+    client_id: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+    fence_id: &str,
+) -> AppResult<()> {
+    if !scope.split_whitespace().any(|value| value == "machine") && reference.is_none() {
+        return Ok(());
+    }
+    let reference = reference.ok_or_else(grant_changed)?;
+    let consent = db
+        .collection::<Consent>(CONSENTS)
+        .find_one(doc! {"_id": &reference.consent_id, "user_id": user_id,
+        "client_id": client_id, "revision": &reference.consent_revision})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(grant_changed)?;
+    if consent.expires_at.is_some_and(|at| at <= Utc::now())
+        || !consent
+            .scopes
+            .split_whitespace()
+            .any(|value| value == "machine")
+        || protected_reference(&consent)? != *reference
+    {
+        return Err(grant_changed());
+    }
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            version_filter(&consent),
+            doc! {"$set": {"issuance_fence": fence_id}},
+        )
+        .session(session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(())
+}
+
 pub fn grant_changed() -> AppError {
     AppError::Conflict(
         "Service access changed or expired. Restart authorization to review the current grant."
@@ -771,6 +816,7 @@ mod tests {
 
         let refresh_result = crate::services::token_service::refresh_tokens(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &config,
             &jwt_keys,
             &refresh_jwt,

@@ -554,25 +554,25 @@ pub async fn callback(
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
-            let session =
-                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Social auth session creation failed");
-                        if let Some(ref iid) = reserved_invite_id {
-                            let db = state.db.clone();
-                            let iid = iid.clone();
-                            tokio::spawn(async move {
-                                let _ = invite_code_service::release_reservation(&db, &iid).await;
-                            });
-                        }
-                        redirect_with_error(
-                            &redirect_target,
-                            "social_auth_exchange",
-                            secure,
-                            domain,
-                        )
-                    })?;
+            let session = token_service::create_session(
+                &state.db,
+                &state.audit_runtime,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Social auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
 
             audit_service::log_async(
                 state.db.clone(),
@@ -611,6 +611,7 @@ pub async fn callback(
         SocialRedirectTarget::Mobile { .. } => {
             let tokens = token_service::create_session_and_issue_tokens(
                 &state.db,
+                &state.audit_runtime,
                 &state.config,
                 &state.jwt_keys,
                 &user.id,
@@ -985,25 +986,25 @@ pub async fn apple_callback(
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
-            let session =
-                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Apple auth session creation failed");
-                        if let Some(ref iid) = reserved_invite_id {
-                            let db = state.db.clone();
-                            let iid = iid.clone();
-                            tokio::spawn(async move {
-                                let _ = invite_code_service::release_reservation(&db, &iid).await;
-                            });
-                        }
-                        redirect_with_error(
-                            &redirect_target,
-                            "social_auth_exchange",
-                            secure,
-                            domain,
-                        )
-                    })?;
+            let session = token_service::create_session(
+                &state.db,
+                &state.audit_runtime,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Apple auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
 
             audit_service::log_async(
                 state.db.clone(),
@@ -1042,6 +1043,7 @@ pub async fn apple_callback(
         SocialRedirectTarget::Mobile { .. } => {
             let tokens = token_service::create_session_and_issue_tokens(
                 &state.db,
+                &state.audit_runtime,
                 &state.config,
                 &state.jwt_keys,
                 &user.id,

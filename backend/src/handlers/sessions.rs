@@ -12,7 +12,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, token_service};
+use crate::services::token_service;
 
 // --- Response types ---
 
@@ -112,14 +112,14 @@ pub async fn revoke_own_session(
     // Shared revoke path: marks the session revoked, nukes its refresh tokens,
     // and cascades to in-memory MCP sessions for this user. Reused so that the
     // DELETE endpoint stays in lock-step with `logout` and admin revocation.
-    token_service::revoke_session(&state.db, &session_id, Some(&state.mcp_sessions)).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "user.session.revoked",
-        Some(serde_json::json!({ "session_id": &session_id })),
-    );
+    token_service::revoke_session(
+        &state.db,
+        &state.audit_runtime,
+        &session_id,
+        token_service::audit_principal(&auth_user)?,
+        Some(&state.mcp_sessions),
+    )
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -127,6 +127,109 @@ pub async fn revoke_own_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn w8_id_http_session_revoke_records_verified_actor_and_rollback() {
+        use crate::{
+            models::{
+                audit_outbox::{
+                    AuditOwner, AuditPrincipal, PENDING_COLLECTION_NAME as PENDING,
+                    PendingAuditEvent,
+                },
+                user::{COLLECTION_NAME as USERS, User, UserType},
+            },
+            test_utils::*,
+        };
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, header},
+            routing::delete,
+        };
+        use tower::ServiceExt;
+        use uuid::Uuid;
+        let db = connect_transaction_test_database("w8_id_http_session").await;
+        let state = test_app_state(db.clone());
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        for actor in [&first, &second] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(actor, UserType::Person))
+                .await
+                .unwrap();
+        }
+        let one = token_service::create_session_and_issue_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &first,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let two = token_service::create_session_and_issue_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &second,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let app = Router::new()
+            .route("/api/v1/sessions/{id}", delete(revoke_own_session))
+            .with_state(state);
+        let request = |session: &str, token: &str| {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/sessions/{session}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let denied = app
+            .clone()
+            .oneshot(request(&two.session_id, &one.access_token))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !db.collection::<Session>(SESSIONS)
+                .find_one(doc! {"_id":&two.session_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING)
+                .count_documents(doc! {"event.action":"session_revoked"})
+                .await
+                .unwrap(),
+            0
+        );
+        let revoked = app
+            .oneshot(request(&one.session_id, &one.access_token))
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+        let event = db
+            .collection::<PendingAuditEvent>(PENDING)
+            .find_one(doc! {"event.action":"session_revoked"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.event.principal,
+            AuditPrincipal::Person { id: first.clone() }
+        );
+        assert_eq!(event.event.owner, AuditOwner::Person { id: first });
+        assert_eq!(event.event.target_id, Some(one.session_id));
+    }
 
     #[test]
     fn session_item_serializes_all_fields() {
@@ -207,9 +310,22 @@ mod tests {
     use uuid::Uuid;
 
     async fn seed_session(db: &mongodb::Database, user_id: &str) -> String {
-        let issued = create_session(db, user_id, None, None)
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                user_id,
+                crate::models::user::UserType::Person,
+            ))
             .await
-            .expect("create_session in revoke test");
+            .unwrap();
+        let issued = create_session(
+            db,
+            &test_app_state(db.clone()).audit_runtime,
+            user_id,
+            None,
+            None,
+        )
+        .await
+        .expect("create_session in revoke test");
         issued.session_id
     }
 

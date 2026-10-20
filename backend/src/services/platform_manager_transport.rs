@@ -972,7 +972,13 @@ pub fn spawn_sweeps(state: AppState, producers: Arc<PlatformManagerProducers>) {
                 ticks.tick().await;
             }
             pending = false;
-            match super::platform_personal_owner_lifecycle::recover_pending(&state.db, 32).await {
+            match super::platform_personal_owner_lifecycle::recover_pending(
+                &state.db,
+                &state.audit_runtime,
+                32,
+            )
+            .await
+            {
                 Ok(visited) => {
                     pending |= visited == 32;
                     if visited > 0 {

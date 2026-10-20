@@ -537,7 +537,13 @@ pub async fn delete_me(
             })?;
     }
 
-    admin_user_service::delete_current_user_cascade(&state.db, &user_id, deletion_policy).await?;
+    admin_user_service::delete_current_user_cascade(
+        &state.db,
+        &state.audit_runtime,
+        &user_id,
+        deletion_policy,
+    )
+    .await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
     audit_service::log_for_user(

@@ -513,7 +513,8 @@ pub async fn login(
 
     let user = auth_service::authenticate_user(&state.db, &body.email, &body.password).await?;
 
-    // Check MFA requirement
+    // Retain the verified factor so issuance can fence it in its transaction.
+    let mut mfa_factor = None;
     if user.mfa_enabled {
         match &body.mfa_code {
             Some(code) => {
@@ -544,7 +545,7 @@ pub async fn login(
                     ));
                 }
 
-                let valid = crate::services::mfa_service::verify_totp(
+                let verified = crate::services::mfa_service::verified_factor(
                     &state.db,
                     &state.encryption_keys,
                     &user.id,
@@ -552,7 +553,7 @@ pub async fn login(
                 )
                 .await?;
 
-                if !valid {
+                if verified.is_none() {
                     emit_event(
                         state.telemetry.as_deref(),
                         &user.id.to_string(),
@@ -567,6 +568,8 @@ pub async fn login(
                         "Invalid MFA code".to_string(),
                     ));
                 }
+
+                mfa_factor = verified;
 
                 // Inline-MFA success: pair with the failure emit above so
                 // the MFA funnel sees both outcomes from the
@@ -590,8 +593,13 @@ pub async fn login(
                 let temp_token_hash = crate::crypto::token::hash_token(&temp_token);
 
                 // Store the MFA session as a short-lived session record
-                token_service::create_mfa_pending_session(&state.db, &user.id, &temp_token_hash)
-                    .await?;
+                token_service::create_mfa_pending_session(
+                    &state.db,
+                    &state.audit_runtime,
+                    &user.id,
+                    &temp_token_hash,
+                )
+                .await?;
 
                 return Err(AppError::MfaRequired {
                     session_token: temp_token,
@@ -621,20 +629,32 @@ pub async fn login(
 
     match client_mode {
         AuthClientMode::BrowserSession => {
-            let session =
-                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
-                    .await?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user.id.clone()),
-                "login".to_string(),
-                Some(serde_json::json!({ "session_id": session.session_id })),
-                ip,
-                ua,
-                None,
-                None,
-            );
+            let session = if let Some(factor) = &mfa_factor {
+                let prepared = crate::services::mfa_service::MfaSession::browser(
+                    token_service::prepare_browser_session(&user.id, ip.as_deref(), ua.as_deref())?,
+                );
+                crate::services::mfa_service::complete_login(
+                    &state.db,
+                    &state.audit_runtime,
+                    None,
+                    factor,
+                    &prepared,
+                )
+                .await?;
+                let crate::services::mfa_service::MfaSession::Browser(value) = prepared else {
+                    unreachable!()
+                };
+                value.issued
+            } else {
+                token_service::create_session(
+                    &state.db,
+                    &state.audit_runtime,
+                    &user.id,
+                    ip.as_deref(),
+                    ua.as_deref(),
+                )
+                .await?
+            };
 
             apply_browser_session_cookies(
                 &mut response_headers,
@@ -665,26 +685,42 @@ pub async fn login(
             ))
         }
         AuthClientMode::TokenClient => {
-            let tokens = token_service::create_session_and_issue_tokens(
-                &state.db,
-                &state.config,
-                &state.jwt_keys,
-                &user.id,
-                ip.as_deref(),
-                ua.as_deref(),
-            )
-            .await?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user.id.clone()),
-                "login".to_string(),
-                Some(serde_json::json!({ "session_id": tokens.session_id })),
-                ip,
-                ua,
-                None,
-                None,
-            );
+            let tokens = if let Some(factor) = &mfa_factor {
+                let prepared = crate::services::mfa_service::MfaSession::tokens(
+                    token_service::prepare_session_tokens(
+                        &state.db,
+                        &state.config,
+                        &state.jwt_keys,
+                        &user.id,
+                        ip.as_deref(),
+                        ua.as_deref(),
+                    )
+                    .await?,
+                );
+                crate::services::mfa_service::complete_login(
+                    &state.db,
+                    &state.audit_runtime,
+                    None,
+                    factor,
+                    &prepared,
+                )
+                .await?;
+                let crate::services::mfa_service::MfaSession::Tokens(value) = prepared else {
+                    unreachable!()
+                };
+                value.tokens
+            } else {
+                token_service::create_session_and_issue_tokens(
+                    &state.db,
+                    &state.audit_runtime,
+                    &state.config,
+                    &state.jwt_keys,
+                    &user.id,
+                    ip.as_deref(),
+                    ua.as_deref(),
+                )
+                .await?
+            };
 
             emit_event(
                 state.telemetry.as_deref(),
@@ -723,7 +759,9 @@ pub async fn logout(
     if let Some(session_id) = auth_user.session_id {
         token_service::revoke_session(
             &state.db,
+            &state.audit_runtime,
             &session_id.to_string(),
+            token_service::audit_principal(&auth_user)?,
             Some(&state.mcp_sessions),
         )
         .await?;
@@ -736,8 +774,6 @@ pub async fn logout(
         &tele,
         TelemetryEvent::AuthLoggedOut,
     );
-
-    audit_service::log_for_user(state.db.clone(), &auth_user, "logout", None);
 
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
@@ -798,6 +834,7 @@ pub async fn refresh(
 
     let tokens = token_service::refresh_tokens(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &refresh_token,
@@ -1105,7 +1142,7 @@ pub async fn cli_token(
     let user_id_str = auth_user.user_id.to_string();
     let user_agent = resolve_cli_session_user_agent(client_ua, &headers);
 
-    let tokens = token_service::create_session_and_issue_tokens(
+    let prepared = token_service::prepare_session_tokens(
         &state.db,
         &state.config,
         &state.jwt_keys,
@@ -1113,7 +1150,10 @@ pub async fn cli_token(
         extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips).as_deref(),
         user_agent.as_deref(),
     )
-    .await?;
+    .await?
+    .with_principal(token_service::audit_principal(&auth_user)?);
+    let tokens =
+        token_service::issue_prepared_session(&state.db, &state.audit_runtime, prepared).await?;
 
     Ok(Json(CliTokenResponse {
         access_token: tokens.access_token,
@@ -1139,6 +1179,79 @@ pub struct CliTokenResponse {
 mod tests {
     use super::*;
     use axum::body::Bytes;
+
+    #[tokio::test]
+    async fn w8_id_cli_session_records_authenticated_key_principal() {
+        use crate::{
+            models::{
+                audit_outbox::{
+                    AuditOwner, AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent,
+                },
+                user::{COLLECTION_NAME as USERS, User, UserType},
+            },
+            test_utils::*,
+        };
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, StatusCode},
+            routing::post,
+        };
+        use tower::ServiceExt;
+        use uuid::Uuid;
+        let db = connect_transaction_test_database("w8_id_cli_key_session").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let key = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let (prefix, secret, hash) = crate::crypto::token::generate_api_key();
+        db.collection::<mongodb::bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &key, "user_id": &owner, "name": "w8-id-private-key-name",
+                "key_prefix": prefix, "key_hash": hash, "scopes": "read write",
+                "is_active": true, "created_at": mongodb::bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/api/v1/auth/cli-token", post(cli_token))
+            .layer(axum::Extension(ConnectInfo(
+                "127.0.0.1:23151".parse::<SocketAddr>().unwrap(),
+            )))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/cli-token")
+                    .header("x-api-key", &secret)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let event = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {"event.action": "session_issued"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.event.principal,
+            AuditPrincipal::ApiKey {
+                id: key,
+                owner_id: owner.clone()
+            }
+        );
+        assert_eq!(event.event.owner, AuditOwner::Person { id: owner });
+        let safe = serde_json::to_string(&event).unwrap();
+        assert!(!safe.contains(&secret));
+        assert!(!safe.contains("w8-id-private-key-name"));
+    }
 
     #[test]
     fn email_domain_extracts_lowercased_host_portion() {

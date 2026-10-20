@@ -203,6 +203,7 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
     assert_eq!(row.protected_consent, Some(reference.clone()));
     let refreshed = crate::services::token_service::refresh_tokens(
         &f.state.db,
+        &f.state.audit_runtime,
         &f.state.config,
         &f.state.jwt_keys,
         &issued.refresh_token,
@@ -230,6 +231,7 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
     assert!(
         crate::services::token_service::refresh_tokens(
             &f.state.db,
+            &f.state.audit_runtime,
             &f.state.config,
             &f.state.jwt_keys,
             &refreshed.refresh_token,
@@ -308,6 +310,7 @@ async fn machine_oauth_code_access_refresh_keep_exact_version_and_never_upgrade(
     assert!(
         crate::services::token_service::refresh_tokens(
             &f.state.db,
+            &f.state.audit_runtime,
             &f.state.config,
             &f.state.jwt_keys,
             &legacy.refresh_token,
@@ -539,6 +542,7 @@ async fn machine_oauth_consent_revoke_reconsent_never_adopts_old_tokens() {
     assert!(
         crate::services::token_service::refresh_tokens(
             &f.state.db,
+            &f.state.audit_runtime,
             &f.state.config,
             &f.state.jwt_keys,
             &original.refresh_token,

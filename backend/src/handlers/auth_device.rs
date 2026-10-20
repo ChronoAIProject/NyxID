@@ -307,6 +307,7 @@ pub async fn poll_auth_device(
 
     let claim = auth_device_service::poll_and_prepare(
         &state.db,
+        &state.audit_runtime,
         &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
         &body.device_code,
@@ -337,6 +338,7 @@ pub async fn poll_auth_device(
         PollClaim::AgentKey => {
             let delivery = auth_device_service::poll_agent_key(
                 &state.db,
+                &state.audit_runtime,
                 &state.encryption_keys,
                 state.auth_device_hmac_key.as_slice(),
                 &body.device_code,
@@ -417,12 +419,15 @@ pub async fn poll_auth_device_web(
     )?;
     let claim = auth_device_service::poll_for_browser(
         &state.db,
+        &state.audit_runtime,
         &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
         &body.device_code,
-        &crate::crypto::token::hash_token(&cookie),
-        &browser_ip,
-        browser_user_agent.as_deref(),
+        crate::services::auth_device_service::BrowserSessionInput {
+            cookie_hash: &crate::crypto::token::hash_token(&cookie),
+            ip: &browser_ip,
+            user_agent: browser_user_agent.as_deref(),
+        },
     )
     .await?;
 
@@ -663,6 +668,7 @@ async fn approve_device_grant(
         }
         auth_device_service::approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &state.encryption_keys,
@@ -2130,6 +2136,7 @@ mod tests {
         .expect("initiate");
         auth_device_service::approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &state.encryption_keys,

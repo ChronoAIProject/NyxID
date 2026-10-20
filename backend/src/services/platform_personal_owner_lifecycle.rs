@@ -8,13 +8,16 @@ use mongodb::{
 
 use super::{
     api_key_mutation_service::{map_transaction_error, transaction_result},
+    audit_runtime::AuditRuntime,
     platform_manager_contract::*,
     platform_personal_binding_service::{
         self as bindings, CapturedPersonalStop, PersonalLifecycleEffects,
     },
+    token_service::SessionAudit,
 };
 use crate::{
     errors::{AppError, AppResult},
+    models::audit_outbox::{AuditPrincipal, SystemAuditActor},
     models::{
         platform_bot_runtime_controls::{ExactMachineJob, ExactMachineScope},
         platform_personal_binding::{PersonalActiveTurn, PlatformPersonalBinding},
@@ -97,7 +100,7 @@ fn changed() -> AppError {
 }
 
 // Inactive users cannot acquire new consent: review/confirmation write the same
-// user document. No personal state preserves ordinary standalone MongoDB use.
+// user document. Owners without personal state need only ordinary credential retirement.
 async fn has_personal_state(db: &Database, owner: &str) -> AppResult<bool> {
     for (collection, field) in [
         (
@@ -131,22 +134,14 @@ async fn has_personal_state(db: &Database, owner: &str) -> AppResult<bool> {
 async fn disable_credentials_in_session(
     db: &Database,
     session: &mut ClientSession,
+    runtime: &AuditRuntime,
+    audit: &SessionAudit,
     owner: &str,
 ) -> AppResult<usize> {
-    db.collection::<Document>(crate::models::session::COLLECTION_NAME)
-        .update_many(
-            doc! {"user_id": owner, "revoked": false},
-            doc! {"$set": {"revoked": true, "last_active_at": bson::DateTime::now()}},
-        )
-        .session(&mut *session)
-        .await?;
-    db.collection::<Document>(crate::models::refresh_token::COLLECTION_NAME)
-        .update_many(
-            doc! {"user_id": owner, "revoked": false},
-            doc! {"$set": {"revoked": true}},
-        )
-        .session(&mut *session)
-        .await?;
+    super::admin_user_service::revoke_all_user_sessions_in_session(
+        db, runtime, session, owner, audit,
+    )
+    .await?;
     super::api_key_mutation_service::update_many(
         db,
         doc! {"user_id": owner, "is_active": true},
@@ -181,7 +176,12 @@ async fn disable_credentials_in_session(
 
 /// Retire one snapshot while writing the inactive owner. The final transaction
 /// revokes ordinary credentials before releasing the reactivation barrier.
-async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bool> {
+async fn retire_batch(
+    db: &Database,
+    runtime: &AuditRuntime,
+    owner: &str,
+    deleted: bool,
+) -> AppResult<bool> {
     let users = db.collection::<Document>(crate::models::user::COLLECTION_NAME);
     let Some(user) = users
         .find_one(doc! {"_id": owner, "is_active": false,
@@ -194,10 +194,18 @@ async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bo
     super::platform_setup_service::retire_owner(db, owner, deleted).await?;
 
     if !has_personal_state(db, owner).await? {
-        // Match the pre-personal lifecycle for ordinary accounts on standalone
-        // MongoDB. Their credential helpers do not require transactions.
+        // Preserve the ordinary credential lifecycle without walking personal
+        // bindings. Session revocation still uses its durable audit transaction.
         if !deleted {
-            super::admin_user_service::revoke_all_user_sessions(db, owner).await?;
+            super::admin_user_service::revoke_all_user_sessions(
+                db,
+                runtime,
+                AuditPrincipal::System {
+                    actor: SystemAuditActor::Reconciliation,
+                },
+                owner,
+            )
+            .await?;
             super::api_key_mutation_service::update_many(
                 db,
                 doc! {"user_id": owner, "is_active": true},
@@ -214,69 +222,86 @@ async fn retire_batch(db: &Database, owner: &str, deleted: bool) -> AppResult<bo
         return Ok(completed.matched_count == 1);
     }
 
+    let audit = SessionAudit::new(
+        AuditPrincipal::System {
+            actor: SystemAuditActor::Reconciliation,
+        },
+        owner,
+        "sessions_revoked",
+        owner,
+    );
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
-        .and_run((db, owner, deleted), |session, (db, owner, deleted)| {
-            Box::pin(async move {
-                let result: AppResult<bool> = async {
-                    let Some(current) = db
-                        .collection::<Document>(crate::models::user::COLLECTION_NAME)
-                        .find_one_and_update(
-                            doc! {"_id": *owner, "is_active": false,
-                            "platform_personal_retirement_pending": true},
-                            doc! {"$inc": {"platform_personal_effect_revision": 1_i64}},
-                        )
-                        .session(&mut *session)
-                        .await?
-                    else {
-                        return Ok(true);
-                    };
-                    if current
-                        .get_bool("platform_personal_deleting")
-                        .unwrap_or(false)
-                        && !*deleted
-                    {
-                        return Err(changed());
-                    }
-                    let deleted = *deleted;
-                    let bindings = bindings::retire_owner_batch_in_session(
-                        db,
-                        session,
-                        owner,
-                        deleted,
-                        &LocalEffects,
-                    )
-                    .await?;
-                    let credentials = if deleted {
-                        0
-                    } else {
-                        disable_credentials_in_session(db, session, owner).await?
-                    };
-                    let done = bindings == 0 && credentials == 0;
-                    if done {
-                        db.collection::<Document>(crate::models::user::COLLECTION_NAME)
-                            .update_one(
+        .and_run(
+            (db, runtime, &audit, owner, deleted),
+            |session, (db, runtime, audit, owner, deleted)| {
+                Box::pin(async move {
+                    let result: AppResult<bool> = async {
+                        let Some(current) = db
+                            .collection::<Document>(crate::models::user::COLLECTION_NAME)
+                            .find_one_and_update(
                                 doc! {"_id": *owner, "is_active": false,
                                 "platform_personal_retirement_pending": true},
-                                doc! {"$set": {"platform_personal_retirement_pending": false}},
+                                doc! {"$inc": {"platform_personal_effect_revision": 1_i64}},
                             )
-                            .session(session)
-                            .await?;
+                            .session(&mut *session)
+                            .await?
+                        else {
+                            return Ok(true);
+                        };
+                        if current
+                            .get_bool("platform_personal_deleting")
+                            .unwrap_or(false)
+                            && !*deleted
+                        {
+                            return Err(changed());
+                        }
+                        let deleted = *deleted;
+                        let bindings = bindings::retire_owner_batch_in_session(
+                            db,
+                            session,
+                            owner,
+                            deleted,
+                            &LocalEffects,
+                        )
+                        .await?;
+                        let credentials = if deleted {
+                            0
+                        } else {
+                            disable_credentials_in_session(db, session, runtime, audit, owner)
+                                .await?
+                        };
+                        let done = bindings == 0 && credentials == 0;
+                        if done {
+                            db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+                                .update_one(
+                                    doc! {"_id": *owner, "is_active": false,
+                                    "platform_personal_retirement_pending": true},
+                                    doc! {"$set": {"platform_personal_retirement_pending": false}},
+                                )
+                                .session(session)
+                                .await?;
+                        }
+                        Ok(done)
                     }
-                    Ok(done)
-                }
-                .await;
-                transaction_result(result)
-            })
-        })
+                    .await;
+                    transaction_result(result)
+                })
+            },
+        )
         .await
         .map_err(map_transaction_error)
 }
 
 /// Request paths finish every batch before activation or destructive cascade.
 /// The deleting marker is monotonic and is never cleared by disable/recovery.
-pub async fn retire(db: &Database, owner: &str, deleted: bool) -> AppResult<()> {
+pub async fn retire(
+    db: &Database,
+    runtime: &AuditRuntime,
+    owner: &str,
+    deleted: bool,
+) -> AppResult<()> {
     let users = db.collection::<Document>(crate::models::user::COLLECTION_NAME);
     if users
         .find_one(doc! {"_id": owner, "is_active": false})
@@ -295,14 +320,18 @@ pub async fn retire(db: &Database, owner: &str, deleted: bool) -> AppResult<()> 
             "$inc": {"platform_personal_effect_revision": 1_i64}},
         )
         .await?;
-    while !retire_batch(db, owner, deleted).await? {}
+    while !retire_batch(db, runtime, owner, deleted).await? {}
     Ok(())
 }
 
 /// Visit at most 32 inactive pending owners, one local retirement batch each.
 /// Never activates an account or resumes deletion. Failed owners remain pending
 /// and move behind other candidates so one failure cannot starve the sweep.
-pub async fn recover_pending(db: &Database, limit: usize) -> AppResult<usize> {
+pub async fn recover_pending(
+    db: &Database,
+    runtime: &AuditRuntime,
+    limit: usize,
+) -> AppResult<usize> {
     if limit == 0 {
         return Ok(0);
     }
@@ -326,7 +355,7 @@ pub async fn recover_pending(db: &Database, limit: usize) -> AppResult<usize> {
                 doc! {"$set": {"platform_personal_retirement_attempted_at": bson::DateTime::now()}},
             )
             .await?;
-        if let Err(error) = retire_batch(db, owner, false).await {
+        if let Err(error) = retire_batch(db, runtime, owner, false).await {
             tracing::warn!(user_id = owner, error = %error, "Personal account retirement remains pending");
         }
     }
@@ -347,12 +376,24 @@ mod tests {
         .await
         .unwrap();
         let admin = uuid::Uuid::new_v4().to_string();
-        super::super::admin_user_service::set_user_active(&db, &admin, &owner, false)
-            .await
-            .unwrap();
-        super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
-            .await
-            .unwrap();
+        super::super::admin_user_service::set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin,
+            &owner,
+            false,
+        )
+        .await
+        .unwrap();
+        super::super::admin_user_service::set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin,
+            &owner,
+            true,
+        )
+        .await
+        .unwrap();
         let retired = db
             .collection::<PlatformPersonalBinding>(
                 crate::models::platform_personal_binding::COLLECTION_NAME,
@@ -489,14 +530,32 @@ mod tests {
         db.collection::<Document>(crate::models::platform_link_intent::CHALLENGES)
             .insert_one(doc! {"_id": "retirement-challenge", "reviewed_user_id": &owner, "state": "awaiting_chat_confirmation"}).await.unwrap();
         mark_pending(&db, &owner, false).await;
-        assert_eq!(recover_pending(&db, 0).await.unwrap(), 0);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                0
+            )
+            .await
+            .unwrap(),
+            0
+        );
         assert_eq!(
             rows.count_documents(doc! {"state": "active"})
                 .await
                 .unwrap(),
             51
         );
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            1
+        );
         assert_eq!(
             rows.count_documents(doc! {"state": "active"})
                 .await
@@ -521,14 +580,32 @@ mod tests {
                 .unwrap();
             assert_eq!(proof.get_str("state").unwrap(), "cancelled");
         }
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            1
+        );
         assert_eq!(
             rows.count_documents(doc! {"state": "active"})
                 .await
                 .unwrap(),
             0
         );
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            1
+        );
         let user = owner_row(&db, &owner).await;
         assert!(
             !user
@@ -536,7 +613,16 @@ mod tests {
                 .unwrap()
         );
         assert!(!user.get_bool("is_active").unwrap());
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 0);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            0
+        );
         db.drop().await.unwrap();
     }
 
@@ -571,7 +657,16 @@ mod tests {
             .await
             .unwrap();
         mark_pending(&db, &owner, false).await;
-        assert!(retire_batch(&db, &owner, false).await.is_err());
+        assert!(
+            retire_batch(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                &owner,
+                false
+            )
+            .await
+            .is_err()
+        );
         let saved = db
             .collection::<PlatformPersonalBinding>(
                 crate::models::platform_personal_binding::COLLECTION_NAME,
@@ -626,18 +721,30 @@ mod tests {
         assert_eq!(key.get_i64("state_version").unwrap(), 1);
         let admin = uuid::Uuid::new_v4().to_string();
         assert!(
-            super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
-                .await
-                .is_err()
+            super::super::admin_user_service::set_user_active(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                &admin,
+                &owner,
+                true
+            )
+            .await
+            .is_err()
         );
         assert!(!owner_row(&db, &owner).await.get_bool("is_active").unwrap());
         credentials
             .delete_one(doc! {"_id": "broken-credential"})
             .await
             .unwrap();
-        super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
-            .await
-            .unwrap();
+        super::super::admin_user_service::set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin,
+            &owner,
+            true,
+        )
+        .await
+        .unwrap();
         let stop = db
             .collection::<PlatformPersonalStopEffect>(STOP_EFFECTS)
             .find_one(doc! {})
@@ -691,12 +798,24 @@ mod tests {
             .unwrap()
             .unwrap();
         let admin = uuid::Uuid::new_v4().to_string();
-        super::super::admin_user_service::set_user_active(&db, &admin, &owner, false)
-            .await
-            .unwrap();
-        super::super::admin_user_service::set_user_active(&db, &admin, &owner, true)
-            .await
-            .unwrap();
+        super::super::admin_user_service::set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin,
+            &owner,
+            false,
+        )
+        .await
+        .unwrap();
+        super::super::admin_user_service::set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin,
+            &owner,
+            true,
+        )
+        .await
+        .unwrap();
         assert!(
             bindings::fence_binding_in_session(&db, &mut stale, &binding, 1)
                 .await
@@ -708,8 +827,26 @@ mod tests {
             .insert_one(doc! {"_id": "new-session", "user_id": &owner, "revoked": false})
             .await
             .unwrap();
-        assert_eq!(recover_pending(&db, 32).await.unwrap(), 0);
-        assert!(retire_batch(&db, &owner, false).await.unwrap());
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                32
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            retire_batch(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                &owner,
+                false
+            )
+            .await
+            .unwrap()
+        );
         let session = db
             .collection::<Document>(crate::models::session::COLLECTION_NAME)
             .find_one(doc! {"_id": "new-session"})
@@ -728,14 +865,39 @@ mod tests {
         let (db, update, owner) = bindings::tests::fixture("personal_retirement_delete").await;
         let binding = insert_running_binding(&db, &update, &owner).await;
         mark_pending(&db, &owner, true).await;
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
-        assert_eq!(recover_pending(&db, 1).await.unwrap(), 1);
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            recover_pending(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                1
+            )
+            .await
+            .unwrap(),
+            1
+        );
         let user = owner_row(&db, &owner).await;
         assert!(user.get_bool("platform_personal_deleting").unwrap());
         assert!(!user.get_bool("is_active").unwrap());
         let admin = uuid::Uuid::new_v4().to_string();
         assert!(matches!(
-            super::super::admin_user_service::set_user_active(&db, &admin, &owner, true).await,
+            super::super::admin_user_service::set_user_active(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                &admin,
+                &owner,
+                true
+            )
+            .await,
             Err(AppError::Conflict(_))
         ));
         let retired = db
@@ -752,6 +914,7 @@ mod tests {
         );
         super::super::admin_user_service::delete_current_user_cascade(
             &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
             &owner,
             super::super::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         )

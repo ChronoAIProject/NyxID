@@ -2,8 +2,14 @@ use chrono::Utc;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
+use super::{
+    audit_outbox_service,
+    audit_runtime::{AuditRuntime, policy::AuditTier, transaction},
+    token_service::SessionAudit,
+};
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
+use crate::models::audit_outbox::{AuditOwner, AuditPrincipal};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::services::{api_key_mutation_service as key_mutations, role_service};
@@ -361,6 +367,7 @@ pub async fn set_platform_role(
 /// Side effect: when disabling, revokes all sessions.
 pub async fn set_user_active(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
     admin_user_id: &str,
     target_user_id: &str,
     is_active: bool,
@@ -378,12 +385,14 @@ pub async fn set_user_active(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if is_active && !target.is_active {
-        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
+        super::platform_personal_owner_lifecycle::retire(db, runtime, target_user_id, false)
+            .await?;
     }
     apply_user_security_state(db, target_user_id, is_active, false, target.is_active).await?;
 
     if !is_active {
-        super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
+        super::platform_personal_owner_lifecycle::retire(db, runtime, target_user_id, false)
+            .await?;
     }
 
     Ok(())
@@ -539,6 +548,8 @@ async fn apply_user_security_state_with_deletion_policy(
 /// password (social login only).
 pub async fn force_password_reset(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    principal: AuditPrincipal,
     user_id: &str,
 ) -> AppResult<Option<String>> {
     let user = db
@@ -556,7 +567,7 @@ pub async fn force_password_reset(
     let token = crate::services::auth_service::initiate_password_reset(db, &user.email).await?;
 
     // Revoke all sessions to force re-authentication
-    revoke_all_user_sessions(db, user_id).await?;
+    revoke_all_user_sessions(db, runtime, principal, user_id).await?;
 
     Ok(token)
 }
@@ -567,6 +578,7 @@ pub async fn force_password_reset(
 /// Audit log entries are retained (orphaned reference).
 pub async fn delete_user_cascade(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
     admin_user_id: &str,
     target_user_id: &str,
 ) -> AppResult<()> {
@@ -576,7 +588,7 @@ pub async fn delete_user_cascade(
         ));
     }
 
-    delete_user_cascade_internal(db, target_user_id, None).await
+    delete_user_cascade_internal(db, runtime, target_user_id, None).await
 }
 
 /// Delete the currently authenticated user and cascade-delete all related documents.
@@ -597,11 +609,12 @@ pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
 
 pub async fn delete_current_user_cascade(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
     user_id: &str,
     deletion_policy_version: &str,
 ) -> AppResult<()> {
     validate_account_deletion_policy(deletion_policy_version)?;
-    delete_user_cascade_internal(db, user_id, Some(deletion_policy_version)).await
+    delete_user_cascade_internal(db, runtime, user_id, Some(deletion_policy_version)).await
 }
 
 async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
@@ -637,6 +650,7 @@ async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppR
 
 async fn delete_user_cascade_internal(
     db: &mongodb::Database,
+    runtime: &AuditRuntime,
     target_user_id: &str,
     owner_deletion_policy: Option<&str>,
 ) -> AppResult<()> {
@@ -678,7 +692,7 @@ async fn delete_user_cascade_internal(
     )
     .await?;
 
-    super::platform_personal_owner_lifecycle::retire(db, target_user_id, true).await?;
+    super::platform_personal_owner_lifecycle::retire(db, runtime, target_user_id, true).await?;
 
     // Org bots the user linked to their NyxBot keep an org-owned route and
     // route key; remove them so the org's bot is free for its admins.
@@ -899,29 +913,89 @@ pub async fn list_user_sessions(db: &mongodb::Database, user_id: &str) -> AppRes
 /// Revoke all non-revoked sessions and refresh tokens for a user.
 ///
 /// Returns the number of sessions revoked.
-pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> AppResult<u64> {
-    let now = bson::DateTime::from_chrono(Utc::now());
+pub async fn revoke_all_user_sessions(
+    db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    principal: AuditPrincipal,
+    user_id: &str,
+) -> AppResult<u64> {
+    let audit = SessionAudit::new(principal, user_id, "sessions_revoked", user_id);
+    let context = (db, runtime, user_id, &audit);
+    transaction::run(db, &context, |session, (db, runtime, owner, audit)| {
+        Box::pin(async move {
+            revoke_all_user_sessions_in_session(db, runtime, session, owner, audit).await
+        })
+    })
+    .await
+}
 
-    // Revoke active sessions
-    let result = db
+/// Join the caller's complete account/retirement transaction.
+/// The prepared identity belongs to the caller; the affected owner is loaded here.
+pub(super) async fn revoke_all_user_sessions_in_session(
+    db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    session: &mut mongodb::ClientSession,
+    user_id: &str,
+    audit: &SessionAudit,
+) -> AppResult<u64> {
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": user_id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    // Session creation also writes this row, so a stale issuance conflicts.
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! {"_id": &owner.id},
+            doc! {"$set": {"updated_at": bson::DateTime::now()}},
+        )
+        .session(&mut *session)
+        .await?;
+    let sessions = db
         .collection::<Session>(SESSIONS)
         .update_many(
-            doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true, "last_active_at": &now } },
+            doc! {"user_id": &owner.id, "revoked": false},
+            doc! {"$set": {"revoked": true, "last_active_at": bson::DateTime::now()}},
         )
+        .session(&mut *session)
         .await?;
-
-    let revoked_count = result.modified_count;
-
-    // Revoke associated refresh tokens
-    db.collection::<bson::Document>(REFRESH_TOKENS)
+    let tokens = db
+        .collection::<bson::Document>(REFRESH_TOKENS)
         .update_many(
-            doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true } },
+            doc! {"user_id": &owner.id, "revoked": false},
+            doc! {"$set": {"revoked": true}},
+        )
+        .session(&mut *session)
+        .await?;
+    if sessions.modified_count != 0 || tokens.modified_count != 0 {
+        let event = audit_outbox_service::AuditEvent {
+            owner: if owner.user_type.is_org() {
+                AuditOwner::Org {
+                    id: owner.id.clone(),
+                }
+            } else {
+                AuditOwner::Person {
+                    id: owner.id.clone(),
+                }
+            },
+            target_id: Some(owner.id),
+            ..audit.event.clone()
+        }
+        .with_detail(audit_outbox_service::session_revocation_count(
+            sessions.modified_count,
+        ));
+        audit_outbox_service::enqueue_admitted_in_session(
+            db,
+            session,
+            runtime,
+            AuditTier::Narrowing,
+            &audit.event_id,
+            &event,
         )
         .await?;
-
-    Ok(revoked_count)
+    }
+    Ok(sessions.modified_count)
 }
 
 #[cfg(test)]
@@ -931,6 +1005,111 @@ mod tests {
         COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, Role,
     };
     use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn w8_id_revoke_all_joins_owner_transaction_and_keeps_admin_attribution() {
+        use crate::models::audit_outbox::{PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent};
+        let db = connect_transaction_test_database("w8_id_revoke_all").await;
+        let state = test_app_state(db.clone());
+        let admin = Uuid::new_v4().to_string();
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let issued = super::super::token_service::create_session_and_issue_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &owner,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let principal = AuditPrincipal::Person { id: admin.clone() };
+        let audit = SessionAudit::new(principal.clone(), &owner, "sessions_revoked", &owner);
+        let context = (&db, &state.audit_runtime, &owner, &audit);
+        let aborted: AppResult<()> =
+            transaction::run(&db, &context, |session, (db, runtime, owner, audit)| {
+                Box::pin(async move {
+                    assert_eq!(
+                        revoke_all_user_sessions_in_session(db, runtime, session, owner, audit)
+                            .await?,
+                        1
+                    );
+                    Err(AppError::Conflict("abort retirement".into()))
+                })
+            })
+            .await;
+        assert!(matches!(aborted, Err(AppError::Conflict(_))));
+        assert!(
+            !db.collection::<Session>(SESSIONS)
+                .find_one(doc! {"_id":&issued.session_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(REFRESH_TOKENS)
+                .count_documents(doc! {"revoked":true})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING)
+                .count_documents(doc! {"event.action":"sessions_revoked"})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            revoke_all_user_sessions(&db, &state.audit_runtime, principal, &owner)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(REFRESH_TOKENS)
+                .count_documents(doc! {"revoked":true})
+                .await
+                .unwrap(),
+            1
+        );
+        let event = db
+            .collection::<PendingAuditEvent>(PENDING)
+            .find_one(doc! {"event.action":"sessions_revoked"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event.principal, AuditPrincipal::Person { id: admin });
+        assert_eq!(event.event.owner, AuditOwner::Person { id: owner.clone() });
+        assert_eq!(
+            event.event.detail,
+            Some(
+                crate::models::audit_outbox::AuditDetail::SessionRevocationCount {
+                    count: 1,
+                    saturated: false,
+                }
+            )
+        );
+        assert_eq!(
+            revoke_all_user_sessions(&db, &state.audit_runtime, event.event.principal, &owner)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING)
+                .count_documents(doc! {"event.action":"sessions_revoked"})
+                .await
+                .unwrap(),
+            1
+        );
+    }
 
     async fn seed_platform_roles(db: &mongodb::Database) -> (String, String) {
         let now = Utc::now();
@@ -1210,12 +1389,24 @@ mod tests {
             })
             .await
             .unwrap();
-        set_user_active(&db, &Uuid::new_v4().to_string(), &user, false)
-            .await
-            .unwrap();
-        set_user_active(&db, &Uuid::new_v4().to_string(), &user, true)
-            .await
-            .unwrap();
+        set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &Uuid::new_v4().to_string(),
+            &user,
+            false,
+        )
+        .await
+        .unwrap();
+        set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &Uuid::new_v4().to_string(),
+            &user,
+            true,
+        )
+        .await
+        .unwrap();
         let source = db
             .collection::<bson::Document>(USERS)
             .find_one(doc! {"_id":&user})
@@ -1382,9 +1573,15 @@ mod tests {
             requested.get_datetime("deletion_requested_at").unwrap()
         );
         assert!(
-            set_user_active(&db, &Uuid::new_v4().to_string(), &user, true)
-                .await
-                .is_err()
+            set_user_active(
+                &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+                &Uuid::new_v4().to_string(),
+                &user,
+                true
+            )
+            .await
+            .is_err()
         );
         apply_user_security_state_with_deletion_policy(
             &db,
@@ -1473,9 +1670,15 @@ mod tests {
         .await
         .unwrap();
 
-        set_user_active(&db, &admin_id, &target_id, false)
-            .await
-            .unwrap();
+        set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin_id,
+            &target_id,
+            false,
+        )
+        .await
+        .unwrap();
 
         let user = db
             .collection::<User>(USERS)
@@ -1516,7 +1719,14 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "self-disable@example.com").await;
 
-        let result = set_user_active(&db, &user_id, &user_id, false).await;
+        let result = set_user_active(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &user_id,
+            &user_id,
+            false,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1569,9 +1779,14 @@ mod tests {
             .await
             .unwrap();
 
-        delete_user_cascade(&db, &admin_id, &target_id)
-            .await
-            .unwrap();
+        delete_user_cascade(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin_id,
+            &target_id,
+        )
+        .await
+        .unwrap();
 
         let user = db
             .collection::<User>(USERS)
@@ -1617,7 +1832,13 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "self-del@example.com").await;
 
-        let result = delete_user_cascade(&db, &user_id, &user_id).await;
+        let result = delete_user_cascade(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &user_id,
+            &user_id,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1629,7 +1850,13 @@ mod tests {
         let admin_id = Uuid::new_v4().to_string();
         seed_person(&db, &admin_id, "admin-nf@example.com").await;
 
-        let result = delete_user_cascade(&db, &admin_id, &Uuid::new_v4().to_string()).await;
+        let result = delete_user_cascade(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            &admin_id,
+            &Uuid::new_v4().to_string(),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1657,7 +1884,16 @@ mod tests {
             .await
             .unwrap();
 
-        force_password_reset(&db, &user_id).await.unwrap();
+        force_password_reset(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            AuditPrincipal::System {
+                actor: crate::models::audit_outbox::SystemAuditActor::Maintenance,
+            },
+            &user_id,
+        )
+        .await
+        .unwrap();
 
         let sess = db
             .collection::<crate::models::session::Session>(SESSIONS)
@@ -1707,7 +1943,15 @@ mod tests {
             .await
             .unwrap();
 
-        let result = force_password_reset(&db, &user_id).await;
+        let result = force_password_reset(
+            &db,
+            &crate::test_utils::test_app_state(db.clone()).audit_runtime,
+            AuditPrincipal::System {
+                actor: crate::models::audit_outbox::SystemAuditActor::Maintenance,
+            },
+            &user_id,
+        )
+        .await;
         assert!(result.is_err());
     }
 

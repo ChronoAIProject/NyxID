@@ -155,6 +155,7 @@ pub async fn redeem(
 ) -> AppResult<Json<AuthDevicePollResponse>> {
     let delivery = codes::redeem(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &state.encryption_keys,
@@ -246,6 +247,7 @@ pub async fn revoke(
     super::login_client_context::require_first_party_human(&user)?;
     codes::revoke(
         &state.db,
+        &state.audit_runtime,
         &user.user_id.to_string(),
         &id,
         Some(&state.mcp_sessions),

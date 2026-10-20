@@ -331,55 +331,66 @@ where
 #[tracing::instrument(name = "auth_device.poll.outcome", skip_all, fields(row_id, outcome))]
 pub async fn poll_and_claim(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     hmac_key: &[u8],
     device_code: &str,
 ) -> AppResult<PollClaim> {
-    poll_internal(db, hmac_key, device_code, None, true).await
+    poll_internal(db, runtime, hmac_key, device_code, None, true).await
 }
 
 pub async fn poll_and_prepare(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     device_code: &str,
 ) -> AppResult<PollClaim> {
-    poll_internal(db, hmac_key, device_code, Some(encryption), true).await
+    poll_internal(db, runtime, hmac_key, device_code, Some(encryption), true).await
+}
+
+pub struct BrowserSessionInput<'a> {
+    pub cookie_hash: &'a str,
+    pub ip: &'a str,
+    pub user_agent: Option<&'a str>,
 }
 
 /// Convert an approved account grant to a browser session in the same commit
 /// that consumes delivery. Cookie headers must be prepared before this call.
 pub async fn poll_for_browser(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     device_code: &str,
-    cookie_hash: &str,
-    ip: &str,
-    user_agent: Option<&str>,
+    browser: BrowserSessionInput<'_>,
 ) -> AppResult<PollClaim> {
-    use crate::models::{
-        refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken},
-        session::{COLLECTION_NAME as SESSIONS, Session},
-    };
-    use crate::services::api_key_mutation_service as mutations;
-    let claim = poll_internal(db, hmac_key, device_code, Some(encryption), false).await?;
+    let BrowserSessionInput {
+        cookie_hash,
+        ip,
+        user_agent,
+    } = browser;
+    use crate::models::audit_outbox::AuditPrincipal;
+    use crate::services::audit_runtime::transaction;
+    let claim = poll_internal(db, runtime, hmac_key, device_code, Some(encryption), false).await?;
     let PollClaim::Account(mut delivery) = claim else {
         return Ok(claim);
     };
-    let now = Utc::now();
-    let browser = Session {
-        id: Uuid::new_v4().to_string(),
-        user_id: delivery.user_id.clone(),
-        token_hash: cookie_hash.to_owned(),
-        ip_address: Some(ip.to_owned()),
-        user_agent: user_agent.map(str::to_owned),
-        expires_at: now + Duration::seconds(token_service::SESSION_TTL_SECS),
-        revoked: false,
-        created_at: now,
-        last_active_at: now,
-    };
-    let browser_id = browser.id.clone();
+    let browser = token_service::prepare_browser_session_with_hash(
+        &delivery.user_id,
+        cookie_hash,
+        Some(ip),
+        user_agent,
+    )?;
     let original_id = delivery.session_id.clone();
+    let principal = AuditPrincipal::Person {
+        id: delivery.user_id.clone(),
+    };
+    let revoke = token_service::SessionAudit::new(
+        principal.clone(),
+        &delivery.user_id,
+        "session_revoked",
+        &original_id,
+    );
     let device_hash = hmac_hex(hmac_key, device_code.as_bytes());
     let codes = collection_for_device_code(db, device_code);
     let request_id = codes
@@ -387,40 +398,51 @@ pub async fn poll_for_browser(
         .await?
         .ok_or(AppError::AuthDeviceCodeNotFound)?
         .id;
-    let db_owned = db.clone();
-    let transaction_codes = codes.clone();
-    let mut transaction = db.client().start_session().await?;
-    let result = transaction.start_transaction().and_run2(async move |session| {
-        let db = &db_owned;
-        let result: AppResult<()> = async {
-            let now = Utc::now();
-            let claimed = transaction_codes.find_one_and_update(doc! {
-                "device_code_hmac": &device_hash, "status": "approved", "agent_key_grant": Bson::Null,
-                "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-            }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
-                .session(&mut *session).await?;
-            if claimed.is_none() { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
-            db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &original_id},
-                doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
-            db.collection::<RefreshToken>(REFRESH_TOKENS).update_many(doc! {"session_id": &original_id},
-                doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
-            db.collection::<Session>(SESSIONS).insert_one(&browser).session(&mut *session).await?;
-            Ok(())
-        }.await;
-        mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error);
+    let context = (
+        db,
+        runtime,
+        &codes,
+        &device_hash,
+        &original_id,
+        &principal,
+        &revoke,
+        &browser,
+    );
+    let result = transaction::run(
+        db,
+        &context,
+        |session, (db, runtime, codes, device_hash, original_id, principal, revoke, browser)| {
+            Box::pin(async move {
+                let now = Utc::now();
+                let claimed = codes.find_one_and_update(doc! {
+                        "device_code_hmac": *device_hash, "status": "approved", "agent_key_grant": Bson::Null,
+                        "approved_user_id": browser.user_id(), "approved_session_id": *original_id,
+                        "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+                    }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
+                        "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
+                        "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
+                        .session(&mut *session).await?;
+                if claimed.is_none() {
+                    return Err(AppError::AuthDeviceCodeAlreadyDelivered);
+                }
+                token_service::revoke_session_in_session(db, runtime, session, original_id, principal, revoke)
+                    .await?;
+                token_service::insert_prepared_browser_session(db, runtime, browser, session).await
+            })
+        },
+    )
+    .await;
     if matches!(result, Err(AppError::AuthDeviceCodeAlreadyDelivered)) {
         return current_poll_outcome(&codes, &request_id).await;
     }
     result?;
-    delivery.session_id = browser_id;
+    delivery.session_id = browser.issued.session_id;
     Ok(PollClaim::Account(delivery))
 }
 
 async fn poll_internal(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     hmac_key: &[u8],
     device_code: &str,
     encryption: Option<&EncryptionKeys>,
@@ -446,7 +468,7 @@ async fn poll_internal(
             AuthDeviceCodeStatus::Delivered | AuthDeviceCodeStatus::Denied
         )
     {
-        grants::expire(db, &collection, &row).await?;
+        grants::expire(db, runtime, &collection, &row).await?;
         record_poll_outcome(&row.id, "expired");
         return Ok(PollClaim::Expired);
     }
@@ -542,6 +564,7 @@ pub async fn preview(
 )]
 pub async fn approve(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
     encryption_keys: &EncryptionKeys,
@@ -568,7 +591,6 @@ pub async fn approve(
             .await;
     }
 
-    let mut transaction = db.client().start_session().await?;
     let user_agent = approve_session_user_agent(input.approver_user_agent.as_deref());
     let mut prepared = token_service::prepare_session_tokens(
         db,
@@ -587,69 +609,98 @@ pub async fn approve(
         .approver_ip
         .as_deref()
         .map(|ip| hmac_hex(hmac_key, ip.as_bytes()));
-    let session_id = {
-        let db_owned = db.clone();
-        let input = input.clone();
-        let row = row.clone();
-        let collection = collection.clone();
-        transaction.start_transaction().and_run2(async move |session| {
-    let db = &db_owned;
-    let operation: AppResult<String> = async {
-    let claimed = collection.find_one_and_update(
-        doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
-        doc! {"$set": {"status": "approved"}},
-    ).session(&mut *session).await?;
-    if claimed.is_none() {
-        return Err(current_decision_error(&collection, &row.id).await?);
-    }
-    token_service::insert_prepared_session(db, &prepared, &mut *session).await?;
-    let tokens = &prepared.tokens;
-    tracing::Span::current().record("session_id", tokens.session_id.as_str());
-    let session_id = tokens.session_id.clone();
+    let context = (
+        db,
+        runtime,
+        &input,
+        &row,
+        &collection,
+        &prepared,
+        &encrypted_access,
+        &encrypted_refresh,
+        &approver_ip_hmac,
+    );
+    let session_id = super::audit_runtime::transaction::run(db, &context,
+        |session, (db, runtime, input, row, collection, prepared, encrypted_access, encrypted_refresh, approver_ip_hmac)| {
+            Box::pin(async move {
+                let (
+                    db,
+                    runtime,
+                    input,
+                    row,
+                    collection,
+                    prepared,
+                    encrypted_access,
+                    encrypted_refresh,
+                    approver_ip_hmac,
+                ) = (
+                    *db,
+                    *runtime,
+                    *input,
+                    *row,
+                    *collection,
+                    *prepared,
+                    *encrypted_access,
+                    *encrypted_refresh,
+                    *approver_ip_hmac,
+                );
+                let claimed = collection.find_one_and_update(
+                    doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
+                    doc! {"$set": {"status": "approved"}},
+                ).session(&mut *session).await?;
+                if claimed.is_none() {
+                    return Err(current_decision_error(collection, &row.id).await?);
+                }
+                token_service::insert_prepared_session(db, runtime, prepared, &mut *session).await?;
+                let tokens = &prepared.tokens;
+                tracing::Span::current().record("session_id", tokens.session_id.as_str());
+                let session_id = tokens.session_id.clone();
 
-    let approved_status = bson::to_bson(&AuthDeviceCodeStatus::Approved)
-        .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
-    let approved_at = Utc::now();
-    if row.expires_at <= approved_at { return Err(AppError::AuthDeviceCodeExpired); }
-    let delivery_expires_at = approved_at + Duration::seconds(60);
-    let mut set_doc = doc! {
-        "status": approved_status,
-        "approved_user_id": &input.user_id,
-        "approved_session_id": &tokens.session_id,
-        "approved_at": bson::DateTime::from_chrono(approved_at),
-        "delivery_access_token_encrypted": Bson::Binary(Binary {
-            subtype: BinarySubtype::Generic,
-            bytes: encrypted_access.clone(),
-        }),
-        "delivery_refresh_token_encrypted": Bson::Binary(Binary {
-            subtype: BinarySubtype::Generic,
-            bytes: encrypted_refresh.clone(),
-        }),
-        "delivery_access_token_expires_in": tokens.access_expires_in,
-        "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
-    };
-    match &approver_ip_hmac {
-        Some(ip_hmac) => {
-            set_doc.insert("approver_ip_hmac", ip_hmac);
-        }
-        None => {
-            set_doc.insert("approver_ip_hmac", Bson::Null);
-        }
-    }
+                let approved_status = bson::to_bson(&AuthDeviceCodeStatus::Approved)
+                    .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
+                let approved_at = Utc::now();
+                if row.expires_at <= approved_at {
+                    return Err(AppError::AuthDeviceCodeExpired);
+                }
+                let delivery_expires_at = approved_at + Duration::seconds(60);
+                let mut set_doc = doc! {
+                    "status": approved_status,
+                    "approved_user_id": &input.user_id,
+                    "approved_session_id": &tokens.session_id,
+                    "approved_at": bson::DateTime::from_chrono(approved_at),
+                    "delivery_access_token_encrypted": Bson::Binary(Binary {
+                        subtype: BinarySubtype::Generic,
+                        bytes: encrypted_access.clone(),
+                    }),
+                    "delivery_refresh_token_encrypted": Bson::Binary(Binary {
+                        subtype: BinarySubtype::Generic,
+                        bytes: encrypted_refresh.clone(),
+                    }),
+                    "delivery_access_token_expires_in": tokens.access_expires_in,
+                    "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
+                };
+                match approver_ip_hmac {
+                    Some(ip_hmac) => {
+                        set_doc.insert("approver_ip_hmac", ip_hmac);
+                    }
+                    None => {
+                        set_doc.insert("approver_ip_hmac", Bson::Null);
+                    }
+                }
 
-    collection
-        .find_one_and_update(
-            doc! { "_id": &row.id, "status": "approved" },
-            doc! { "$set": set_doc },
-        )
-        .return_document(ReturnDocument::After)
-        .session(&mut *session)
-        .await?;
-    Ok(session_id)
-    }.await;
-    crate::services::api_key_mutation_service::transaction_result(operation)
-    }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?
-    };
+                collection
+                    .find_one_and_update(
+                        doc! { "_id": &row.id, "status": "approved" },
+                        doc! { "$set": set_doc },
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?;
+                Ok(session_id)
+            })
+        },
+    )
+    .await?;
 
     audit_service::log_async(
         db.clone(),
@@ -868,16 +919,6 @@ fn approve_session_user_agent(approver_user_agent: Option<&str>) -> String {
     match approver_user_agent {
         Some(user_agent) if user_agent.starts_with("nyxid-cli/") => user_agent.to_string(),
         _ => "nyxid-cli (device-code)".to_string(),
-    }
-}
-
-async fn cleanup_issued_session(db: &Database, session_id: &str) {
-    if let Err(error) = token_service::revoke_session(db, session_id, None).await {
-        tracing::error!(
-            session_id = %session_id,
-            error = %error,
-            "failed to revoke auth-device session after approve failure"
-        );
     }
 }
 
@@ -1891,6 +1932,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_deny_race").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -1909,6 +1951,7 @@ mod tests {
         let (approve_result, deny_result) = tokio::join!(
             approve(
                 &db,
+                &audit_runtime,
                 &config,
                 &jwt_keys,
                 &encryption_keys,
@@ -1974,6 +2017,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_happy").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2004,6 +2048,7 @@ mod tests {
 
         approve(
             &db,
+            &audit_runtime,
             &config,
             &jwt_keys,
             &encryption_keys,
@@ -2102,6 +2147,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_wrong_code").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2119,6 +2165,7 @@ mod tests {
 
         let result = approve(
             &db,
+            &audit_runtime,
             &config,
             &jwt_keys,
             &encryption_keys,
@@ -2144,6 +2191,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_already_approved").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2161,6 +2209,7 @@ mod tests {
 
         let result = approve(
             &db,
+            &audit_runtime,
             &config,
             &jwt_keys,
             &encryption_keys,
@@ -2192,6 +2241,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_expired").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2209,6 +2259,7 @@ mod tests {
 
         let result = approve(
             &db,
+            &audit_runtime,
             &config,
             &jwt_keys,
             &encryption_keys,
@@ -2247,6 +2298,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_approve_race_rollback").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2271,6 +2323,7 @@ mod tests {
         let (left, right) = tokio::join!(
             approve(
                 &db,
+                &audit_runtime,
                 &config,
                 &jwt_keys,
                 &encryption_keys,
@@ -2279,6 +2332,7 @@ mod tests {
             ),
             approve(
                 &db,
+                &audit_runtime,
                 &config,
                 &jwt_keys,
                 &encryption_keys,
@@ -2343,6 +2397,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_slow_down").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2351,13 +2406,13 @@ mod tests {
             .expect("initiate");
 
         assert_eq!(
-            poll_and_claim(&db, TEST_HMAC_KEY, &output.device_code)
+            poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, &output.device_code)
                 .await
                 .expect("first poll"),
             PollClaim::Pending
         );
         assert_eq!(
-            poll_and_claim(&db, TEST_HMAC_KEY, &output.device_code)
+            poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, &output.device_code)
                 .await
                 .expect("second poll"),
             PollClaim::SlowDown
@@ -2378,6 +2433,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_expired").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2389,7 +2445,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            poll_and_claim(&db, TEST_HMAC_KEY, "device-code")
+            poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, "device-code")
                 .await
                 .expect("poll"),
             PollClaim::Expired
@@ -2407,6 +2463,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_concurrent_claim").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2418,8 +2475,8 @@ mod tests {
         .await;
 
         let (left, right) = tokio::join!(
-            poll_and_claim(&db, TEST_HMAC_KEY, "device-code"),
-            poll_and_claim(&db, TEST_HMAC_KEY, "device-code")
+            poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, "device-code"),
+            poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, "device-code")
         );
         let outcomes = [left.expect("left poll"), right.expect("right poll")];
 
@@ -2441,6 +2498,7 @@ mod tests {
         let Some(db) = connect_test_database("auth_device_claim_unsets_ciphertext").await else {
             return;
         };
+        let audit_runtime = crate::test_utils::test_app_state(db.clone()).audit_runtime;
         crate::db::ensure_indexes(&db)
             .await
             .expect("ensure indexes");
@@ -2451,7 +2509,7 @@ mod tests {
         )
         .await;
 
-        let claim = poll_and_claim(&db, TEST_HMAC_KEY, "device-code")
+        let claim = poll_and_claim(&db, &audit_runtime, TEST_HMAC_KEY, "device-code")
             .await
             .expect("poll");
         assert_eq!(

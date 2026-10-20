@@ -149,61 +149,85 @@ pub async fn identify(
 
 pub async fn verify(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     row: &LoginApproval,
     mfa_verified: bool,
     ip: &str,
     user_agent: Option<&str>,
 ) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
-    verify_identity(db, row, mfa_verified, ip, user_agent, None).await
+    verify_identity(db, runtime, row, mfa_verified, ip, user_agent, None).await
 }
 
 pub async fn verify_app(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     row: &LoginApproval,
     request: &AuthDeviceCode,
     ip: &str,
     user_agent: Option<&str>,
 ) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
-    verify_identity(db, row, true, ip, user_agent, Some(request.id.clone())).await
+    verify_identity(
+        db,
+        runtime,
+        row,
+        true,
+        ip,
+        user_agent,
+        Some(request.id.clone()),
+    )
+    .await
 }
 
 async fn verify_identity(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     row: &LoginApproval,
     mfa_verified: bool,
     ip: &str,
     user_agent: Option<&str>,
     app_request_id: Option<String>,
 ) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
-    let db = db.clone();
-    let row = row.clone();
-    let ip = ip.to_owned();
-    let user_agent = user_agent.map(str::to_owned);
-    let mut transaction = db.client().start_session().await?;
-    transaction.start_transaction().and_run2(async move |session| {
-        let result: AppResult<_> = async {
-            if let Some(id) = &app_request_id {
-                let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
-                    doc! {"_id": id, "login_approval_id": &row.id, "approved_user_id": &row.user_id,
-                        "status": "approved", "approved_session_id": null,
-                        "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
-                    doc! {"$set": {"status": "delivered", "delivered_at": mongodb::bson::DateTime::now(),
-                        "purge_at": mongodb::bson::DateTime::from_chrono(Utc::now() + Duration::days(1))}})
-                    .session(&mut *session).await?;
-                if claimed.modified_count != 1 { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
-            }
-            let verified = db.collection::<LoginApproval>(COLLECTION_NAME).find_one_and_update(
-                doc! {"_id": &row.id, "user_id": &row.user_id, "verified": false, "closed": false, "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
-                doc! {"$set": {"verified": true, "mfa_verified": mfa_verified}})
-                .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(invalid)?;
-            let browser = if verified.keep_signed_in {
-                Some(token_service::create_session_with_transaction(&db,
-                    verified.user_id.as_deref().ok_or_else(invalid)?, Some(&ip), user_agent.as_deref(), Some(&mut *session)).await?)
-            } else { None };
-            Ok((verified, browser))
-        }.await;
-        super::api_key_mutation_service::transaction_result(result)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+    let prepared = if row.keep_signed_in {
+        Some(token_service::prepare_browser_session(
+            row.user_id.as_deref().ok_or_else(invalid)?,
+            Some(ip),
+            user_agent,
+        )?)
+    } else {
+        None
+    };
+    let context = (db, runtime, row, mfa_verified, &app_request_id, &prepared);
+    super::audit_runtime::transaction::run(
+        db,
+        &context,
+        |session, (db, runtime, row, mfa_verified, app_request_id, prepared)| {
+            Box::pin(async move {
+                if let Some(id) = app_request_id {
+                    let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
+                            doc! {"_id": id, "login_approval_id": &row.id, "approved_user_id": &row.user_id,
+                                "status": "approved", "approved_session_id": null, "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
+                            doc! {"$set": {"status": "delivered", "delivered_at": mongodb::bson::DateTime::now(),
+                                "purge_at": mongodb::bson::DateTime::from_chrono(Utc::now() + Duration::days(1))}})
+                            .session(&mut *session).await?;
+                    if claimed.modified_count != 1 {
+                        return Err(AppError::AuthDeviceCodeAlreadyDelivered);
+                    }
+                }
+                let verified = db.collection::<LoginApproval>(COLLECTION_NAME).find_one_and_update(
+                        doc! {"_id": &row.id, "user_id": &row.user_id, "verified": false, "closed": false, "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
+                        doc! {"$set": {"verified": true, "mfa_verified": mfa_verified}})
+                        .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(invalid)?;
+                if let Some(prepared) = prepared {
+                    token_service::insert_prepared_browser_session(db, runtime, prepared, session).await?;
+                }
+                Ok((
+                    verified,
+                    prepared.as_ref().map(|value| value.issued.clone()),
+                ))
+            })
+        },
+    )
+    .await
 }
 
 pub async fn begin_app(

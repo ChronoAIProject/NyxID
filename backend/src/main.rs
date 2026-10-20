@@ -1222,6 +1222,7 @@ async fn server_main() {
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {
         let sweep_db = state.db.clone();
+        let sweep_runtime = state.audit_runtime.clone();
         let sweep_interval = config.agent_key_login_sweep_interval_secs;
         tokio::spawn(async move {
             let mut interval =
@@ -1229,7 +1230,9 @@ async fn server_main() {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
+                if let Err(error) =
+                    services::auth_device_service::sweep_expired(&sweep_db, &sweep_runtime).await
+                {
                     tracing::error!(
                         error_code = error.error_code(),
                         "Device login expiry sweep failed"

@@ -1088,6 +1088,7 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
     }
     crate::services::admin_user_service::delete_current_user_cascade(
         &f.state.db,
+        &f.state.audit_runtime,
         &f.bot.user_id,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
     )
@@ -1501,6 +1502,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
             assert!(
                 crate::services::admin_user_service::delete_current_user_cascade(
                     &f.state.db,
+                    &f.state.audit_runtime,
                     &f.bot.user_id,
                     crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
                 )
@@ -1521,6 +1523,7 @@ async fn aurinko_owner_deletion_fences_delayed_ingress_and_reply() {
         tokio::join!(effect, deletion);
         crate::services::admin_user_service::delete_current_user_cascade(
             &f.state.db,
+            &f.state.audit_runtime,
             &f.bot.user_id,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         )

@@ -6,7 +6,7 @@ use axum::{
     http::HeaderMap,
 };
 use chrono::Utc;
-use mongodb::bson::{self, doc};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -19,7 +19,7 @@ use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, mfa_service, token_service};
+use crate::services::{mfa_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -78,9 +78,17 @@ pub async fn setup(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let result =
-        mfa_service::setup_totp(&state.db, &state.encryption_keys, &user_id_str, &user.email)
-            .await?;
+    let result = mfa_service::setup_totp(
+        &state.db,
+        &state.audit_runtime,
+        &state.encryption_keys,
+        &mfa_service::MfaActor {
+            user_id: user_id_str.clone(),
+            principal: token_service::audit_principal(&auth_user)?,
+        },
+        &user.email,
+    )
+    .await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -128,26 +136,16 @@ pub async fn confirm(
 
     let recovery_codes = mfa_service::verify_totp_setup(
         &state.db,
+        &state.audit_runtime,
         &state.encryption_keys,
         &factor.id,
-        &user_id_str,
+        &mfa_service::MfaActor {
+            user_id: user_id_str.clone(),
+            principal: token_service::audit_principal(&auth_user)?,
+        },
         &body.code,
     )
     .await?;
-
-    // Enable MFA on user account
-    let now = Utc::now();
-    state
-        .db
-        .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user_id_str },
-            doc! { "$set": {
-                "mfa_enabled": true,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -206,8 +204,10 @@ pub async fn verify(
     );
 
     // Verify TOTP code
-    let valid =
-        mfa_service::verify_totp(&state.db, &state.encryption_keys, user_id, &body.code).await?;
+    let verified_factor =
+        mfa_service::verified_factor(&state.db, &state.encryption_keys, user_id, &body.code)
+            .await?;
+    let valid = verified_factor.is_some();
 
     if !valid {
         emit_event(
@@ -241,16 +241,6 @@ pub async fn verify(
     // follows fails, matching the bug Part 1 already fixed on the
     // non-MFA password path.
 
-    // Revoke the pending MFA session
-    state
-        .db
-        .collection::<Session>(SESSIONS)
-        .update_one(
-            doc! { "_id": &pending_session.id },
-            doc! { "$set": { "revoked": true } },
-        )
-        .await?;
-
     // Issue real session tokens
     let ip = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
     let ua = extract_user_agent(&headers);
@@ -261,20 +251,23 @@ pub async fn verify(
 
     match client_mode {
         AuthClientMode::BrowserSession => {
-            let session =
-                token_service::create_session(&state.db, user_id, ip.as_deref(), ua.as_deref())
-                    .await?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user_id.to_string()),
-                "login_mfa".to_string(),
-                Some(serde_json::json!({ "session_id": session.session_id })),
-                ip,
-                ua,
-                None,
-                None,
+            let prepared = mfa_service::MfaSession::browser(
+                token_service::prepare_browser_session(user_id, ip.as_deref(), ua.as_deref())?,
             );
+            mfa_service::complete_login(
+                &state.db,
+                &state.audit_runtime,
+                Some(&pending_session),
+                verified_factor
+                    .as_ref()
+                    .ok_or_else(|| AppError::AuthenticationFailed("Invalid MFA code".into()))?,
+                &prepared,
+            )
+            .await?;
+            let mfa_service::MfaSession::Browser(prepared) = prepared else {
+                unreachable!()
+            };
+            let session = prepared.issued;
 
             apply_browser_session_cookies(
                 &mut response_headers,
@@ -308,26 +301,31 @@ pub async fn verify(
             ))
         }
         AuthClientMode::TokenClient => {
-            let tokens = token_service::create_session_and_issue_tokens(
+            let prepared = mfa_service::MfaSession::tokens(
+                token_service::prepare_session_tokens(
+                    &state.db,
+                    &state.config,
+                    &state.jwt_keys,
+                    user_id,
+                    ip.as_deref(),
+                    ua.as_deref(),
+                )
+                .await?,
+            );
+            mfa_service::complete_login(
                 &state.db,
-                &state.config,
-                &state.jwt_keys,
-                user_id,
-                ip.as_deref(),
-                ua.as_deref(),
+                &state.audit_runtime,
+                Some(&pending_session),
+                verified_factor
+                    .as_ref()
+                    .ok_or_else(|| AppError::AuthenticationFailed("Invalid MFA code".into()))?,
+                &prepared,
             )
             .await?;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user_id.to_string()),
-                "login_mfa".to_string(),
-                Some(serde_json::json!({ "session_id": tokens.session_id })),
-                ip,
-                ua,
-                None,
-                None,
-            );
+            let mfa_service::MfaSession::Tokens(prepared) = prepared else {
+                unreachable!()
+            };
+            let tokens = prepared.tokens;
 
             // Tokens are materialized; record the login under the same
             // `method="password"` label as non-MFA logins so the
@@ -367,52 +365,16 @@ pub async fn disable(
 ) -> AppResult<Json<MfaDisableResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    // Verify password
-    let user = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id_str })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    let password_hash = user
-        .password_hash
-        .as_ref()
-        .ok_or_else(|| AppError::BadRequest("No password set on account".to_string()))?;
-
-    let password_valid = crate::crypto::password::verify_password(&body.password, password_hash)?;
-    if !password_valid {
-        return Err(AppError::AuthenticationFailed(
-            "Invalid password".to_string(),
-        ));
-    }
-
-    // Deactivate all MFA factors
-    let now = Utc::now();
-    state
-        .db
-        .collection::<MfaFactor>(MFA_FACTORS)
-        .update_many(
-            doc! { "user_id": &user_id_str, "is_active": true },
-            doc! { "$set": {
-                "is_active": false,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    // Disable MFA on user
-    state
-        .db
-        .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user_id_str },
-            doc! { "$set": {
-                "mfa_enabled": false,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    mfa_service::disable_totp(
+        &state.db,
+        &state.audit_runtime,
+        &mfa_service::MfaActor {
+            user_id: user_id_str.clone(),
+            principal: token_service::audit_principal(&auth_user)?,
+        },
+        &body.password,
+    )
+    .await?;
 
     Ok(Json(MfaDisableResponse {
         message: "MFA has been disabled.".to_string(),

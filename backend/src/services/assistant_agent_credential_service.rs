@@ -1394,9 +1394,15 @@ mod tests {
         let (state, owner, row) = fixture("nyxa_owner_cleanup").await;
         let db = &state.db;
         let other = new_chat(&state, &owner).await;
-        crate::services::admin_user_service::set_user_active(db, "admin", &owner, false)
-            .await
-            .unwrap();
+        crate::services::admin_user_service::set_user_active(
+            db,
+            &state.audit_runtime,
+            "admin",
+            &owner,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(!exists(db, &owner).await.unwrap());
         for row in [&row, &other] {
             assert_eq!(
@@ -1408,15 +1414,26 @@ mod tests {
                 Some("credential_replaced")
             );
         }
-        crate::services::admin_user_service::set_user_active(db, "admin", &owner, true)
-            .await
-            .unwrap();
+        crate::services::admin_user_service::set_user_active(
+            db,
+            &state.audit_runtime,
+            "admin",
+            &owner,
+            true,
+        )
+        .await
+        .unwrap();
         load_or_provision(db, &state.encryption_keys, &owner, &row.id)
             .await
             .unwrap();
-        crate::services::admin_user_service::delete_user_cascade(db, "admin", &owner)
-            .await
-            .unwrap();
+        crate::services::admin_user_service::delete_user_cascade(
+            db,
+            &state.audit_runtime,
+            "admin",
+            &owner,
+        )
+        .await
+        .unwrap();
         for collection in [
             CREDENTIALS,
             CONVERSATIONS,

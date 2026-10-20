@@ -95,6 +95,7 @@ async fn duplicate_codes_in_either_collection_fail_closed_without_approval_or_de
         assert!(matches!(
             approve(
                 &db,
+                &crate::test_utils::test_app_state(db.clone()).audit_runtime,
                 &state.config,
                 &state.jwt_keys,
                 &state.encryption_keys,

@@ -2216,6 +2216,7 @@ mod integration_tests {
         );
         crate::services::admin_user_service::delete_current_user_cascade(
             db,
+            &state.audit_runtime,
             &user,
             crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
         )

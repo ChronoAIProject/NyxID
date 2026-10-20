@@ -40,6 +40,7 @@ fn context(ip: &str) -> LoginClientContext {
 async fn redeem_code(state: &AppState, code: &str, ip: &str) -> AppResult<Delivery> {
     redeem(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &state.encryption_keys,
@@ -289,6 +290,7 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
     );
     let refreshed = token_service::refresh_tokens(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &tokens.refresh_token,
@@ -301,9 +303,15 @@ async fn issuer_revocation_blocks_initial_and_refreshed_access_at_authentication
         protected_status(&state, &refreshed.access_token).await,
         axum::http::StatusCode::OK
     );
-    revoke(&state.db, &actor, &code.id, Some(&state.mcp_sessions))
-        .await
-        .unwrap();
+    revoke(
+        &state.db,
+        &state.audit_runtime,
+        &actor,
+        &code.id,
+        Some(&state.mcp_sessions),
+    )
+    .await
+    .unwrap();
     for token in [&tokens.access_token, &refreshed.access_token] {
         assert_eq!(
             protected_status(&state, token).await,
@@ -341,6 +349,7 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
         assert!(matches!(
             token_service::refresh_tokens(
                 &state.db,
+                &state.audit_runtime,
                 &state.config,
                 &state.jwt_keys,
                 &tokens.refresh_token,
@@ -388,7 +397,13 @@ async fn restricted_browser_handoff_and_direct_delivery_cannot_both_win() {
         .unwrap();
     let (code, direct) = tokio::join!(
         redeem_code(&state, &handoff.code, "192.0.2.2"),
-        device::poll_agent_key(&state.db, &state.encryption_keys, KEY, &request.device_code)
+        device::poll_agent_key(
+            &state.db,
+            &state.audit_runtime,
+            &state.encryption_keys,
+            KEY,
+            &request.device_code
+        )
     );
     assert_ne!(code.is_ok(), direct.is_ok());
     assert_eq!(

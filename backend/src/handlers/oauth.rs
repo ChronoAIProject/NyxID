@@ -2662,6 +2662,7 @@ async fn token_inner(
 
             let tokens = crate::services::token_service::refresh_tokens(
                 &state.db,
+                &state.audit_runtime,
                 &state.config,
                 &state.jwt_keys,
                 refresh,
@@ -2728,6 +2729,7 @@ async fn token_inner(
                 // Lift once §6.5 is resolved and the service response is extended.
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
+                    &state.audit_runtime,
                     &state.config,
                     &state.jwt_keys,
                     &state.jwks_cache,

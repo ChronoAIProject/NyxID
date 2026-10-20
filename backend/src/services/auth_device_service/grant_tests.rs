@@ -86,22 +86,32 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
         );
         rows.update_one(doc! {"_id": &row.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
         let approved = if concurrent {
-            let (approved, swept) = tokio::join!(approve, grants::sweep_expired(&state.db));
+            let (approved, swept) = tokio::join!(
+                approve,
+                grants::sweep_expired(&state.db, &state.audit_runtime)
+            );
             swept.unwrap();
             approved
         } else {
             let approved = approve.await;
-            grants::sweep_expired(&state.db).await.unwrap();
+            grants::sweep_expired(&state.db, &state.audit_runtime)
+                .await
+                .unwrap();
             approved
         };
         if !concurrent {
             assert!(approved.is_ok());
         }
         if approved.is_ok() {
-            let delivery =
-                poll_agent_key(&state.db, &state.encryption_keys, KEY, &second.device_code)
-                    .await
-                    .unwrap();
+            let delivery = poll_agent_key(
+                &state.db,
+                &state.audit_runtime,
+                &state.encryption_keys,
+                KEY,
+                &second.device_code,
+            )
+            .await
+            .unwrap();
             assert!(
                 crate::services::key_service::validate_api_key(&state.db, &delivery.credential)
                     .await
@@ -200,9 +210,15 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
                     .is_some_and(|options| options.expire_after.is_some()))
         );
     }
-    let delivered = poll_agent_key(&state.db, &state.encryption_keys, KEY, &request.device_code)
-        .await
-        .unwrap();
+    let delivered = poll_agent_key(
+        &state.db,
+        &state.audit_runtime,
+        &state.encryption_keys,
+        KEY,
+        &request.device_code,
+    )
+    .await
+    .unwrap();
     assert!(delivered.credential.starts_with("nyxid_ag_"));
     let parent = state
         .db
@@ -237,6 +253,7 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
     );
     approve(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &state.encryption_keys,
@@ -246,9 +263,15 @@ async fn v2_grants_are_invisible_to_legacy_poll_and_expiry_indexes() {
     .await
     .unwrap();
     assert!(matches!(
-        poll_and_prepare(&state.db, &state.encryption_keys, KEY, &legacy.device_code)
-            .await
-            .unwrap(),
+        poll_and_prepare(
+            &state.db,
+            &state.audit_runtime,
+            &state.encryption_keys,
+            KEY,
+            &legacy.device_code
+        )
+        .await
+        .unwrap(),
         PollClaim::Account(_)
     ));
 }
@@ -270,6 +293,7 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
     let (account, restricted) = tokio::join!(
         approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &state.encryption_keys,
@@ -309,8 +333,20 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
         children
     );
     let (a, b) = tokio::join!(
-        poll_and_prepare(&state.db, &state.encryption_keys, KEY, &request.device_code),
-        poll_and_prepare(&state.db, &state.encryption_keys, KEY, &request.device_code)
+        poll_and_prepare(
+            &state.db,
+            &state.audit_runtime,
+            &state.encryption_keys,
+            KEY,
+            &request.device_code
+        ),
+        poll_and_prepare(
+            &state.db,
+            &state.audit_runtime,
+            &state.encryption_keys,
+            KEY,
+            &request.device_code
+        )
     );
     if account.is_ok() {
         assert_eq!(
@@ -322,8 +358,20 @@ async fn account_and_agent_approval_race_commits_only_one_grant() {
         );
     } else {
         let (a, b) = tokio::join!(
-            poll_agent_key(&state.db, &state.encryption_keys, KEY, &request.device_code),
-            poll_agent_key(&state.db, &state.encryption_keys, KEY, &request.device_code)
+            poll_agent_key(
+                &state.db,
+                &state.audit_runtime,
+                &state.encryption_keys,
+                KEY,
+                &request.device_code
+            ),
+            poll_agent_key(
+                &state.db,
+                &state.audit_runtime,
+                &state.encryption_keys,
+                KEY,
+                &request.device_code
+            )
         );
         assert_ne!(a.is_ok(), b.is_ok());
         let delivery = a.or(b).unwrap();
@@ -404,6 +452,7 @@ async fn expiry_during_decryption_reports_expired_for_cli_and_browser() {
             .unwrap();
         approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &encryption,
@@ -417,16 +466,26 @@ async fn expiry_during_decryption_reports_expired_for_cli_and_browser() {
             if browser {
                 poll_for_browser(
                     &state.db,
+                    &state.audit_runtime,
                     &encryption,
                     KEY,
                     &request.device_code,
-                    "fixture-cookie",
-                    "192.0.2.1",
-                    None,
+                    crate::services::auth_device_service::BrowserSessionInput {
+                        cookie_hash: "fixture-cookie",
+                        ip: "192.0.2.1",
+                        user_agent: None,
+                    },
                 )
                 .await
             } else {
-                poll_and_prepare(&state.db, &encryption, KEY, &request.device_code).await
+                poll_and_prepare(
+                    &state.db,
+                    &state.audit_runtime,
+                    &encryption,
+                    KEY,
+                    &request.device_code,
+                )
+                .await
             }
         };
         let expire = async {
@@ -437,7 +496,9 @@ async fn expiry_during_decryption_reports_expired_for_cli_and_browser() {
         };
         let (result, ()) = tokio::join!(poll, expire);
         assert!(matches!(result.unwrap(), PollClaim::Expired));
-        grants::sweep_expired(&state.db).await.unwrap();
+        grants::sweep_expired(&state.db, &state.audit_runtime)
+            .await
+            .unwrap();
         assert_eq!(
             state
                 .db
@@ -464,6 +525,7 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
             .unwrap();
         approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &encryption,
@@ -474,19 +536,28 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
         .unwrap();
         provider.fail.store(true, Ordering::SeqCst);
         assert!(
-            poll_and_prepare(&state.db, &encryption, KEY, &request.device_code)
-                .await
-                .is_err()
+            poll_and_prepare(
+                &state.db,
+                &state.audit_runtime,
+                &encryption,
+                KEY,
+                &request.device_code
+            )
+            .await
+            .is_err()
         );
         assert!(
             poll_for_browser(
                 &state.db,
+                &state.audit_runtime,
                 &encryption,
                 KEY,
                 &request.device_code,
-                "cookie-hash",
-                "192.0.2.1",
-                None
+                crate::services::auth_device_service::BrowserSessionInput {
+                    cookie_hash: "cookie-hash",
+                    ip: "192.0.2.1",
+                    user_agent: None
+                },
             )
             .await
             .is_err()
@@ -503,14 +574,22 @@ async fn failed_kms_unwrap_keeps_account_delivery_retryable_and_expiry_cleans_up
         provider.fail.store(false, Ordering::SeqCst);
         if deliver {
             assert!(matches!(
-                poll_and_prepare(&state.db, &encryption, KEY, &request.device_code)
-                    .await
-                    .unwrap(),
+                poll_and_prepare(
+                    &state.db,
+                    &state.audit_runtime,
+                    &encryption,
+                    KEY,
+                    &request.device_code
+                )
+                .await
+                .unwrap(),
                 PollClaim::Account(_)
             ));
         } else {
             collection_for_protocol(&state.db, true).update_one(doc! {"_id": &row.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
-            grants::sweep_expired(&state.db).await.unwrap();
+            grants::sweep_expired(&state.db, &state.audit_runtime)
+                .await
+                .unwrap();
             let session = state
                 .db
                 .collection::<Session>(SESSIONS)
@@ -537,6 +616,7 @@ async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
         .unwrap();
     approve(
         &state.db,
+        &state.audit_runtime,
         &state.config,
         &state.jwt_keys,
         &state.encryption_keys,
@@ -555,12 +635,15 @@ async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
     assert!(
         poll_for_browser(
             &state.db,
+            &state.audit_runtime,
             &state.encryption_keys,
             KEY,
             &request.device_code,
-            "hash",
-            "192.0.2.1",
-            Some("fixture-browser")
+            crate::services::auth_device_service::BrowserSessionInput {
+                cookie_hash: "hash",
+                ip: "192.0.2.1",
+                user_agent: Some("fixture-browser")
+            },
         )
         .await
         .is_err()
@@ -591,12 +674,15 @@ async fn browser_session_insert_failure_rolls_back_delivery_and_revocation() {
     assert!(matches!(
         poll_for_browser(
             &state.db,
+            &state.audit_runtime,
             &state.encryption_keys,
             KEY,
             &request.device_code,
-            "hash",
-            "192.0.2.1",
-            Some("fixture-browser")
+            crate::services::auth_device_service::BrowserSessionInput {
+                cookie_hash: "hash",
+                ip: "192.0.2.1",
+                user_agent: Some("fixture-browser")
+            },
         )
         .await
         .unwrap(),
@@ -650,6 +736,7 @@ async fn retained_terminal_outcomes_precede_expiry_and_codes_are_not_reused() {
     assert!(matches!(
         approve(
             &state.db,
+            &state.audit_runtime,
             &state.config,
             &state.jwt_keys,
             &state.encryption_keys,

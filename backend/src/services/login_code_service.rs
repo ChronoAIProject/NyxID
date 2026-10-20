@@ -178,6 +178,7 @@ pub async fn cancel(db: &Database, actor: &str, id: &str) -> AppResult<()> {
 
 pub async fn revoke(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     actor: &str,
     id: &str,
     mcp: Option<&crate::models::mcp_session::McpSessionStore>,
@@ -187,7 +188,14 @@ pub async fn revoke(
         return Err(AppError::LoginCodeInvalid);
     }
     if let Some(session) = &row.session_id {
-        token_service::revoke_session(db, session, mcp).await?;
+        token_service::revoke_session(
+            db,
+            runtime,
+            session,
+            crate::models::audit_outbox::AuditPrincipal::Person { id: actor.into() },
+            mcp,
+        )
+        .await?;
     }
     if let Some(child) = &row.credential_id {
         credentials::revoke(db, child, CredentialRevokedReason::WebRevoke).await?;
@@ -211,6 +219,7 @@ pub async fn revoke(
 #[allow(clippy::too_many_arguments)]
 pub async fn redeem(
     db: &Database,
+    runtime: &crate::services::audit_runtime::AuditRuntime,
     config: &AppConfig,
     jwt: &JwtKeys,
     encryption: &EncryptionKeys,
@@ -289,58 +298,119 @@ pub async fn redeem(
     };
     let child_id = Uuid::new_v4().to_string();
     let secret = credentials::generate_secret();
-    let db_owned = db.clone();
-    let row_owned = row.clone();
-    let context_owned = context.clone();
     let profile = profile.map(str::to_owned);
-    let mut transaction = db.client().start_session().await?;
-    let result = transaction.start_transaction().and_run2(async move |session| {
-        let db = &db_owned; let row = &row_owned; let context = &context_owned;
-        let result: AppResult<Delivery> = async {
-            let now = Utc::now();
-            let claimed = db.collection::<LoginCode>(COLLECTION_NAME).find_one_and_update(doc! {
-                "_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-            }, doc! {"$set": {"status": "redeemed", "redeemed_at": bson::DateTime::from_chrono(now),
-                "context": bson::to_bson(context).map_err(|_| AppError::Internal("Invalid login context".into()))?}})
-                .session(&mut *session).await?;
-            if claimed.is_none() {
-                return Err(state_error(&status(db, &row.user_id, &row.id).await?).unwrap_or(AppError::LoginCodeRedeemed));
-            }
-            let (delivery, session_id, credential_id) = if let Some(account) = &account {
-                token_service::insert_prepared_session(db, account, &mut *session).await?;
-                let tokens = &account.tokens;
-                (Delivery::Account(token_service::IssuedTokens {access_token: tokens.access_token.clone(), refresh_token: tokens.refresh_token.clone(),
-                    session_id: tokens.session_id.clone(), access_expires_in: tokens.access_expires_in, resource_uris: tokens.resource_uris.clone()}),
-                    Some(tokens.session_id.clone()), None)
-            } else if let Some(handoff) = &handoff {
-                let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
-                    "_id": row.device_request_id.as_deref(), "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-                }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                    "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}}).session(&mut *session).await?;
-                if claimed.modified_count == 0 {
-                    return Err(handoff_claim_error(db, row.device_request_id.as_deref().ok_or(AppError::LoginCodeInvalid)?).await);
+    let transaction_context = (
+        db, runtime, &row, &context, &profile, &account, &handoff, &key_id, &child_id, &secret,
+    );
+    let result = super::audit_runtime::transaction::run(db, &transaction_context,
+        |session, (db, runtime, row, context, profile, account, handoff, key_id, child_id, secret)| {
+            Box::pin(async move {
+                let (db, runtime, row, context, profile, account, handoff, key_id, child_id, secret) = (
+                    *db, *runtime, *row, *context, *profile, *account, *handoff, *key_id, *child_id, *secret,
+                );
+                let now = Utc::now();
+                let claimed = db.collection::<LoginCode>(COLLECTION_NAME).find_one_and_update(doc! {
+                            "_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+                        }, doc! {"$set": {"status": "redeemed", "redeemed_at": bson::DateTime::from_chrono(now),
+                            "context": bson::to_bson(context).map_err(|_| AppError::Internal("Invalid login context".into()))?}})
+                            .session(&mut *session).await?;
+                if claimed.is_none() {
+                    return Err(state_error(&status(db, &row.user_id, &row.id).await?)
+                        .unwrap_or(AppError::LoginCodeRedeemed));
                 }
-                (Delivery::AgentKey(Box::new(agent::Delivery {credential: handoff.credential.clone(), credential_id: handoff.credential_id.clone(),
-                    credential_expires_at: handoff.credential_expires_at.clone(), label: handoff.label.clone(), api_key: handoff.api_key.clone()})),
-                    None, Some(handoff.credential_id.clone()))
-            } else {
-                let selection = row.selection.as_ref().ok_or(AppError::LoginCodeInvalid)?;
-                let parent = agent::issue_selected(db, &row.user_id, &row.id, context, profile.as_deref(), selection,
-                    row.credential_expires_at, row.created_at, &key_id, &child_id, &secret, &mut *session).await?;
-                let summary = agent::key_summary(db, &parent, matches!(selection, Selection::New(_))).await?;
-                let child = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(crate::models::api_key_credential::COLLECTION_NAME)
-                    .find_one(doc! {"_id": &child_id}).session(&mut *session).await?.ok_or(AppError::AgentKeyCredentialNotFound)?;
-                (Delivery::AgentKey(Box::new(agent::Delivery {credential: secret.clone(), credential_id: child_id.clone(),
-                    credential_expires_at: child.expires_at.map(|v| v.to_rfc3339()), label: child.label, api_key: summary})), None, Some(child_id.clone()))
-            };
-            db.collection::<LoginCode>(COLLECTION_NAME).update_one(doc! {"_id": &row.id}, doc! {"$set": {
-                "session_id": session_id, "credential_id": credential_id
-            }}).session(&mut *session).await?;
-            Ok(delivery)
-        }.await;
-        mutations::transaction_result(result)
-    }).await.map_err(mutations::map_transaction_error)?;
+                let (delivery, session_id, credential_id) = if let Some(account) = account {
+                    token_service::insert_prepared_session(db, runtime, account, &mut *session).await?;
+                    let tokens = &account.tokens;
+                    (
+                        Delivery::Account(token_service::IssuedTokens {
+                            access_token: tokens.access_token.clone(),
+                            refresh_token: tokens.refresh_token.clone(),
+                            session_id: tokens.session_id.clone(),
+                            access_expires_in: tokens.access_expires_in,
+                            resource_uris: tokens.resource_uris.clone(),
+                        }),
+                        Some(tokens.session_id.clone()),
+                        None,
+                    )
+                } else if let Some(handoff) = handoff {
+                    let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
+                                "_id": row.device_request_id.as_deref(), "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+                            }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
+                                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
+                                "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}}).session(&mut *session).await?;
+                    if claimed.modified_count == 0 {
+                        return Err(handoff_claim_error(
+                            db,
+                            row.device_request_id
+                                .as_deref()
+                                .ok_or(AppError::LoginCodeInvalid)?,
+                        )
+                        .await);
+                    }
+                    (
+                        Delivery::AgentKey(Box::new(agent::Delivery {
+                            credential: handoff.credential.clone(),
+                            credential_id: handoff.credential_id.clone(),
+                            credential_expires_at: handoff.credential_expires_at.clone(),
+                            label: handoff.label.clone(),
+                            api_key: handoff.api_key.clone(),
+                        })),
+                        None,
+                        Some(handoff.credential_id.clone()),
+                    )
+                } else {
+                    let selection = row.selection.as_ref().ok_or(AppError::LoginCodeInvalid)?;
+                    let parent = agent::issue_selected(
+                        db,
+                        &row.user_id,
+                        &row.id,
+                        context,
+                        profile.as_deref(),
+                        selection,
+                        row.credential_expires_at,
+                        row.created_at,
+                        key_id,
+                        child_id,
+                        secret,
+                        &mut *session,
+                    )
+                    .await?;
+                    let summary =
+                        agent::key_summary(db, &parent, matches!(selection, Selection::New(_))).await?;
+                    let child = db
+                        .collection::<crate::models::api_key_credential::ApiKeyCredential>(
+                            crate::models::api_key_credential::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": &child_id})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or(AppError::AgentKeyCredentialNotFound)?;
+                    (
+                        Delivery::AgentKey(Box::new(agent::Delivery {
+                            credential: secret.clone(),
+                            credential_id: child_id.clone(),
+                            credential_expires_at: child.expires_at.map(|v| v.to_rfc3339()),
+                            label: child.label,
+                            api_key: summary,
+                        })),
+                        None,
+                        Some(child_id.clone()),
+                    )
+                };
+                db.collection::<LoginCode>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &row.id},
+                        doc! {"$set": {
+                            "session_id": session_id, "credential_id": credential_id
+                        }},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                Ok(delivery)
+            })
+        },
+    )
+    .await?;
     audit_service::log_async(
         db.clone(),
         Some(row.user_id),

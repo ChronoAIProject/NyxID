@@ -625,7 +625,14 @@ pub async fn set_user_status(
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
+    admin_user_service::set_user_active(
+        &state.db,
+        &state.audit_runtime,
+        &admin_id,
+        &user_id,
+        body.is_active,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -671,7 +678,13 @@ pub async fn force_password_reset(
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
+    let _token = admin_user_service::force_password_reset(
+        &state.db,
+        &state.audit_runtime,
+        crate::services::token_service::audit_principal(&auth_user)?,
+        &user_id,
+    )
+    .await?;
 
     #[cfg(debug_assertions)]
     if let Some(ref t) = _token {
@@ -712,7 +725,8 @@ pub async fn delete_user(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
     let target_email = target.email.clone();
 
-    admin_user_service::delete_user_cascade(&state.db, &admin_id, &user_id).await?;
+    admin_user_service::delete_user_cascade(&state.db, &state.audit_runtime, &admin_id, &user_id)
+        .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -807,17 +821,13 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.user.sessions_revoked",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "revoked_count": revoked_count,
-        })),
-    );
+    let revoked_count = admin_user_service::revoke_all_user_sessions(
+        &state.db,
+        &state.audit_runtime,
+        crate::services::token_service::audit_principal(&auth_user)?,
+        &user_id,
+    )
+    .await?;
 
     Ok(Json(RevokeSessionsResponse {
         revoked_count,
