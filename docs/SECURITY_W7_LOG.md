@@ -169,3 +169,12 @@
 - Full committed candidate with all 566 source refs: history215 + tree111, reviewed316, unresolved10 (six historical documentation values); gate correctly fails without provenance exceptions.
 - Remaining dependency/history findings stay blocking. No manifest/lock edit, confirmed operational credential, rotation, local application build, push or remote workflow execution.
 - PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Vulnerability Scan Catalog Freshness, Artifact Packaging Policy/image matrix, Machine Docker CLI E2E.
+
+## C-5 approved Cargo remediation
+- PM approved one focused Cargo commit: crossbeam-epoch 0.9.21, h2 0.4.20, self_update 1.3.1 with renamed gzip feature, backend zip 9.0.5.
+- Retain tar/ZIP/TLS and backend deflate features; remove obsolete quick-xml 0.38 and zip 6 paths.
+- zip 9 requires nix 0.31.3, which requires newer libc; resolver-only downgrade probes correctly reject old versions.
+- Final PM D3: remove unused Swagger UI/zip 3 and migrate machine bootstrap RSA to AWS-LC; braces and remaining RSA uses receive separately verified dispositions.
+- Validation: precise resolver updates pass; requested locked workspace check with both KMS features follows this commit using the exact shared-target environment.
+- Fold the final Cargo decisions into the same focused commit before another stream commits; all private bootstrap RSA operations use AWS-LC with canonical/bounded DER and Zeroizing buffers.
+- Preserve existing wire fixtures and add explicit RustCrypto-to-AWS-LC interop; machine rsa is test-only. No production private RustCrypto RSA remains in bootstrap.
