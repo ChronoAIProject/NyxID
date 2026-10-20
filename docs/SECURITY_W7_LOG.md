@@ -204,6 +204,6 @@
 - AWS-LC bootstrap 16/16 passed under the exact shared-target Cargo environment.
 - ZIP fixes 53a10a33c/eb6251219/8aaf4616c cover all three fallible-name sites; locked workspace/all-targets/both-KMS check passed (exit 0), isolated production-function regressions 2/2; actual Backend Test execution remains PR evidence.
 - Clean committed-source audit: all 12 roots passed (8 npm/3 Cargo/1 pnpm); 7 raw findings retained, 7 exact reviewed, 0 unresolved; bundle 1 map/3691 modules/0 forbidden.
-- Full committed-history/tree scan: 215 history + 111 tree findings, 326 reviewed, 0 unresolved; build-input policy passed.
+- Final scan: 215 history + 112 tree, 327 reviewed, 0 unresolved; two new progress-prose identities receive exact monthly/current or annual/immutable dispositions; build-input policy passed.
 - Reviewed committed A/B changes through 7c05214fb: retain 9723cedf9's test_utils binding; add only AES-GCM custody and Ed25519 witness-test operation entries, with no RSA-reference change; Linux/KMS graph/source checks passed.
 - Required PR evidence: Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Vulnerability Scan Catalog Freshness, Mobile, Backend Test, CLI Test, Rust Features/KMS and Artifact Packaging identity/image scans.

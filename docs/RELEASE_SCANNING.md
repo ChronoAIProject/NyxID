@@ -103,6 +103,13 @@ For a new historical finding, review present redeemability, backing-record
 retention and provenance. A redeemable value of unverified provenance requires
 the user's rotation decision before any exception is written.
 
+Two additional generic-detector findings are ordinary slash-separated progress
+prose in the stream A worker log and the historical remediation checkpoint
+table. Their exact rule, path, match, value and source-line hashes are bound
+in the same inventory. The current worker-log record expires monthly; the
+checkpoint record applies only to revision `61781e414d5c` and expires after
+12 months. Neither record grants an exception to any credential value.
+
 ## Exact dependency dispositions
 
 The initial twelve-root audit found twelve Cargo advisory occurrences and six
