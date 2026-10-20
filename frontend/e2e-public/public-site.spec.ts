@@ -31,7 +31,10 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
     document.querySelector('nav a[href^="/security"]'),
   );
   await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
-  await expect(page.locator('nav a[href^="/register"]')).toHaveAttribute("href", /code=INV/);
+  await expect(page.locator('nav a[href^="/register"]')).toHaveAttribute(
+    "href",
+    /code=INV/,
+  );
   const nav = await page.locator("#nav").elementHandle();
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -80,4 +83,54 @@ test("contact preselection and disabled solution gate survive hydration", async 
   await expect(
     page.getByText("Not available yet", { exact: true }),
   ).toBeVisible();
+});
+
+test("records a bounded lab resource sample", async ({ page }) => {
+  await page.addInitScript(() => {
+    const stats = { lcp: null as number | null, cls: 0 };
+    (window as unknown as { publicLab: typeof stats }).publicLab = stats;
+    if (
+      PerformanceObserver.supportedEntryTypes.includes(
+        "largest-contentful-paint",
+      )
+    ) {
+      new PerformanceObserver((list) => {
+        stats.lcp = list.getEntries().at(-1)?.startTime ?? null;
+      }).observe({ type: "largest-contentful-paint", buffered: true });
+    }
+    if (PerformanceObserver.supportedEntryTypes.includes("layout-shift")) {
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const shift = entry as PerformanceEntry & {
+            hadRecentInput: boolean;
+            value: number;
+          };
+          if (!shift.hadRecentInput) stats.cls += shift.value;
+        }
+      }).observe({ type: "layout-shift", buffered: true });
+    }
+  });
+  await page.goto("/security");
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+  const sample = await page.evaluate(() => {
+    const resources = performance.getEntriesByType(
+      "resource",
+    ) as PerformanceResourceTiming[];
+    return {
+      kind: "lab",
+      path: "/security",
+      reducedMotion: true,
+      fieldCwvStatus: "not-measured",
+      resources: resources.length,
+      transferBytes: resources.reduce((sum, r) => sum + r.transferSize, 0),
+      decodedBytes: resources.reduce((sum, r) => sum + r.decodedBodySize, 0),
+      ...(
+        window as unknown as { publicLab: { lcp: number | null; cls: number } }
+      ).publicLab,
+      limitations:
+        "Single CI browser at takeover; cross-origin transfer sizes may be unavailable. Not field CWV or an LCP/CLS pass assertion.",
+    };
+  });
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile("dist/public-lab.json", JSON.stringify(sample, null, 2));
 });

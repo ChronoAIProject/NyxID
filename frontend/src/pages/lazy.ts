@@ -319,15 +319,17 @@ export const OrgDeveloperAppDetailPage = lazy(() =>
 export const OrgJoinPage = lazy(() =>
   import("@/pages/org-join").then((m) => ({ default: m.OrgJoinPage })),
 );
-export const BlogIndexPage = lazy(() =>
+/** @deprecated Prototype article tools are restricted to development. */
+export const BlogIndexPage = import.meta.env.DEV ? lazy(() =>
   import("@/pages/blog-index").then((m) => ({ default: m.BlogIndexPage })),
-);
+) : () => null;
 export const BlogDetailPage = lazy(() =>
   import("@/pages/blog-detail").then((m) => ({ default: m.BlogDetailPage })),
 );
-export const BlogPreviewPage = lazy(() =>
+/** @deprecated Prototype article tools are restricted to development. */
+export const BlogPreviewPage = import.meta.env.DEV ? lazy(() =>
   import("@/pages/blog-preview").then((m) => ({ default: m.BlogPreviewPage })),
-);
+) : () => null;
 export const DesignSystemPage = lazy(() =>
   import("@/pages/design-system").then((m) => ({
     default: m.DesignSystemPage,

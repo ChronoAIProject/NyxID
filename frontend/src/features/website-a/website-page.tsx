@@ -63,14 +63,14 @@ function Website({ children }: { children?: ReactNode }) {
   }, [language, location.pathname]);
 
   useEffect(() => {
-    if (demoStopped || location.pathname !== "/nyxbot") return;
+    if (demoStopped || route !== "/nyxbot") return;
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const timer = window.setInterval(() => {
       if (!media.matches && !document.hidden)
         setDemoIndex((index) => (index + 1) % 4);
     }, 7000);
     return () => window.clearInterval(timer);
-  }, [demoStopped, location.pathname]);
+  }, [demoStopped, route]);
 
   // Migrate old prototype links without installing any mock auth/start handlers.
   useEffect(() => {
