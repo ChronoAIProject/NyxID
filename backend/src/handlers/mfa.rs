@@ -411,7 +411,8 @@ mod tests {
         db.collection::<User>(USERS).insert_one(user).await.unwrap();
         let a = test_app_state(db.clone());
         let b = test_app_state(independent);
-        let recovery = "0123456789abcdef0123456789abcdef";
+        // Same shape as issued recovery codes; never a fixed credential.
+        let recovery = crate::crypto::token::generate_random_token()[..32].to_string();
         let factor_id = uuid::Uuid::new_v4().to_string();
         let secret_encrypted = crate::services::record_field_service::encrypt(
             &a.encryption_keys,
@@ -431,7 +432,7 @@ mod tests {
                 secret_encrypted: Some(secret_encrypted),
                 secret_context_version: a.encryption_keys.contextual_record_writes().then_some(3),
                 recovery_codes: Some(serde_json::json!([crate::crypto::password::hash_password(
-                    recovery
+                    &recovery
                 )
                 .unwrap()])),
                 last_totp_counter: None,
@@ -463,7 +464,7 @@ mod tests {
                     "127.0.0.1:43210".parse::<SocketAddr>().unwrap(),
                 ))
                 .body(Body::from(
-                    serde_json::json!({"mfa_token":token,"code":recovery,"client":"cli"})
+                    serde_json::json!({"mfa_token":token,"code":recovery.as_str(),"client":"cli"})
                         .to_string(),
                 ))
                 .unwrap()
@@ -527,7 +528,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(audits.len(), 1);
-        assert!(!format!("{audits:?}").contains(recovery));
+        assert!(!format!("{audits:?}").contains(recovery.as_str()));
         db.drop().await.unwrap();
     }
 

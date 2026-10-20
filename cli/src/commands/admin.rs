@@ -403,7 +403,8 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
                     } else {
                         "no"
                     };
-                    let mfa = if user["mfa_enabled"].as_bool().unwrap_or(false) {
+                    // Enrollment state only: "enabled" or "disabled".
+                    let enrollment = if user["mfa_enabled"].as_bool().unwrap_or(false) {
                         "enabled"
                     } else {
                         "disabled"
@@ -417,7 +418,7 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
                     eprintln!("Role:       {role}");
                     eprintln!("Active:     {active}");
                     eprintln!("Verified:   {verified}");
-                    eprintln!("MFA:        {mfa}");
+                    eprintln!("MFA:        {enrollment}");
                     eprintln!("Created:    {created}");
                     eprintln!("Last login: {last_login}");
                 }
