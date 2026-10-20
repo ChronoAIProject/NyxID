@@ -300,3 +300,8 @@
 
 - Validate UncertainResponse status at construction and again before terminal completion. Preserve checked HTTP status in uncertain terminal detail and reject changed replay without granting another send; transport errors keep plain Uncertain.
 - Validation: corrected TEST no-run exit0; direct delivery:11, execution:8, all passed with no failures/ignored. Actual both-KMS all-target Clippy exit101 is retained: sole foreign B admin.rs2979 Json lint, PM-qualified unaffected C paths. Broader workflow42 remains pending.
+
+### CORE-B C3: transact notification settings and Telegram links with audit
+
+- Move notification settings and Telegram link mutations under the complete audited transaction with live owner checks and stable event identities. Preserve approval-mode semantics; test fixtures use persisted owners and joined teardown.
+- Validation: corrected TEST no-run exit0; direct settings:5, notification-handlers:13, all passed with no failures/ignored. Actual both-KMS all-target Clippy exit101 is retained: sole foreign B admin.rs2979 Json lint, PM-qualified unaffected C paths. Broader workflow42 remains pending.

@@ -1,15 +1,14 @@
 use axum::{Json, extract::State};
 use chrono::Utc;
-use mongodb::bson::{self, doc};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::{AppError, AppResult};
-use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
+use crate::errors::AppResult;
+use crate::models::notification_channel::NotificationChannel;
 use crate::mw::auth::AuthUser;
 use crate::services::approval_policy::GlobalApprovalMode;
-use crate::services::{audit_service, notification_service};
+use crate::services::notification_service;
+use crate::services::notification_service::settings::{self, Readiness, SettingsPatch};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Response types ---
@@ -128,103 +127,25 @@ pub async fn update_settings(
     auth_user: AuthUser,
     Json(body): Json<UpdateNotificationSettingsRequest>,
 ) -> AppResult<Json<NotificationSettingsResponse>> {
-    if let (Some(legacy), Some(mode)) = (body.approval_required, body.global_approval_mode)
-        && mode.stored() != Some(legacy)
-    {
-        return Err(AppError::ValidationError(
-            "approval_required conflicts with global_approval_mode".to_string(),
-        ));
-    }
     let user_id = auth_user.user_id.to_string();
-    let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-
-    // Validate ranges
-    if let Some(timeout) = body.approval_timeout_secs
-        && !(10..=300).contains(&timeout)
-    {
-        return Err(AppError::ValidationError(
-            "approval_timeout_secs must be between 10 and 300".to_string(),
-        ));
-    }
-    if let Some(days) = body.grant_expiry_days
-        && !(1..=365).contains(&days)
-    {
-        return Err(AppError::ValidationError(
-            "grant_expiry_days must be between 1 and 365".to_string(),
-        ));
-    }
-
-    // Cannot enable Telegram without a linked chat
-    if body.telegram_enabled == Some(true) && channel.telegram_chat_id.is_none() {
-        return Err(AppError::BadRequest(
-            "Cannot enable Telegram notifications without linking your Telegram account first"
-                .to_string(),
-        ));
-    }
-
-    // Cannot enable push without at least one registered device
-    if body.push_enabled == Some(true) && channel.push_devices.is_empty() {
-        return Err(AppError::BadRequest(
-            "Cannot enable push notifications without registering at least one device first"
-                .to_string(),
-        ));
-    }
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let mut update_doc = doc! { "updated_at": now };
-
-    if let Some(v) = body.telegram_enabled {
-        update_doc.insert("telegram_enabled", v);
-    }
-    if let Some(v) = body
-        .global_approval_mode
-        .and_then(GlobalApprovalMode::stored)
-        .or(body.approval_required)
-    {
-        update_doc.insert("approval_required", v);
-    }
-    if let Some(v) = body.approval_timeout_secs {
-        debug_assert!(
-            v <= i32::MAX as u32,
-            "approval_timeout_secs exceeds i32::MAX"
-        );
-        update_doc.insert("approval_timeout_secs", v as i32);
-    }
-    if let Some(v) = body.grant_expiry_days {
-        debug_assert!(v <= i32::MAX as u32, "grant_expiry_days exceeds i32::MAX");
-        update_doc.insert("grant_expiry_days", v as i32);
-    }
-    if let Some(v) = body.push_enabled {
-        update_doc.insert("push_enabled", v);
-    }
-
-    let mut update = doc! { "$set": update_doc };
-    if body.global_approval_mode == Some(GlobalApprovalMode::WritesOnly) {
-        update.insert("$unset", doc! { "approval_required": "" });
-    }
-    state
-        .db
-        .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(doc! { "_id": &channel.id }, update)
-        .await?;
-
-    let updated = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "notification_settings_updated",
-        Some(serde_json::json!({
-            "telegram_enabled": updated.telegram_enabled,
-            "approval_required": updated.approval_required,
-            "global_approval_mode": GlobalApprovalMode::from_stored(updated.approval_required),
-            "approval_suspended": false,
-            "approval_delivery_configured": delivery_configured(&state, &updated),
-            "approval_timeout_secs": updated.approval_timeout_secs,
-            "grant_expiry_days": updated.grant_expiry_days,
-            "push_enabled": updated.push_enabled,
-        })),
-    );
+    let principal = notification_principal(&auth_user);
+    let patch = SettingsPatch {
+        telegram_enabled: body.telegram_enabled,
+        approval_required: body.approval_required,
+        global_approval_mode: body.global_approval_mode,
+        approval_timeout_secs: body.approval_timeout_secs,
+        grant_expiry_days: body.grant_expiry_days,
+        push_enabled: body.push_enabled,
+    };
+    let updated = settings::update(
+        &state.db,
+        &state.audit_runtime,
+        &principal,
+        &user_id,
+        &patch,
+        readiness(&state),
+    )
+    .await?;
 
     Ok(Json(to_settings_response(
         &updated,
@@ -247,41 +168,15 @@ pub async fn telegram_link(
     auth_user: AuthUser,
 ) -> AppResult<Json<TelegramLinkResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-
-    // Generate an 8-character alphanumeric code (~41 bits of entropy)
-    let code: String = {
-        let mut rng = rand::thread_rng();
-        (0..8)
-            .map(|_| {
-                let idx = rng.gen_range(0..36);
-                if idx < 10 {
-                    (b'0' + idx) as char
-                } else {
-                    (b'A' + idx - 10) as char
-                }
-            })
-            .collect()
-    };
-    let link_code = format!("NYXID-{code}");
-
-    let expires_at = Utc::now() + chrono::Duration::minutes(5);
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    state
-        .db
-        .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &channel.id },
-            doc! {
-                "$set": {
-                    "telegram_link_code": &link_code,
-                    "telegram_link_code_expires_at": bson::DateTime::from_chrono(expires_at),
-                    "updated_at": now,
-                }
-            },
-        )
-        .await?;
+    let principal = notification_principal(&auth_user);
+    let link_code = settings::issue_telegram_link(
+        &state.db,
+        &state.audit_runtime,
+        &principal,
+        &user_id,
+        readiness(&state),
+    )
+    .await?;
 
     let bot_username = state
         .config
@@ -306,47 +201,20 @@ pub async fn telegram_disconnect(
     tele: TelemetryContext,
 ) -> AppResult<Json<MessageResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let set_doc = doc! {
-        "telegram_chat_id": bson::Bson::Null,
-        "telegram_username": bson::Bson::Null,
-        "telegram_enabled": false,
-        "telegram_link_code": bson::Bson::Null,
-        "telegram_link_code_expires_at": bson::Bson::Null,
-        "updated_at": now,
-    };
-
-    state
-        .db
-        .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(doc! { "_id": &channel.id }, doc! { "$set": set_doc })
-        .await?;
-
-    let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let web_only = updated_channel.approval_required != Some(false)
-        && !delivery_configured(&state, &updated_channel);
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "telegram_disconnected",
-        if web_only {
-            Some(
-                serde_json::json!({ "approval_suspended": false, "approval_delivery_configured": false }),
-            )
-        } else {
-            None
-        },
-    );
-
-    // Telemetry: notification.channel_unlinked (Telegram). Only emit
-    // when the pre-update state actually had Telegram linked --
-    // otherwise a repeated tap / retry / no-op disconnect would
-    // fabricate unlink activity. The endpoint is idempotent, so this
-    // handler must be too.
-    let telegram_was_linked = channel.telegram_chat_id.is_some() || channel.telegram_enabled;
+    let principal = notification_principal(&auth_user);
+    let result = settings::disconnect_telegram(
+        &state.db,
+        &state.audit_runtime,
+        &principal,
+        &user_id,
+        readiness(&state),
+    )
+    .await?;
+    let web_only = result.channel.approval_required != Some(false)
+        && !delivery_configured(&state, &result.channel);
+    // Derived telemetry follows the definitely committed mutation, and only a
+    // real unlink from the transaction snapshot contributes activity.
+    let telegram_was_linked = result.telegram_was_linked;
     if telegram_was_linked {
         emit_event(
             state.telemetry.as_deref(),
@@ -366,6 +234,27 @@ pub async fn telegram_disconnect(
     };
 
     Ok(Json(MessageResponse { message }))
+}
+
+fn notification_principal(auth: &AuthUser) -> crate::models::audit_outbox::AuditPrincipal {
+    use crate::models::audit_outbox::AuditPrincipal;
+    match &auth.api_key_id {
+        Some(id) => AuditPrincipal::ApiKey {
+            id: id.clone(),
+            owner_id: auth.user_id.to_string(),
+        },
+        None => AuditPrincipal::Person {
+            id: auth.user_id.to_string(),
+        },
+    }
+}
+
+fn readiness(state: &AppState) -> Readiness<'_> {
+    Readiness {
+        config: &state.config,
+        fcm_initialized: state.fcm_auth.is_some(),
+        apns_initialized: state.apns_auth.is_some(),
+    }
 }
 
 fn delivery_configured(state: &AppState, channel: &NotificationChannel) -> bool {
@@ -406,6 +295,9 @@ fn to_settings_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::AppError;
+    use crate::models::notification_channel::COLLECTION_NAME;
+    use mongodb::bson::{self, doc};
 
     #[tokio::test]
     async fn unrelated_settings_preserve_unset_mode_and_conflicting_choices_do_not_create_rows() {
@@ -414,6 +306,13 @@ mod tests {
             .expect("real Mongo required");
         let state = crate::test_utils::test_app_state(db.clone());
         let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let request =
             |value| serde_json::from_value::<UpdateNotificationSettingsRequest>(value).unwrap();
         for (mode, legacy) in [("writes_only", true), ("all", false), ("off", true)] {
@@ -452,7 +351,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!raw.contains_key("approval_required"));
-        db.drop().await.unwrap();
+        crate::test_utils::teardown_test_database(&db).await;
     }
 
     #[tokio::test]
@@ -462,6 +361,13 @@ mod tests {
             .expect("configured Mongo required");
         let state = crate::test_utils::test_app_state(db.clone());
         let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
         let Json(first) = get_settings(
             State(state.clone()),
             crate::test_utils::test_auth_user(&owner),
@@ -539,6 +445,7 @@ mod tests {
         assert!(!notification_service::approval_delivery_configured(
             &channel, &config, true, true
         ));
+        crate::test_utils::teardown_test_database(&db).await;
     }
 
     fn make_channel() -> NotificationChannel {

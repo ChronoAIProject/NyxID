@@ -465,6 +465,809 @@ pub mod delivery {
     }
 }
 
+/// Transactional destination/preferences boundary. Transport readiness is a
+/// serving-process fact; the stored channel is re-read inside every attempt.
+pub mod settings {
+    use super::*;
+    use crate::models::{
+        audit_outbox::{
+            AuditApprovalMode, AuditDetail, AuditOwner, AuditPrincipal, AuditStage,
+            NotificationSettingsDecision,
+        },
+        user::{COLLECTION_NAME as USERS, User},
+    };
+    use crate::services::{
+        approval_policy::GlobalApprovalMode,
+        audit_outbox_service::{self, AuditEvent},
+        audit_runtime::{AuditRuntime, policy::AuditTier, transaction},
+    };
+    use mongodb::{ClientSession, options::ReturnDocument};
+    use uuid::Uuid;
+    use zeroize::Zeroizing;
+
+    #[derive(Default)]
+    pub struct SettingsPatch {
+        pub telegram_enabled: Option<bool>,
+        pub approval_required: Option<bool>,
+        pub global_approval_mode: Option<GlobalApprovalMode>,
+        pub approval_timeout_secs: Option<u32>,
+        pub grant_expiry_days: Option<u32>,
+        pub push_enabled: Option<bool>,
+    }
+
+    impl SettingsPatch {
+        fn validate(&self) -> AppResult<()> {
+            if let (Some(legacy), Some(mode)) = (self.approval_required, self.global_approval_mode)
+                && mode.stored() != Some(legacy)
+            {
+                return Err(AppError::ValidationError(
+                    "approval_required conflicts with global_approval_mode".into(),
+                ));
+            }
+            if self
+                .approval_timeout_secs
+                .is_some_and(|value| !(10..=300).contains(&value))
+            {
+                return Err(AppError::ValidationError(
+                    "approval_timeout_secs must be between 10 and 300".into(),
+                ));
+            }
+            if self
+                .grant_expiry_days
+                .is_some_and(|value| !(1..=365).contains(&value))
+            {
+                return Err(AppError::ValidationError(
+                    "grant_expiry_days must be between 1 and 365".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct Readiness<'a> {
+        pub config: &'a AppConfig,
+        pub fcm_initialized: bool,
+        pub apns_initialized: bool,
+    }
+
+    impl Readiness<'_> {
+        fn decision(self, channel: &NotificationChannel) -> NotificationSettingsDecision {
+            NotificationSettingsDecision {
+                telegram_enabled: channel.telegram_enabled,
+                push_enabled: channel.push_enabled,
+                // Delivery loss never suspends required web approval.
+                approval_suspended: false,
+                approval_delivery_configured: approval_delivery_configured(
+                    channel,
+                    self.config,
+                    self.fcm_initialized,
+                    self.apns_initialized,
+                ),
+                global_approval_mode: match GlobalApprovalMode::from_stored(
+                    channel.approval_required,
+                ) {
+                    GlobalApprovalMode::WritesOnly => AuditApprovalMode::WritesOnly,
+                    GlobalApprovalMode::All => AuditApprovalMode::All,
+                    GlobalApprovalMode::Off => AuditApprovalMode::Off,
+                },
+                approval_timeout_secs: channel.approval_timeout_secs,
+                grant_expiry_days: channel.grant_expiry_days,
+            }
+        }
+    }
+
+    enum Change<'a> {
+        Preferences(&'a SettingsPatch),
+        TelegramLink {
+            code: &'a str,
+            expires: DateTime<Utc>,
+        },
+        TelegramDisconnect,
+    }
+
+    struct Mutation<'a> {
+        db: &'a Database,
+        runtime: &'a AuditRuntime,
+        principal: &'a AuditPrincipal,
+        owner_id: &'a str,
+        readiness: Readiness<'a>,
+        change: Change<'a>,
+        initial: NotificationChannel,
+        event_id: Uuid,
+        operation_id: Uuid,
+        at: DateTime<Utc>,
+    }
+
+    pub struct SettingsResult {
+        pub channel: NotificationChannel,
+        pub telegram_was_linked: bool,
+    }
+
+    impl<'a> Mutation<'a> {
+        fn new(
+            db: &'a Database,
+            runtime: &'a AuditRuntime,
+            principal: &'a AuditPrincipal,
+            owner_id: &'a str,
+            readiness: Readiness<'a>,
+            change: Change<'a>,
+        ) -> Self {
+            let at = bson::DateTime::now().to_chrono();
+            Self {
+                db,
+                runtime,
+                principal,
+                owner_id,
+                readiness,
+                change,
+                initial: default_channel(owner_id, Uuid::new_v4().to_string(), at),
+                event_id: Uuid::new_v4(),
+                operation_id: Uuid::new_v4(),
+                at,
+            }
+        }
+
+        async fn commit(&self) -> AppResult<SettingsResult> {
+            transaction::run(self.db, self, |session, context| {
+                Box::pin(mutate_in_session(session, context))
+            })
+            .await
+        }
+    }
+
+    pub async fn update(
+        db: &Database,
+        runtime: &AuditRuntime,
+        principal: &AuditPrincipal,
+        owner_id: &str,
+        patch: &SettingsPatch,
+        readiness: Readiness<'_>,
+    ) -> AppResult<NotificationChannel> {
+        patch.validate()?;
+        Ok(Mutation::new(
+            db,
+            runtime,
+            principal,
+            owner_id,
+            readiness,
+            Change::Preferences(patch),
+        )
+        .commit()
+        .await?
+        .channel)
+    }
+
+    /// Link code remains product data and is returned only after definite commit.
+    pub async fn issue_telegram_link(
+        db: &Database,
+        runtime: &AuditRuntime,
+        principal: &AuditPrincipal,
+        owner_id: &str,
+        readiness: Readiness<'_>,
+    ) -> AppResult<String> {
+        use rand::Rng;
+        let code = Zeroizing::new(format!("NYXID-{}", {
+            let mut rng = rand::thread_rng();
+            (0..8)
+                .map(|_| {
+                    let value = rng.gen_range(0..36);
+                    if value < 10 {
+                        (b'0' + value) as char
+                    } else {
+                        (b'A' + value - 10) as char
+                    }
+                })
+                .collect::<String>()
+        }));
+        let expires = bson::DateTime::now().to_chrono() + chrono::Duration::minutes(5);
+        Mutation::new(
+            db,
+            runtime,
+            principal,
+            owner_id,
+            readiness,
+            Change::TelegramLink {
+                code: code.as_str(),
+                expires,
+            },
+        )
+        .commit()
+        .await?;
+        Ok(code.to_string())
+    }
+
+    pub async fn disconnect_telegram(
+        db: &Database,
+        runtime: &AuditRuntime,
+        principal: &AuditPrincipal,
+        owner_id: &str,
+        readiness: Readiness<'_>,
+    ) -> AppResult<SettingsResult> {
+        Mutation::new(
+            db,
+            runtime,
+            principal,
+            owner_id,
+            readiness,
+            Change::TelegramDisconnect,
+        )
+        .commit()
+        .await
+    }
+
+    async fn mutate_in_session(
+        session: &mut ClientSession,
+        context: &Mutation<'_>,
+    ) -> AppResult<SettingsResult> {
+        let actor_owner = match context.principal {
+            AuditPrincipal::Person { id } => id,
+            AuditPrincipal::ApiKey { owner_id, .. } => owner_id,
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Notification settings owner required".into(),
+                ));
+            }
+        };
+        if actor_owner != context.owner_id {
+            return Err(AppError::Forbidden(
+                "Notification settings owner required".into(),
+            ));
+        }
+        let db = context.db;
+        let owner = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": context.owner_id, "is_active": true})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Notification settings owner not found".into()))?;
+        // A shared-document write makes a concurrent owner deletion/revocation
+        // conflict rather than committing against a stale authorization snapshot.
+        if db
+            .collection::<bson::Document>(USERS)
+            .update_one(
+                doc! {"_id": context.owner_id, "is_active": true},
+                doc! {"$inc": {"audit_mutation_fence": 1_i64}},
+            )
+            .session(&mut *session)
+            .await?
+            .matched_count
+            != 1
+        {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        let channels = db.collection::<NotificationChannel>(COLLECTION_NAME);
+        let existing = channels
+            .find_one(doc! {"user_id": context.owner_id})
+            .session(&mut *session)
+            .await?;
+        let before = existing.as_ref().unwrap_or(&context.initial);
+        let mut after = before.clone();
+        let old = context.readiness.decision(before);
+        let telegram_was_linked = before.telegram_chat_id.is_some() || before.telegram_enabled;
+        let (action, tier, changed, detail) = match context.change {
+            Change::Preferences(patch) => {
+                patch.validate()?;
+                if patch.telegram_enabled == Some(true) && before.telegram_chat_id.is_none() {
+                    return Err(AppError::BadRequest("Cannot enable Telegram notifications without linking your Telegram account first".into()));
+                }
+                if patch.push_enabled == Some(true) && before.push_devices.is_empty() {
+                    return Err(AppError::BadRequest("Cannot enable push notifications without registering at least one device first".into()));
+                }
+                if let Some(value) = patch.telegram_enabled {
+                    after.telegram_enabled = value;
+                }
+                if let Some(value) = patch.push_enabled {
+                    after.push_enabled = value;
+                }
+                if let Some(value) = patch.global_approval_mode {
+                    after.approval_required = value.stored();
+                } else if let Some(value) = patch.approval_required {
+                    after.approval_required = Some(value);
+                }
+                if let Some(value) = patch.approval_timeout_secs {
+                    after.approval_timeout_secs = value;
+                }
+                if let Some(value) = patch.grant_expiry_days {
+                    after.grant_expiry_days = value;
+                }
+                let new = context.readiness.decision(&after);
+                let changed = old != new;
+                // Pure channel disable or stricter approval/grant lifetime is
+                // local narrowing. Any widening/ordinary preference is Standard.
+                let rank = |mode: AuditApprovalMode| match mode {
+                    AuditApprovalMode::Off => 0,
+                    AuditApprovalMode::WritesOnly => 1,
+                    AuditApprovalMode::All => 2,
+                };
+                let narrowing = (!after.telegram_enabled || before.telegram_enabled)
+                    && (!after.push_enabled || before.push_enabled)
+                    && rank(new.global_approval_mode) >= rank(old.global_approval_mode)
+                    && after.grant_expiry_days <= before.grant_expiry_days
+                    && after.approval_timeout_secs == before.approval_timeout_secs;
+                (
+                    "notification_settings_updated",
+                    if narrowing {
+                        AuditTier::Narrowing
+                    } else {
+                        AuditTier::Standard
+                    },
+                    changed,
+                    AuditDetail::NotificationSettingsChange { old, new },
+                )
+            }
+            Change::TelegramLink { code, expires } => {
+                after.telegram_link_code = Some(code.to_string());
+                after.telegram_link_code_expires_at = Some(expires);
+                (
+                    "telegram_link_issued",
+                    AuditTier::Standard,
+                    true,
+                    AuditDetail::ExpiryChange {
+                        old: before.telegram_link_code_expires_at,
+                        new: Some(expires),
+                    },
+                )
+            }
+            Change::TelegramDisconnect => {
+                let changed = telegram_was_linked
+                    || before.telegram_username.is_some()
+                    || before.telegram_link_code.is_some()
+                    || before.telegram_link_code_expires_at.is_some();
+                after.telegram_chat_id = None;
+                after.telegram_username = None;
+                after.telegram_enabled = false;
+                after.telegram_link_code = None;
+                after.telegram_link_code_expires_at = None;
+                let new = context.readiness.decision(&after);
+                (
+                    "telegram_disconnected",
+                    AuditTier::Narrowing,
+                    changed,
+                    AuditDetail::NotificationSettingsChange { old, new },
+                )
+            }
+        };
+        if !changed {
+            // Do not create a row or fabricate an event for an effective no-op.
+            return Ok(SettingsResult {
+                channel: after,
+                telegram_was_linked: false,
+            });
+        }
+        after.updated_at = context.at;
+        if existing.is_some() {
+            // Patch only owned fields: preserve destination tokens and any
+            // forward-compatible product/revision fields on the same record.
+            let mut set = doc! {"updated_at": bson::DateTime::from_chrono(context.at)};
+            let mut unset = doc! {};
+            match context.change {
+                Change::Preferences(_) => {
+                    set.insert("telegram_enabled", after.telegram_enabled);
+                    set.insert("push_enabled", after.push_enabled);
+                    set.insert(
+                        "approval_timeout_secs",
+                        i64::from(after.approval_timeout_secs),
+                    );
+                    set.insert("grant_expiry_days", i64::from(after.grant_expiry_days));
+                    if let Some(required) = after.approval_required {
+                        set.insert("approval_required", required);
+                    } else {
+                        unset.insert("approval_required", "");
+                    }
+                }
+                Change::TelegramLink { code, expires } => {
+                    set.insert("telegram_link_code", code);
+                    set.insert(
+                        "telegram_link_code_expires_at",
+                        bson::DateTime::from_chrono(expires),
+                    );
+                }
+                Change::TelegramDisconnect => {
+                    set.insert("telegram_enabled", false);
+                    for field in [
+                        "telegram_chat_id",
+                        "telegram_username",
+                        "telegram_link_code",
+                        "telegram_link_code_expires_at",
+                    ] {
+                        set.insert(field, bson::Bson::Null);
+                    }
+                }
+            }
+            let mut update = doc! {"$set": set};
+            if !unset.is_empty() {
+                update.insert("$unset", unset);
+            }
+            let updated = channels
+                .find_one_and_update(
+                    doc! {"_id": &before.id, "user_id": context.owner_id},
+                    update,
+                )
+                .return_document(ReturnDocument::After)
+                .session(&mut *session)
+                .await?;
+            if updated.is_none() {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+        } else {
+            channels.insert_one(&after).session(&mut *session).await?;
+        }
+        let event = AuditEvent {
+            operation_id: context.operation_id.to_string(),
+            stage: AuditStage::Committed,
+            principal: context.principal.clone(),
+            owner: if owner.user_type.is_org() {
+                AuditOwner::Org { id: owner.id }
+            } else {
+                AuditOwner::Person { id: owner.id }
+            },
+            action,
+            target_id: Some(after.id.clone()),
+        }
+        .with_detail(detail);
+        audit_outbox_service::enqueue_admitted_in_session(
+            db,
+            session,
+            context.runtime,
+            tier,
+            &context.event_id,
+            &event,
+        )
+        .await?;
+        Ok(SettingsResult {
+            channel: after,
+            telegram_was_linked,
+        })
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::models::audit_outbox::{PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent};
+
+        async fn fixture() -> (Database, String, AppConfig) {
+            let db =
+                crate::test_utils::connect_transaction_test_database("w8_coreb_settings").await;
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(crate::test_utils::test_user(
+                    &owner,
+                    crate::models::user::UserType::Person,
+                ))
+                .await
+                .unwrap();
+            db.collection::<NotificationChannel>(COLLECTION_NAME)
+                .create_index(
+                    mongodb::IndexModel::builder()
+                        .keys(doc! {"user_id": 1})
+                        .options(
+                            mongodb::options::IndexOptions::builder()
+                                .unique(true)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await
+                .unwrap();
+            (db, owner, crate::test_utils::test_app_config())
+        }
+
+        fn ready(config: &AppConfig) -> Readiness<'_> {
+            Readiness {
+                config,
+                fcm_initialized: false,
+                apns_initialized: false,
+            }
+        }
+
+        #[tokio::test]
+        async fn w8_coreb_settings_abort_and_commit_preserve_exact_snapshot_detail() {
+            let (db, owner, config) = fixture().await;
+            let runtime = AuditRuntime::new(Default::default(), false);
+            let principal = AuditPrincipal::ApiKey {
+                id: Uuid::new_v4().to_string(),
+                owner_id: owner.clone(),
+            };
+            let patch = SettingsPatch {
+                global_approval_mode: Some(GlobalApprovalMode::All),
+                ..Default::default()
+            };
+            let context = Mutation::new(
+                &db,
+                &runtime,
+                &principal,
+                &owner,
+                ready(&config),
+                Change::Preferences(&patch),
+            );
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            mutate_in_session(&mut session, &context).await.unwrap();
+            session.abort_transaction().await.unwrap();
+            drop(session);
+            assert_eq!(
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<PendingAuditEvent>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            context.commit().await.unwrap();
+            // A repeated preferences request is a no-op, not a fabricated audit.
+            context.commit().await.unwrap();
+            let event = db
+                .collection::<PendingAuditEvent>(PENDING)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap()
+                .event;
+            assert_eq!(event.principal, principal);
+            assert_eq!(event.owner, AuditOwner::Person { id: owner });
+            let Some(AuditDetail::NotificationSettingsChange { old, new }) = event.detail else {
+                panic!("missing decision detail")
+            };
+            assert_eq!(old.global_approval_mode, AuditApprovalMode::WritesOnly);
+            assert_eq!(new.global_approval_mode, AuditApprovalMode::All);
+            assert!(!new.approval_suspended);
+            assert_eq!(
+                db.collection::<PendingAuditEvent>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn w8_coreb_settings_closed_admission_blocks_widening_but_keeps_local_revocation() {
+            use crate::services::audit_runtime::policy::{AdmissionLimits, TierLimit};
+            let (db, owner, mut config) = fixture().await;
+            config.telegram_bot_token = Some("test-only-bot-token".into());
+            let principal = AuditPrincipal::Person { id: owner.clone() };
+            let mut channel = default_channel(&owner, Uuid::new_v4().to_string(), Utc::now());
+            channel.telegram_enabled = true;
+            channel.telegram_chat_id = Some(8246824682468246);
+            channel.telegram_username = Some("private-name".into());
+            channel.telegram_link_code = Some("private-link-code".into());
+            db.collection::<NotificationChannel>(COLLECTION_NAME)
+                .insert_one(&channel)
+                .await
+                .unwrap();
+            let defaults = AdmissionLimits::default();
+            let runtime = AuditRuntime::new(
+                AdmissionLimits {
+                    pending_count: 1,
+                    standard: TierLimit {
+                        pending_count: 1,
+                        ..defaults.standard
+                    },
+                    ..defaults
+                },
+                true,
+            );
+            // Consume the only Standard slot with a benign ordinary preference.
+            let patch = SettingsPatch {
+                approval_timeout_secs: Some(100),
+                ..Default::default()
+            };
+            update(&db, &runtime, &principal, &owner, &patch, ready(&config))
+                .await
+                .unwrap();
+            let patch = SettingsPatch {
+                global_approval_mode: Some(GlobalApprovalMode::Off),
+                ..Default::default()
+            };
+            assert!(matches!(
+                update(&db, &runtime, &principal, &owner, &patch, ready(&config)).await,
+                Err(AppError::AuditAdmissionClosed { .. })
+            ));
+            let outcome = disconnect_telegram(&db, &runtime, &principal, &owner, ready(&config))
+                .await
+                .unwrap();
+            assert!(outcome.telegram_was_linked);
+            assert_eq!(outcome.channel.approval_required, None);
+            assert!(!outcome.channel.telegram_enabled);
+            assert!(outcome.channel.telegram_chat_id.is_none());
+            assert!(
+                !disconnect_telegram(&db, &runtime, &principal, &owner, ready(&config))
+                    .await
+                    .unwrap()
+                    .telegram_was_linked
+            );
+            let event = db
+                .collection::<PendingAuditEvent>(PENDING)
+                .find_one(doc! {"event.action": "telegram_disconnected"})
+                .await
+                .unwrap()
+                .unwrap();
+            let Some(AuditDetail::NotificationSettingsChange { old, new }) = &event.event.detail
+            else {
+                panic!("missing detail")
+            };
+            assert!(old.approval_delivery_configured);
+            assert!(!new.approval_delivery_configured);
+            assert!(!new.approval_suspended);
+            let evidence = serde_json::to_string(&event).unwrap();
+            for forbidden in [
+                "private-name",
+                "private-link-code",
+                "test-only-bot-token",
+                "8246824682468246",
+            ] {
+                assert!(!evidence.contains(forbidden));
+            }
+        }
+
+        #[tokio::test]
+        async fn w8_coreb_settings_validation_and_principal_refusal_leave_no_business_rows() {
+            let (db, owner, config) = fixture().await;
+            let runtime = AuditRuntime::new(Default::default(), false);
+            let principal = AuditPrincipal::Person { id: owner.clone() };
+            for patch in [
+                SettingsPatch {
+                    approval_timeout_secs: Some(9),
+                    ..Default::default()
+                },
+                SettingsPatch {
+                    grant_expiry_days: Some(366),
+                    ..Default::default()
+                },
+                SettingsPatch {
+                    global_approval_mode: Some(GlobalApprovalMode::WritesOnly),
+                    approval_required: Some(false),
+                    ..Default::default()
+                },
+                SettingsPatch {
+                    telegram_enabled: Some(true),
+                    ..Default::default()
+                },
+                SettingsPatch {
+                    push_enabled: Some(true),
+                    ..Default::default()
+                },
+            ] {
+                assert!(
+                    update(&db, &runtime, &principal, &owner, &patch, ready(&config))
+                        .await
+                        .is_err()
+                );
+            }
+            let patch = SettingsPatch {
+                approval_required: Some(false),
+                ..Default::default()
+            };
+            for principal in [
+                AuditPrincipal::Node { id: owner.clone() },
+                AuditPrincipal::Person {
+                    id: Uuid::new_v4().to_string(),
+                },
+            ] {
+                assert!(matches!(
+                    update(&db, &runtime, &principal, &owner, &patch, ready(&config)).await,
+                    Err(AppError::Forbidden(_))
+                ));
+            }
+            assert_eq!(
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<PendingAuditEvent>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+
+        #[tokio::test]
+        async fn w8_coreb_telegram_link_is_transactional_and_never_audit_payload() {
+            let (db, owner, config) = fixture().await;
+            let runtime = AuditRuntime::new(Default::default(), false);
+            let principal = AuditPrincipal::Person { id: owner.clone() };
+            let context = Mutation::new(
+                &db,
+                &runtime,
+                &principal,
+                &owner,
+                ready(&config),
+                Change::TelegramLink {
+                    code: "NYXID-TESTONLY",
+                    expires: bson::DateTime::now().to_chrono() + chrono::Duration::minutes(5),
+                },
+            );
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            mutate_in_session(&mut session, &context).await.unwrap();
+            session.abort_transaction().await.unwrap();
+            drop(session);
+            assert_eq!(
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let code = issue_telegram_link(&db, &runtime, &principal, &owner, ready(&config))
+                .await
+                .unwrap();
+            let channel = db
+                .collection::<NotificationChannel>(COLLECTION_NAME)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(channel.telegram_link_code.as_deref(), Some(code.as_str()));
+            assert_eq!(channel.approval_required, None);
+            assert!(!channel.telegram_enabled);
+            let event = db
+                .collection::<PendingAuditEvent>(PENDING)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                event.event.detail,
+                Some(AuditDetail::ExpiryChange { .. })
+            ));
+            assert!(!serde_json::to_string(&event).unwrap().contains(&code));
+        }
+
+        #[tokio::test]
+        async fn w8_coreb_settings_preserve_destination_and_future_fields_and_all_three_modes() {
+            let (db, owner, config) = fixture().await;
+            let runtime = AuditRuntime::new(Default::default(), false);
+            let principal = AuditPrincipal::Person { id: owner.clone() };
+            let channel = get_or_create_channel(&db, &owner).await.unwrap();
+            db.collection::<bson::Document>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id": &channel.id},
+                    doc! {"$set": {"future_destination_revision": "opaque-preserved"}},
+                )
+                .await
+                .unwrap();
+            for (mode, stored) in [
+                (GlobalApprovalMode::Off, Some(false)),
+                (GlobalApprovalMode::All, Some(true)),
+                (GlobalApprovalMode::WritesOnly, None),
+            ] {
+                let patch = SettingsPatch {
+                    global_approval_mode: Some(mode),
+                    ..Default::default()
+                };
+                let after = update(&db, &runtime, &principal, &owner, &patch, ready(&config))
+                    .await
+                    .unwrap();
+                assert_eq!(after.approval_required, stored);
+                let row = db
+                    .collection::<bson::Document>(COLLECTION_NAME)
+                    .find_one(doc! {"_id": &channel.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    row.get_str("future_destination_revision").unwrap(),
+                    "opaque-preserved"
+                );
+                if stored.is_none() {
+                    assert!(!row.contains_key("approval_required"));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "w8_coreb_delivery_tests.rs"]
 mod w8_coreb_delivery_tests;
@@ -1390,17 +2193,9 @@ pub async fn send_silent_push_to_user(
     Ok(())
 }
 
-/// Get the user's notification channel settings, creating defaults if none exist.
-pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<NotificationChannel> {
-    let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
-
-    if let Some(channel) = collection.find_one(doc! { "user_id": user_id }).await? {
-        return Ok(channel);
-    }
-
-    let now = Utc::now();
-    let channel = NotificationChannel {
-        id: uuid::Uuid::new_v4().to_string(),
+fn default_channel(user_id: &str, id: String, at: DateTime<Utc>) -> NotificationChannel {
+    NotificationChannel {
+        id,
         user_id: user_id.to_string(),
         telegram_chat_id: None,
         telegram_username: None,
@@ -1412,9 +2207,20 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         approval_required: None,
         push_enabled: false,
         push_devices: vec![],
-        created_at: now,
-        updated_at: now,
-    };
+        created_at: at,
+        updated_at: at,
+    }
+}
+
+/// Get the user's notification channel settings, creating defaults if none exist.
+pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<NotificationChannel> {
+    let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
+
+    if let Some(channel) = collection.find_one(doc! { "user_id": user_id }).await? {
+        return Ok(channel);
+    }
+
+    let channel = default_channel(user_id, uuid::Uuid::new_v4().to_string(), Utc::now());
 
     match collection.insert_one(&channel).await {
         Ok(_) => Ok(channel),
