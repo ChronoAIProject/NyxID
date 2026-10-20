@@ -839,11 +839,8 @@ async fn archived_discovery_respects_current_roles_scopes_and_uuid_identity() {
 }
 
 #[tokio::test]
-async fn independent_backing_writes_race_first_history_head() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+async fn independent_backing_writes_serialize_first_history_head() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let (db, mut s) = fixture().await;
     s.api_key_id = Some("key".into());
     db.collection::<UserService>("user_services")
@@ -854,45 +851,74 @@ async fn independent_backing_writes_race_first_history_head() {
         .insert_one(doc! { "_id": "key", "user_id": &s.user_id, "label": "Before" })
         .await
         .unwrap();
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let jobs = [("user_endpoints", "endpoint"), ("user_api_keys", "key")].map(|(entity, id)| {
-        let db = db.clone();
-        let service_id = s.id.clone();
-        let barrier = barrier.clone();
-        async move {
-            let first = AtomicBool::new(true);
-            transaction::run(&db, async |session| {
-                if first.swap(false, Ordering::SeqCst) {
-                    let head = db
-                        .collection::<Document>(
-                            crate::models::service_change_event::HEADS_COLLECTION_NAME,
-                        )
-                        .find_one(doc! { "_id": &service_id })
-                        .session(&mut *session)
-                        .await?;
-                    assert!(head.is_none());
-                    barrier.wait().await;
-                }
-                collection::<Document>(&db, entity)
-                    .update_one(doc! { "_id": id }, doc! { "$set": { "label": "After" } })
-                    .session(&mut *session)
-                    .await?;
-                Ok(())
-            })
-            .await
-            .unwrap();
+    let inside = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
+    let first = AtomicBool::new(true);
+    let sibling_entered = AtomicBool::new(false);
+    let endpoint = transaction::run(&db, async |session| {
+        let head = db
+            .collection::<Document>(crate::models::service_change_event::HEADS_COLLECTION_NAME)
+            .find_one(doc! { "_id": &s.id })
+            .session(&mut *session)
+            .await?;
+        assert!(head.is_none());
+        if first.swap(false, Ordering::SeqCst) {
+            inside.notify_one();
+            // Only the independent test controller releases this owner.
+            release.notified().await;
         }
+        collection::<Document>(&db, "user_endpoints")
+            .update_one(
+                doc! { "_id": "endpoint" },
+                doc! { "$set": { "label": "After" } },
+            )
+            .session(&mut *session)
+            .await?;
+        Ok(())
     });
-    let [endpoint, key] = jobs;
-    tokio::join!(endpoint, key);
+    let controller = async {
+        inside.notified().await;
+        let key = transaction::run(&db, async |session| {
+            sibling_entered.store(true, Ordering::SeqCst);
+            let head = db
+                .collection::<Document>(crate::models::service_change_event::HEADS_COLLECTION_NAME)
+                .find_one(doc! { "_id": &s.id })
+                .session(&mut *session)
+                .await?
+                .expect("the first owner committed the initial history head");
+            assert_eq!(head.get_i64("sequence").unwrap(), 1);
+            collection::<Document>(&db, "user_api_keys")
+                .update_one(doc! { "_id": "key" }, doc! { "$set": { "label": "After" } })
+                .session(&mut *session)
+                .await?;
+            Ok(())
+        });
+        tokio::pin!(key);
+        // A simultaneous first-head snapshot is now impossible under local FIFO.
+        // The queued sibling cannot enter until this controller permits commit.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut key)
+                .await
+                .is_err()
+        );
+        assert!(!sibling_entered.load(Ordering::SeqCst));
+        assert!(events(&db, &s.id).await.is_empty());
+        release.notify_one();
+        key.await.unwrap();
+    };
+    let (result, ()) = tokio::join!(endpoint, controller);
+    result.unwrap();
+    assert!(sibling_entered.load(Ordering::SeqCst));
     let rows = events(&db, &s.id).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(
         rows.iter().map(|e| e.service_sequence).collect::<Vec<_>>(),
         [1, 2]
     );
-    assert_ne!(rows[0].entity_type, rows[1].entity_type);
+    assert_eq!(rows[0].entity_type, "user_endpoints");
+    assert_eq!(rows[1].entity_type, "user_api_keys");
     assert!(rows.iter().all(|e| e.action == "service.updated"));
+    crate::test_utils::teardown_test_database(&db).await;
 }
 
 #[tokio::test]
@@ -991,23 +1017,22 @@ async fn oversized_operation_remains_whole_and_late_commits_do_not_move_page_anc
 async fn concurrent_reference_creation_and_backing_edit_are_serialized() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let (db, s) = fixture().await;
-    let inserted = tokio::sync::Notify::new();
-    let edited = tokio::sync::Notify::new();
+    let inside = tokio::sync::Notify::new();
+    let release = tokio::sync::Notify::new();
     let first = AtomicBool::new(true);
     let creation = transaction::run(&db, async |session| {
-        // Establish the snapshot before the endpoint edit; the first write must
-        // conflict with that edit, retry, and create against its final state.
         let endpoint = db
             .collection::<Document>("user_endpoints")
             .find_one(doc! { "_id": "endpoint" })
             .session(&mut *session)
             .await?
             .unwrap();
+        assert_eq!(endpoint.get_str("label").unwrap(), "Original");
         if first.swap(false, Ordering::SeqCst) {
-            inserted.notify_one();
-            edited.notified().await;
-        } else {
-            assert_eq!(endpoint.get_str("label").unwrap(), "Updated concurrently");
+            // Hold only a read snapshot: a DB write lock must not be the reason
+            // the sibling blocks during the controller's FIFO probe.
+            inside.notify_one();
+            release.notified().await;
         }
         collection::<UserService>(&db, "user_services")
             .insert_one(&s)
@@ -1015,34 +1040,75 @@ async fn concurrent_reference_creation_and_backing_edit_are_serialized() {
             .await?;
         Ok(())
     });
-    let edit = async {
-        inserted.notified().await;
-        collection::<Document>(&db, "user_endpoints")
-            .update_one(
-                doc! { "_id": "endpoint" },
-                doc! { "$set": { "label": "Updated concurrently" } },
-            )
-            .await
-            .unwrap();
-        edited.notify_one();
+    let controller = async {
+        inside.notified().await;
+        let edit = async {
+            collection::<Document>(&db, "user_endpoints")
+                .update_one(
+                    doc! { "_id": "endpoint" },
+                    doc! { "$set": { "label": "Updated concurrently" } },
+                )
+                .await
+        };
+        tokio::pin!(edit);
+        // Editing between the creation snapshot and commit is now impossible
+        // under local FIFO. The owner waits only for this independent controller,
+        // never for the queued edit; the edit must follow the creation commit.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut edit)
+                .await
+                .is_err()
+        );
+        assert!(events(&db, &s.id).await.is_empty());
+        assert!(
+            db.collection::<UserService>("user_services")
+                .find_one(doc! { "_id": &s.id })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        release.notify_one();
+        assert_eq!(edit.await.unwrap().modified_count, 1);
     };
-    let (result, ()) = tokio::join!(creation, edit);
+    let (result, ()) = tokio::join!(creation, controller);
     result.unwrap();
     let rows = events(&db, &s.id).await;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].action, "service.created");
+    assert_eq!(rows[1].action, "service.updated");
+    assert_eq!(rows[1].entity_type, "user_endpoints");
+    assert_eq!(
+        rows.iter().map(|e| e.service_sequence).collect::<Vec<_>>(),
+        [1, 2]
+    );
     let endpoint = db
         .collection::<Document>("user_endpoints")
         .find_one(doc! { "_id": "endpoint" })
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(endpoint.get_str("label").unwrap(), "Updated concurrently");
     assert_eq!(endpoint.get_i64("service_history_ref_epoch").unwrap(), 1);
+    let service = db
+        .collection::<UserService>("user_services")
+        .find_one(doc! { "_id": &s.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(service.created_by.is_some());
+    assert_eq!(
+        service.last_change.unwrap().change_group_id,
+        rows[1].change_group_id
+    );
+    crate::test_utils::teardown_test_database(&db).await;
 }
 
 #[tokio::test]
 async fn new_and_rebound_references_are_included_in_retried_backing_fanout() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     for create in [true, false] {
         for (field, backing) in [
             ("endpoint_id", "user_endpoints"),
@@ -1059,56 +1125,102 @@ async fn new_and_rebound_references_are_included_in_retried_backing_fanout() {
                     .await
                     .unwrap();
             }
-            let snapshot_ready = tokio::sync::Notify::new();
-            let reference_ready = tokio::sync::Notify::new();
+            let inside = tokio::sync::Notify::new();
+            let release = tokio::sync::Notify::new();
             let first = AtomicBool::new(true);
-            let edit = transaction::run(&db, async |session| {
-                db.collection::<Document>(backing)
-                    .find_one(doc! { "_id": "new-backing" })
-                    .session(&mut *session)
-                    .await?;
-                if first.swap(false, Ordering::SeqCst) {
-                    snapshot_ready.notify_one();
-                    reference_ready.notified().await;
-                }
-                collection::<Document>(&db, backing)
-                    .update_one(
-                        doc! { "_id": "new-backing" },
-                        doc! { "$set": { "label": "After" } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                Ok(())
-            });
-            let reference = async {
-                snapshot_ready.notified().await;
+            let attempts = AtomicUsize::new(0);
+            let observed = Mutex::new(Vec::new());
+            let reference = transaction::run(&db, async |session| {
                 if create {
                     let mut service = bson::to_document(&s).unwrap();
                     service.insert(field, "new-backing");
                     collection::<Document>(&db, "user_services")
                         .insert_one(service)
-                        .await
-                        .unwrap();
+                        .session(&mut *session)
+                        .await?;
                 } else {
                     collection::<Document>(&db, "user_services")
                         .update_one(
                             doc! { "_id": &s.id },
                             doc! { "$set": { field: "new-backing" } },
                         )
-                        .await
-                        .unwrap();
+                        .session(&mut *session)
+                        .await?;
                 }
-                reference_ready.notify_one();
+                if first.swap(false, Ordering::SeqCst) {
+                    inside.notify_one();
+                    release.notified().await;
+                }
+                Ok(())
+            });
+            let controller = async {
+                inside.notified().await;
+                let edit = context::scope(
+                    actor(&s.user_id, &uuid::Uuid::new_v4().to_string()),
+                    transaction::run(&db, async |session| {
+                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                        collection::<Document>(&db, backing)
+                            .update_one(
+                                doc! { "_id": "new-backing" },
+                                doc! { "$set": { "label": "After" } },
+                            )
+                            .session(&mut *session)
+                            .await?;
+                        let event = db
+                            .collection::<ServiceChangeEvent>(COLLECTION_NAME)
+                            .find_one(doc! { "service_id": &s.id, "entity_type": backing })
+                            .session(&mut *session)
+                            .await?
+                            .expect("every fanout attempt must include the committed reference");
+                        assert_eq!(event.service_sequence, 2);
+                        observed.lock().unwrap().push(event);
+                        // The old snapshot/reference interleaving is now impossible
+                        // under local FIFO. Force a real transaction rollback after
+                        // fanout so retry coverage remains explicit for both references.
+                        if attempt == 0 {
+                            return Err(mongodb::error::Error::custom(
+                                transaction::ConcurrentHeadCreation,
+                            ));
+                        }
+                        Ok(())
+                    }),
+                );
+                tokio::pin!(edit);
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(50), &mut edit)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    0,
+                    "backing edit cannot enter before reference commit"
+                );
+                assert!(events(&db, &s.id).await.is_empty());
+                release.notify_one();
+                edit.await.unwrap();
             };
-            let (result, ()) = tokio::join!(edit, reference);
+            let (result, ()) = tokio::join!(reference, controller);
             result.unwrap();
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
             let rows = events(&db, &s.id).await;
             assert_eq!(
                 rows.len(),
                 2,
-                "one reference mutation and one backing change: {field}, create={create}"
+                "one reference mutation and one durable backing change: {field}, create={create}"
             );
+            assert_eq!(rows[0].entity_type, "user_services");
             assert_eq!(rows[1].entity_type, backing);
+            assert_eq!(
+                rows.iter().map(|e| e.service_sequence).collect::<Vec<_>>(),
+                [1, 2]
+            );
+            {
+                let observed = observed.lock().unwrap();
+                assert_eq!(observed.len(), 2);
+                assert_eq!(observed[0].id, observed[1].id);
+                assert_eq!(observed[1].id, rows[1].id);
+            }
             let service = db
                 .collection::<UserService>("user_services")
                 .find_one(doc! { "_id": &s.id })
@@ -1120,6 +1232,14 @@ async fn new_and_rebound_references_are_included_in_retried_backing_fanout() {
                 rows[1].change_group_id
             );
             assert_eq!(service.created_by.is_some(), create);
+            let stored_backing = db
+                .collection::<Document>(backing)
+                .find_one(doc! { "_id": "new-backing" })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored_backing.get_str("label").unwrap(), "After");
+            crate::test_utils::teardown_test_database(&db).await;
         }
     }
 }

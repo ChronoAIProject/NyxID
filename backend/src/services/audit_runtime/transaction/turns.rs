@@ -21,6 +21,9 @@ tokio::task_local! {
 #[derive(Debug)]
 pub(super) struct NestedTransactionOwner;
 
+/// Never await a task that takes the same turn. Nested-owner detection is
+/// task-local; it cannot detect a dependency through a spawned task, JoinHandle
+/// or channel reply. Keep all awaited transaction work on this owning task.
 pub(in crate::services) async fn with_turn<F: Future>(
     db: &mongodb::Database,
     body: F,

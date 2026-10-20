@@ -205,6 +205,7 @@ struct FifoMeasurement {
     failed: usize,
     bodies: u32,
     max_bodies: u32,
+    commits: u32,
     max_commits: u32,
 }
 
@@ -230,6 +231,7 @@ async fn measure_durable_fifo(tasks: usize, fifo: bool) -> FifoMeasurement {
                     unqueued_durable_append(&db, event, &mut bodies, &mut commits).await
                 };
                 stats.bodies += bodies;
+                stats.commits += commits;
                 stats.max_bodies = stats.max_bodies.max(bodies);
                 stats.max_commits = stats.max_commits.max(commits);
                 match result {
@@ -254,21 +256,28 @@ async fn measure_durable_fifo(tasks: usize, fifo: bool) -> FifoMeasurement {
         stats.succeeded += result.succeeded;
         stats.failed += result.failed;
         stats.bodies += result.bodies;
+        stats.commits += result.commits;
         stats.max_bodies = stats.max_bodies.max(result.max_bodies);
         stats.max_commits = stats.max_commits.max(result.max_commits);
     }
     stats.per_sec = stats.succeeded as f64 / started.elapsed().as_secs_f64();
     assert_chain(&db, stats.succeeded, true, 0).await;
     crate::test_utils::teardown_test_database(&db).await;
+    assert_eq!(
+        stats.succeeded, 256,
+        "every durable benchmark append must succeed"
+    );
+    assert_eq!(stats.failed, 0, "durable benchmark append failures");
     stats
 }
 
 // Optional protocol for the external host-wide process monitor. It samples
 // throughout each arm and snapshots load/swap/processes at these boundaries.
+// Dedicated hosted runners omit NYXID_BENCHMARK_HOST_MONITOR and never read stdin.
 // Complete in-flight writes and fixture cleanup before rejecting a noisy arm;
 // never retain either arm of a contaminated pair in the reported median.
 fn host_gate(phase: &str, tasks: usize, round: usize, attempt: usize) -> bool {
-    if std::env::var_os("NYXID_FIFO_AB_HOST_GATE").is_none() {
+    if std::env::var_os("NYXID_BENCHMARK_HOST_MONITOR").is_none() {
         return true;
     }
     eprintln!(
@@ -287,12 +296,17 @@ fn host_gate(phase: &str, tasks: usize, round: usize, attempt: usize) -> bool {
 #[ignore = "manual controlled durable audit FIFO versus unqueued owner benchmark"]
 async fn audit_append_throughput_durable_fifo_vs_unqueued() {
     let mut failed = 0;
+    let mut summary = Vec::new();
     for tasks in [1, 16] {
+        let mut pair_attempts = 0;
+        let (mut unqueued_totals, mut fifo_totals) =
+            (FifoMeasurement::default(), FifoMeasurement::default());
         let (mut unqueued, mut fifo) = (Vec::new(), Vec::new());
         for round in 0..3 {
             let mut attempt = 0;
             let (without, with) = loop {
                 attempt += 1;
+                pair_attempts += 1;
                 assert!(
                     attempt <= 20,
                     "host noise exhausted manual benchmark attempts"
@@ -325,16 +339,28 @@ async fn audit_append_throughput_durable_fifo_vs_unqueued() {
             };
             for (queued, result) in [(false, &without), (true, &with)] {
                 eprintln!(
-                    "audit_fifo_ab tasks={tasks} round={} fifo={queued} attempted=256 succeeded={} failed={} appends_per_sec={:.2} body_attempts={} max_body_attempts={} max_commit_attempts={}",
+                    "audit_fifo_ab tasks={tasks} round={} fifo={queued} attempted=256 succeeded={} failed={} appends_per_sec={:.2} body_attempts={} max_body_attempts={} commit_attempts={} max_commit_attempts={}",
                     round + 1,
                     result.succeeded,
                     result.failed,
                     result.per_sec,
                     result.bodies,
                     result.max_bodies,
+                    result.commits,
                     result.max_commits
                 );
                 failed += result.failed;
+                let totals = if queued {
+                    &mut fifo_totals
+                } else {
+                    &mut unqueued_totals
+                };
+                totals.succeeded += result.succeeded;
+                totals.failed += result.failed;
+                totals.bodies += result.bodies;
+                totals.commits += result.commits;
+                totals.max_bodies = totals.max_bodies.max(result.max_bodies);
+                totals.max_commits = totals.max_commits.max(result.max_commits);
             }
             unqueued.push(without.per_sec);
             fifo.push(with.per_sec);
@@ -347,7 +373,42 @@ async fn audit_append_throughput_durable_fifo_vs_unqueued() {
             fifo[1],
             fifo[1] / unqueued[1]
         );
+        let attempts = |totals: &FifoMeasurement| {
+            serde_json::json!({
+                "attempted_appends": 3 * 256,
+                "succeeded": totals.succeeded,
+                "failed": totals.failed,
+                "body_attempts": totals.bodies,
+                "commit_attempts": totals.commits,
+                "max_body_attempts": totals.max_bodies,
+                "max_commit_attempts": totals.max_commits,
+            })
+        };
+        summary.push(serde_json::json!({
+            "tasks": tasks,
+            "accepted_pairs": 3,
+            "pair_attempts": pair_attempts,
+            "unqueued_median_per_sec": unqueued[1],
+            "fifo_median_per_sec": fifo[1],
+            "fifo_throughput_over_unqueued": fifo[1] / unqueued[1],
+            "fifo_time_over_unqueued": unqueued[1] / fifo[1],
+            "unqueued": attempts(&unqueued_totals),
+            "fifo": attempts(&fifo_totals),
+            "all_success": unqueued_totals.succeeded == 3 * 256
+                && fifo_totals.succeeded == 3 * 256 && failed == 0,
+            "integrity_verified": true,
+        }));
     }
+    eprintln!(
+        "audit_fifo_ab SUMMARY {}",
+        serde_json::json!({
+            "schema": 1,
+            "host_monitor": std::env::var_os("NYXID_BENCHMARK_HOST_MONITOR").is_some(),
+            "shapes": summary,
+            "all_success": failed == 0,
+            "integrity_verified": true,
+        })
+    );
     assert_eq!(
         failed, 0,
         "all durable benchmark appends must succeed within unchanged budgets"
