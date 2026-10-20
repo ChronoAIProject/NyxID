@@ -146,10 +146,11 @@ the same account to return the original batch. Omitting the flag creates a new
 batch. A conflicting reuse returns HTTP 409 naming the request ID. Issuance
 retains saved-session 401 refresh and one replay with the same body.
 
-All replicas must include credit allocations (#1950, included in 0.73.0).
-The CLI sends exact `amount` without legacy `amount_credits`, so older replicas
-reject the request rather than silently ignoring its retry ID. Ready, pending,
-and broken results use exits 0/2; server HTTP errors preserve status and body.
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). The CLI sends exact `amount` without legacy
+`amount_credits`, so older replicas reject the request rather than silently
+ignoring its retry ID. Ready, pending, and broken results use exits 0/2; server
+HTTP errors preserve status and body.
 
 Grant lists support `--page` and `--per-page` (1..=500), and include `total`.
 List and revoke tables show exact balances, held and reclaimed credits, status,

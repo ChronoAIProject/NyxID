@@ -172,12 +172,11 @@ retry guidance. Saved sessions retain 401 refresh and a single replay of the
 identical issuance body, including its request ID. Network and 5xx failures
 are not automatically retried.
 
-All server replicas must include credit allocations (#1950, included in
-NyxID 0.73.0) before using this issuance command. Older replicas ignore unknown
-`amount` and `request_id` fields. The CLI deliberately omits legacy
-`amount_credits`, which those replicas require, so they reject the request
-instead of silently issuing a batch without retry protection. There is no
-fallback to the legacy payload.
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). Older replicas ignore unknown `amount` and
+`request_id` fields. The CLI deliberately omits legacy `amount_credits`, which
+those replicas require, so they reject the request instead of silently issuing
+a batch without retry protection. There is no fallback to the legacy payload.
 
 Save the returned `batch_id` and check every recipient's `activation_state`.
 Pending activation grants are unspendable until their issuance is journaled.

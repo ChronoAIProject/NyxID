@@ -8,27 +8,26 @@ use super::billing_support as support;
 use crate::{
     api::ApiClient,
     cli::{AdminCreditsCommands, CreditGrantCommands, OutputFormat},
+    error_format::RetryContext,
 };
 
-#[derive(Debug, thiserror::Error)]
-#[error("Grant request {request_id}")]
-pub(crate) struct GrantRequest {
-    pub(crate) request_id: String,
-}
-
-impl GrantRequest {
-    pub(crate) fn guidance(&self, conflict: bool) -> String {
-        let prefix = if conflict {
-            "409 Conflict: a reused request ID requires identical settings. "
-        } else {
-            ""
-        };
-        format!(
-            "{prefix}Retry with --request-id {} and identical settings using the same account \
-             to return the original batch. A new invocation without --request-id creates a new batch.",
-            self.request_id
-        )
-    }
+fn grant_error(error: anyhow::Error, request_id: &str) -> anyhow::Error {
+    let conflict = error
+        .downcast_ref::<crate::api::ApiError>()
+        .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT);
+    let prefix = if conflict {
+        "409 Conflict: a reused request ID requires identical settings. "
+    } else {
+        ""
+    };
+    error.context(RetryContext {
+        request_id: request_id.into(),
+        message: format!("Grant request {request_id}"),
+        guidance: format!(
+            "{prefix}Retry with --request-id {request_id} and identical settings using the same account \
+             to return the original batch. A new invocation without --request-id creates a new batch."
+        ),
+    })
 }
 
 fn grant_amount(raw: &str) -> Result<String> {
@@ -138,15 +137,11 @@ pub async fn run(command: AdminCreditsCommands) -> Result<()> {
             let mut result: Value = api
                 .post("/admin/credits/grants", &body)
                 .await
-                .with_context(|| GrantRequest {
-                    request_id: request_id.clone(),
-                })?;
+                .map_err(|error| grant_error(error, &request_id))?;
             result
                 .as_object_mut()
                 .context("Grant issuance returned a non-object response")
-                .with_context(|| GrantRequest {
-                    request_id: request_id.clone(),
-                })?
+                .map_err(|error| grant_error(error, &request_id))?
                 .insert("request_id".into(), json!(request_id));
             support::print(&result, auth.output, || support::fields(&result))
         }

@@ -691,13 +691,16 @@ async fn grant_issue_help_and_table_conflict_explain_retry_identity() {
     let server = MockServer::start().await;
     let help = run(&server, &["admin", "credits", "grant", "issue", "--help"]).await;
     assert!(help.status.success());
-    let help = String::from_utf8_lossy(&help.stdout);
+    let help = String::from_utf8_lossy(&help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for text in [
         "--request-id <UUID>",
         "12 fractional digits",
         "identical settings",
         "Without --request-id, each invocation creates a new batch",
-        "#1950",
+        "all server replicas at NyxID 0.72.0 or later (credit allocations, #1950)",
     ] {
         assert!(help.contains(text), "Missing {text}: {help}");
     }
@@ -714,9 +717,14 @@ async fn grant_issue_help_and_table_conflict_explain_retry_identity() {
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     let error = String::from_utf8_lossy(&out.stderr);
-    assert!(error.starts_with(&format!("Request ID: {GRANT_REQUEST_ID}\n")));
-    assert!(error.contains("409 Conflict: a reused request ID requires identical settings"));
-    assert!(error.contains(&format!("--request-id {GRANT_REQUEST_ID}")));
+    let expected = format!(
+        "Request ID: {GRANT_REQUEST_ID}\n\
+         Error: /admin/credits/grants failed (HTTP 409 Conflict): different settings\n\
+         409 Conflict: a reused request ID requires identical settings. \
+         Retry with --request-id {GRANT_REQUEST_ID} and identical settings using the same account \
+         to return the original batch. A new invocation without --request-id creates a new batch.\n"
+    );
+    assert_eq!(error, expected);
 }
 
 #[tokio::test]
@@ -748,8 +756,16 @@ async fn grant_issue_errors_preserve_request_id_http_details_and_retry_guidance(
         let error = &diagnostics[1];
         assert_eq!(error["request_id"], GRANT_REQUEST_ID);
         let guidance = error["retry_guidance"].as_str().unwrap();
-        assert!(guidance.contains(GRANT_REQUEST_ID));
-        assert!(guidance.contains("identical settings using the same account"));
+        let prefix = if status == 409 {
+            "409 Conflict: a reused request ID requires identical settings. "
+        } else {
+            ""
+        };
+        let expected_guidance = format!(
+            "{prefix}Retry with --request-id {GRANT_REQUEST_ID} and identical settings using the same account \
+             to return the original batch. A new invocation without --request-id creates a new batch."
+        );
+        assert_eq!(guidance, expected_guidance);
         if status != 200 {
             assert_eq!(error["error"], "http_error");
             assert_eq!(error["status"], status);
@@ -759,6 +775,14 @@ async fn grant_issue_errors_preserve_request_id_http_details_and_retry_guidance(
         if status == 409 {
             assert!(guidance.contains("409 Conflict"));
             assert!(guidance.contains("reused request ID requires identical settings"));
+        }
+        if response == "[]" {
+            assert_eq!(
+                error["message"],
+                format!(
+                    "Grant request {GRANT_REQUEST_ID}: Grant issuance returned a non-object response"
+                )
+            );
         }
         assert!(!output_text(&out).contains(SENTINEL));
     }

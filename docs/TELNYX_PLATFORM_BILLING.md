@@ -288,11 +288,11 @@ invocation without that flag creates a new batch. A different payload with
 the same request ID returns HTTP 409 naming that ID. Confirmation still applies
 on a retry.
 
-All replicas must include credit allocations (#1950, included in 0.73.0) for
-retry-safe issuance. The CLI sends `amount` and omits legacy `amount_credits`:
-older replicas ignore unknown exact-amount/request-ID fields but require the
-legacy amount, so this payload fails there instead of silently issuing an
-unprotected batch. Do not fall back to legacy requests during rollout.
+Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later
+(credit allocations, #1950). The CLI sends `amount` and omits legacy
+`amount_credits`: older replicas ignore unknown exact-amount/request-ID fields
+but require the legacy amount, so this payload fails there instead of silently
+issuing an unprotected batch. Do not fall back to legacy requests during rollout.
 
 Grant list and revoke tables show exact balances, held and reclaimed credits,
 status, activation, revoke state and service limits; JSON retains the server

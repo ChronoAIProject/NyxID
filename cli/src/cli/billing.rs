@@ -237,7 +237,8 @@ pub enum CreditGrantCommands {
         "Retry with the same --request-id, identical settings and the same account ",
         "to return the original batch. ",
         "Without --request-id, each invocation creates a new batch. ",
-        "All server replicas must include credit allocations (#1950)."
+        "Retry-safe issuance requires all server replicas at NyxID 0.72.0 or later ",
+        "(credit allocations, #1950)."
     ))]
     Issue {
         /// User UUID or exact email address
