@@ -219,7 +219,7 @@ nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
 ```
 
-Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
+For inbound attachment downloads, the channel bot app needs any one of `im:message`, `im:message:readonly`, or `im:message.history:readonly`, configured in the Lark/Feishu developer console, as listed by the official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get) API (`/reference/im-v1/message-resource/get`). Missing permission causes `channel_media_fetch_failed`. Outbound image/file uploads separately accept `im:resource` or `im:resource:upload`.
 
 ### Fix a stuck Lark / Feishu bot
 

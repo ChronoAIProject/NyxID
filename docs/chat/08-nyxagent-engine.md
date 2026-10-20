@@ -777,6 +777,42 @@ and drop. Markdown accepts both `.md` and `.markdown`; JSON and CSV are validate
 before their verbatim text is retained. Empty MIME, `application/octet-stream`
 and Windows' `application/vnd.ms-excel` CSV MIME do not change classification.
 
+## Managed attachment writes
+
+`bitable_media_upload` is available for trusted Lark/Feishu catalog operations
+in a live, non-guest owner chat with the default-off, per-person
+`assistant:attachment-writes` flag enabled. It resolves an authorized
+`attachment_id` from the chat, derives its size, and uploads canonical
+multipart bytes to the selected Base. A successful response returns a
+`file_token`; it does not create a record. User uploads retain conversation,
+key, and retention checks, and tool images retain their producing-turn fence.
+Ordinary Agent Keys, external OAuth plugin connections, exact/durable/async execution,
+and mounted copies of the OpenAPI document cannot use this capability.
+
+The managed `bitable_record_create_with_attachments` release contract is being
+implemented separately; use it only when the deployed server advertises it.
+It accepts closed `{fields, attachments}` JSON, validates the schema and
+complete source photo set, reserves the content digests, uploads, then creates
+one record. One composite action card, when confirmation is required, binds
+the canonical JSON and all dependency contracts. Child requests run under the
+managed guard, without separate child grants or cards. Before each field page,
+upload attempt, and create, the guard revalidates the live turn, Stop, key and
+operation scopes, published contracts, destination, credential epoch, and
+agent override. The standalone upload does not provide these record-replay
+guarantees.
+
+The dispatch barrier durably records `dispatching` before the create send.
+There is no automatic create resend after that barrier. An `uncertain` result
+means **check the Base; NyxID will not create it again**. Do not retry through
+plain create or another connection. Successful replays return the stored
+record; duplicate-photo refusals name the existing record or write state.
+Terminal metadata protects identical photos for 400 days within the same
+owner, Base, and table. See the [Lark Base guide](../site/cli/guides/connect-a-service.md#lark-base)
+for permissions, flag combinations, and the Receipt-Bot recipe, and
+[API discovery](../API_DISCOVERY.md) for trusted projection and discovery
+exclusions. Inbound media and rollback completion gates remain defined in
+[Assistant uploads](10-uploads.md#channel-rollout-and-rollback).
+
 ## Task completion and knowledge retrieval
 
 Both NyxBot and specialist base instructions favor the shortest sufficient

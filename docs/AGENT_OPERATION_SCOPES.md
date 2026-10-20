@@ -182,6 +182,133 @@ Audits contain holder/service/endpoint IDs, revisions and counts only
 (`assistant_agent_operations_changed`, `api_key_operations_changed`). No request
 bodies, tool arguments, input-limit values, secrets or credential material.
 
+## Receipt-Bot recipe
+
+This example describes the managed Lark Base receipt-write contract. At this
+revision the standalone `bitable_media_upload` is implemented; the field-list
+and managed-create operations are being added separately. Apply the recipe
+only after both selected operations are published on your deployed server.
+The connection and rollout guide is [Lark Base](site/cli/guides/connect-a-service.md#lark-base).
+
+Grant one Lark/Feishu UserService to a specialist, then select only
+`bitable_fields_list` and `bitable_record_create_with_attachments`. A grant
+still supplies service access; this scope only narrows it. Do not grant plain
+`bitable_record_create` or standalone `bitable_media_upload` to this specialist.
+The composite's internal field reads/uploads/create run under its managed
+guard, so it does not need those child operations as separate grants.
+
+First read the table's field definitions and current options with
+`bitable_fields_list`. The example uses Base `bascnReceiptApp`, table
+`tblReceipts`, select options `Expense`/`Refund` for `Type` and `1234`/`5678`
+for `Card Number`, a UTC date in 2026 as integer milliseconds, Amount between
+0 and 1,000,000 with at most two decimal places, and the attachment field
+`Receipt Photos`. Replace these values with the owner's exact schema and
+policy. A newly added dropdown option requires an explicit scope change; the
+agent cannot invent options.
+
+Identify the two operations through catalog/MCP discovery, then read
+`GET /api/v1/assistant/nyxagent/agents/{agent_id}/operations` as the human
+owner. Find the granted UserService and match each operation's method/path
+to the returned scope options to obtain its endpoint ID. The options include
+method, path, and summary; they do not expose operation names. Endpoint IDs
+are the returned server IDs, not operation-name strings. In the following
+selection, replace
+`<fields-endpoint-id>` and `<composite-endpoint-id>` everywhere, including the
+`inputs` object keys. Replace `expected_revision: 0` with that service's current
+revision. Save the resulting JSON with:
+
+```http
+PUT /api/v1/assistant/nyxagent/agents/{agent_id}/operations/{service_id}
+Content-Type: application/json
+```
+
+```json
+{
+  "expected_revision": 0,
+  "all_operations": false,
+  "endpoint_ids": ["<fields-endpoint-id>", "<composite-endpoint-id>"],
+  "inputs": {
+    "<fields-endpoint-id>": {
+      "path": {
+        "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+        "table_id": {"type": "exact", "value": "tblReceipts"}
+      }
+    },
+    "<composite-endpoint-id>": {
+      "path": {
+        "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+        "table_id": {"type": "exact", "value": "tblReceipts"}
+      },
+      "body": {
+        "type": "object",
+        "required": ["fields", "attachments"],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": ["Type", "Card Number", "Date", "Amount"],
+            "properties": {
+              "Type": {"type": "one_of", "values": ["Expense", "Refund"]},
+              "Card Number": {"type": "one_of", "values": ["1234", "5678"]},
+              "Date": {"type": "integer", "minimum": 1767225600000, "maximum": 1798761599999},
+              "Amount": {"type": "number", "minimum": 0, "maximum": 1000000, "max_fraction_digits": 2}
+            }
+          },
+          "attachments": {
+            "type": "object",
+            "required": ["Receipt Photos"],
+            "properties": {
+              "Receipt Photos": {
+                "type": "array",
+                "max_items": 10,
+                "items": {"type": "string", "max_length": 128}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Every `object` in this vocabulary is closed without an
+`additionalProperties` keyword. This selection refuses missing fields,
+unknown fields or top-level properties, unknown dropdown options, a different
+Base/table, Amount `12.345`, and more than ten photo IDs. Amount `12.34` is a
+number, not a quoted string. The scope vocabulary's `array` has a maximum but
+no minimum length; the managed composite must separately refuse empty photo
+arrays, repeated IDs, incomplete inbound photo sets, and inaccessible uploads
+before any provider call. The required `Receipt Photos` property makes an
+empty `attachments` object fail the scope itself.
+
+An ordinary Agent Key's equivalent management routes are
+`GET /api/v1/api-keys/{key_id}/operations` and
+`PUT /api/v1/api-keys/{key_id}/operations/{service_id}`, using that key's own
+endpoint IDs and revision. The CLI can apply the same input map to an ordinary
+key after saving the JSON object's `inputs` value as `receipt-inputs.json`:
+
+```bash
+nyxid api-key operations <key-id> --service <user-service-id> \
+  --allow-endpoint <fields-endpoint-id> \
+  --allow-endpoint <composite-endpoint-id> \
+  --inputs receipt-inputs.json
+```
+
+This demonstrates scope management only: an ordinary Agent Key cannot execute
+chat attachment writes. For the working Receipt-Bot, use the specialist's
+scope endpoint above; its live owner conversation key inherits the saved
+scope. The specialist's grants UI and the Agent Key **Service operations**
+card can select operations and retain existing input limits, but cannot author
+this nested JSON. Configuration requires `assistant:operation-scopes` for the
+acting person; execution also needs `assistant:attachment-writes` and a live,
+non-guest owner turn. Upgrade all replicas before saving the Number rule.
+
+If a managed create reports `uncertain`, check the Base and stop. Never call
+plain create or standalone upload to evade the scope or replay decision. A
+duplicate refusal names the stored record or write state; it is not a request
+to send the same photos again. See the guide for the 400-day protection horizon
+and [compatibility](#compatibility) for scope removal before rollback.
+
 ## Relationship to permission-bound keys
 
 Permission-bound keys (`purpose: permission_bound`) remain an immutable,
