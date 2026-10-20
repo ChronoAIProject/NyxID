@@ -37,6 +37,8 @@ class BuildDependencyTests(unittest.TestCase):
         (self.root / "scripts/apt-snapshot-install.sh").write_text(installer)
         shutil.copyfile(ROOT / "scripts/apt-snapshot-select.awk", self.root / "scripts/apt-snapshot-select.awk")
         shutil.copyfile(ROOT / "security/apt-transport-ca.pem", self.root / "security/apt-transport-ca.pem")
+        shutil.copyfile(ROOT / "security/apt-transport-ca.tsv", self.root / "security/apt-transport-ca.tsv")
+        shutil.copyfile(ROOT / "scripts/apt-transport-ca.awk", self.root / "scripts/apt-transport-ca.awk")
         metadata = b"fixture signed metadata\n"
         digest = hashlib.sha256(metadata).hexdigest()
         catalog = (ROOT / "security/apt-snapshots.tsv").read_text().splitlines()
@@ -156,6 +158,21 @@ if operation == "update":
         result = self.invoke()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("transport CA bundle missing", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_transport_provenance_stops_before_update(self):
+        (self.root / "security/apt-transport-ca.tsv").unlink()
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("transport CA provenance missing", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_http_transport_provenance_is_rejected_before_update(self):
+        pins = self.root / "security/apt-transport-ca.tsv"
+        pins.write_text(pins.read_text().replace("https://curl.se/", "http://curl.se/"))
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid APT transport CA provenance", result.stderr)
         self.assertFalse(self.calls.exists())
 
     def test_download_failure_stops_before_offline_install(self):

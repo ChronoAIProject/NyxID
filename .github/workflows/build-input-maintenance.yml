@@ -1,0 +1,163 @@
+name: Build Input Maintenance
+
+on:
+  workflow_call:
+    outputs:
+      catalog-date:
+        description: UTC date shared by verified native candidates
+        value: ${{ jobs.apt-candidate.outputs.date }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-input-maintenance-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Catalog Maintenance Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test-build-catalogs.py
+      - run: python3 scripts/test-hosted-context.py
+      - run: python3 scripts/check-hosted-inputs.py
+      - run: python3 scripts/test-apt-inputs.py
+      - run: python3 scripts/check-build-input-freshness.py --validate-only
+
+  freshness:
+    name: Build Input Catalog Freshness
+    needs: policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check-build-input-freshness.py
+
+  apt-candidate:
+    name: Resolve APT Snapshot Candidate
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      date: ${{ steps.date.outputs.date }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: date
+        name: Select one UTC catalog date for APT, CA and both APK architectures
+        run: |
+          python3 - <<'PYDATE'
+          from datetime import datetime, timedelta, timezone
+          import os
+          now = datetime.now(timezone.utc)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('date=' + now.date().isoformat() + '\n')
+              output.write('stamp=' + (now - timedelta(days=1)).strftime('%Y%m%dT000000Z') + '\n')
+          PYDATE
+      - name: Fetch official HTTPS CA/checksum and signed snapshot candidates
+        env:
+          CATALOG_DATE: ${{ steps.date.outputs.date }}
+          SNAPSHOT_STAMP: ${{ steps.date.outputs.stamp }}
+        run: |
+          python3 scripts/refresh-apt-transport-ca.py --output "$RUNNER_TEMP/apt-candidate/security" --date "$CATALOG_DATE"
+          python3 scripts/refresh-apt-catalog.py --output "$RUNNER_TEMP/apt-candidate/security/apt-snapshots.tsv" --stamp "$SNAPSHOT_STAMP"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: catalog-candidate-apt
+          path: ${{ runner.temp }}/apt-candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+  apk-candidate:
+    name: Resolve and Replay APK Candidate (${{ matrix.arch }})
+    needs: [policy, apt-candidate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Resolve signed closures in exact native base inventories
+        env:
+          CATALOG_DATE: ${{ needs.apt-candidate.outputs.date }}
+        run: >-
+          python3 scripts/resolve-apk-candidates.py --arch '${{ matrix.arch }}'
+          --date "$CATALOG_DATE" --output "$RUNNER_TEMP/apk-resolved"
+      - name: Stage candidate catalogs and exact verified release payload
+        run: |
+          python3 scripts/stage-apk-candidates.py --input "$RUNNER_TEMP/apk-resolved" \
+            --arch '${{ matrix.arch }}' --output "$RUNNER_TEMP/apk-candidate"
+          cp "$RUNNER_TEMP/apk-candidate/security/apk/"*.tsv security/apk/
+          python3 scripts/check-apk-inputs.py
+      - name: Native offline candidate replay and every integrity negative
+        run: >-
+          python3 scripts/test-apk-replay.py --arch '${{ matrix.arch }}'
+          --output "$RUNNER_TEMP/apk-candidate-replay"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: catalog-candidate-apk-${{ matrix.arch }}
+          path: ${{ runner.temp }}/apk-candidate/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain candidate replay evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: catalog-replay-apk-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/apk-candidate-replay/
+            !${{ runner.temp }}/apk-candidate-replay/payload/*.apk
+          retention-days: 7
+
+  apt-replay:
+    name: Replay APT Candidate (${{ matrix.base }}, ${{ matrix.arch }})
+    needs: apt-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [bookworm, trixie, focal, noble]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: catalog-candidate-apt
+          path: ${{ runner.temp }}/apt-candidate
+      - name: Authenticate candidate signatures, indexes and packages; reject tampering
+        run: |
+          cp "$RUNNER_TEMP/apt-candidate/security/"* security/
+          python3 scripts/test-apt-snapshots.py --base '${{ matrix.base }}' \
+            --platform 'linux/${{ matrix.arch }}' --evidence "$RUNNER_TEMP/apt-candidate-replay"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: catalog-replay-apt-${{ matrix.base }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/apt-candidate-replay/
+          retention-days: 7

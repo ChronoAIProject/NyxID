@@ -72,8 +72,10 @@ so minimal images additionally need transport trust before installing CA
 packages. Every caller carries `security/apt-transport-ca.pem`, the public
 Mozilla bundle extracted by curl as of 2026-09-25, obtained from
 `https://curl.se/ca/cacert.pem` and compared with its HTTPS `.sha256` publication.
-Its exact SHA-256 is
-`a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505`.
+`security/apt-transport-ca.tsv` records the exact upstream bundle and checksum
+URLs, Mozilla source timestamp (`2026-09-25T03:12:01Z` for the initial bundle),
+upstream check date, and SHA-256. The portable manifest parser supplies that
+reviewed digest to every installer; provenance and bundle travel together.
 The installer rejects missing, symlinked or changed bundle bytes before any
 APT request. It supplies this file only via `Acquire::https::CaInfo`, requires
 peer and hostname verification, and never adds it to the image's system trust
@@ -216,10 +218,73 @@ The workflow is not invoked by this change. Native PR closure jobs rehearse
 payload staging and successful HTTP-404 fallback with real Alpine signature
 and signed-identity verification, including tampered signature/identity
 rejections. The explicit `provision-upstream` mode is confined to maintainer
-payload preparation and logs each upstream source. Weekly candidate refresh
-(C-3) must produce new reviewed catalogs and the corresponding release
-payloads. Provision them promptly to preserve availability after Alpine
-removes superseded packages.
+payload preparation and logs each upstream source. Weekly candidate refresh produces new reviewable catalogs and their exact
+archive release payloads as described below. The initial catalogs still need
+the maintainer provisioning step; scheduled refreshes provision new candidates
+before opening their review PR.
+
+`Weekly Build Input Refresh` runs each Monday. Its read-only candidate workflow
+selects one UTC date, fetches all twelve APT InRelease files from the previous
+UTC day's official HTTPS snapshots, fetches the official curl.se bundle and
+its matching HTTPS checksum, and resolves APK closures from the exact pinned
+bases on native amd64 and arm64 runners. Generated dates, full signed metadata
+hashes, inventories and every archive checksum become reviewable inputs.
+The native APT matrix authenticates signatures/indexes/packages and exercises
+all nine success/tamper cases for four distro roots on both architectures,
+using the exact candidate transport CA. APK jobs replay all eighteen cases for
+all three closures on each architecture and stage the exact archive payloads.
+HTTPS-derived hashes alone never accept a distro candidate.
+
+The same candidate workflow runs as `CI / Build Input Maintenance` on relevant
+PRs and is required by `CI Pipeline`. Its PR jobs have contents:read, no secrets
+and no OIDC, and never publish. Only the separate main-schedule publisher has
+contents:write and pull-requests:write. After every native candidate job passes,
+it admits exactly seven distro catalogs plus the CA bundle/pins and the exact
+APK payload, creates a catalog-only review branch, stores immutable
+`build-inputs-apk-YYYY-MM-DD` prerelease assets, and opens a review PR. Existing
+same-date branches/assets must match; replacement and force pushes are refused.
+Candidate archive releases may precede catalog review; accepting their catalogs
+still requires a reviewed PR and all consuming integrity checks. Application
+release tags and image promotion are outside this maintenance workflow.
+
+Repository admins must allow GitHub Actions to create pull requests and the
+scheduled job's GITHUB_TOKEN to create archive releases/upload assets. No new
+secret is needed. GitHub does not start a new PR CI run for a PR opened by
+GITHUB_TOKEN: a maintainer must push a reviewed follow-up commit, or close and
+reopen the PR using their own account, to start required PR checks. Scheduled
+candidate evidence cannot substitute for those required checks. The maintenance
+publisher is implemented but was not invoked during local validation.
+
+`check-build-input-freshness.py` rejects APT/APK catalogs and CA upstream checks
+older than fourteen days, future dates, and a Mozilla bundle source timestamp
+older than ninety days even if it was recently checked. The weekly freshness
+job and scheduled APT/APK image checks fail on stale inputs. Candidate generation
+runs independently of the current-input freshness result, so an overdue catalog
+can still receive a verified refresh PR. The PR freshness job evaluates the
+proposed committed inputs. Scheduled vulnerability-image jobs must use this
+same freshness gate when those scanner jobs are added; package-prefix builds
+are not vulnerability scans.
+
+Dependabot covers the Cargo/npm roots, Actions, Dockerfile base digests and
+hash-locked Python requirements. `renovate.json` adds Monday version proposals
+for standalone Rust/npm/bootstrap/SBOM tools, Node, hosted Codex/ACP/Heca,
+CUA releases and the CMA source revision. Enable the Renovate GitHub App for
+this repository and grant it read access to the private CMA repository to
+activate those proposals; no Renovate credential is added here. Automerge is
+disabled. Version-only proposals must refresh their official archive URLs,
+checksums, dependency locks, pin-resolution records and reviewed output hashes
+before acceptance. CUA admission rejects a changed version tag with old archive
+identities. Distro/CA weekly updates use the repository-owned workflow above
+and do not depend on Renovate activation.
+
+The hosted machine's external CMA patches are bound by
+`security/hosted-context.tsv` to a source commit and three ordered SHA-256 values.
+`verify-hosted-context.py` verifies every file before any Node execution, rejects
+missing/symlinked/changed files and noncanonical names/order, then executes only
+private temporary copies of the verified bytes. The read-only build context's
+private source is removed before the layer is committed. The existing final
+patched ACP bundle hash remains required. Portable PR tests prove ordering and
+rejection; they do not claim a full private-context hosted image build.
 
 The reproducibility contract fixes source revision, language tools, dependency
 locks, Actions, base image indices, downloaded tool checksums, APT snapshots and

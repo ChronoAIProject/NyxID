@@ -6,7 +6,7 @@ import subprocess
 
 ROOTS = ("debian:bookworm", "debian:trixie", "ubuntu:focal", "ubuntu:noble")
 INSTALLER = "sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv"
-INPUTS = ("scripts/apt-snapshot-install.sh", "scripts/apt-snapshot-select.awk", "security/apt-snapshots.tsv", "security/apt-transport-ca.pem")
+INPUTS = ("scripts/apt-snapshot-install.sh", "scripts/apt-snapshot-select.awk", "security/apt-snapshots.tsv", "security/apt-transport-ca.pem", "security/apt-transport-ca.tsv", "scripts/apt-transport-ca.awk")
 RAW_APT = re.compile(r"(?<![\w-])(?:/usr/bin/)?apt(?:-get)?(?=\s|$)")
 
 

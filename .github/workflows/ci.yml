@@ -66,6 +66,7 @@ jobs:
       backend_image: ${{ steps.filter.outputs.backend_image }}
       apt: ${{ steps.filter.outputs.apt }}
       apk: ${{ steps.filter.outputs.apk }}
+      catalogs: ${{ steps.filter.outputs.catalogs }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
       permissions: ${{ steps.filter.outputs.permissions }}
@@ -93,6 +94,15 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            catalogs:
+              - 'scripts/*catalog*'
+              - 'scripts/*build-input*'
+              - 'scripts/*hosted*'
+              - 'scripts/check-build-input-freshness.py'
+              - 'renovate.json'
+              - '.github/dependabot.yml'
+              - '.node-version'
+              - 'rust-toolchain.toml'
             apt:
               - '**/Dockerfile*'
               - 'Dockerfile*'
@@ -102,7 +112,7 @@ jobs:
               - 'scripts/install-release-dependencies.sh'
               - '.github/scripts/install-linux-build-deps.sh'
               - 'security/apt-snapshots.tsv'
-              - 'security/apt-transport-ca.pem'
+              - 'security/apt-transport-ca.*'
               - 'security/build-input-pins.json'
               - '.dockerignore'
             apk:
@@ -285,6 +295,14 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/apk-inputs.yml
+
+  catalog-maintenance:
+    name: Build Input Maintenance
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.apt == 'true' || needs.changes.outputs.apk == 'true' || needs.changes.outputs.catalogs == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-input-maintenance.yml
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -1493,6 +1511,7 @@ jobs:
       - workflow-permissions
       - apt-inputs
       - apk-inputs
+      - catalog-maintenance
       - cursor-plugin-validate
       - codex-plugin-validate
       - claude-plugin-validate
@@ -1527,6 +1546,7 @@ jobs:
             workflow-permissions=${{ needs.workflow-permissions.result }}
             apt-inputs=${{ needs.apt-inputs.result }}
             apk-inputs=${{ needs.apk-inputs.result }}
+            catalog-maintenance=${{ needs.catalog-maintenance.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             codex-plugin-validate=${{ needs.codex-plugin-validate.result }}
             claude-plugin-validate=${{ needs.claude-plugin-validate.result }}

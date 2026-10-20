@@ -118,3 +118,8 @@ updates:
   - package-ecosystem: docker
     directory: /cli/tests/machine_context_spike
     schedule: { interval: weekly }
+
+  # Hash-locked workflow parser dependencies.
+  - package-ecosystem: pip
+    directory: /security
+    schedule: { interval: weekly }

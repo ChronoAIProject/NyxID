@@ -13,7 +13,7 @@ FROM scratch AS artifact
 COPY --from=builder /build/cli/tests/machine_context_spike/target/debug/nyxid-machine-context-spike /nyxid-context-spike
 
 FROM ghcr.io/chronoaiproject/nyxid/nyxid-node-machine@sha256:2f1fe82573fa86f99c3cca219be33ab846f17a7374cc40bcf51e2a56a1b4f7d4 AS spike
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem /opt/nyxid-apt/
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble debian:bookworm -- cargo python3-pip python3-venv
 COPY --from=builder /build/cli/tests/machine_context_spike/target/debug/nyxid-machine-context-spike /usr/local/bin/nyxid-context-spike
 COPY cli/tests/machine_context_spike/check.py /opt/m13/check.py

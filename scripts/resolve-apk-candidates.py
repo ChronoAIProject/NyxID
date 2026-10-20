@@ -6,6 +6,7 @@ root. --no-scripts permits cross-architecture resolution without executing
 foreign binaries. Native PR closure replay must pass before accepting a pin.
 """
 import argparse
+from datetime import date, datetime, timezone
 from pathlib import Path
 import platform
 import subprocess
@@ -47,6 +48,7 @@ def generate(args):
              "--read-only", "--tmpfs", "/tmp", "--entrypoint", "sh",
              "-v", str(ROOT / "scripts") + ":/input:ro", "-v", str(output) + ":/out",
              "-e", "NYXID_APK_RESOLVE_ROOT=/out/solver",
+             "-e", "NYXID_APK_REFRESH_DATE=" + args.date,
              "-e", "NYXID_APK_RESOLVE_ARCH=" + {"amd64": "x86_64", "arm64": "aarch64"}[args.arch],
              base, "/input/resolve-apk-inputs.sh", base, *REQUESTS[label][2]])
         print("CANDIDATE " + str(output / "archives.tsv"), flush=True)
@@ -55,8 +57,10 @@ def generate(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
+    parser.add_argument("--date", default=datetime.now(timezone.utc).date().isoformat(), help="shared UTC catalog date for the complete architecture matrix")
     parser.add_argument("--stage", choices=tuple(REQUESTS), action="append")
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
+    date.fromisoformat(arguments.date)
     arguments.stage = arguments.stage or list(REQUESTS)
     generate(arguments)

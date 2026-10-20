@@ -146,7 +146,7 @@ class DockerPolicy(unittest.TestCase):
                 self.assertTrue(any('raw APT' in error for error in check_apt_inputs(self.root, ['Dockerfile'])))
 
     def test_missing_stage_inputs_and_unknown_selector_rejected(self):
-        for text in (self.valid.replace(INPUTS[3], ''), self.valid.replace(INPUTS[1], ''), self.valid.replace('debian:bookworm --', 'debian:sid --'),
+        for text in (*[self.valid.replace(name, '') for name in INPUTS[3:]], self.valid.replace(INPUTS[1], ''), self.valid.replace('debian:bookworm --', 'debian:sid --'),
                      self.valid.replace('sh /opt/nyxid-apt/apt-snapshot-install.sh ',
                                         'sh /opt/nyxid-apt/apt-snapshot-install.sh --install-only ')):
             self.dockerfile.write_text(text)

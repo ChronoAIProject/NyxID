@@ -57,7 +57,7 @@ awk -F '\t' 'NR==FNR {present[$1]=1;next} !present[$1] {exit 1}' \
 catalog=/out/archives.tsv
 rows=/out/archive-inputs.tsv
 : > "$rows"
-refreshed=$(date -u +%Y-%m-%d)
+refreshed=${NYXID_APK_REFRESH_DATE:-$(date -u +%Y-%m-%d)}
 tab=$(printf '\t')
 while IFS="$tab" read -r name version architecture; do
     # Pinned APK 2/3 expose query-mode fetch. Exclude the installed DB so

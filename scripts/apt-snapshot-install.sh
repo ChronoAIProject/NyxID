@@ -49,7 +49,11 @@ awk -v selectors="$selectors" -f "$snapshot_script_dir/apt-snapshot-select.awk" 
 # InRelease hash remain mandatory independently of TLS.
 transport_ca=$(CDPATH= cd -- "$(dirname -- "$catalog")" && pwd)/apt-transport-ca.pem
 [ -f "$transport_ca" ] && [ ! -L "$transport_ca" ] || fail 'APT transport CA bundle missing or symlinked'
-printf '%s  %s\n' a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505 "$transport_ca" | sha256sum -c - >/dev/null \
+transport_pins=${transport_ca%.pem}.tsv
+[ -f "$transport_pins" ] && [ ! -L "$transport_pins" ] || fail 'APT transport CA provenance missing or symlinked'
+transport_digest=$(awk -f "$snapshot_script_dir/apt-transport-ca.awk" "$transport_pins") \
+    || fail 'invalid APT transport CA provenance'
+printf '%s  %s\n' "$transport_digest" "$transport_ca" | sha256sum -c - >/dev/null \
     || fail 'APT transport CA bundle checksum mismatch'
 
 mkdir "$work/lists" "$work/lists/partial" "$work/archives" "$work/archives/partial"

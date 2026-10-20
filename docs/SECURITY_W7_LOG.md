@@ -61,3 +61,16 @@
 - Local tests: Detect Changes 24/0, build pins 20/0, APT 21/0, APK inputs 43/0, scratch preflight 5/0, archive/durability 33/0, YAML 6/0 (152/0 total).
 - Input, shell syntax, YAML/permission checks pass. Native replay is 18 cases × 3 closures × 2 arches; PR acceptance pending.
 - No local image build, remote workflow or push; R2b already committed at 9514f3827 for the same next push.
+
+## C-3 — weekly catalog maintenance and transport-CA provenance
+- Pin Mozilla/curl bundle provenance, exact HTTPS sources, source/check dates and SHA-256 in one portable installer manifest.
+- All APT stages carry the manifest/parser; invalid/missing provenance rejects before update; HTTPS-only snapshot catalogs remain required.
+- Read-only PR maintenance resolves/replays APT candidates on four bases/two native arches and APK closures on both native arches.
+- Main-only weekly publisher admits exactly catalog/CA files and checked APK payloads, opens a review PR and refuses branch/asset replacement.
+- Only the scheduled publisher has write scopes; candidate/freshness checks are required by CI Pipeline, with no PR secrets or OIDC.
+- Freshness rejects distro/CA-check age >14 days and CA-source age >90 days; recovery candidate generation is independent of stale-input failures.
+- Dependabot adds hash-locked Python coverage; Renovate proposes standalone/tool/CUA/CMA pin updates weekly (admin App activation remains external).
+- Hosted CMA patches require all three reviewed byte identities before ordered execution of private temporary copies; final ACP identity still required.
+- Local: helpers 26/0, build 20/0, APT 21/0, APK 43/0, preflight 5/0, archives 33/0, catalogs 29/0, hosted 11/0, workflow YAML 8/0 (196/0).
+- Policies, freshness, workflow YAML/permissions and syntax pass; native replay/image evidence awaits PR CI. No push or remote workflow run.
+- Hosted npm lock root/wiring still awaits PM's explicit manifest approval; D's real Docker CLI/separation coverage is assigned to C-4.

@@ -1,7 +1,7 @@
 # Test-only tooling for a trusted local HTTPS site and a protocol test server.
 ARG MACHINE_IMAGE=nyxid-node-machine:local
 FROM ${MACHINE_IMAGE}
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem /opt/nyxid-apt/
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble debian:bookworm -- libnss3-tools node-ws
 COPY cli/tests/machine_container_e2e.mjs cli/tests/machine_context_e2e.mjs /test/
 COPY cli/tests/machine_native_probe_drop.py /test/

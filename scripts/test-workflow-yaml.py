@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from pathlib import Path
 import unittest
 import yaml
 from workflow_yaml import RUST_ACTION, load_unique, validate_rust_steps
@@ -45,6 +46,57 @@ class WorkflowYaml(unittest.TestCase):
         workflow = self.rust_step({"components": "llvm-tools-preview, clippy, rustfmt",
                                    "targets": "aarch64-unknown-linux-gnu"})
         self.assertEqual(validate_rust_steps(workflow), [])
+
+
+class CatalogWorkflowBoundary(unittest.TestCase):
+    def load(self, name):
+        root = Path(__file__).resolve().parents[1]
+        return load_unique((root / '.github/workflows' / name).read_text())
+
+    def test_pr_candidate_workflow_is_required_and_read_only(self):
+        ci = self.load('ci.yml')
+        job = ci['jobs']['catalog-maintenance']
+        self.assertEqual(job['uses'], './.github/workflows/build-input-maintenance.yml')
+        self.assertEqual(job['permissions'], {'contents': 'read'})
+        pipeline = ci['jobs']['ci-pass']
+        self.assertIn('catalog-maintenance', pipeline['needs'])
+        self.assertIn('catalog-maintenance=${{ needs.catalog-maintenance.result }}',
+                      str(pipeline['steps']))
+        workflow = self.load('build-input-maintenance.yml')
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        for name, candidate in workflow['jobs'].items():
+            with self.subTest(job=name):
+                self.assertNotIn('secrets', candidate)
+                self.assertNotIn('continue-on-error', candidate)
+                self.assertEqual(candidate.get('permissions', {'contents': 'read'}), {'contents': 'read'})
+                self.assertNotIn('gh pr create', str(candidate))
+                self.assertNotIn('gh release', str(candidate))
+        self.assertEqual(set(workflow['jobs']['apt-replay']['strategy']['matrix']['base']),
+                         {'bookworm', 'trixie', 'focal', 'noble'})
+        self.assertEqual(set(workflow['jobs']['apt-replay']['strategy']['matrix']['arch']), {'amd64', 'arm64'})
+        self.assertEqual({item['arch'] for item in workflow['jobs']['apk-candidate']['strategy']['matrix']['include']},
+                         {'amd64', 'arm64'})
+
+    def test_only_schedule_publisher_can_write_after_native_verification(self):
+        workflow = self.load('refresh-build-inputs.yml')
+        events = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(events), {'schedule'})
+        self.assertEqual(events['schedule'], [{'cron': '7 1 * * 1'}])
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        jobs = workflow['jobs']
+        publisher = jobs['publish-candidate']
+        self.assertEqual(publisher['needs'], 'candidates')
+        self.assertEqual(publisher['permissions'], {'contents': 'write', 'pull-requests': 'write'})
+        self.assertIn("github.event_name == 'schedule'", publisher['if'])
+        self.assertIn("github.ref == 'refs/heads/main'", publisher['if'])
+        for name in ('freshness', 'candidates'):
+            self.assertEqual(jobs[name].get('permissions', {'contents': 'read'}), {'contents': 'read'})
+            self.assertNotIn('needs', jobs[name], 'staleness must not block recovery candidate generation')
+        self.assertEqual(jobs['candidates']['uses'], './.github/workflows/build-input-maintenance.yml')
+        self.assertNotIn('id-token', str(workflow))
+        checkout = next(step for step in publisher['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+        self.assertEqual(checkout['with']['ref'], '${{ github.workflow_sha }}')
+        self.assertFalse(checkout['with']['persist-credentials'])
 
 
 if __name__ == "__main__":
