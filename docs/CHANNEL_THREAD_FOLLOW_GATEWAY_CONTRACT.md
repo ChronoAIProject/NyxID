@@ -96,8 +96,15 @@ serialized behavior. Opaque refs remain encrypted at rest and never logged.
 
 ## Deferred surfaces
 
-Lark/Feishu remain text-only on CMAEG. No media, edit or gateway history feature
-is added. NyxID reuses existing bounded adapter history with metadata fallback,
+The thread contract itself adds no media, edit or gateway history feature.
+Lark/Feishu owner images, files and rich posts use the separate default-off
+`assistant:channel-media` path on both transports, including admitted followed
+threads. Gateway media requires CMA ≥ `a570be21` and `CMAEG_MEDIA_ENABLED=true`;
+ingestion starts in the consuming turn after live follow authority is rechecked.
+Guests receive a fixed note and no download. See
+[inbound channel media](chat/10-uploads.md#inbound-channel-media) for limits,
+deduplication, finalization and rollout.
+NyxID reuses existing bounded adapter history with metadata fallback,
 without new scopes. Slack, Discord, Telegram topics/chains, WhatsApp and Aurinko
 need the follow-ups listed in [the parity table](CHANNEL_EVENT_GATEWAY.md#agent-gateway-group-thread-parity).
 X public thread follow remains out of scope.

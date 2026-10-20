@@ -22,6 +22,38 @@ impl std::fmt::Debug for StoredAttachment {
     }
 }
 
+/// Bounded gateway admission metadata; no upstream IDs, prose or raw body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CallbackDisposition {
+    Accepted,
+    Refused { reason: CallbackRefusal },
+    Unknown,
+}
+
+/// CMA's closed refusal vocabulary (`ingress/admission.rs`). Unknown codes are
+/// normalized to an unknown disposition when the callback response is parsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackRefusal {
+    BotSender,
+    SystemSender,
+    UnknownSender,
+    MessageEdit,
+    InteractiveActionUnsupported,
+    InteractionExpiredOrInvalid,
+    SystemEvent,
+    ContentUnsupported,
+    AttachmentUnsupported,
+    SenderDenied,
+    ChatDenied,
+    GroupDenied,
+    GroupNotAddressed,
+    AddressingEvidenceUnavailable,
+    ThreadEvidenceUnavailable,
+    PlatformVerifierUnavailable,
+}
+
 /// A metadata-only record of a message flowing through the channel bot
 /// relay pipeline.
 ///
@@ -104,6 +136,9 @@ pub struct ChannelMessage {
     /// it answered at all. A status code only, never the response body.
     #[serde(default)]
     pub callback_http_status: Option<u16>,
+    /// Parsed HTTP 202 admission from the gateway; legacy callbacks omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_disposition: Option<CallbackDisposition>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
@@ -163,6 +198,7 @@ mod tests {
             agent_api_key_id: None,
             callback_status: None,
             callback_http_status: None,
+            callback_disposition: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
             reply_to_platform_message_id: None,

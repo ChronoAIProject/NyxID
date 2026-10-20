@@ -1127,3 +1127,800 @@ async fn channel_media_ingestion_and_settlement_emit_no_bytes_keys_or_labels_to_
         assert!(!format!("{audit:?}").contains(sensitive));
     }
 }
+
+// Pre-media model field sets exercise old readers without importing the new fields.
+mod pre_media_shapes {
+    pub mod agent_event {
+        use crate::models::assistant_conversation::*;
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub struct Old {
+            pub id: String,
+            pub kind: String,
+            pub text: String,
+            #[serde(default)]
+            pub agent_id: Option<String>,
+            #[serde(default)]
+            pub question_key: Option<String>,
+            #[serde(default)]
+            pub reply_to: Vec<ChannelOrigin>,
+            #[serde(default)]
+            pub source_event_ids: Vec<String>,
+            #[serde(default)]
+            pub bound: bool,
+            #[serde(default)]
+            pub report_to: Option<String>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub created_at: DateTime<Utc>,
+        }
+    }
+    pub mod nyxbot_event {
+        use crate::models::nyxbot_channel::*;
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub struct Old {
+            #[serde(default)]
+            pub native_bot_budget_claimed: bool,
+            #[serde(default)]
+            pub retry_request_sha256: Option<String>,
+            #[serde(default)]
+            pub delivery: Option<ChannelTurnDelivery>,
+            #[serde(default)]
+            pub resolved_thread_id: Option<String>,
+            #[serde(default)]
+            pub resolved_conversation_id: Option<String>,
+            #[serde(rename = "_id")]
+            pub id: String,
+            pub channel_id: String,
+            pub user_id: String,
+            pub partition: String,
+            pub event_id: String,
+            #[serde(default)]
+            pub relay_message_id: Option<String>,
+            #[serde(with = "crate::models::bson_bytes::optional", default)]
+            pub event_context_ciphertext: Option<Vec<u8>>,
+            pub status: String,
+            #[serde(default)]
+            pub conversation_id: Option<String>,
+            #[serde(default)]
+            pub turn_id: Option<String>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub created_at: DateTime<Utc>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub expires_at: DateTime<Utc>,
+        }
+    }
+    pub mod channel_message {
+        use crate::models::channel_message::StoredAttachment;
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub struct Old {
+            #[serde(default)]
+            pub thread_context: Option<crate::models::channel_thread::ChannelThreadFacts>,
+            #[serde(default)]
+            pub activity: Option<crate::models::channel_activity::ActivityMetadata>,
+            #[serde(default)]
+            pub platform_send: Option<crate::models::channel_delivery::PlatformSendRecord>,
+            #[serde(rename = "_id")]
+            pub id: String,
+            #[serde(default)]
+            pub channel_bot_id: Option<String>,
+            pub conversation_id: String,
+            #[serde(default)]
+            pub platform_conversation_id: Option<String>,
+            pub user_id: String,
+            pub direction: String,
+            pub platform: String,
+            #[serde(default)]
+            pub platform_message_id: Option<String>,
+            #[serde(default)]
+            pub native_event_id: Option<String>,
+            #[serde(default)]
+            pub sender_platform_id: Option<String>,
+            #[serde(default)]
+            pub sender_display_name: Option<String>,
+            pub content_type: String,
+            #[serde(default)]
+            pub attachments: Vec<StoredAttachment>,
+            #[serde(default)]
+            pub thread_id: Option<String>,
+            #[serde(default)]
+            pub agent_api_key_id: Option<String>,
+            #[serde(default)]
+            pub callback_status: Option<String>,
+            #[serde(default)]
+            pub callback_http_status: Option<u16>,
+            #[serde(default)]
+            pub reply_to_message_id: Option<String>,
+            #[serde(default)]
+            pub platform_reply_message_id: Option<String>,
+            #[serde(default)]
+            pub reply_to_platform_message_id: Option<String>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub created_at: DateTime<Utc>,
+            #[serde(default, with = "crate::models::bson_datetime::optional")]
+            pub updated_at: Option<DateTime<Utc>>,
+        }
+    }
+    pub mod upload {
+        use crate::models::assistant_upload::*;
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub struct Old {
+            #[serde(rename = "_id")]
+            pub id: String,
+            pub origin: String,
+            pub user_id: String,
+            pub conversation_id: String,
+            pub group_id: Option<String>,
+            pub message_id: Option<String>,
+            pub label: String,
+            pub content_type: String,
+            pub size: i64,
+            pub pages: usize,
+            #[serde(default)]
+            pub extracted_chars: Option<i64>,
+            pub chunks: usize,
+            #[serde(with = "crate::models::bson_bytes::required")]
+            pub text_encrypted: Vec<u8>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub created_at: DateTime<Utc>,
+            #[serde(default, with = "crate::models::bson_datetime::optional")]
+            pub expires_at: Option<DateTime<Utc>>,
+            #[serde(default, with = "crate::models::bson_datetime::optional")]
+            pub bound_at: Option<DateTime<Utc>>,
+            #[serde(default)]
+            pub reads: i64,
+            #[serde(default)]
+            pub coverage: Vec<ReadInterval>,
+        }
+    }
+    pub mod message {
+        use crate::models::assistant_message::*;
+        use chrono::{DateTime, Utc};
+        use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize)]
+        pub struct Old {
+            #[serde(default)]
+            pub platform_delivery_recovery_queued: bool,
+            #[serde(default)]
+            pub platform_reply: Option<crate::models::assistant_conversation::PlatformReplyRouting>,
+            #[serde(default)]
+            pub platform_origin: Option<crate::models::assistant_conversation::PlatformTurnOrigin>,
+            #[serde(default)]
+            pub author: Option<MessageAuthor>,
+            #[serde(default)]
+            pub steering: Option<Box<Steering>>,
+            #[serde(default)]
+            pub voice: Option<VoiceTranscript>,
+            #[serde(default)]
+            pub execution_pending: bool,
+            #[serde(rename = "_id")]
+            pub id: String,
+            pub conversation_id: String,
+            pub user_id: String,
+            pub seq: i64,
+            pub turn_id: String,
+            pub role: String,
+            pub text: String,
+            pub status: String,
+            pub error_code: Option<String>,
+            #[serde(default)]
+            pub upstream_error_code: Option<String>,
+            #[serde(default)]
+            pub error_detail: Option<AssistantErrorDetail>,
+            #[serde(default)]
+            pub turn_metadata: Option<TurnMetadata>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub specialist_id: Option<String>,
+            #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+            pub created_at: DateTime<Utc>,
+            #[serde(default)]
+            pub activities: Vec<crate::models::assistant_conversation::TurnActivity>,
+            #[serde(default)]
+            pub activity_total: i64,
+            #[serde(default)]
+            pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+            #[serde(default)]
+            pub origin: Option<crate::models::assistant_conversation::TurnOrigin>,
+            #[serde(default)]
+            pub via: Option<String>,
+            #[serde(default)]
+            pub retry_of: Option<String>,
+            #[serde(default)]
+            pub retry_claimed_by: Option<String>,
+            #[serde(default)]
+            pub activity_count: Option<i64>,
+            #[serde(default)]
+            pub continuation_of: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub report_to: Option<String>,
+        }
+    }
+}
+
+fn pre_media_projection<T: serde::de::DeserializeOwned + serde::Serialize>(
+    document: &bson::Document,
+) -> bson::Document {
+    let old: T = bson::from_document(document.clone()).unwrap();
+    bson::to_document(&old).unwrap()
+}
+
+#[tokio::test]
+async fn channel_media_mixed_version_models_preserve_old_fields_through_services_and_new_writes() {
+    use crate::models::channel_message::{CallbackDisposition, ChannelMessage, StoredAttachment};
+    use crate::services::channel_relay_service as relay;
+    use pre_media_shapes::{
+        agent_event, channel_message, message as old_message, nyxbot_event, upload as old_upload,
+    };
+
+    let (state, row, message, event) = fixture().await;
+    let now = bson::DateTime::now();
+
+    // A pre-media queue item survives the real append service alongside new media work.
+    let old_agent = doc! {
+        "id":Uuid::new_v4().to_string(), "kind":"subagent_settled", "text":"legacy queued result",
+        "agent_id":"specialist", "question_key":"old-question", "bound":true,
+        "report_to":"manager", "source_event_ids":[], "reply_to":[], "created_at":now,
+    };
+    let old_agent_expected = pre_media_projection::<agent_event::Old>(&old_agent);
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"pending_events":[&old_agent]}},
+        )
+        .await
+        .unwrap();
+    let mut queued_source = event.clone();
+    queued_source.id = Uuid::new_v4().to_string();
+    queued_source.event_id = queued_source.id.clone();
+    queued_source.status = "queued".into();
+    queued_source.turn_id = None;
+    queued_source.media.as_mut().unwrap().key = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&queued_source)
+        .await
+        .unwrap();
+    let queued: AgentEvent = bson::from_document(doc! {
+        "id":Uuid::new_v4().to_string(), "kind":"message", "text":"new queued photo", "created_at":now,
+        "source_event_ids":[&queued_source.id], "media_event_ids":[&queued_source.id], "media_declared":1i64, "media_sent_at":now,
+    }).unwrap();
+    let appended = engine::push_events(&state.db, &row.user_id, &row.id, vec![queued.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(appended.pending_events.len(), 2);
+    assert_eq!(
+        pre_media_projection::<agent_event::Old>(
+            &bson::to_document(&appended.pending_events[0]).unwrap()
+        ),
+        old_agent_expected
+    );
+    let queued_new = bson::to_document(&appended.pending_events[1]).unwrap();
+    assert_eq!(
+        pre_media_projection::<agent_event::Old>(&queued_new)
+            .get_str("text")
+            .unwrap(),
+        "new queued photo"
+    );
+    assert_eq!(
+        appended.pending_events[1].media_event_ids,
+        queued.media_event_ids
+    );
+
+    // A pre-media source event can be loaded, upgraded, and reconciled without losing routing or ciphertext.
+    let mut original_event = bson::to_document(&event).unwrap();
+    original_event.insert("relay_message_id", "relay-source");
+    original_event.insert(
+        "event_context_ciphertext",
+        bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: vec![17, 23, 42],
+        },
+    );
+    original_event.insert("resolved_thread_id", "legacy-thread");
+    original_event.insert("retry_request_sha256", "legacy-request-digest");
+    let old_event = pre_media_projection::<nyxbot_event::Old>(&original_event);
+    state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .replace_one(doc! {"_id":&event.id}, &old_event)
+        .await
+        .unwrap();
+    let mut loaded = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(loaded.media.is_none());
+    assert!(loaded.source_media_declared.is_none());
+    loaded.media = event.media.clone();
+    loaded.source_media_declared = Some(1);
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .replace_one(doc! {"_id":&event.id}, &loaded)
+        .await
+        .unwrap();
+    assert_eq!(
+        pre_media_projection::<nyxbot_event::Old>(&bson::to_document(&loaded).unwrap()),
+        old_event
+    );
+
+    // Callback updates on a pre-media relay row preserve every old field except the requested status change.
+    let old_channel = doc! {
+        "_id":Uuid::new_v4().to_string(), "channel_bot_id":"bot", "conversation_id":"route",
+        "platform_conversation_id":"chat", "user_id":&row.user_id, "direction":"inbound", "platform":"lark",
+        "platform_message_id":"native", "native_event_id":"native-event", "sender_platform_id":"sender",
+        "sender_display_name":"sender name", "content_type":"post", "thread_id":"thread", "agent_api_key_id":"key",
+        "attachments":[{"content_type":"image","provider_ref":"legacy-handle","image_key":"legacy-image","size_bytes":42i64}],
+        "callback_status":"pending", "callback_http_status":202, "reply_to_platform_message_id":"parent", "created_at":now,
+    };
+    let channel_id = old_channel.get_str("_id").unwrap();
+    let mut channel_expected = pre_media_projection::<channel_message::Old>(&old_channel);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(&old_channel)
+        .await
+        .unwrap();
+    let mut channel = relay::get_message(&state.db, channel_id).await.unwrap();
+    assert!(channel.embedded_attachments.is_empty());
+    assert_eq!(channel.embedded_attachments_omitted, 0);
+    assert!(channel.duplicate_of_media_key.is_none());
+    assert!(channel.callback_disposition.is_none());
+    channel.embedded_attachments.push(StoredAttachment {
+        content_type: "image".into(),
+        provider_ref: "embedded-handle".into(),
+        platform_message_id: None,
+        file_key: None,
+        image_key: Some("embedded-image".into()),
+        filename: None,
+        mime_type: None,
+        size_bytes: Some(4),
+    });
+    channel.embedded_attachments_omitted = 2;
+    channel.duplicate_of_media_key = Some("a".repeat(64));
+    state
+        .db
+        .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+        .replace_one(doc! {"_id":channel_id}, &channel)
+        .await
+        .unwrap();
+    relay::record_callback_disposition(&state.db, channel_id, &CallbackDisposition::Accepted)
+        .await
+        .unwrap();
+    relay::update_callback_status(&state.db, channel_id, "delivered")
+        .await
+        .unwrap();
+    channel_expected.insert("callback_status", "delivered");
+    let channel = relay::get_message(&state.db, channel_id).await.unwrap();
+    assert_eq!(
+        pre_media_projection::<channel_message::Old>(&bson::to_document(&channel).unwrap()),
+        channel_expected
+    );
+    assert_eq!(channel.embedded_attachments.len(), 1);
+    assert_eq!(channel.embedded_attachments_omitted, 2);
+    assert_eq!(
+        channel.duplicate_of_media_key.as_deref(),
+        Some("a".repeat(64).as_str())
+    );
+    assert_eq!(
+        channel.callback_disposition,
+        Some(CallbackDisposition::Accepted)
+    );
+
+    // Bind an actual browser upload after stripping the two media additions, as an old writer would.
+    let attachment = uploads::upload_authorized(
+        &state.db,
+        &state.encryption_keys,
+        &row.user_id,
+        &row.id,
+        "legacy.png",
+        png(),
+        None,
+    )
+    .await
+    .unwrap();
+    let upload_rows = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME);
+    let original_upload = upload_rows
+        .find_one(doc! {"_id":&attachment.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut upload_expected = pre_media_projection::<old_upload::Old>(&original_upload);
+    upload_rows
+        .replace_one(doc! {"_id":&attachment.id}, &upload_expected)
+        .await
+        .unwrap();
+    let old_root: AssistantUpload = bson::from_document(upload_expected.clone()).unwrap();
+    assert!(old_root.source.is_none());
+    assert!(old_root.content_sha256.is_none());
+    let mut session = state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let bound = uploads::bind(
+        &state.db,
+        &row.user_id,
+        &row.id,
+        &message.id,
+        std::slice::from_ref(&attachment.id),
+        &mut session,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bound.len(), 1);
+    session.commit_transaction().await.unwrap();
+    let bound_root = upload_rows
+        .find_one(doc! {"_id":&attachment.id})
+        .await
+        .unwrap()
+        .unwrap();
+    upload_expected.insert("message_id", &message.id);
+    upload_expected.insert("bound_at", bound_root.get("bound_at").unwrap().clone());
+    upload_expected.insert("expires_at", bson::Bson::Null);
+    assert_eq!(
+        pre_media_projection::<old_upload::Old>(&bound_root),
+        upload_expected
+    );
+
+    // A pre-media user message is a no-op for finalization, then accepts a new bind receipt.
+    let mut message_expected =
+        pre_media_projection::<old_message::Old>(&bson::to_document(&message).unwrap());
+    message_expected.insert("via", "lark");
+    message_expected.insert("retry_of", "legacy-retry");
+    message_expected.insert("report_to", "manager");
+    state
+        .db
+        .collection::<bson::Document>(MESSAGES)
+        .replace_one(doc! {"_id":&message.id}, &message_expected)
+        .await
+        .unwrap();
+    let mut upgraded = saved(&state, &message).await;
+    assert!(upgraded.media_event_ids.is_empty());
+    assert!(upgraded.media_pending.is_none());
+    assert!(upgraded.media_bound.is_none());
+    assert!(upgraded.media_queue_notice_id.is_none());
+    media_finalize(&state.db, &row.user_id, &row.id, &message.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        pre_media_projection::<old_message::Old>(
+            &bson::to_document(&saved(&state, &message).await).unwrap()
+        ),
+        message_expected
+    );
+    upgraded.media_event_ids = vec![event.id.clone()];
+    upgraded.media_pending = Some(1);
+    state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .replace_one(doc! {"_id":&message.id}, &upgraded)
+        .await
+        .unwrap();
+    let channel_upload = upload(&state, &row, &event).await;
+    let new_root = upload_rows
+        .find_one(doc! {"_id":&channel_upload})
+        .await
+        .unwrap()
+        .unwrap();
+    let old_reader: old_upload::Old = bson::from_document(new_root.clone()).unwrap();
+    assert_eq!(old_reader.id, channel_upload);
+    assert_eq!(
+        old_reader.text_encrypted,
+        bson::from_document::<AssistantUpload>(new_root)
+            .unwrap()
+            .text_encrypted
+    );
+    let mut receipt = proposed(&event, channel_upload);
+    receipt.context.clear();
+    binding::bind(&state.db, &upgraded, &receipt).await.unwrap();
+    let committed = saved(&state, &message).await;
+    message_expected.insert(
+        "attachments",
+        bson::to_bson(&committed.attachments).unwrap(),
+    );
+    assert_eq!(
+        pre_media_projection::<old_message::Old>(&bson::to_document(&committed).unwrap()),
+        message_expected
+    );
+    assert!(ingest_and_bind(&state, &row).await.unwrap().is_empty());
+    let reconciled = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&event.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        reconciled.media.as_ref().unwrap().items[0]
+            .outcome
+            .is_some()
+    );
+    assert_eq!(
+        pre_media_projection::<nyxbot_event::Old>(&bson::to_document(&reconciled).unwrap()),
+        old_event
+    );
+    // Rollback conversion leaves ordinary old queue items intact; the next turn drains them normally.
+    assert_eq!(
+        queue::convert_queued(&state.db, Utc::now()).await.unwrap(),
+        1
+    );
+    settle(&state, &row, None).await;
+    let successor = Box::pin(engine::begin_turn(
+        &state.db,
+        &row.user_id,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            conversation_id: Some(row.id.clone()),
+            attachment_ids: vec![],
+            text: "next owner turn".into(),
+            agent_id: None,
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert!(successor.pending_events.is_empty());
+    let drained = &successor.active_turn.as_ref().unwrap().events;
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        pre_media_projection::<agent_event::Old>(&bson::to_document(&drained[0]).unwrap()),
+        old_agent_expected
+    );
+}
+
+#[tokio::test]
+async fn channel_media_rollback_rehearsal_flags_off_sweeps_then_admin_drain_reach_zero_gates() {
+    use crate::services::{channel_media_events, feature_flag_service as flags};
+    use axum::extract::State;
+
+    let (state, row, crashed_message, event) = fixture().await;
+    for key in [
+        flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        flags::ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    ] {
+        assert!(
+            !flags::personal_flag_enabled(&state.db, &row.user_id, key)
+                .await
+                .unwrap()
+        );
+    }
+    let old_time = Utc::now() - ChronoDuration::days(6) - ChronoDuration::hours(1);
+    let fresh_time = Utc::now() - ChronoDuration::minutes(1);
+    let mut sources = Vec::new();
+    let mut queued = Vec::new();
+    for (label, time) in [
+        ("old photo request", old_time),
+        ("fresh photo request", fresh_time),
+    ] {
+        let mut source = event.clone();
+        source.id = Uuid::new_v4().to_string();
+        source.event_id = source.id.clone();
+        source.status = "queued".into();
+        source.turn_id = None;
+        source.created_at = time;
+        source.expires_at = time + ChronoDuration::days(7);
+        source.media.as_mut().unwrap().key = Uuid::new_v4().to_string();
+        queued.push(bson::from_document::<AgentEvent>(doc! {
+            "id":Uuid::new_v4().to_string(),"kind":"message","text":label,
+            "source_event_ids":[&source.id],"media_event_ids":[&source.id],"media_declared":1i64,
+            "created_at":bson::DateTime::from_chrono(time),"media_sent_at":bson::DateTime::from_chrono(time),
+        }).unwrap());
+        sources.push(source);
+    }
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_many(&sources)
+        .await
+        .unwrap();
+    // Also exercise the real event sweeper's admission-crash classification.
+    let mut interrupted = event.clone();
+    interrupted.id = Uuid::new_v4().to_string();
+    interrupted.event_id = interrupted.id.clone();
+    interrupted.conversation_id = None;
+    interrupted.turn_id = None;
+    interrupted.created_at = Utc::now() - ChronoDuration::minutes(10);
+    interrupted.media.as_mut().unwrap().key = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&interrupted)
+        .await
+        .unwrap();
+    state.db.collection::<bson::Document>(CONVERSATIONS).update_one(
+        doc! {"_id":&row.id},
+        doc! {"$unset":{"active_turn":""},"$set":{"pending_events":bson::to_bson(&queued).unwrap()}},
+    ).await.unwrap();
+
+    let mut sweep_totals = (0, 0);
+    let mut stopped = false;
+    for _ in 0..10 {
+        let messages_and_queue = queue::sweep(&state.db).await.unwrap();
+        let admissions = channel_media_events::sweep(&state.db).await.unwrap();
+        sweep_totals.0 += messages_and_queue;
+        sweep_totals.1 += admissions;
+        if messages_and_queue + admissions == 0 {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(stopped, "bounded maintenance must stop making progress");
+    assert_eq!(sweep_totals, (2, 1));
+    let current = engine::get(&state.db, &row.user_id, &row.id).await.unwrap();
+    assert!(current.active_turn.is_none());
+    assert_eq!(current.pending_events.len(), 1);
+    assert_eq!(current.pending_events[0].id, queued[1].id);
+    assert_eq!(current.pending_events[0].text, "fresh photo request");
+    let fresh = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&sources[1].id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        fresh
+            .media
+            .unwrap()
+            .items
+            .iter()
+            .all(|i| i.outcome.is_none())
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {"media_queue_notice_id":&queued[1].id})
+            .await
+            .unwrap(),
+        0
+    );
+    let finalized = saved(&state, &crashed_message).await;
+    assert!(finalized.media_pending.is_none());
+    assert_eq!(
+        finalized.media_bound.unwrap().failed[0].status,
+        "not_processed: failed"
+    );
+    let interrupted = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&interrupted.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(interrupted.status, "interrupted");
+    assert!(interrupted.media.unwrap().interrupted);
+
+    crate::services::role_service::seed_system_roles(&state.db)
+        .await
+        .unwrap();
+    let roles = crate::services::role_service::get_platform_role_ids(&state.db)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.user_id},
+            doc! {"$set":{"role_ids":[roles.admin]}},
+        )
+        .await
+        .unwrap();
+    let auth = crate::test_utils::test_auth_user(&row.user_id);
+    let mut admin_converted = 0;
+    let mut drained = false;
+    for _ in 0..10 {
+        let result = crate::handlers::admin_assistant::drain_channel_media(
+            State(state.clone()),
+            auth.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        admin_converted += result.converted;
+        if result.converted == 0 {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained, "bounded admin drain must reach zero");
+    assert_eq!(
+        admin_converted, 1,
+        "only the fresh item remains for admin conversion"
+    );
+    assert_eq!(queue::sweep(&state.db).await.unwrap(), 0);
+    assert_eq!(channel_media_events::sweep(&state.db).await.unwrap(), 0);
+
+    // These are the two media rollback queries documented in chat/10-uploads.md.
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .count_documents(doc! {
+                "pending_events":{"$elemMatch":{"media_event_ids.0":{"$exists":true}}}
+            })
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(MESSAGES)
+            .count_documents(doc! {
+                "media_pending":{"$ne":bson::Bson::Null}
+            })
+            .await
+            .unwrap(),
+        0
+    );
+    for (source, request) in sources.iter().zip(&queued) {
+        let saved = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&source.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            saved
+                .media
+                .unwrap()
+                .items
+                .iter()
+                .all(|i| i.outcome.as_ref().unwrap().status == "not_processed: expired")
+        );
+        let notices: Vec<AssistantMessage> = state
+            .db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find(doc! {"media_queue_notice_id":&request.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0]
+                .text
+                .contains("expired before it could be processed; please resend")
+        );
+        assert!(notices[0].text.contains(&format!("> {}", request.text)));
+        assert!(notices[0].activities.is_empty());
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    for key in [
+        flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+        flags::ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
+    ] {
+        assert!(
+            !flags::personal_flag_enabled(&state.db, &row.user_id, key)
+                .await
+                .unwrap()
+        );
+    }
+}
