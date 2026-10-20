@@ -345,6 +345,27 @@ gateway. Both allowlists can be overridden in `.env.production`. MongoDB stays
 on the separate default network. Keep the published frontend port loopback-only:
 host processes reaching that gateway are trusted to assert client addresses.
 
+The following **Compose-only** variables make that bridge relocatable. Set them
+in `.env.production` (passed with `--env-file`) or the Compose process environment;
+they are not backend runtime configuration.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NYXID_FRONTEND_SUBNET` | `172.30.0.0/24` | Dedicated frontend/backend IPv4 subnet; choose one that does not overlap the host or another Docker network. |
+| `NYXID_FRONTEND_GATEWAY` | `172.30.0.1` | Bridge gateway and the derived default for `NYXID_TRUSTED_INGRESS_IPS`. |
+| `NYXID_FRONTEND_IP` | `172.30.0.10` | Fixed frontend address and the derived default for backend `TRUSTED_PROXY_IPS`. |
+| `NYXID_FRONTEND_IP_RANGE` | `172.30.0.128/25` | Dynamic backend address pool within the subnet, excluding the gateway and fixed frontend address. |
+
+For example, relocate the bridge with `NYXID_FRONTEND_SUBNET=172.31.42.0/24`,
+`NYXID_FRONTEND_GATEWAY=172.31.42.1`, `NYXID_FRONTEND_IP=172.31.42.10`, and
+`NYXID_FRONTEND_IP_RANGE=172.31.42.128/25`. Leave both trust overrides unset:
+Compose derives them from the selected frontend address and gateway. Explicit
+`TRUSTED_PROXY_IPS` or `NYXID_TRUSTED_INGRESS_IPS` overrides take precedence, so
+update any explicit override when relocating its corresponding hop. Keep both
+fixed addresses inside the subnet and outside the dynamic pool. Run
+`ruby frontend/scripts/test-compose-ingress.rb` to check default and relocated
+network/trust invariants without starting containers.
+
 The host TLS proxy must overwrite XFF with its client socket IP or append that IP
 after any client-supplied prefix. nginx uses `set_real_ip_from` plus
 `real_ip_recursive on` to select the rightmost untrusted hop only from an
@@ -364,9 +385,9 @@ multi-hop ingress can also share the general limiter bucket. Set the frontend's
 outer-ingress allowlist separately if using this nginx behind another proxy.
 The backend emits a startup warning for empty trust and one additional warning
 on its first private/loopback peer. Do not infer proxy trust or Cloudflare
-authentication merely from a private backend peer. If the fixed Compose subnet
-conflicts with a host network, change its subnet, gateway, frontend address and
-both default allowlists together before deployment.
+authentication merely from a private backend peer. If the Compose subnet
+conflicts with a host network, set the four bridge variables above together;
+the default trust addresses follow automatically.
 
 `TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
 exemption by itself. To exempt an operator-controlled client, set
