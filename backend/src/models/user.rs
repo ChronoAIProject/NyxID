@@ -93,6 +93,9 @@ pub struct UserProfileConfig {
 /// choices and DNT may narrow this account permission but never enable it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyticsConsent {
+    /// Policy recorded by the latest explicit choice; unknown for older rows.
+    #[serde(default)]
+    pub policy_version: Option<String>,
     #[serde(default)]
     pub revision: String,
     #[serde(default)]

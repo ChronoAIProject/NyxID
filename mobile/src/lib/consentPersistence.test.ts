@@ -3,6 +3,17 @@ import { test } from 'node:test';
 import { createAnalyticsConsentState } from './analyticsConsentState';
 import { createConsentPersistence } from './consentPersistence';
 
+test('successful storage acknowledgement preserves authority; failed storage invalidates it', async () => {
+  const state = createAnalyticsConsentState(); state.hydrate(null); state.bindAccount('a'); state.setConsent(true);
+  const before = state.getSnapshot().revision;
+  await createConsentPersistence(state, async () => {})();
+  assert.equal(state.getSnapshot().revision, before);
+  assert.equal(state.getSnapshot().enabled, true);
+  await createConsentPersistence(state, async () => { throw new Error('storage unavailable'); })();
+  assert.ok(state.getSnapshot().revision > before);
+  assert.equal(state.getSnapshot().enabled, false);
+});
+
 test('failed A write after switch never changes B, retains A denial and offers retry', async () => {
   const state = createAnalyticsConsentState(); state.hydrate(null); state.bindAccount('a'); state.setConsent(true);
   let reject!: (error: Error) => void;

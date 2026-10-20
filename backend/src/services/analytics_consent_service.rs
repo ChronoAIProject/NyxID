@@ -13,6 +13,9 @@ use mongodb::{
 };
 use std::future::IntoFuture;
 
+/// Version of the optional, account-linked product analytics permission.
+pub const POLICY_VERSION: &str = "1";
+
 fn options() -> CollectionOptions {
     CollectionOptions::builder()
         .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
@@ -43,7 +46,8 @@ pub async fn set(db: &Database, user_id: &str, enabled: bool) -> AppResult<Analy
         .find_one_and_update(
             active_person(user_id),
             vec![doc! {"$set": {"profile_config.analytics": {
-                "enabled": enabled, "changed_at": "$$NOW", "revision": &revision
+                "enabled": enabled, "changed_at": "$$NOW", "revision": &revision,
+                "policy_version": POLICY_VERSION
             }}}],
         )
         .return_document(ReturnDocument::After)
@@ -111,6 +115,97 @@ mod tests {
             .await
             .unwrap();
         (db, id)
+    }
+
+    #[tokio::test]
+    async fn choices_persist_policy_version_and_database_change_time() {
+        let (db, id) = account().await;
+        // A legacy row must not invent consent or a policy acknowledgement.
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &id},
+                doc! {"$unset": {"profile_config.analytics": ""}},
+            )
+            .await
+            .unwrap();
+        let absent = read(&db, &id).await.unwrap();
+        assert!(!absent.enabled);
+        assert!(absent.changed_at.is_none());
+        assert!(absent.policy_version.is_none());
+        assert!(absent.revision.is_empty());
+        for enabled in [true, false] {
+            let before = db.run_command(doc! {"hello": 1}).await.unwrap();
+            let saved = set(&db, &id, enabled).await.unwrap();
+            let after = db.run_command(doc! {"hello": 1}).await.unwrap();
+            assert_eq!(saved.enabled, enabled);
+            assert_eq!(saved.policy_version.as_deref(), Some(POLICY_VERSION));
+            let changed = saved.changed_at.unwrap().timestamp_millis();
+            assert!(changed >= before.get_datetime("localTime").unwrap().timestamp_millis());
+            assert!(changed <= after.get_datetime("localTime").unwrap().timestamp_millis());
+            assert_eq!(read(&db, &id).await.unwrap(), saved);
+            let stored = db
+                .collection::<Document>(COLLECTION_NAME)
+                .find_one(doc! {"_id": &id})
+                .await
+                .unwrap()
+                .unwrap();
+            let analytics = stored
+                .get_document("profile_config")
+                .unwrap()
+                .get_document("analytics")
+                .unwrap();
+            assert_eq!(analytics.get_str("policy_version").unwrap(), POLICY_VERSION);
+            assert_eq!(
+                analytics
+                    .get_datetime("changed_at")
+                    .unwrap()
+                    .timestamp_millis(),
+                changed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn security_audit_persists_without_analytics_permission() {
+        use crate::services::audit_service::{self, AuditActor};
+        let (db, id) = account().await;
+        let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&id));
+        for choice in [None, Some(false), Some(true), Some(false)] {
+            if let Some(enabled) = choice {
+                set(&db, &id, enabled).await.unwrap();
+            }
+            audit_service::log_actor_event(
+                db.clone(),
+                &actor,
+                "security.consent_independence",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let rows = db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"user_id": &id, "event_type": "security.consent_independence"})
+            .await
+            .unwrap();
+        assert_eq!(
+            rows, 4,
+            "product consent must never suppress security evidence"
+        );
+        let verified = crate::services::audit_chain_service::verify_chain(
+            &db,
+            audit_service::audit_chain_hmac_key().unwrap(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            verified.status,
+            crate::services::audit_chain_service::AuditChainStatus::Ok
+        );
+        assert_eq!(verified.checked_count, 4);
     }
 
     #[tokio::test]
