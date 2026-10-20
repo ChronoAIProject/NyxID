@@ -518,8 +518,24 @@ async fn probe_test_mongo_uri(
     // inherit the production-default 10 second heartbeat delay under load.
     options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
-    options.command_event_handler = command_event_handler;
     let drop_guard = Arc::new(TestDbDropGuard::new(uri, db_name));
+    let sessions = drop_guard.sessions.clone();
+    options.command_event_handler = Some(mongodb::event::EventHandler::callback(move |event| {
+        if let mongodb::event::command::CommandEvent::Started(started) = &event
+            && let Ok(lsid) = started.command.get_document("lsid")
+            && let Some(bson::Bson::Binary(id)) = lsid.get("id")
+            && id.subtype == bson::spec::BinarySubtype::Uuid
+            && let Ok(id) = Uuid::from_slice(&id.bytes)
+        {
+            sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id);
+        }
+        if let Some(handler) = &command_event_handler {
+            forward_test_command_event(handler, event);
+        }
+    }));
     let guard_keepalive = Arc::clone(&drop_guard);
     options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_event| {
         let _ = Arc::strong_count(&guard_keepalive);
@@ -586,7 +602,7 @@ async fn probe_test_mongo_uri(
     .await;
     ensure_test_db_heartbeat(uri);
     sweep_stale_test_databases_once(&client, unix_time_secs()).await;
-    register_test_db_for_cleanup(uri, db_name);
+    register_test_db_for_cleanup(uri, db_name, drop_guard.sessions.clone());
     drop_guard.arm();
     Some(client)
 }
@@ -1345,6 +1361,8 @@ struct TestDbCleanup {
     uri: Option<String>,
     /// Databases created this run that still need a successful drop.
     db_names: HashSet<String>,
+    /// Exact sessions observed on each client; never a server/user-wide kill.
+    sessions: HashMap<String, TestDbSessions>,
     /// Guards one-time `atexit` registration.
     hook_installed: bool,
 }
@@ -1354,6 +1372,7 @@ impl TestDbCleanup {
         Self {
             uri: None,
             db_names: HashSet::new(),
+            sessions: HashMap::new(),
             hook_installed: false,
         }
     }
@@ -1368,6 +1387,7 @@ impl TestDbCleanup {
     fn complete_lifecycle_drop(&mut self, db_name: &str, dropped: bool) {
         if dropped {
             self.db_names.remove(db_name);
+            self.sessions.remove(db_name);
         }
     }
 
@@ -1376,10 +1396,97 @@ impl TestDbCleanup {
     }
 }
 
+type TestDbSessions = Arc<std::sync::Mutex<HashSet<Uuid>>>;
+
+// Preserve the supplied observer's synchronous/async/channel delivery semantics.
+fn forward_test_command_event(
+    handler: &mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+    event: mongodb::event::command::CommandEvent,
+) {
+    use mongodb::event::EventHandler;
+    match handler {
+        EventHandler::Callback(callback) => callback(event),
+        EventHandler::AsyncCallback(callback) => {
+            tokio::spawn(callback(event));
+        }
+        EventHandler::TokioMpsc(sender) => {
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let _ = sender.send(event).await;
+            });
+        }
+        _ => unreachable!("a new Mongo observer requires explicit forwarding"),
+    }
+}
+
+fn test_db_sessions(db_name: &str) -> Vec<Uuid> {
+    let Some(registry) = TEST_DB_CLEANUP.get() else {
+        return Vec::new();
+    };
+    let sessions = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .sessions
+        .get(db_name)
+        .cloned();
+    sessions
+        .map(|sessions| {
+            sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A cancelled runtime may never poll ClientSession's asynchronous abort. Only
+/// after client teardown (or process exit), end its exact recorded sessions on
+/// the independent cleanup runtime. Committed writes remain unchanged; pending
+/// transactions abort atomically. Never use killAllSessions or a user-wide match.
+async fn end_test_client_sessions(client: &mongodb::Client, sessions: &[Uuid]) -> bool {
+    for batch in sessions.chunks(128) {
+        let ids: Vec<_> = batch
+            .iter()
+            .map(|id| {
+                doc! {"id": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Uuid, bytes: id.as_bytes().to_vec(),
+                }}
+            })
+            .collect();
+        if client
+            .database("admin")
+            .run_command(doc! {"killSessions": ids})
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// Session cleanup and drop share the original per-attempt budget. No extra
+// metadata timeout or server transaction-lifetime change is introduced.
+async fn drop_test_database_with_sessions(client: &mongodb::Client, name: &str) -> bool {
+    matches!(
+        tokio::time::timeout(STALE_TEST_DB_DROP_TIMEOUT, async {
+            if !end_test_client_sessions(client, &test_db_sessions(name)).await {
+                return false;
+            }
+            client.database(name).drop().await.is_ok()
+        })
+        .await,
+        Ok(true)
+    )
+}
+
 struct TestDbDropGuard {
     uri: String,
     db_name: String,
     armed: AtomicBool,
+    sessions: TestDbSessions,
 }
 
 impl TestDbDropGuard {
@@ -1388,6 +1495,7 @@ impl TestDbDropGuard {
             uri: uri.to_string(),
             db_name: db_name.to_string(),
             armed: AtomicBool::new(false),
+            sessions: Arc::default(),
         }
     }
 
@@ -1583,16 +1691,7 @@ fn test_db_drop_worker(receiver: Arc<std::sync::Mutex<Receiver<TestDbDropJob>>>)
                 || {
                     let client = client.clone();
                     let db_name = job.db_name.clone();
-                    async move {
-                        matches!(
-                            tokio::time::timeout(
-                                STALE_TEST_DB_DROP_TIMEOUT,
-                                client.database(&db_name).drop(),
-                            )
-                            .await,
-                            Ok(Ok(()))
-                        )
-                    }
+                    async move { drop_test_database_with_sessions(&client, &db_name).await }
                 },
             ))
         });
@@ -1617,11 +1716,12 @@ where
     false
 }
 
-fn register_test_db_for_cleanup(uri: &str, db_name: &str) {
+fn register_test_db_for_cleanup(uri: &str, db_name: &str, sessions: TestDbSessions) {
     TEST_DB_DROP_WORKERS.get_or_init(start_test_db_drop_workers);
     let cell = TEST_DB_CLEANUP.get_or_init(|| std::sync::Mutex::new(TestDbCleanup::new()));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.register(uri, db_name);
+    guard.sessions.insert(db_name.to_owned(), sessions);
     if !guard.hook_installed {
         guard.hook_installed = true;
         // SAFETY: `atexit` registers a C callback invoked once at normal process
@@ -1737,14 +1837,7 @@ extern "C" fn drop_test_databases_at_exit() {
                 let cleanup = async {
                     let mut all_dropped = true;
                     for name in db_names {
-                        all_dropped &= matches!(
-                            tokio::time::timeout(
-                                STALE_TEST_DB_DROP_TIMEOUT,
-                                client.database(&name).drop(),
-                            )
-                            .await,
-                            Ok(Ok(()))
-                        );
+                        all_dropped &= drop_test_database_with_sessions(&client, &name).await;
                     }
                     all_dropped
                 };
@@ -3478,6 +3571,113 @@ mod tests {
             "the lifecycle worker must report a successful drop"
         );
         assert!(!test_db_is_registered_for_cleanup(&db_name));
+    }
+
+    #[tokio::test]
+    async fn audit_cleanup_ends_only_owned_client_sessions() {
+        let owned = connect_transaction_test_database("audit_cleanup_owned").await;
+        let other = connect_transaction_test_database("audit_cleanup_other").await;
+        let uri = TEST_DB_PINNED_URI.get().expect("test replica URI").clone();
+        let cleanup = test_db_cleanup_client(&uri).await.expect("cleanup client");
+        // Establish collections before their transactions, preserving committed
+        // data as well as the independence of another client's live write.
+        for db in [&owned, &other] {
+            db.collection::<Document>("business")
+                .insert_one(doc! {"_id": "committed"})
+                .await
+                .unwrap();
+        }
+        let mut owned_session = owned.client().start_session().await.unwrap();
+        let mut other_session = other.client().start_session().await.unwrap();
+        owned_session.start_transaction().await.unwrap();
+        other_session.start_transaction().await.unwrap();
+        owned
+            .collection::<Document>("business")
+            .insert_one(doc! {"_id": "uncommitted"})
+            .session(&mut owned_session)
+            .await
+            .unwrap();
+        other
+            .collection::<Document>("business")
+            .insert_one(doc! {"_id": "independent"})
+            .session(&mut other_session)
+            .await
+            .unwrap();
+        let ids = test_db_sessions(owned.name());
+        let session_uuid = |session: &mongodb::ClientSession| {
+            let bson::Bson::Binary(id) = session.id().get("id").unwrap() else {
+                panic!("Mongo session must use binary UUID");
+            };
+            Uuid::from_slice(&id.bytes).unwrap()
+        };
+        assert!(ids.contains(&session_uuid(&owned_session)));
+        assert!(!ids.contains(&session_uuid(&other_session)));
+        assert!(end_test_client_sessions(&cleanup, &ids).await);
+        assert!(owned_session.commit_transaction().await.is_err());
+        other_session.commit_transaction().await.unwrap();
+        assert_eq!(
+            owned
+                .collection::<Document>("business")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            other
+                .collection::<Document>("business")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn audit_cleanup_after_runtime_shutdown_releases_pending_transaction() {
+        // The session is dropped after its runtime, so the driver's scheduled
+        // abort cannot execute there. This deterministically models a canceled
+        // fire-and-forget writer without weakening or bypassing its transaction.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (db, session) = runtime.block_on(async {
+            let db = connect_transaction_test_database("audit_cleanup_cancel").await;
+            db.collection::<Document>("business")
+                .insert_one(doc! {"_id": "committed"})
+                .await
+                .unwrap();
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            db.collection::<Document>("business")
+                .insert_one(doc! {"_id": "uncommitted"})
+                .session(&mut session)
+                .await
+                .unwrap();
+            (db, session)
+        });
+        let name = db.name().to_owned();
+        let ids = test_db_sessions(&name);
+        assert!(!ids.is_empty());
+        drop(runtime);
+        drop(session);
+        drop(db);
+        // Process-exit recovery uses the same tracked IDs if driver teardown
+        // cannot release its guard after the owning runtime has disappeared.
+        let cleanup_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cleanup_runtime.block_on(async {
+            let uri = TEST_DB_PINNED_URI.get().expect("test replica URI").clone();
+            let client = test_db_cleanup_client(&uri).await.unwrap();
+            assert!(
+                drop_test_database_with_sessions(&client, &name).await,
+                "cleanup must complete within the unchanged 3-second attempt budget"
+            );
+            assert!(!client.list_database_names().await.unwrap().contains(&name));
+        });
     }
 
     #[tokio::test]

@@ -44,16 +44,25 @@ handler processes left incomplete audit **write** transactions after runtime
 shutdown, one after its outbox insert. The preexisting fire-and-forget helper
 now starts a real multi-document transaction; canceling the test runtime can
 also cancel its asynchronous session abort. Explicit verifier cleanup alone
-does not close these abandoned writer sessions. A focused fixture teardown
-extension has been proposed to PM: retain only each test client's session IDs
-and end exactly those sessions, from the existing independent cleanup runtime,
-before dropping that client's test database. This must preserve transaction
-rollback, observer behavior, cleanup budgets and isolation from other clients;
-no production transaction limit or cryptographic control may be weakened.
-The proposed session-ending call and database drop share the original
-three-second attempt budget; the existing exit budget, retry count and backoff
-are unchanged. Only session IDs are tracked, with no command or event bodies
-retained by the fixture.
+does not close these abandoned writer sessions. The fixture teardown now
+retains only each test client's observed session IDs
+and ends exactly those sessions, from the existing independent cleanup runtime,
+before dropping that client's test database. `test_utils.rs` and common fixtures
+are CORE-owned under the accepted inventory; the focused change is covered by
+the existing W8-4 approval and urgent regression instruction. It requires no
+additional approval. Explicit verifier closure alone cannot cover a canceled
+writer whose runtime has already stopped.
+
+The `killSessions` call and database drop share the original three-second attempt
+budget; the existing exit budget, retry count and backoff are unchanged. No
+server-wide or user-wide session kill is used. Only session IDs are tracked,
+with no command or event bodies retained by the fixture. The existing observer
+is forwarded with the driver's callback/async/channel semantics. Cleanup occurs
+after the client's lifecycle guard is released, or at process exit; a live
+Database clone still defers lifecycle cleanup. Tests cover committed-data
+preservation, another client's live transaction, and session drop after its
+Tokio runtime has already shut down. Final live results are recorded below
+when available.
 
 On the isolated MongoDB 8.0.17 replica, observed read-only transactions spent
 less than one millisecond doing work and 72–86 seconds inactive before abort.
@@ -77,7 +86,7 @@ unwitnessed deployments. The append path still validates the live tail/HMAC,
 checks immutable replay, performs the head CAS, inserts row/outbox atomically,
 and uses snapshot reads plus majority+journal commit.
 
-## Local comparison method
+## Local comparison method and instrumentation correction
 
 Preserved pre-W8-4 and W8-4 binaries from the required shared Cargo target have
 9,605 and 9,695 server tests respectively. All 9,605 original names survive in
@@ -92,17 +101,26 @@ All 300 passed in each arm; zero failed or ignored.
 | Pre-W8-4 | 1,614.376 s | 1,547.370 s | 0.359 s |
 | W8-4 | 1,731.088 s | 1,644.220 s | 0.658 s |
 
-The same-host comparison reproduces added median setup cost (+83%) but only a
-7.2% increase in summed process time, not the entire hosted factor. Long,
-preexisting paths and other shared-host activity make these distributions
-variable. It would be incorrect to claim that this local run alone reproduced
-the hosted twofold slowdown. Cached binary identities, common names, runner and
-plain CSV/log evidence are under `/tmp/nyxid-w8-ci-perf`; no receipt archive is
-required.
+A subsequent Mach-O section check found an instrumentation mismatch: the cached
+pre-W8 binary has `__llvm_prf_*` coverage sections; W8 and the fixed binaries do
+not. The cached pre binary also lacks both KMS feature flags. The pass/fail counts
+remain valid, but **the 7.2% sum and 83% median changes are descriptive only and
+must not be used as a clean estimate of W8 overhead**. This correction was
+reported to PM as soon as discovered. The hosted exact-source comparison and
+Mongo causal evidence are independent of this local mismatch.
 
-The fixed measurement copy is committed source `31873a467` plus only the four
-CORE audit implementation/test files. It excludes other lanes' uncommitted
-caller conversions, so their changes cannot determine the before/after result.
+The replacement pre-W8 build is an isolated read-only source snapshot of exact
+hosted baseline `8589cfd8`, built under the mandated environment with both KMS
+features and no coverage flags. The shared Cargo target serializes it with the
+other streams. The final W8/fixed arms also have matching uninstrumented build
+profiles. Common test names and plain CSV/log evidence remain under
+`/tmp/nyxid-w8-ci-perf`; no evidence archive is required.
+
+The fixed measurement copy is committed source `31873a467` plus the four
+CORE audit implementation/test files and the exact owned `test_utils.rs` diff.
+It holds caller source at that commit rather than incorporating later lanes'
+uncommitted conversions. The cached W8 executable is not an exact-source rebuild
+of hosted head `19549c364`; the hosted logs provide that exact-head comparison.
 It uses the mandated target/jobs/incremental/debug settings and both KMS
 features; no profile overrides or weaker Mongo write concern.
 
@@ -175,3 +193,9 @@ separately for the representative timing comparison; the shared executable also
 contains other lanes' current caller conversions.
 The complete service-history filter also passed: 25 passed, zero failed/ignored,
 23.63 s (`/tmp/nyxid-w8-ci-perf/shared-fix-history.log`).
+
+The first frozen-source build (before adding fixture cleanup) also passed the
+exact snapshot-closure regression: one passed, zero failed/ignored, 2.71 s.
+Build plus target-lock wait took 41m28s; that is build contention, not the
+measured test time. The complete frozen copy adds only the owned fixture diff
+to this source; shared-tree integration may additionally include other lanes.
