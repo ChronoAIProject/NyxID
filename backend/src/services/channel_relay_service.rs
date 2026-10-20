@@ -9,12 +9,14 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
 use mongodb::bson::doc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
+use crate::models::channel_message::{
+    COLLECTION_NAME, CallbackDisposition, CallbackRefusal, ChannelMessage,
+};
 use crate::services::channel_platform::InboundMessage;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -250,6 +252,7 @@ pub(crate) fn inbound_metadata(
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
         callback_http_status: None,
+        callback_disposition: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
         reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
@@ -302,6 +305,7 @@ pub async fn store_outbound_message(
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
         callback_http_status: None,
+        callback_disposition: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
         platform_reply_message_id: None,
         reply_to_platform_message_id: None,
@@ -376,6 +380,7 @@ pub async fn store_device_event_message(
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
         callback_http_status: None,
+        callback_disposition: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
         reply_to_platform_message_id: None,
@@ -404,6 +409,7 @@ pub async fn store_device_event_message(
 #[derive(Debug)]
 pub struct CallbackDelivery {
     pub http_status: Option<u16>,
+    pub disposition: Option<CallbackDisposition>,
     pub result: AppResult<()>,
 }
 
@@ -438,6 +444,7 @@ pub async fn forward_to_agent(
         Err(e) => {
             return CallbackDelivery {
                 http_status: None,
+                disposition: None,
                 result: Err(AppError::Internal(format!(
                     "failed to serialize callback payload: {e}"
                 ))),
@@ -459,6 +466,7 @@ pub async fn forward_to_agent(
         Err(e) => {
             return CallbackDelivery {
                 http_status: None,
+                disposition: None,
                 result: Err(e),
             };
         }
@@ -469,6 +477,7 @@ pub async fn forward_to_agent(
         Err(e) => {
             return CallbackDelivery {
                 http_status: None,
+                disposition: None,
                 result: Err(e),
             };
         }
@@ -499,6 +508,7 @@ pub async fn forward_to_agent(
         Err(e) => {
             return CallbackDelivery {
                 http_status: None,
+                disposition: None,
                 result: Err(AppError::ChannelRelayFailed(format!(
                     "callback request failed: {e}"
                 ))),
@@ -512,6 +522,7 @@ pub async fn forward_to_agent(
     match code {
         202 => CallbackDelivery {
             http_status: Some(202),
+            disposition: Some(read_callback_disposition(response).await),
             result: Ok(()),
         },
         200 => {
@@ -523,16 +534,83 @@ pub async fn forward_to_agent(
             );
             CallbackDelivery {
                 http_status: Some(200),
+                disposition: None,
                 result: Ok(()),
             }
         }
         _ => CallbackDelivery {
             http_status: Some(code),
+            disposition: None,
             result: Err(AppError::ChannelRelayFailed(format!(
                 "callback returned HTTP {status}"
             ))),
         },
     }
+}
+
+const CALLBACK_DISPOSITION_MAX_BYTES: usize = 2048;
+
+fn parse_callback_disposition(body: &[u8]) -> CallbackDisposition {
+    // CMA's accepted form includes IDs. Recognize that envelope, then discard
+    // the IDs; only the disposition and closed refusal code may be persisted.
+    #[derive(Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+    enum Response {
+        Accepted {
+            #[serde(default, rename = "event_id")]
+            _event_id: Option<String>,
+            #[serde(default, rename = "conversation_id")]
+            _conversation_id: Option<String>,
+        },
+        Refused {
+            reason: CallbackRefusal,
+        },
+    }
+    if body.len() > CALLBACK_DISPOSITION_MAX_BYTES {
+        return CallbackDisposition::Unknown;
+    }
+    match serde_json::from_slice::<Response>(body) {
+        Ok(Response::Accepted { .. }) => CallbackDisposition::Accepted,
+        Ok(Response::Refused { reason }) => CallbackDisposition::Refused { reason },
+        Err(_) => CallbackDisposition::Unknown,
+    }
+}
+
+async fn read_callback_disposition(mut response: reqwest::Response) -> CallbackDisposition {
+    if response
+        .content_length()
+        .is_some_and(|n| n > CALLBACK_DISPOSITION_MAX_BYTES as u64)
+    {
+        return CallbackDisposition::Unknown;
+    }
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if chunk.len() <= CALLBACK_DISPOSITION_MAX_BYTES - body.len() => {
+                body.extend_from_slice(&chunk);
+            }
+            Ok(Some(_)) | Err(_) => return CallbackDisposition::Unknown,
+            Ok(None) => return parse_callback_disposition(&body),
+        }
+    }
+}
+
+/// Store only bounded admission codes alongside the existing callback outcome.
+pub async fn record_callback_disposition(
+    db: &mongodb::Database,
+    message_id: &str,
+    disposition: &CallbackDisposition,
+) -> AppResult<()> {
+    db.collection::<ChannelMessage>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": message_id},
+            doc! {"$set": {
+                "callback_disposition": mongodb::bson::to_bson(disposition)
+                    .map_err(|_| AppError::Internal("Invalid callback disposition".into()))?
+            }},
+        )
+        .await?;
+    Ok(())
 }
 
 /// Update the callback delivery status on a stored message.
@@ -1363,6 +1441,7 @@ mod tests {
             agent_api_key_id: Some("key-1".to_string()),
             callback_status: Some("pending".to_string()),
             callback_http_status: None,
+            callback_disposition: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
             reply_to_platform_message_id: None,
@@ -1889,6 +1968,155 @@ mod tests {
             .unwrap_or_else(|| panic!("{name} header should be present"))
             .to_str()
             .unwrap_or_else(|_| panic!("{name} header should be valid UTF-8"))
+    }
+
+    #[test]
+    fn callback_disposition_is_closed_bounded_and_codes_only() {
+        assert_eq!(
+            parse_callback_disposition(
+                br#"{"status":"accepted","event_id":"discard","conversation_id":"discard"}"#
+            ),
+            CallbackDisposition::Accepted
+        );
+        for reason in [
+            "content_unsupported",
+            "attachment_unsupported",
+            "group_not_addressed",
+            "thread_evidence_unavailable",
+            "platform_verifier_unavailable",
+        ] {
+            let body = format!(r#"{{"status":"refused","reason":"{reason}"}}"#);
+            let disposition = parse_callback_disposition(body.as_bytes());
+            assert!(matches!(disposition, CallbackDisposition::Refused { .. }));
+            assert_eq!(serde_json::to_value(disposition).unwrap()["reason"], reason);
+        }
+        for body in [
+            "",
+            "{",
+            r#"{"status":"refused","reason":"secret prose"}"#,
+            r#"{"status":"accepted","body":"private text"}"#,
+            r#"{"status":"accepted","reason":"group_not_addressed"}"#,
+            r#"{"status":"accepted","status":"refused"}"#,
+            r#"{"status":"unexpected"}"#,
+            r#"{"status":"refused"}"#,
+        ] {
+            assert_eq!(
+                parse_callback_disposition(body.as_bytes()),
+                CallbackDisposition::Unknown,
+                "{body}"
+            );
+        }
+        let oversized = format!(
+            r#"{{"status":"accepted","event_id":"{}"}}"#,
+            "x".repeat(CALLBACK_DISPOSITION_MAX_BYTES)
+        );
+        assert_eq!(
+            parse_callback_disposition(oversized.as_bytes()),
+            CallbackDisposition::Unknown
+        );
+        let parsed = parse_callback_disposition(
+            br#"{"status":"accepted","event_id":"do-not-store","conversation_id":"do-not-store"}"#,
+        );
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::json!({"status":"accepted"})
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_disposition_reads_202_and_limits_chunked_bodies() {
+        use axum::{
+            Router,
+            body::{Body, Bytes},
+            http::StatusCode,
+            routing::post,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route("/accepted", post(|| async {
+            (StatusCode::ACCEPTED, r#"{"status":"accepted","event_id":"event","conversation_id":"conversation"}"#)
+        })).route("/refused", post(|| async {
+            (StatusCode::ACCEPTED, r#"{"status":"refused","reason":"content_unsupported"}"#)
+        })).route("/oversized", post(|| async {
+            // No Content-Length: the reader must cap bytes as chunks arrive.
+            (StatusCode::ACCEPTED, Body::from_stream(futures::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from(vec![b' '; 1500])),
+                Ok(Bytes::from(vec![b' '; 1500])),
+            ])))
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let config = test_app_config();
+        let keys = test_jwt_keys();
+        for (path, expected) in [
+            ("accepted", CallbackDisposition::Accepted),
+            (
+                "refused",
+                CallbackDisposition::Refused {
+                    reason: CallbackRefusal::ContentUnsupported,
+                },
+            ),
+            ("oversized", CallbackDisposition::Unknown),
+        ] {
+            let delivery = forward_to_agent(
+                &client,
+                &config,
+                &keys,
+                &format!("http://{address}/{path}"),
+                test_payload(),
+                "key",
+                "hash",
+                None,
+            )
+            .await;
+            assert!(delivery.result.is_ok());
+            assert_eq!(delivery.http_status, Some(202));
+            assert_eq!(delivery.disposition, Some(expected));
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn callback_disposition_persists_no_response_body_and_legacy_rows_still_load() {
+        let db = crate::test_utils::connect_test_database("callback_disposition_codes")
+            .await
+            .expect("MongoDB required");
+        let (message, _, _) = attachment_callback_fixture();
+        let mut legacy = mongodb::bson::to_document(&message).unwrap();
+        legacy.remove("callback_disposition");
+        let restored: ChannelMessage = mongodb::bson::from_document(legacy.clone()).unwrap();
+        assert!(restored.callback_disposition.is_none());
+        db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+            .insert_one(legacy)
+            .await
+            .unwrap();
+        let disposition = parse_callback_disposition(
+            br#"{"status":"accepted","event_id":"private-id","conversation_id":"private-id"}"#,
+        );
+        record_callback_disposition(&db, &message.id, &disposition)
+            .await
+            .unwrap();
+        let stored = db
+            .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id": &message.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.get_document("callback_disposition").unwrap(),
+            &doc! {"status":"accepted"}
+        );
+        assert!(!format!("{stored:?}").contains("private-id"));
+        assert_eq!(
+            get_message(&db, &message.id)
+                .await
+                .unwrap()
+                .callback_disposition,
+            Some(CallbackDisposition::Accepted)
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

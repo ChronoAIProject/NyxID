@@ -204,9 +204,14 @@ export function ChannelBotsManager({
                 {!row.owner_linked && row.inbound_hint ? (
                   <p className="text-11 text-muted-foreground">{row.inbound_hint}</p>
                 ) : null}
-                {row.delivery_status === "failing" ? (
+                {["failing", "interrupted", "media_failed"].includes(row.delivery_status ?? "") ? (
                   <p className="text-11 text-destructive">
-                    Messages are not reaching the agent: {row.delivery_reason ?? "delivery failed"}
+                    {row.delivery_status === "failing"
+                      ? "Messages are not reaching the agent: "
+                      : row.delivery_status === "interrupted"
+                        ? "Attachment processing was interrupted: "
+                        : "Some attachments could not be processed: "}
+                    {row.delivery_reason ?? "delivery failed"}
                     {row.delivery_failed_at
                       ? ` (${formatRelativeTime(row.delivery_failed_at)})`
                       : ""}
