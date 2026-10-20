@@ -115,6 +115,8 @@ export type DialogId =
 // --- The discriminated union itself -----------------------------------
 
 export type UiEvent =
+  | { name: 'public_page_view' | 'solution_detail_view' | 'docs_link_click' | 'contact_mailto_open' | 'discord_outbound' | 'generic_signup_click'; props: { page_id: string; locale: 'en' | 'zh' } }
+
   // § Dialog / wizard opened
   | {
       name: 'ui.dialog_opened';

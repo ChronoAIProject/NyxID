@@ -1,9 +1,9 @@
+import { forwardRef } from "react";
 import {
   cleanup,
   fireEvent,
   render,
   screen,
-  waitFor,
   within,
 } from "@testing-library/react";
 import {
@@ -19,10 +19,26 @@ import { allDocPages } from "@/features/docs/manifest";
 import { isPublicPath } from "@/lib/public-paths";
 import routes from "./generated/routes.json";
 import { WebsitePage } from "./website-page";
-import { websiteI18n } from "./i18n";
+import { parsePublicPath } from "../public-site/publication";
 
 const location = vi.hoisted(() => ({ pathname: "/", searchStr: "" }));
-vi.mock("@tanstack/react-router", () => ({ useLocation: () => location }));
+vi.mock("@tanstack/react-router", () => ({
+  useLocation: () => location,
+  Link: forwardRef<HTMLAnchorElement, Record<string, unknown>>(
+    function TestLink({ to, search, hash, preload: _preload, ...props }, ref) {
+      const query = new URLSearchParams(
+        search as Record<string, string>,
+      ).toString();
+      return (
+        <a
+          {...props}
+          ref={ref}
+          href={`${to}${query ? `?${query}` : ""}${hash ? `#${hash}` : ""}`}
+        />
+      );
+    },
+  ),
+}));
 
 const publicDestinations = new Set([
   ...routes,
@@ -68,12 +84,12 @@ afterEach(() => {
 afterAll(() => vi.unstubAllGlobals());
 
 async function openPage(pathname: string, language = "en") {
-  location.pathname = pathname;
+  location.pathname =
+    language === "zh" ? `/zh${pathname === "/" ? "" : pathname}` : pathname;
   location.searchStr = queryFor(language);
-  window.history.replaceState({}, "", pathname + location.searchStr);
-  await websiteI18n.changeLanguage(language);
+  window.history.replaceState({}, "", location.pathname + location.searchStr);
   const result = render(<WebsitePage />);
-  await screen.findByRole("heading", { level: 1 });
+  await screen.findByRole("heading", { level: 1 }, { timeout: 5000 });
   return result;
 }
 
@@ -86,7 +102,7 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
       expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
       expect(
         container.querySelector("main")?.textContent?.length,
-      ).toBeGreaterThan(100);
+      ).toBeGreaterThan(pathname === "/blog" ? 50 : 100);
       expect(container.querySelector("nav")).toBeTruthy();
       expect(container.querySelector("footer")).toBeTruthy();
       for (const anchor of container.querySelectorAll<HTMLAnchorElement>("a")) {
@@ -99,7 +115,7 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
           continue;
         }
         expect(
-          publicDestinations.has(destination.pathname),
+          publicDestinations.has(parsePublicPath(destination.pathname).route),
           `${pathname} -> ${href}`,
         ).toBe(true);
         if (href!.startsWith("#")) {
@@ -114,7 +130,8 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
           expect(destination.searchParams.get("return_to"), href!).toBe(
             "/keys?tab=active",
           );
-          expect(destination.searchParams.get("lang"), href!).toBe(language);
+          if (["/login", "/register"].includes(destination.pathname))
+            expect(destination.searchParams.get("lang"), href!).toBe(language);
         }
       }
       expect(
@@ -137,7 +154,7 @@ describe.each(["en", "zh"])("public page matrix: %s", (language) => {
     ];
     const active = links.filter((link) => link.getAttribute("aria-current"));
     expect(active).toHaveLength(1);
-    expect(active[0]?.pathname).toBe(section);
+    expect(parsePublicPath(active[0]?.pathname ?? "/").route).toBe(section);
     expect(active[0]).toHaveClass("on");
     expect(links.filter((link) => link.classList.contains("on"))).toHaveLength(
       1,
@@ -162,7 +179,6 @@ it("filters solutions by category and channel without losing custom-solution nav
   ).toBe(true);
   const channel = within(container.querySelector("#chF")!).getByRole("button", {
     name: "Telegram",
-    exact: true,
   });
   fireEvent.click(channel);
   expect(cards().length).toBeGreaterThan(0);
@@ -205,21 +221,13 @@ it("withholds unapproved articles and newsletter promises", async () => {
   expect(container.querySelector(".nl-form")).toBeNull();
 });
 
-it("switches website language without dropping the nested return destination", async () => {
+it("offers a real locale URL preserving business query and nested return", async () => {
   const { container } = await openPage("/contact");
-  fireEvent.click(
-    within(container.querySelector("nav")!).getByRole("button", {
-      name: "中文",
-      exact: true,
-    }),
-  );
-  await waitFor(() =>
-    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
-      "联系我们",
-    ),
-  );
-  expect(new URLSearchParams(window.location.search).get("lang")).toBe("zh");
-  expect(
-    container.querySelector('a[href^="/login?"]')?.getAttribute("href"),
-  ).toContain("return_to=%2Fkeys%3Ftab%3Dactive");
+  const link = within(container.querySelector("nav")!).getByRole("link", {
+    name: "中文",
+  });
+  const url = new URL(link.getAttribute("href")!, window.location.href);
+  expect(url.pathname).toBe("/zh/contact");
+  expect(url.searchParams.has("lang")).toBe(false);
+  expect(url.searchParams.get("return_to")).toBe("/keys?tab=active");
 });

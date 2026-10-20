@@ -9,12 +9,11 @@ import zhFilm from "./generated/zh-film.json";
 import "./workflow-film.css";
 
 function useReducedMotion() {
-  const [reduced, setReduced] = useState(
-    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
+  const [reduced, setReduced] = useState(() => true);
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const update = () => setReduced(media.matches);
+    update();
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);
@@ -26,7 +25,7 @@ export function AudienceSwitcher({
 }: {
   items: { id: string; label: ReactNode; content: ReactNode }[];
 }) {
-  const initial = new URLSearchParams(window.location.search).get("for");
+  const initial = null;
   const [selected, setSelected] = useState(() =>
     Math.max(
       0,
@@ -39,6 +38,14 @@ export function AudienceSwitcher({
   const root = useRef<HTMLDivElement>(null);
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const reduced = useReducedMotion();
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("for");
+    const index = items.findIndex((item) => item.id === requested);
+    if (index >= 0) {
+      setSelected(index);
+      setStopped(true);
+    }
+  }, [items]);
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -432,14 +439,11 @@ export function CommunityAccess() {
   const s = useWebsite();
   useEffect(() => {
     if (window.location.hash === "#beta") {
-      document
-        .getElementById("beta")
-        ?.scrollIntoView({
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
-            .matches
-            ? "auto"
-            : "smooth",
-        });
+      document.getElementById("beta")?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
     }
   }, []);
   return (

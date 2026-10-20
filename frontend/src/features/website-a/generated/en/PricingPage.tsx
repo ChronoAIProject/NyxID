@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
 export default function PricingPage() {
@@ -33,9 +34,12 @@ export default function PricingPage() {
             >
               {"Get started"}
             </VisualLink>
-            <a className="btn lg" href={s.siteHref("/contact?topic=bundle")}>
+            <SiteLink
+              className="btn lg"
+              href={s.siteHref("/contact?topic=bundle")}
+            >
               {"Talk to us"}
-            </a>
+            </SiteLink>
           </div>
         </div>
         {"\n"}
@@ -227,7 +231,7 @@ export default function PricingPage() {
                   "Predictable spend, volume, SSO, on-prem credential nodes and priority support, shaped around your workload."
                 }
               </p>
-              <a
+              <SiteLink
                 className="more"
                 style={{ marginTop: "14px" }}
                 href={s.siteHref("/contact?topic=bundle")}
@@ -236,7 +240,7 @@ export default function PricingPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n  "}
           </div>
@@ -330,12 +334,12 @@ export default function PricingPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"Get started"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"Browse solutions"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

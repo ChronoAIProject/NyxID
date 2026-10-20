@@ -12,6 +12,7 @@ import { fixPrimaryButtonPaint } from "./primary-button-css.mjs";
 const root = path.resolve(import.meta.dirname, "../..");
 const publication = JSON.parse(fs.readFileSync(path.join(root, "content/publication.json"), "utf8"));
 const approvedArticles = new Set(publication.pages.filter(p => p.route.startsWith("/blog/") && p.publication === "published" && p.approval === "approved").map(p => p.route.slice(6)));
+fs.writeFileSync(path.join(root, "content/published.json"), JSON.stringify(publication.pages.filter(p=>p.publication==="published"&&p.approval==="approved").map(({id,route,locales,indexable})=>({id,route,locales,indexable})),null,2)+"\n");
 const source = fs.readFileSync(
   process.argv[2] ??
     path.resolve(root, "../docs/plans/website-review/nyxid-site-preview.html"),
@@ -32,6 +33,9 @@ const assetDir = path.join(root, "public/website-a");
 const outDir = path.join(root, "src/features/website-a/generated");
 fs.mkdirSync(assetDir, { recursive: true });
 fs.mkdirSync(outDir, { recursive: true });
+function writeChanged(file, contents) {
+  if (!fs.existsSync(file) || !fs.readFileSync(file).equals(Buffer.from(contents))) fs.writeFileSync(file, contents);
+}
 const q = JSON.stringify;
 const attrNames = {
   class: "className",
@@ -169,7 +173,7 @@ function jsx(el) {
         crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 16) +
         "." +
         ext;
-      fs.writeFileSync(
+      writeChanged(
         path.join(assetDir, filename),
         Buffer.from(bytes, "base64"),
       );
@@ -229,9 +233,8 @@ function jsx(el) {
   if (tag === "img") {
     attrs.push("onError={s.imageFallback}");
   }
-  if (tag === "button" && !el.hasAttribute("type")) attrs.push('type="button"');
-  if (el.hasAttribute("data-lang"))
-    attrs.push(`onClick={()=>s.setLanguage(${q(el.dataset.lang)})}`);
+  if (tag === "button" && !el.hasAttribute("data-lang") && !el.hasAttribute("type")) attrs.push('type="button"');
+  if (el.hasAttribute("data-lang")) attrs.push(`href={s.localeHref(${q(el.dataset.lang)})}`);
   if (cls === "nb-app")
     attrs.push("onMouseEnter={s.stopDemo} onFocusCapture={s.stopDemo}");
   if (id === "burger")
@@ -250,7 +253,7 @@ function jsx(el) {
     attrs.push(
       `hidden={!s.solutionVisible(${q(el.dataset.category)},${q(el.dataset.channels)})}`,
     );
-  if (el.parentElement?.id === "blogGrid")
+  if (el.parentElement?.id === "blogGrid" && el.hasAttribute("data-category"))
     attrs.push(`hidden={!s.postVisible(${q(el.dataset.category)})}`);
   if (id === "intQ")
     attrs.push("value={s.query} onChange={e=>s.setQuery(e.target.value)}");
@@ -265,7 +268,7 @@ function jsx(el) {
   if (el.hasAttribute("data-group"))
     attrs.push(`hidden={s.integrationGroupCount(${q(el.dataset.group)})===0}`);
   if (voids.has(tag)) return `<${tag} ${attrs.join(" ")} />`;
-  let component = tag;
+  let component = el.hasAttribute("data-lang") ? "SiteLink" : tag === "a" ? "SiteLink" : tag;
   if (currentRoute === "" && tag === "section" && el.classList.contains("hero")) component = "HeroSection";
   if (tag === "a" && el.matches(".btn.p")) {
     component = "VisualLink";
@@ -327,7 +330,7 @@ for (locale of ["en", "zh"]) {
     entries["blog/" + slug] = run(`pages.post(${q(slug)})`);
   const integrations = run("INTEGRATIONS");
   if (locale === "en")
-    fs.writeFileSync(
+    writeChanged(
       path.join(outDir, "integrations.json"),
       JSON.stringify(
         integrations.map(([name, cat, available]) => ({
@@ -353,7 +356,7 @@ for (locale of ["en", "zh"]) {
     document: { documentElement: {}, getElementById: () => null },
   };
   const filmData = vm.runInNewContext(filmScript + ";SCENES", filmContext);
-  fs.writeFileSync(
+  writeChanged(
     path.join(outDir, locale + "-film.json"),
     JSON.stringify(filmData, null, 2) + "\n",
   );
@@ -367,10 +370,12 @@ for (locale of ["en", "zh"]) {
   const banner = `// Generated from approved A, SHA-256 ${hash}.\n// Run: node scripts/website-a/generate.mjs <baseline.html>\n`;
   let output =
     banner +
-    `import {lazy,useEffect} from 'react';\nimport {useWebsite} from '../website-context';\n`;
+    `import {lazy,Suspense} from 'react';\nimport {useWebsite} from '../website-context';\n`;
   fs.mkdirSync(path.join(outDir, locale), { recursive: true });
   const pageTitles = {};
-  fs.writeFileSync(
+  const pageDescriptions = {};
+  const loaders = [];
+  writeChanged(
     path.join(outDir, locale + "-demos.json"),
     JSON.stringify({ demos, agents: demoAgents }, null, 2) + "\n",
   );
@@ -497,12 +502,13 @@ for (locale of ["en", "zh"]) {
       (heroComponents.length ? `import {${heroComponents.join(",")}} from '../../visuals/hero';\n` : "");
     const pageSource =
       banner +
+      (body.includes("<SiteLink") ? "import {SiteLink} from '../../site-link';\n" : "") +
       imports + visualImports +
       (body.includes("<ContactSection") ? "import {ContactSection} from '../../contact';\n" : "") +
       (body.includes("websiteNavProps") ? "import {websiteNavProps} from '../../navigation';\n" : "") +
       (body.includes("<SolutionActivation") ? "import {SolutionActivation} from '../../solution-activation';\n" : "") +
       `import {useWebsite} from '../../website-context';\nexport default function ${component}(){const s=useWebsite(); void s; return <>${body}</>;}\n`;
-    fs.writeFileSync(
+    writeChanged(
       path.join(outDir, locale, component + ".tsx"),
       await format(pageSource, { parser: "typescript" }),
     );
@@ -510,8 +516,10 @@ for (locale of ["en", "zh"]) {
       output += `import ${component} from './${locale}/${component}';\n`;
     else
       output += `const ${component}=lazy(()=>import('./${locale}/${component}'));\n`;
+    if (route !== "nav" && route !== "footer") loaders.push(`${q("/" + (route === "notfound" ? "404" : route))}:()=>import('./${locale}/${component}')`);
     const heading = tree.querySelector("h1");
     if (heading) {
+      pageDescriptions["/" + (route === "notfound" ? "404" : route)] = (heading.closest("section")?.querySelector("p.lead,p.sub,p") ?? tree.querySelector("p"))?.textContent.replace(/\s+/g," ").trim() ?? "NyxID";
       heading
         .querySelectorAll("br")
         .forEach((br) => br.replaceWith(dom.document.createTextNode(" ")));
@@ -522,13 +530,13 @@ for (locale of ["en", "zh"]) {
       `${q("/" + (route === "notfound" ? "404" : route))}:${component}`,
     );
   }
-  output += `const pages={${exports.join(",")}};\nconst titles:Record<string,string>=${q(pageTitles)};\nexport default function WebsiteContent(){const s=useWebsite();const Page=(pages as Record<string,React.ElementType>)[s.route]??pages["/404"];useEffect(()=>{document.title=(titles[s.route]??titles['/404'])+' · NyxID';},[s.route]);return <><nav className={"nav "+(s.menuOpen?"open":"")} id="nav"><WebsiteHeader /></nav><main id="website-main" tabIndex={-1}><Page /></main><footer id="foot"><WebsiteFooter /></footer></>;}\n`;
-  fs.writeFileSync(
+  output += `const pages={${exports.join(",")}};\nexport const titles:Record<string,string>=${q(pageTitles)};\nexport const descriptions:Record<string,string>=${q(pageDescriptions)};\nexport const loaders={${loaders.join(",")}};\nexport async function loadPage(route:string){const load=(loaders as Record<string,()=>Promise<{default:React.ComponentType}>>)[route]??loaders['/404'];return (await load()).default;}\nexport default function WebsiteContent(){const s=useWebsite();const Page=(pages as Record<string,React.ElementType>)[s.route]??pages["/404"];return <Suspense fallback={<p role="status">Loading…</p>}><Page /></Suspense>;}\n`;
+  writeChanged(
     path.join(outDir, locale + ".tsx"),
     await format(output, { parser: "typescript" }),
   );
   if (locale === "en")
-    fs.writeFileSync(
+    writeChanged(
       path.join(outDir, "routes.json"),
       JSON.stringify(
         Object.keys(pageTitles).filter((route) => route !== "/404"),
@@ -565,10 +573,10 @@ sheet.walkRules((rule) => {
     return sel.startsWith(".website-a") ? sel : ".website-a " + sel;
   });
 });
-fs.writeFileSync(
+writeChanged(
   path.join(root, "src/features/website-a/website-a.css"),
   '@import url("https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap");\n' +
-    sheet.toString() +
+    sheet.toString().replace(/\.lang button/g, ".lang a") +
     `\n.website-a [hidden]{display:none!important}\n.website-a{min-height:100vh;font-size:15px;line-height:1.6;isolation:isolate}\n.website-a .ann{display:none}\n.website-a .icp-tabs button[aria-selected="true"]{background:var(--fg)!important;border-radius:999px}\n.website-a .icp-ind{display:none}\n.website-a .icp-progress.done span{transform:scaleX(1)}\n.website-a .nb-app{min-width:0}\n.website-a .demo-label{font-size:12px;color:var(--fg3);margin:8px 0}\n.website-a .nl-form :disabled{opacity:.65;cursor:not-allowed}\n.website-skip{position:absolute;left:16px;top:-100px;z-index:100}.website-skip:focus{top:12px;background:var(--card);padding:8px}\n.website-a .icp-panel.is-running .icp-progress span{animation:website-a-icpBar 9s linear forwards}.website-a .icp-panel.is-stopped .icp-progress span{transform:scaleX(1)}\n.website-a .audience-switcher:hover .icp-progress span{animation-play-state:paused}\n`,
 );
 console.log(

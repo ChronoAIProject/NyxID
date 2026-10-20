@@ -10,7 +10,7 @@
 export function isPublicPath(path: string): boolean {
   const websitePath = path.replace(/\/$/, "") || "/";
   return (
-    path === "/" ||
+    path === "/" || path === "/zh" || path.startsWith("/zh/") || path === "/start" ||
     [
       "/nyxbot",
       "/solutions",

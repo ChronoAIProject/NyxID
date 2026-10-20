@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { SolutionFilm } from "../../interactions";
 import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
@@ -654,9 +655,12 @@ export default function SolutionsPage() {
               >
                 {"开始使用"}
               </VisualLink>
-              <a className="btn" href={s.siteHref("/contact?topic=bundle")}>
+              <SiteLink
+                className="btn"
+                href={s.siteHref("/contact?topic=bundle")}
+              >
                 {"联系我们"}
-              </a>
+              </SiteLink>
             </div>
           </div>
           {"\n  "}
@@ -826,7 +830,7 @@ export default function SolutionsPage() {
               <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 10px" }}>
                 {"餐厅与咖啡馆"}
               </h3>
-              <a
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/restaurant-manager")}
@@ -835,8 +839,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/back-office-clerk")}
@@ -845,8 +849,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/callback-queue")}
@@ -855,7 +859,7 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             <div className="card">
               <div className="ic">
@@ -868,7 +872,7 @@ export default function SolutionsPage() {
               <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 10px" }}>
                 {"美发与诊所"}
               </h3>
-              <a
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/appointment-booker")}
@@ -877,8 +881,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/callback-queue")}
@@ -887,8 +891,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/help-desk")}
@@ -897,7 +901,7 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             <div className="card">
               <div className="ic">
@@ -908,7 +912,7 @@ export default function SolutionsPage() {
               <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 10px" }}>
                 {"网店"}
               </h3>
-              <a
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/help-desk")}
@@ -917,8 +921,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/x-lead-catcher")}
@@ -927,8 +931,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/back-office-clerk")}
@@ -937,7 +941,7 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             <div className="card">
               <div className="ic">
@@ -949,7 +953,7 @@ export default function SolutionsPage() {
               <h3 style={{ fontSize: "var(--fs-h3)", margin: "14px 0 10px" }}>
                 {"创业者与分析师"}
               </h3>
-              <a
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/stock-analyst")}
@@ -958,8 +962,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/news-aggregator")}
@@ -968,8 +972,8 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
-              <a
+              </SiteLink>
+              <SiteLink
                 className="more"
                 style={{ display: "flex", padding: "4px 0" }}
                 href={s.siteHref("/solutions/desk-researcher")}
@@ -978,7 +982,7 @@ export default function SolutionsPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n    "}
           </div>
@@ -1005,12 +1009,12 @@ export default function SolutionsPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"浏览方案"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

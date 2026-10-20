@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { VisualLink } from "../../visuals/elements";
 import { SolutionActivation } from "../../solution-activation";
 import { useWebsite } from "../../website-context";
@@ -23,7 +24,7 @@ export default function SolutionsNewsAggregatorPage() {
           <div>
             {"\n      "}
             <div className="crumbs">
-              <a href={s.siteHref("/solutions")}>{"方案"}</a>
+              <SiteLink href={s.siteHref("/solutions")}>{"方案"}</SiteLink>
               <span>{"/"}</span>
               <span>{"研究与洞察"}</span>
             </div>
@@ -63,9 +64,9 @@ export default function SolutionsNewsAggregatorPage() {
               }}
             >
               <SolutionActivation />
-              <a className="btn lg" href={s.siteHref("/how-it-works")}>
+              <SiteLink className="btn lg" href={s.siteHref("/how-it-works")}>
                 {"工作原理"}
-              </a>
+              </SiteLink>
             </div>
             {"\n      "}
             <div className="pills" style={{ marginTop: "20px" }}>
@@ -178,7 +179,7 @@ export default function SolutionsNewsAggregatorPage() {
               <span className="badge b-no">{"禁止"}</span>
             </div>
             {"\n  "}
-            <a
+            <SiteLink
               className="more"
               style={{ marginTop: "22px" }}
               href={s.siteHref("/security")}
@@ -187,7 +188,7 @@ export default function SolutionsNewsAggregatorPage() {
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           {"\n  "}
           <div className="perm-card">
@@ -310,7 +311,7 @@ export default function SolutionsNewsAggregatorPage() {
                   "此方案按各服务的收费计费：Firecrawl、X（推特）、Tavily、Telegram以及 AI 模型，零加价。早期体验期间网络费用由我们承担。"
                 }
               </p>
-              <a
+              <SiteLink
                 className="more"
                 style={{ marginTop: "12px" }}
                 href={s.siteHref("/pricing")}
@@ -319,7 +320,7 @@ export default function SolutionsNewsAggregatorPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n    "}
             <div className="card">
@@ -332,7 +333,7 @@ export default function SolutionsNewsAggregatorPage() {
                   "规模化运行新闻聚合？我们会根据你的用量、部署和支持需求定制套餐。"
                 }
               </p>
-              <a
+              <SiteLink
                 className="more"
                 style={{ marginTop: "12px" }}
                 href={s.siteHref("/contact?topic=bundle")}
@@ -341,7 +342,7 @@ export default function SolutionsNewsAggregatorPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n  "}
           </div>
@@ -370,12 +371,12 @@ export default function SolutionsNewsAggregatorPage() {
         <div className="wrap">
           <div className="sechead">
             <h2 className="h2">{"相关方案"}</h2>
-            <a className="btn" href={s.siteHref("/solutions")}>
+            <SiteLink className="btn" href={s.siteHref("/solutions")}>
               {"全部方案 "}
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           <div className="grid g3">
             <VisualLink
@@ -535,12 +536,12 @@ export default function SolutionsNewsAggregatorPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"浏览方案"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

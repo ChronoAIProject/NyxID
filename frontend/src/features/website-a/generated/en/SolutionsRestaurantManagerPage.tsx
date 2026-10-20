@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { VisualLink } from "../../visuals/elements";
 import { SolutionActivation } from "../../solution-activation";
 import { useWebsite } from "../../website-context";
@@ -23,7 +24,7 @@ export default function SolutionsRestaurantManagerPage() {
           <div>
             {"\n      "}
             <div className="crumbs">
-              <a href={s.siteHref("/solutions")}>{"Solutions"}</a>
+              <SiteLink href={s.siteHref("/solutions")}>{"Solutions"}</SiteLink>
               <span>{"/"}</span>
               <span>{"Hospitality"}</span>
             </div>
@@ -64,9 +65,9 @@ export default function SolutionsRestaurantManagerPage() {
               }}
             >
               <SolutionActivation />
-              <a className="btn lg" href={s.siteHref("/how-it-works")}>
+              <SiteLink className="btn lg" href={s.siteHref("/how-it-works")}>
                 {"How it works"}
-              </a>
+              </SiteLink>
             </div>
             {"\n      "}
             <div className="pills" style={{ marginTop: "20px" }}>
@@ -184,7 +185,7 @@ export default function SolutionsRestaurantManagerPage() {
               <span className="badge b-no">{"Not allowed"}</span>
             </div>
             {"\n  "}
-            <a
+            <SiteLink
               className="more"
               style={{ marginTop: "22px" }}
               href={s.siteHref("/security")}
@@ -193,7 +194,7 @@ export default function SolutionsRestaurantManagerPage() {
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           {"\n  "}
           <div className="perm-card">
@@ -336,7 +337,7 @@ export default function SolutionsRestaurantManagerPage() {
                   "You pay what each service charges for this solution: Telegram, Google Calendar, Google Sheets and the AI model, with no markup. Network fees are on us during early access."
                 }
               </p>
-              <a
+              <SiteLink
                 className="more"
                 style={{ marginTop: "12px" }}
                 href={s.siteHref("/pricing")}
@@ -345,7 +346,7 @@ export default function SolutionsRestaurantManagerPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n    "}
             <div className="card">
@@ -358,7 +359,7 @@ export default function SolutionsRestaurantManagerPage() {
                   "Running Restaurant manager at scale? We’ll build a bundle around your volume, deployment and support needs."
                 }
               </p>
-              <a
+              <SiteLink
                 className="more"
                 style={{ marginTop: "12px" }}
                 href={s.siteHref("/contact?topic=bundle")}
@@ -367,7 +368,7 @@ export default function SolutionsRestaurantManagerPage() {
                 <svg className="i" viewBox="0 0 24 24">
                   <path d="M5 12h14M12 5l7 7-7 7"></path>
                 </svg>
-              </a>
+              </SiteLink>
             </div>
             {"\n  "}
           </div>
@@ -412,12 +413,12 @@ export default function SolutionsRestaurantManagerPage() {
         <div className="wrap">
           <div className="sechead">
             <h2 className="h2">{"Related solutions"}</h2>
-            <a className="btn" href={s.siteHref("/solutions")}>
+            <SiteLink className="btn" href={s.siteHref("/solutions")}>
               {"All solutions "}
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           <div className="grid g3">
             <VisualLink
@@ -584,12 +585,12 @@ export default function SolutionsRestaurantManagerPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"Get started"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"Browse solutions"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

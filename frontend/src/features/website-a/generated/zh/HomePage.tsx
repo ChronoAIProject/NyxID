@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import {
   AudienceSwitcher,
   CodeExample,
@@ -117,12 +118,15 @@ export default function HomePage() {
                         >
                           {"开始使用"}
                         </VisualLink>
-                        <a className="btn" href={s.siteHref("/solutions")}>
+                        <SiteLink
+                          className="btn"
+                          href={s.siteHref("/solutions")}
+                        >
                           {"查看方案 "}
                           <svg className="i" viewBox="0 0 24 24">
                             <path d="M5 12h14M12 5l7 7-7 7"></path>
                           </svg>
-                        </a>
+                        </SiteLink>
                       </div>
                       {"\n      "}
                     </div>
@@ -217,9 +221,12 @@ export default function HomePage() {
                         {"登录后连接服务，设置你的助手。"}
                       </span>
                       <span className="try-links">
-                        <a className="btn sm" href={s.authHref("register")}>
+                        <SiteLink
+                          className="btn sm"
+                          href={s.authHref("register")}
+                        >
                           {"开始使用"}
-                        </a>
+                        </SiteLink>
                       </span>
                     </div>
                     {"\n    "}
@@ -310,12 +317,12 @@ export default function HomePage() {
                         >
                           {"开始使用"}
                         </VisualLink>
-                        <a className="btn" href={s.siteHref("/nyxbot")}>
+                        <SiteLink className="btn" href={s.siteHref("/nyxbot")}>
                           {"认识 NyxBot "}
                           <svg className="i" viewBox="0 0 24 24">
                             <path d="M5 12h14M12 5l7 7-7 7"></path>
                           </svg>
-                        </a>
+                        </SiteLink>
                       </div>
                       {"\n      "}
                     </div>
@@ -404,9 +411,12 @@ export default function HomePage() {
                         {"登录后连接服务，设置你的助手。"}
                       </span>
                       <span className="try-links">
-                        <a className="btn sm" href={s.authHref("register")}>
+                        <SiteLink
+                          className="btn sm"
+                          href={s.authHref("register")}
+                        >
                           {"开始使用"}
-                        </a>
+                        </SiteLink>
                       </span>
                     </div>
                     {"\n    "}
@@ -500,12 +510,12 @@ export default function HomePage() {
                         >
                           {"开始使用"}
                         </VisualLink>
-                        <a className="btn" href={s.siteHref("/agents")}>
+                        <SiteLink className="btn" href={s.siteHref("/agents")}>
                           {"接入你的智能体 "}
                           <svg className="i" viewBox="0 0 24 24">
                             <path d="M5 12h14M12 5l7 7-7 7"></path>
                           </svg>
-                        </a>
+                        </SiteLink>
                       </div>
                       {"\n      "}
                     </div>
@@ -582,9 +592,12 @@ export default function HomePage() {
                         {"登录后连接服务，设置你的助手。"}
                       </span>
                       <span className="try-links">
-                        <a className="btn sm" href={s.authHref("register")}>
+                        <SiteLink
+                          className="btn sm"
+                          href={s.authHref("register")}
+                        >
                           {"开始使用"}
-                        </a>
+                        </SiteLink>
                       </span>
                     </div>
                     {"\n    "}
@@ -700,12 +713,12 @@ export default function HomePage() {
             >
               {"开始使用"}
             </VisualLink>
-            <a className="btn" href={s.siteHref("/how-it-works")}>
+            <SiteLink className="btn" href={s.siteHref("/how-it-works")}>
               {"了解更多 "}
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           {"\n  "}
         </div>
@@ -745,12 +758,12 @@ export default function HomePage() {
                 >
                   {"开始使用"}
                 </VisualLink>
-                <a className="btn" href={s.siteHref("/agents")}>
+                <SiteLink className="btn" href={s.siteHref("/agents")}>
                   {"了解更多 "}
                   <svg className="i" viewBox="0 0 24 24">
                     <path d="M5 12h14M12 5l7 7-7 7"></path>
                   </svg>
-                </a>
+                </SiteLink>
               </div>
             </div>
           </div>
@@ -1375,12 +1388,12 @@ export default function HomePage() {
             >
               {"开始使用"}
             </VisualLink>
-            <a className="btn" href={s.siteHref("/integrations")}>
+            <SiteLink className="btn" href={s.siteHref("/integrations")}>
               {"查看全部集成 "}
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           {"\n  "}
         </div>
@@ -1405,12 +1418,12 @@ export default function HomePage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"浏览方案"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

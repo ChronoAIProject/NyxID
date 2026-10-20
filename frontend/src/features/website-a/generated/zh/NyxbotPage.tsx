@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { DemoAgents, DemoMessages, DemoChips } from "../../interactions";
 import { VisualLink } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
@@ -64,9 +65,9 @@ export default function NyxbotPage() {
               >
                 {"从 NyxBot 开始"}
               </VisualLink>
-              <a className="btn lg" href={s.siteHref("/solutions")}>
+              <SiteLink className="btn lg" href={s.siteHref("/solutions")}>
                 {"看看它能做什么"}
-              </a>
+              </SiteLink>
             </div>
             {"\n    "}
           </div>
@@ -133,9 +134,9 @@ export default function NyxbotPage() {
             <span className="try-tag">{"连接 NyxBot"}</span>
             <span className="try-txt">{"登录后连接服务，设置你的助手。"}</span>
             <span className="try-links">
-              <a className="btn sm" href={s.authHref("register")}>
+              <SiteLink className="btn sm" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
+              </SiteLink>
             </span>
           </div>
         </div>
@@ -532,7 +533,7 @@ export default function NyxbotPage() {
           </div>
           {"\n  "}
           <div style={{ textAlign: "center", marginTop: "28px" }}>
-            <a
+            <SiteLink
               className="btn"
               href={s.siteHref("/solutions/back-office-clerk")}
             >
@@ -540,7 +541,7 @@ export default function NyxbotPage() {
               <svg className="i" viewBox="0 0 24 24">
                 <path d="M5 12h14M12 5l7 7-7 7"></path>
               </svg>
-            </a>
+            </SiteLink>
           </div>
           {"\n"}
         </div>
@@ -798,12 +799,12 @@ export default function NyxbotPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"浏览方案"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

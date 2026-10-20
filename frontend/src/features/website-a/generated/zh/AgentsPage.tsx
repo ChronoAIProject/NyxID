@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { CodeExample } from "../../interactions";
 import { VisualLink, RevealFrame } from "../../visuals/elements";
 import { useWebsite } from "../../website-context";
@@ -34,12 +35,12 @@ export default function AgentsPage() {
             >
               {"获取智能体密钥"}
             </VisualLink>
-            <a
+            <SiteLink
               className="btn lg"
               href={s.siteHref("/docs/ai/guides/agent-isolation")}
             >
               {"阅读：限权密钥"}
-            </a>
+            </SiteLink>
           </div>
         </div>
         {"\n"}
@@ -363,12 +364,12 @@ export default function AgentsPage() {
                 zIndex: "1",
               }}
             >
-              <a className="btn lg" href={s.authHref("register")}>
+              <SiteLink className="btn lg" href={s.authHref("register")}>
                 {"开始使用"}
-              </a>
-              <a className="btn lg gh" href={s.siteHref("/solutions")}>
+              </SiteLink>
+              <SiteLink className="btn lg gh" href={s.siteHref("/solutions")}>
                 {"浏览方案"}
-              </a>
+              </SiteLink>
             </div>
           </div>
         </div>

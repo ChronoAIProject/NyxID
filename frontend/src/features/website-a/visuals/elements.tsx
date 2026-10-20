@@ -1,3 +1,4 @@
+import { SiteLink } from "../site-link";
 import { useState } from "react";
 import type { AnchorHTMLAttributes, HTMLAttributes } from "react";
 import SpecularButton from "./react-bits/SpecularButton";
@@ -16,7 +17,7 @@ export function VisualLink({
   const [target, setTarget] = useState<HTMLAnchorElement | null>(null);
   const { active } = useMotionTarget(target);
   return (
-    <a
+    <SiteLink
       {...props}
       hidden={hidden}
       ref={setTarget}
@@ -57,7 +58,7 @@ export function VisualLink({
             aria-hidden="true"
           />
         ))}
-    </a>
+    </SiteLink>
   );
 }
 

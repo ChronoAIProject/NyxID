@@ -27,13 +27,13 @@ export function injectRedditDefaultCode() {
 
 export function authHref(
   kind: "login" | "register",
-  search = window.location.search,
+  search = typeof window === "undefined" ? "" : window.location.search,
 ) {
   return `/${kind}${search}`;
 }
 
-export function siteHref(pathname: string, search = window.location.search) {
-  const destination = new URL(pathname, window.location.origin);
+export function siteHref(pathname: string, search = typeof window === "undefined" ? "" : window.location.search) {
+  const destination = new URL(pathname, "https://nyx.chrono-ai.fun");
   const params = new URLSearchParams(search);
   destination.searchParams.forEach((value, key) => params.set(key, value));
   const query = params.toString();
@@ -43,7 +43,7 @@ export function siteHref(pathname: string, search = window.location.search) {
 /** Only recognized public prototype paths may leave the fragment namespace. */
 export function legacyDestination(
   hash: string,
-  search = window.location.search,
+  search = typeof window === "undefined" ? "" : window.location.search,
 ): string | null {
   if (!hash.startsWith("#/")) return null;
   const fragment = hash.slice(1);

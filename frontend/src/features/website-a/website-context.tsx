@@ -8,6 +8,7 @@ export interface WebsiteState {
   menuOpen: boolean;
   setLanguage: (language: Language) => void;
   toggleMenu: () => void;
+  localeHref: (language: Language) => string;
   authHref: (kind: "login" | "register") => string;
   siteHref: (pathname: string) => string;
   imageFallback: (event: SyntheticEvent<HTMLImageElement>) => void;

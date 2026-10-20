@@ -1,17 +1,25 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { SyntheticEvent } from "react";
+import type { ReactNode, SyntheticEvent } from "react";
 import { useLocation } from "@tanstack/react-router";
 import { WEBSITE_THEME } from "./website-theme";
-import { I18nextProvider, useTranslation } from "react-i18next";
+import {
+  parsePublicPath,
+  publicationPath,
+  publishedRoute,
+} from "../public-site/publication";
+import EnHeader from "./generated/en/WebsiteHeader";
+import EnFooter from "./generated/en/WebsiteFooter";
+import ZhHeader from "./generated/zh/WebsiteHeader";
+import ZhFooter from "./generated/zh/WebsiteFooter";
 import { WebsiteContext } from "./website-context";
-import type { Language, WebsiteState } from "./website-context";
+import type { WebsiteState } from "./website-context";
 import {
   authHref,
   siteHref,
   legacyDestination,
   injectRedditDefaultCode,
 } from "./auth-links";
-import { websiteI18n } from "./i18n";
+
 import integrations from "./generated/integrations.json";
 import "./website-a.css";
 import "./visuals/visuals.css";
@@ -21,11 +29,20 @@ import { VisualMotionProvider } from "./visuals/motion-provider";
 const English = lazy(() => import("./generated/en"));
 const Chinese = lazy(() => import("./generated/zh"));
 
-function Website() {
+function Website({ children }: { children?: ReactNode }) {
   const { mode } = useVisualMotion();
   const location = useLocation();
-  const { i18n } = useTranslation(undefined, { i18n: websiteI18n });
-  const language: Language = i18n.language === "zh" ? "zh" : "en";
+  // Canonical HTML has no visitor query. The first client tree must match it;
+  // apply browser context after hydration and after subsequent URL changes.
+  const [urlContext, setUrlContext] = useState({ search: "", hash: "" });
+  useEffect(() => {
+    injectRedditDefaultCode();
+    setUrlContext({
+      search: window.location.search,
+      hash: window.location.hash,
+    });
+  }, [location.pathname, location.searchStr, location.hash]);
+  const { locale: language, route } = parsePublicPath(location.pathname);
   const [menuOpen, setMenuOpen] = useState(false);
   const [filters, setFilters] = useState<Record<string, string>>({
     catF: "all",
@@ -37,7 +54,6 @@ function Website() {
   const [category, setCategory] = useState("");
   const [demoIndex, setDemoIndex] = useState(0);
   const [demoStopped, setDemoStopped] = useState(false);
-  injectRedditDefaultCode();
 
   useEffect(() => {
     const previous = document.documentElement.lang;
@@ -75,25 +91,32 @@ function Website() {
   ).length;
   const state: WebsiteState = {
     language,
-    route: location.pathname.replace(/\/$/, "") || "/",
+    route,
     menuOpen,
+    localeHref: (next) => {
+      const params = new URLSearchParams(urlContext.search);
+      params.delete("lang");
+      const query = params.toString();
+      return (
+        publicationPath(route, next) +
+        (query ? `?${query}` : "") +
+        urlContext.hash
+      );
+    },
     setLanguage: (next) => {
-      void i18n.changeLanguage(next);
-      try {
-        localStorage.setItem("nyx-lang", next);
-      } catch {
-        /* In-memory language remains available. */
-      }
-      // Explicit URL language must agree with the newly selected language on reload.
-      const url = new URL(window.location.href);
-      if (url.searchParams.has("lang")) {
-        url.searchParams.set("lang", next);
-        window.history.replaceState(window.history.state, "", url);
-      }
+      window.location.assign(publicationPath(route, next) + urlContext.search);
     },
     toggleMenu: () => setMenuOpen((open) => !open),
-    authHref,
-    siteHref,
+    authHref: (kind) => authHref(kind, urlContext.search),
+    siteHref: (path) => {
+      const url = new URL(path, "https://nyx.chrono-ai.fun");
+      const localized = publishedRoute(url.pathname)
+        ? publicationPath(url.pathname, language)
+        : url.pathname;
+      const params = new URLSearchParams(urlContext.search);
+      params.delete("lang");
+      return siteHref(localized + url.search + url.hash, `?${params}`);
+    },
     imageFallback: (event: SyntheticEvent<HTMLImageElement>) => {
       // Hide a failed icon while its adjacent provider name remains readable.
       event.currentTarget.style.visibility = "hidden";
@@ -133,6 +156,8 @@ function Website() {
     stopDemo: () => setDemoStopped(true),
   };
   const Content = language === "zh" ? Chinese : English;
+  const Header = language === "zh" ? ZhHeader : EnHeader;
+  const Footer = language === "zh" ? ZhFooter : EnFooter;
   return (
     <WebsiteContext.Provider value={state}>
       <div
@@ -146,26 +171,32 @@ function Website() {
         <a href="#website-main" className="website-skip">
           {language === "zh" ? "跳到正文" : "Skip to content"}
         </a>
-        <Suspense
-          fallback={
-            <div className="wrap" role="status" style={{ padding: 48 }}>
-              {language === "zh" ? "加载中…" : "Loading…"}
-            </div>
-          }
-        >
-          <Content key={`${location.pathname}-${language}`} />
-        </Suspense>
+        <nav className={"nav " + (menuOpen ? "open" : "")} id="nav">
+          <Header />
+        </nav>
+        <main id="website-main" tabIndex={-1}>
+          <Suspense
+            fallback={
+              <div className="wrap" role="status" style={{ padding: 48 }}>
+                {language === "zh" ? "加载中…" : "Loading…"}
+              </div>
+            }
+          >
+            {children ?? <Content />}
+          </Suspense>
+        </main>
+        <footer id="foot">
+          <Footer />
+        </footer>
       </div>
     </WebsiteContext.Provider>
   );
 }
 
-export function WebsitePage() {
+export function WebsitePage({ children }: { children?: ReactNode }) {
   return (
-    <I18nextProvider i18n={websiteI18n}>
-      <VisualMotionProvider>
-        <Website />
-      </VisualMotionProvider>
-    </I18nextProvider>
+    <VisualMotionProvider>
+      <Website>{children}</Website>
+    </VisualMotionProvider>
   );
 }

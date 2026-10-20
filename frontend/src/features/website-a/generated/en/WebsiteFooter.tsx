@@ -1,5 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 // Run: node scripts/website-a/generate.mjs <baseline.html>
+import { SiteLink } from "../../site-link";
 import { useWebsite } from "../../website-context";
 export default function WebsiteFooter() {
   const s = useWebsite();
@@ -11,7 +12,7 @@ export default function WebsiteFooter() {
         <div className="fgrid">
           {"\n      "}
           <div>
-            <a className="brand" href={s.siteHref("/")}>
+            <SiteLink className="brand" href={s.siteHref("/")}>
               <img
                 className="ld"
                 src="/website-a/b9c156ac563aec44.svg"
@@ -24,7 +25,7 @@ export default function WebsiteFooter() {
                 alt="NyxID"
                 onError={s.imageFallback}
               />
-            </a>
+            </SiteLink>
             <p
               className="small"
               style={{ marginTop: "14px", maxWidth: "270px" }}
@@ -37,61 +38,69 @@ export default function WebsiteFooter() {
           {"\n      "}
           <div>
             <h4>{"Product"}</h4>
-            <a href={s.siteHref("/nyxbot")}>{"NyxBot"}</a>
-            <a href={s.siteHref("/integrations")}>{"Integrations"}</a>
-            <a href={s.siteHref("/how-it-works")}>{"How it works"}</a>
-            <a href={s.siteHref("/security")}>{"Security"}</a>
-            <a href={s.siteHref("/pricing")}>{"Pricing"}</a>
+            <SiteLink href={s.siteHref("/nyxbot")}>{"NyxBot"}</SiteLink>
+            <SiteLink href={s.siteHref("/integrations")}>
+              {"Integrations"}
+            </SiteLink>
+            <SiteLink href={s.siteHref("/how-it-works")}>
+              {"How it works"}
+            </SiteLink>
+            <SiteLink href={s.siteHref("/security")}>{"Security"}</SiteLink>
+            <SiteLink href={s.siteHref("/pricing")}>{"Pricing"}</SiteLink>
           </div>
           {"\n      "}
           <div>
             <h4>{"Solutions"}</h4>
-            <a href={s.siteHref("/solutions/restaurant-manager")}>
+            <SiteLink href={s.siteHref("/solutions/restaurant-manager")}>
               {"Restaurant manager"}
-            </a>
-            <a href={s.siteHref("/solutions/help-desk")}>
+            </SiteLink>
+            <SiteLink href={s.siteHref("/solutions/help-desk")}>
               {"24-hour help desk"}
-            </a>
-            <a href={s.siteHref("/solutions/back-office-clerk")}>
+            </SiteLink>
+            <SiteLink href={s.siteHref("/solutions/back-office-clerk")}>
               {"Back-office clerk"}
-            </a>
-            <a href={s.siteHref("/solutions")}>{"All solutions →"}</a>
+            </SiteLink>
+            <SiteLink href={s.siteHref("/solutions")}>
+              {"All solutions →"}
+            </SiteLink>
           </div>
           {"\n      "}
           <div>
             <h4>{"Your agent"}</h4>
-            <a href={s.siteHref("/agents")}>{"Connect your agent"}</a>
-            <a href={s.siteHref("/docs/ai/guides/agent-isolation")}>
+            <SiteLink href={s.siteHref("/agents")}>
+              {"Connect your agent"}
+            </SiteLink>
+            <SiteLink href={s.siteHref("/docs/ai/guides/agent-isolation")}>
               {"Scoped keys guide"}
-            </a>
-            <a href={s.siteHref("/docs")}>{"Docs"}</a>
-            <a href={s.siteHref("/docs/cli/getting-started/install")}>
+            </SiteLink>
+            <SiteLink href={s.siteHref("/docs")}>{"Docs"}</SiteLink>
+            <SiteLink href={s.siteHref("/docs/cli/getting-started/install")}>
               {"CLI"}
-            </a>
+            </SiteLink>
           </div>
           {"\n      "}
           <div>
             <h4>{"Community"}</h4>
-            <a
+            <SiteLink
               href="https://discord.gg/QMvcs8UQBW"
               target="_blank"
               rel="noopener noreferrer"
             >
               {"Discord"}
-            </a>
-            <a
+            </SiteLink>
+            <SiteLink
               href="https://github.com/ChronoAIProject/NyxID"
               target="_blank"
               rel="noopener noreferrer"
             >
               {"GitHub"}
-            </a>
-            <a href={s.siteHref("/blog")}>{"Blog"}</a>
+            </SiteLink>
+            <SiteLink href={s.siteHref("/blog")}>{"Blog"}</SiteLink>
           </div>
           {"\n      "}
           <div>
             <h4>{"Company"}</h4>
-            <a href={s.siteHref("/contact")}>{"Talk to us"}</a>
+            <SiteLink href={s.siteHref("/contact")}>{"Talk to us"}</SiteLink>
           </div>
           {"\n    "}
         </div>
@@ -99,8 +108,8 @@ export default function WebsiteFooter() {
         <div className="legal small">
           <span>{"© 2026 ChronoAI Pte. Ltd."}</span>
           <span className="legal-links">
-            <a href={s.siteHref("/terms")}>{"Terms"}</a>
-            <a href={s.siteHref("/privacy")}>{"Privacy"}</a>
+            <SiteLink href={s.siteHref("/terms")}>{"Terms"}</SiteLink>
+            <SiteLink href={s.siteHref("/privacy")}>{"Privacy"}</SiteLink>
           </span>
         </div>
         {"\n  "}

@@ -1,3 +1,4 @@
+import { forwardRef } from "react";
 import { cleanup, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { authHref, siteHref } from "./auth-links";
@@ -14,6 +15,7 @@ vi.mock("./website-context", () => ({
     menuOpen: true,
     authHref,
     siteHref,
+    localeHref: () => "/zh",
     filterClass: () => "pill",
     isFilterSelected: () => false,
     solutionVisible: () => true,
@@ -112,3 +114,5 @@ describe.each([
     });
   },
 );
+
+vi.mock("./site-link", () => ({ SiteLink: forwardRef<HTMLAnchorElement, React.AnchorHTMLAttributes<HTMLAnchorElement>>(function Anchor(props,ref) { return <a {...props} ref={ref} />; }) }));

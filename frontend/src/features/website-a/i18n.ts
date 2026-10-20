@@ -3,15 +3,7 @@ import { initReactI18next } from "react-i18next";
 import type { Language } from "./website-context";
 
 export function initialLanguage(): Language {
-  const requested = new URLSearchParams(window.location.search).get("lang");
-  if (requested === "en" || requested === "zh") return requested;
-  try {
-    const saved = localStorage.getItem("nyx-lang");
-    if (saved === "en" || saved === "zh") return saved;
-  } catch {
-    // The browser language is still available when persistent storage is blocked.
-  }
-  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+  return typeof window !== "undefined" && (window.location.pathname === "/zh" || window.location.pathname.startsWith("/zh/")) ? "zh" : "en";
 }
 
 // A separate instance avoids overwriting AuthFlow/app translation resources.

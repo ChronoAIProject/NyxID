@@ -46,8 +46,8 @@
 .website-a .nl.on{color:var(--fg);background:var(--ov)}
 .website-a .sp{flex:1}
 .website-a .lang{display:inline-flex;height:32px;border-radius:var(--r-ctl);border:1px solid var(--hair);overflow:hidden;margin-right:6px}
-.website-a .lang button{padding:0 10px;font-size:12.5px;font-weight:600;color:var(--fg3)}
-.website-a .lang button.on{background:var(--ov2);color:var(--fg)}
+.website-a .lang a{padding:0 10px;font-size:12.5px;font-weight:600;color:var(--fg3)}
+.website-a .lang a.on{background:var(--ov2);color:var(--fg)}
 .website-a .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:var(--r-ctl);font-size:14px;font-weight:500;border:1px solid var(--hair);background:var(--ov);color:var(--fg);white-space:nowrap;transition:border-color .15s,background .15s,transform .15s}
 .website-a .btn:hover{border-color:var(--hair2);background:var(--ov2)}
 .website-a .btn.p{background:var(--vivid) border-box no-repeat;border-color:transparent;color:#fff;box-shadow:0 8px 24px -10px rgba(94,0,245,.7)}
@@ -520,8 +520,8 @@
   .website-a .hide-m{display:none}
   .website-a .nav .iconbtn{display:none}
   .website-a .nav .wrap{gap:8px;padding:0 16px}
-  .website-a .nav .lang button.on{display:none}
-  .website-a .nav .lang button{min-width:44px}
+  .website-a .nav .lang a.on{display:none}
+  .website-a .nav .lang a{min-width:44px}
   .website-a .nav .btn.sm,.website-a .nav .lang,.website-a .nav .burger,.website-a .auth-top .lang{height:44px}
   .website-a .pill{height:auto;min-height:44px}
   .website-a .nl-form .btn,.website-a .nl-form input{min-height:44px}

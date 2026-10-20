@@ -174,7 +174,11 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
 export function ContactSection({ children }: { children: ReactNode }) {
   const { language } = useWebsite();
   const location = useLocation();
-  const topic = contactTopicFromSearch(location.searchStr);
+  const [committedSearch, setCommittedSearch] = useState("");
+  useEffect(() => {
+    setCommittedSearch(location.searchStr);
+  }, [location.searchStr]);
+  const topic = contactTopicFromSearch(committedSearch);
   const schema = useMemo(
     () => createWebsiteContactSchema(language),
     [language],
@@ -190,9 +194,7 @@ export function ContactSection({ children }: { children: ReactNode }) {
   return (
     <div className="wrap contact">
       <ContactForm form={form} />
-      <div className="contact-side">
-        {children}
-      </div>
+      <div className="contact-side">{children}</div>
     </div>
   );
 }

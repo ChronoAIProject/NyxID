@@ -54,7 +54,7 @@ describe("Contact email-client handoff", () => {
       expect(screen.getByLabelText(topic!)).toHaveValue("bundle");
       expect(screen.getByLabelText(new RegExp(company!))).not.toBeRequired();
       fireEvent.click(
-        screen.getByRole("button", { name: submit, exact: true }),
+        screen.getByRole("button", { name: submit }),
       );
       expect(await screen.findAllByRole("alert")).toHaveLength(3);
       expect(openContactMailto).not.toHaveBeenCalled();
@@ -68,7 +68,7 @@ describe("Contact email-client handoff", () => {
         target: { value: "A bundle question" },
       });
       fireEvent.click(
-        screen.getByRole("button", { name: submit, exact: true }),
+        screen.getByRole("button", { name: submit }),
       );
       expect(await screen.findByRole("status")).toHaveTextContent(
         language === "zh" ? "尚未发送" : "has not been sent",
