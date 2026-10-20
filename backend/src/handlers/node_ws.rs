@@ -8,7 +8,7 @@ use axum::{
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -857,31 +857,7 @@ fn ws_extract_ip(
     peer: Option<SocketAddr>,
     trusted_proxies: &[crate::config::TrustedProxyRange],
 ) -> Option<String> {
-    if trusted_proxies.is_empty() {
-        crate::mw::rate_limit::warn_if_proxy_attribution_is_collapsed(
-            peer.map(|address| address.ip()),
-            trusted_proxies,
-        );
-        if let Some(forwarded) = headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| normalize_legacy_ip_text(value.split(',').next().unwrap_or("")))
-            .filter(|value| !value.is_empty())
-        {
-            return Some(forwarded);
-        }
-        if let Some(real_ip) = headers
-            .get("x-real-ip")
-            .and_then(|value| value.to_str().ok())
-            .map(normalize_legacy_ip_text)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(real_ip);
-        }
-        return peer.map(|address| crate::config::normalize_ip_address(address.ip()).to_string());
-    }
-
-    crate::mw::rate_limit::resolve_client_ip_with_legacy_fallback(headers, peer, trusted_proxies)
+    crate::mw::rate_limit::resolve_client_ip(headers, peer, trusted_proxies)
         .map(|resolved| resolved.ip.to_string())
 }
 
@@ -902,15 +878,6 @@ async fn validate_managed_runtime_binding(
         return Err(AppError::Conflict("managed runtime fence is stale".into()));
     }
     Ok(())
-}
-
-fn normalize_legacy_ip_text(value: &str) -> String {
-    let value = value.trim();
-    value
-        .parse::<IpAddr>()
-        .map(crate::config::normalize_ip_address)
-        .map(|address| address.to_string())
-        .unwrap_or_else(|_| value.to_string())
 }
 
 async fn handle_node_connection(
@@ -3568,25 +3535,25 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
-    fn ws_extract_ip_prefers_forwarded_for_over_real_ip_and_peer() {
+    fn ws_extract_ip_ignores_forwarded_for_without_proxy_trust() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
         headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
         assert_eq!(
             ws_extract_ip(&headers, Some(peer), &[]).as_deref(),
-            Some("1.2.3.4")
+            Some("10.0.0.1")
         );
     }
 
     #[test]
-    fn ws_extract_ip_falls_back_to_real_ip() {
+    fn ws_extract_ip_ignores_real_ip_without_proxy_trust() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "192.168.1.1".parse().unwrap());
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
         assert_eq!(
             ws_extract_ip(&headers, Some(peer), &[]).as_deref(),
-            Some("192.168.1.1")
+            Some("10.0.0.1")
         );
     }
 
@@ -3607,14 +3574,11 @@ mod tests {
     }
 
     #[test]
-    fn ws_extract_ip_ignores_empty_forwarded_for() {
+    fn ws_extract_ip_requires_peer_even_with_real_ip() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "".parse().unwrap());
         headers.insert("x-real-ip", "8.8.8.8".parse().unwrap());
-        assert_eq!(
-            ws_extract_ip(&headers, None, &[]).as_deref(),
-            Some("8.8.8.8")
-        );
+        assert_eq!(ws_extract_ip(&headers, None, &[]).as_deref(), None);
     }
 
     #[test]
@@ -3639,17 +3603,14 @@ mod tests {
     }
 
     #[test]
-    fn ws_extract_ip_single_forwarded_for_entry() {
+    fn ws_extract_ip_requires_peer_even_with_single_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
-        assert_eq!(
-            ws_extract_ip(&headers, None, &[]).as_deref(),
-            Some("203.0.113.50")
-        );
+        assert_eq!(ws_extract_ip(&headers, None, &[]).as_deref(), None);
     }
 
     #[test]
-    fn ws_extract_ip_preserves_legacy_non_ip_xff_without_proxy_config() {
+    fn ws_extract_ip_rejects_non_ip_xff_without_proxy_config() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "legacy-proxy-value".parse().unwrap());
         headers.insert("x-real-ip", "8.8.8.8".parse().unwrap());
@@ -3657,18 +3618,15 @@ mod tests {
 
         assert_eq!(
             ws_extract_ip(&headers, Some(peer), &[]).as_deref(),
-            Some("legacy-proxy-value")
+            Some("10.0.0.1")
         );
     }
 
     #[test]
-    fn ws_extract_ip_normalizes_ipv4_mapped_legacy_values() {
+    fn ws_extract_ip_normalizes_ipv4_mapped_peer_and_requires_peer_for_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "::ffff:8.8.8.8".parse().unwrap());
-        assert_eq!(
-            ws_extract_ip(&headers, None, &[]).as_deref(),
-            Some("8.8.8.8")
-        );
+        assert_eq!(ws_extract_ip(&headers, None, &[]).as_deref(), None);
 
         let peer = SocketAddr::new("::ffff:10.2.10.22".parse().unwrap(), 443);
         assert_eq!(
@@ -3678,13 +3636,10 @@ mod tests {
     }
 
     #[test]
-    fn ws_extract_ip_trims_real_ip_whitespace() {
+    fn ws_extract_ip_requires_peer_even_with_trimmed_real_ip() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "  10.0.0.1  ".parse().unwrap());
-        assert_eq!(
-            ws_extract_ip(&headers, None, &[]).as_deref(),
-            Some("10.0.0.1")
-        );
+        assert_eq!(ws_extract_ip(&headers, None, &[]).as_deref(), None);
     }
 
     #[test]

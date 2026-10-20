@@ -252,7 +252,7 @@ pub async fn verify(
         .await?;
 
     // Issue real session tokens
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
     let ua = extract_user_agent(&headers);
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();

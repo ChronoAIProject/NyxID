@@ -136,12 +136,14 @@ pub async fn require_credit_grant_manager(state: &AppState, auth_user: &AuthUser
     Ok(())
 }
 
-pub fn extract_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
+/// Audit attribution always uses the authenticated transport/proxy boundary.
+pub(crate) fn extract_ip(
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    trusted_proxies: &[crate::config::TrustedProxyRange],
+) -> Option<String> {
+    crate::mw::rate_limit::resolve_client_ip(headers, peer, trusted_proxies)
+        .map(|resolved| resolved.ip.to_string())
 }
 
 pub fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
@@ -355,34 +357,62 @@ mod tests {
     fn extract_ip_from_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        assert_eq!(extract_ip(&headers), Some("1.2.3.4".to_string()));
+        assert_eq!(
+            extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap(), "5.6.7.8".parse().unwrap()]
+            ),
+            Some("1.2.3.4".to_string())
+        );
     }
 
     #[test]
     fn extract_ip_single_value() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "10.0.0.1".parse().unwrap());
-        assert_eq!(extract_ip(&headers), Some("10.0.0.1".to_string()));
+        assert_eq!(
+            extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            ),
+            Some("10.0.0.1".to_string())
+        );
     }
 
     #[test]
     fn extract_ip_missing_header() {
         let headers = HeaderMap::new();
-        assert!(extract_ip(&headers).is_none());
+        assert!(extract_ip(&headers, None, &[]).is_none());
     }
 
     #[test]
     fn extract_ip_empty_value() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "".parse().unwrap());
-        assert!(extract_ip(&headers).is_none());
+        assert_eq!(
+            extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap()]
+            ),
+            Some("10.10.10.1".to_string())
+        );
     }
 
     #[test]
     fn extract_ip_trims_whitespace() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "  9.8.7.6  , 1.2.3.4".parse().unwrap());
-        assert_eq!(extract_ip(&headers), Some("9.8.7.6".to_string()));
+        assert_eq!(
+            extract_ip(
+                &headers,
+                Some("10.10.10.1:443".parse().unwrap()),
+                &["10.10.10.1".parse().unwrap(), "1.2.3.4".parse().unwrap()]
+            ),
+            Some("9.8.7.6".to_string())
+        );
     }
 
     #[test]

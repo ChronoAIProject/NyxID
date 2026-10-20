@@ -391,7 +391,7 @@ async fn server_main() {
     config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
         tracing::warn!(
-            "TRUSTED_PROXY_IPS is empty; forwarded client IPs and Cloudflare country headers cannot be verified. Requester attribution will be unavailable when the observed peer is an internal proxy, and strict public per-IP limits may collapse to that proxy address."
+            "TRUSTED_PROXY_IPS is empty; custom proxy deployments must configure trusted hops before upgrade or audit/login IPs fall back to the proxy and per-IP limits are shared. Forwarded client IPs and Cloudflare geography remain unverified."
         );
     }
 

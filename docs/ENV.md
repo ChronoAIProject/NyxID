@@ -60,6 +60,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `BACKEND_URL` | `http://backend:3001` | Internal HTTP(S) upstream origin, without path/credentials/query/fragment. |
 | `NYXID_PUBLIC_ORIGIN` | `http://localhost:8080` | Trusted public frontend origin. HTTPS enables HSTS; production Compose passes `FRONTEND_URL`. |
 | `NYXID_BROWSER_CONNECT_ORIGINS` | *(empty)* | At most 16 space-separated HTTP(S) origins for custom runtime API/analytics destinations; matching WS(S) origins are derived. Origin values are validated, never substituted as CSP/nginx fragments. |
+| `NYXID_TRUSTED_INGRESS_IPS` | *(empty; production Compose: `172.30.0.1`)* | Frontend nginx's comma-separated outer-ingress IP/CIDR allowlist (at most 64 entries / 8,192 characters). Only these peers can supply XFF for `real_ip_header X-Forwarded-For` with recursive resolution. IPs/CIDRs are validated before writing configuration; wildcard/unspecified addresses, hostnames, ports and nginx fragments are rejected. Empty trusts no outer ingress. This is distinct from the backend's `TRUSTED_PROXY_IPS`. |
 
 See [Production browser policy](BROWSER_SECURITY_POLICY.md) for response-specific
 CSP, supported resources, split credential routing and the production harness.
@@ -324,10 +325,72 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | Initially false. The first true process observation persists a sticky platform-policy cutover marker before serving. Actor-addressed master credentials then require the complete declared/drained replica roster with this env true, plus explicit policies on the conservative inventory of active master-capable catalog rows. Missing policy blocks readiness; an explicit empty policy is distinct and denies all operations. Expired siblings or changing this env to false do not undo cutover. See [activation and maintenance recovery](SECURITY_ROLLOUT_READINESS.md). Server-chosen surfaces retain their separate policy contract. |
-| `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
+| `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` or `/128`; IPv4-mapped IPv6 normalizes to IPv4. Trust only actual proxy hops that sanitize provenance. All audit, authentication, session, MFA, social OAuth, node WebSocket and MCP attribution uses the strict resolver: an untrusted peer (including an empty allowlist) supplies only its socket IP. From a trusted peer, valid `CF-Connecting-IP` takes priority, then the rightmost untrusted XFF hop, then `X-Real-IP`, then the peer. Repeated provenance lines or any malformed XFF hop invalidate forwarded evidence; no secondary-header recovery. Invalid config entries are dropped with a warning. Configure this before relying on requester identity or dedicated per-IP limits behind ingress. |
 | `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
-Deploy the resolver code before changing `TRUSTED_PROXY_IPS`. The code-only deploy is backward compatible for the global limiter and node WebSocket path. Setting the variable is the activation step: Cloudflare client attribution becomes verified, auth-device request/poll/preview limits key by the actual client, and the global/WS paths stop accepting forwarded headers from peers outside the allowlist.
+With an empty allowlist, the general per-IP request budget uses a global-unicast
+socket peer directly and ignores its headers. For private/loopback peers only,
+it uses the valid **rightmost** element of a single XFF line, as appended by the
+immediate proxy; otherwise it uses the peer. Client-controlled prefix text is
+ignored here, including malformed prefix hops, so it cannot collapse clients
+into the proxy bucket. Repeated XFF lines are rejected. It never uses `X-Real-IP`
+for this compatibility path. The private-peer warning remains active. This
+exception supplies neither audit attribution nor a rate-limit exemption.
+Missing transport evidence never authorizes forwarded headers.
+
+Production Compose handles the shipped two-hop topology without manual tuning:
+host TLS proxy → `127.0.0.1:3000` → frontend nginx → backend. Its dedicated
+`frontend_backend` bridge is `172.30.0.0/24`, with gateway `172.30.0.1`, fixed
+frontend address `172.30.0.10`, and dynamic backend allocation in
+`172.30.0.128/25`. The backend defaults `TRUSTED_PROXY_IPS` to exactly
+`172.30.0.10`; frontend defaults `NYXID_TRUSTED_INGRESS_IPS` to exactly the
+gateway. Both allowlists can be overridden in `.env.production`. MongoDB stays
+on the separate default network. Keep the published frontend port loopback-only:
+host processes reaching that gateway are trusted to assert client addresses.
+
+The following **Compose-only** variables make that bridge relocatable. Set them
+in `.env.production` (passed with `--env-file`) or the Compose process environment;
+they are not backend runtime configuration.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NYXID_FRONTEND_SUBNET` | `172.30.0.0/24` | Dedicated frontend/backend IPv4 subnet; choose one that does not overlap the host or another Docker network. |
+| `NYXID_FRONTEND_GATEWAY` | `172.30.0.1` | Bridge gateway and the derived default for `NYXID_TRUSTED_INGRESS_IPS`. |
+| `NYXID_FRONTEND_IP` | `172.30.0.10` | Fixed frontend address and the derived default for backend `TRUSTED_PROXY_IPS`. |
+| `NYXID_FRONTEND_IP_RANGE` | `172.30.0.128/25` | Dynamic backend address pool within the subnet, excluding the gateway and fixed frontend address. |
+
+For example, relocate the bridge with `NYXID_FRONTEND_SUBNET=172.31.42.0/24`,
+`NYXID_FRONTEND_GATEWAY=172.31.42.1`, `NYXID_FRONTEND_IP=172.31.42.10`, and
+`NYXID_FRONTEND_IP_RANGE=172.31.42.128/25`. Leave both trust overrides unset:
+Compose derives them from the selected frontend address and gateway. Explicit
+`TRUSTED_PROXY_IPS` or `NYXID_TRUSTED_INGRESS_IPS` overrides take precedence, so
+update any explicit override when relocating its corresponding hop. Keep both
+fixed addresses inside the subnet and outside the dynamic pool. Run
+`ruby frontend/scripts/test-compose-ingress.rb` to check default and relocated
+network/trust invariants without starting containers.
+
+The host TLS proxy must overwrite XFF with its client socket IP or append that IP
+after any client-supplied prefix. nginx uses `set_real_ip_from` plus
+`real_ip_recursive on` to select the rightmost untrusted hop only from an
+allowlisted outer peer. An untrusted peer's XFF cannot change `$remote_addr`.
+Every backend proxy location includes one rendered request policy that discards
+the incoming provenance, sends the normalized `$remote_addr` as both XFF and
+`X-Real-IP`, and clears consumed CF identity/geography fields. Thus backend trust
+needs only the frontend address after this normalization. With additional outer
+proxy hops, configure every actual sanitizing outer hop in
+`NYXID_TRUSTED_INGRESS_IPS`; when bypassing frontend nginx, configure every hop
+needed by the backend's raw XFF scan in `TRUSTED_PROXY_IPS`.
+
+**Upgrade note for custom (non-Compose) deployments:** set `TRUSTED_PROXY_IPS`
+to the actual sanitizing ingress addresses before upgrading. Otherwise audit and
+login IPs collapse to the proxy address and dedicated per-IP limits are shared;
+multi-hop ingress can also share the general limiter bucket. Set the frontend's
+outer-ingress allowlist separately if using this nginx behind another proxy.
+The backend emits a startup warning for empty trust and one additional warning
+on its first private/loopback peer. Do not infer proxy trust or Cloudflare
+authentication merely from a private backend peer. If the Compose subnet
+conflicts with a host network, set the four bridge variables above together;
+the default trust addresses follow automatically.
 
 `TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
 exemption by itself. To exempt an operator-controlled client, set
@@ -336,24 +399,25 @@ addresses. Behind ingress, also configure `TRUSTED_PROXY_IPS` with the sanitized
 forwarding hops. Do not use a shared ingress/NAT address as a client exemption
 unless every client represented by that address is intended to be exempt.
 
-Exemptions always use the TCP peer trust boundary, even when the general bucket
-key still uses legacy forwarded-header behavior with `TRUSTED_PROXY_IPS` empty.
+Exemptions always use the TCP peer trust boundary, including when the general
+bucket uses the private-peer single-hop compatibility path.
 An untrusted peer cannot claim an exempt address in a forwarding header. A
 trusted proxy must supply a usable client header: missing/malformed headers do
 not fall back to exempting the proxy itself, and malformed intervening XFF hops
-are not skipped to find an exempt prefix. Missing peer information never becomes
-an exempt loopback address. IPv4-mapped IPv6 addresses normalize to IPv4.
+invalidate the entire chain rather than being skipped to find an exempt prefix.
+Missing peer information never becomes an exempt loopback address. IPv4-mapped IPv6 addresses normalize to IPv4.
 
 Before enabling trusted proxy attribution in production:
 
-1. Verify the ingress overwrites or strips all client-supplied `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, and `CF-IPCountry` headers.
-2. Prefer the narrow actual ingress CIDR over broad private ranges. The example `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` is a starting point only when the ingress network cannot yet be narrowed.
-3. Add every proxy hop needed by the XFF fallback. When Cloudflare is in front, include its current published IPv4 and IPv6 ranges as well as the private ingress range. Keep those ranges synchronized with Cloudflare. `CF-Connecting-IP` remains the preferred path because it is independent of this complete-hop requirement.
-4. Confirm the origin cannot be reached around Cloudflare. If direct-to-origin traffic is possible, ensure it cannot reach an allowlisted ingress peer.
-5. After enabling, initiate a device login while sending a forged `CF-Connecting-IP`, then confirm `/auth/device/preview` does not echo the forged address. Repeat with forged `X-Forwarded-For`, `X-Real-IP`, and `CF-IPCountry` values before treating requester attribution as verified.
+1. Verify each ingress sanitizes client-supplied provenance. The shipped frontend nginx clears `CF-Connecting-IP`, `CF-IPCountry`, `CF-IPCity`, `CF-Region`, `CF-IPContinent`, `CF-Timezone`, and unused RFC `Forwarded` in every backend proxy location. It replaces XFF and `X-Real-IP` with the normalized client address after its own outer-ingress trust gate. Repo deployment configuration does not establish an authenticated Cloudflare hop.
+2. Prefer the narrow actual ingress addresses/CIDRs over broad private ranges. A trusted peer can assert client identity, so unrelated private-network clients must not match.
+3. List every intermediary in XFF. Otherwise the rightmost unlisted proxy becomes the apparent client and rate-limit key. For Cloudflare, keep its published IPv4/IPv6 ranges current as well as the origin ingress ranges.
+4. A custom Cloudflare ingress may preserve CF fields only when it authenticates the Cloudflare hop, overwrites client-supplied fields, and prevents direct-to-origin bypass. The default nginx deliberately removes them; changing `TRUSTED_PROXY_IPS` alone does not enable CF geography through that template.
+5. Send forged `CF-Connecting-IP`, XFF, `X-Real-IP` and every enabled CF location field from an untrusted client. Confirm device-login previews and audits do not attribute the forged identity/location. Repeat with malformed/repeated provenance. A valid XFF prefix followed by an untrusted proxy must resolve to that proxy, never the prefix.
 
 For richer requester recognition, enable Cloudflare's **Add visitor location headers**
-managed transform in the Cloudflare dashboard. NyxID reads `CF-IPCity`, `CF-Region`,
+managed transform in the Cloudflare dashboard and use an authenticated, sanitizing
+Cloudflare ingress as described above. NyxID reads `CF-IPCity`, `CF-Region`,
 `CF-IPContinent`, and `CF-Timezone` only when the origin peer matches
 `TRUSTED_PROXY_IPS`, under the same trust gate as `CF-IPCountry`. It intentionally
 does not retain Cloudflare latitude, longitude, postal-code, or metro-code headers;

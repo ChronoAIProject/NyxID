@@ -934,6 +934,10 @@ async fn oauth_request(
     let mut r = Request::builder()
         .method(method)
         .uri(path)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            43123,
+        ))))
         .header("content-type", "application/x-www-form-urlencoded");
     if human {
         r = r.header(

@@ -165,7 +165,7 @@ pub async fn poll_device_code(
 ) -> AppResult<Json<DeviceCodePoll>> {
     let device_code = normalize_device_code(&req.device_code)?;
     let signature = decode_poll_signature(&req.signature)?;
-    let ip_address = extract_ip(&headers, Some(peer));
+    let ip_address = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
     let user_agent = extract_user_agent(&headers);
     let response = match poll(
         &state.db,

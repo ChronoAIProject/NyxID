@@ -45,6 +45,12 @@ services:
       INTERNAL_BIND_ADDR: 0.0.0.0:3002
       INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS: 5
       NYXID_SERVER_TUF_STATE_DIR: /var/lib/nyxid/tuf
+      # Only frontend nginx can assert the normalized client address. Never
+      # trust the whole bridge subnet, where other workloads may run.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-${NYXID_FRONTEND_IP:-172.30.0.10}}
+    networks:
+      default: {}
+      frontend_backend: {}
     volumes:
       - ./keys:/app/keys:ro
       - backend_tuf:/var/lib/nyxid/tuf
@@ -67,8 +73,23 @@ services:
       BACKEND_URL: http://backend:3001
       NYXID_PUBLIC_ORIGIN: ${FRONTEND_URL:-http://localhost:3000}
       NYXID_BROWSER_CONNECT_ORIGINS: ${NYXID_BROWSER_CONNECT_ORIGINS:-}
+      # The loopback-published port is reached through this fixed bridge
+      # gateway by the host TLS proxy. Custom ingress must set exact hops.
+      NYXID_TRUSTED_INGRESS_IPS: ${NYXID_TRUSTED_INGRESS_IPS:-${NYXID_FRONTEND_GATEWAY:-172.30.0.1}}
+    networks:
+      frontend_backend:
+        ipv4_address: ${NYXID_FRONTEND_IP:-172.30.0.10}
     depends_on:
       - backend
 
 volumes:
   backend_tuf:
+
+networks:
+  frontend_backend:
+    ipam:
+      config:
+        - subnet: ${NYXID_FRONTEND_SUBNET:-172.30.0.0/24}
+          gateway: ${NYXID_FRONTEND_GATEWAY:-172.30.0.1}
+          # Keep dynamically allocated backend replicas away from nginx.
+          ip_range: ${NYXID_FRONTEND_IP_RANGE:-172.30.0.128/25}

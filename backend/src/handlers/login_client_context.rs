@@ -91,10 +91,12 @@ pub(super) fn trusted_client_location(
 }
 
 pub(super) fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|header| header.to_str().ok())
-        .map(String::from)
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.to_str().ok().map(String::from)
 }
 
 pub(super) fn capture_client_context(
