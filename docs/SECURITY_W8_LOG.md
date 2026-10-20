@@ -200,3 +200,11 @@
 - SessionRevocationCount takes Mongo modified_count through session_revocation_count, caps at 1,000,000 with explicit saturation. Scope registry/alphabet/64-byte, sorted disjoint 32-entry vectors, canonical v4 IDs, millisecond expiry and 2 KiB total enforced at enqueue and materialization; replay equality includes detail.
 - Added 12 focused tests for variants/invalid inputs, exact legacy JSON+BSON bytes, deterministic detail, live admitted replay and poisoned-storage rejection. Scoped rustfmt and git diff --check pass; full backend compile/tests/Clippy remain queued on the shared target and are not claimed passing.
 - Contract documents snapshot-derived required details, None semantics, resource_kind JSON naming and lane requests. Inventory flags affected ID/ASSIST/NODE rows detail-pending; no caller completion claimed. Runtime regression validation remains separately in progress.
+
+## W8 Decision 6 follow-up — borrowed producer compatibility (2026-10-20)
+
+- Added sealed reference forwarding for every AuditEventSource, preserving transaction-context &&AuditEvent / &&DetailedAuditEvent call shapes. Added one nested-borrow regression (13 detail tests total); no lane caller edits or open trait implementations.
+- Persisted ScopeSetChange uses the registered ScopeIdent constructor, count validation shares producer saturation, and validation-only match arms use guards. No dead-code/lint allowance, retry/timeout change or v1 byte change.
+- Backend all-target Clippy with both KMS features and -D warnings: exit 0, zero diagnostics; total 62m17s includes shared-lock wait. Log /tmp/nyxid-w8-ci-perf/fixed-clippy.log. Scoped rustfmt and whitespace checks pass.
+- Reused CORE-B both-KMS test build (Cargo PID 21951; compiler started 18:53 after last source edit 18:38; nyxid_server-5684336b1e77dbbb mtime 19:04:37). Direct audit_detail_ --nocapture --test-threads=2 on own replica: 13 passed / 0 failed / 0 ignored, body 0.41s / process 11.01s. Logs /tmp/nyxid-w8-ci-perf/{watch-decision6,decision6-direct-tests}.log.
+- Per PM's unified gate, canceled our queued redundant cargo check/test and duplicate Clippy; no other stream's Cargo was touched. Targeted tests plus all-target Clippy are green; no extra cargo check was run.

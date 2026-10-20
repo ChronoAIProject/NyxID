@@ -314,6 +314,21 @@ fn audit_detail_serialization_is_deterministic_and_part_of_immutable_equality() 
     assert_ne!(event, changed);
 }
 
+#[test]
+fn audit_detail_producers_forward_nested_borrows_from_transaction_contexts() {
+    fn project(producer: &impl AuditEventSource) -> SafeAuditEvent {
+        producer.project()
+    }
+    let plain = event();
+    let detailed = plain.clone().with_detail(session_revocation_count(3));
+    let context = (&plain, &detailed);
+    let (plain_ref, detailed_ref) = &context;
+    assert_eq!(project(plain_ref), plain.project());
+    assert_eq!(project(detailed_ref), detailed.project());
+    assert_eq!(project(&plain_ref), plain.project());
+    assert_eq!(project(&detailed_ref), detailed.project());
+}
+
 #[tokio::test]
 async fn audit_detail_enqueue_replay_conflicts_and_materialization_revalidates_storage() {
     let db = connect_transaction_test_database("audit_detail_replay").await;

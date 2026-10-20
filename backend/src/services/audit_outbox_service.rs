@@ -62,12 +62,18 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::AuditEvent {}
     impl Sealed for super::DetailedAuditEvent {}
+    impl<T: super::AuditEventSource + ?Sized> Sealed for &T {}
 }
 
 /// Sealed producer interface: stored models and arbitrary JSON cannot enqueue.
 pub trait AuditEventSource: sealed::Sealed + Sync {
     #[doc(hidden)]
     fn project(&self) -> SafeAuditEvent;
+}
+impl<T: AuditEventSource + ?Sized> AuditEventSource for &T {
+    fn project(&self) -> SafeAuditEvent {
+        <T as AuditEventSource>::project(*self)
+    }
 }
 impl AuditEventSource for AuditEvent {
     fn project(&self) -> SafeAuditEvent {
@@ -136,17 +142,17 @@ fn validate_set<T: Ord>(added: &[T], removed: &[T]) -> AppResult<()> {
 
 fn validate_detail(detail: &AuditDetail) -> AppResult<()> {
     match detail {
-        AuditDetail::AccessModeChange { scope, old, new } => {
+        AuditDetail::AccessModeChange { scope, old, new }
             if old == new
-                || (*scope == AccessModeScope::Workspace && (old.is_none() || new.is_none()))
-            {
-                return Err(invalid_detail());
-            }
+                || (*scope == AccessModeScope::Workspace && (old.is_none() || new.is_none())) =>
+        {
+            return Err(invalid_detail());
         }
         AuditDetail::ScopeSetChange { added, removed, .. } => {
             validate_set(added, removed)?;
             for ident in added.iter().chain(removed) {
-                validate_scope_ident(&ident.0)?;
+                // Storage must pass the same registered constructor as producers.
+                scope_ident(&ident.0)?;
             }
         }
         AuditDetail::ResourceSetChange { added, removed, .. } => {
@@ -158,23 +164,21 @@ fn validate_detail(detail: &AuditDetail) -> AppResult<()> {
                 }
             }
         }
-        AuditDetail::SessionRevocationCount { count, saturated } => {
-            if *count > MAX_SESSION_REVOCATION_COUNT
-                || (*saturated && *count != MAX_SESSION_REVOCATION_COUNT)
-            {
-                return Err(invalid_detail());
-            }
+        AuditDetail::SessionRevocationCount { count, saturated }
+            if (!*saturated && session_revocation_count(*count) != *detail)
+                || (*saturated && *count != MAX_SESSION_REVOCATION_COUNT) =>
+        {
+            return Err(invalid_detail());
         }
-        AuditDetail::ExpiryChange { old, new } => {
-            // BSON persists milliseconds: reject lossy values before replay
-            // comparison rather than silently changing the queued decision.
+        // BSON persists milliseconds: reject lossy values before replay
+        // comparison rather than silently changing the queued decision.
+        AuditDetail::ExpiryChange { old, new }
             if old
                 .iter()
                 .chain(new)
-                .any(|time| time.timestamp_subsec_nanos() % 1_000_000 != 0)
-            {
-                return Err(invalid_detail());
-            }
+                .any(|time| time.timestamp_subsec_nanos() % 1_000_000 != 0) =>
+        {
+            return Err(invalid_detail());
         }
         _ => (),
     }
