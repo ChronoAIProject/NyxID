@@ -1585,6 +1585,17 @@ mod tests {
                 .unwrap();
             assert_eq!(rotated.api_key_id, successor.id);
             assert_ne!(rotated.raw_key.as_str(), before.raw_key.as_str());
+            for key_id in [&before.api_key_id, &successor.id] {
+                let key = state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .find_one(doc! {"_id": key_id, "user_id": &owner})
+                    .projection(doc! {"assistant_usage": 1})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(key.get_bool("assistant_usage"), Ok(true));
+            }
             let raw = state
                 .db
                 .collection::<bson::Document>(CREDENTIALS)
