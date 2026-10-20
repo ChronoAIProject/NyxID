@@ -86,6 +86,18 @@ against the real public hosted desktop on both native architectures. Private
 patch bytes remain external, and final private-image acceptance stays with
 the operator's successful receipt and recorded runtime tests.
 
+`Built Image Worklet CSP (amd64/arm64)` runs the existing real microphone,
+hashed AudioWorklet, font and WebSocket case plus the enforcing CSP rejection
+case against the actual frontend runtime image. The runtime inherits its
+packaged default entrypoint and nginx configuration; only writable tmpfs paths
+are supplied. Tests read safely extracted image assets, and HTTP byte checks
+bind the served HTML/worklet to that same immutable image ID. Browser tools
+come from the digest-pinned, native Playwright image in
+`frontend/Dockerfile.policy-tests`, with dependencies installed from the
+frontend lock without hooks. Its version must match locked Playwright;
+Dependabot's weekly frontend Docker/npm updates cover both inputs. Missing,
+skipped, retried or failed cases fail the required PR/weekly gate.
+
 The two machine test Dockerfiles deliberately accept `MACHINE_IMAGE` from the
 exact same CI build, rather than claiming a preexisting release digest. The
 context-spike fixture names an immutable published machine digest. Production

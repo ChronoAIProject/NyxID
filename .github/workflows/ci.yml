@@ -96,6 +96,8 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             packaging:
+              - 'scripts/*csp*'
+              - 'frontend/Dockerfile.policy-tests'
               - 'scripts/*identity*'
               - 'scripts/*artifacts*'
               - 'scripts/*packaging*'

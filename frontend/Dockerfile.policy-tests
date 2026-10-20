@@ -1,0 +1,13 @@
+# Browser-only test runtime. Application bytes come from the final frontend image.
+FROM mcr.microsoft.com/playwright:v1.62.0-noble@sha256:baed2032d533817f3dbe6425de795788430ba345e819a1201337009ba17c9d07
+WORKDIR /tests/frontend
+COPY security/npm-tools/package.json security/npm-tools/package-lock.json security/npm-tools/.npmrc /opt/nyxid-build-tools/
+RUN npm ci --ignore-scripts --prefix /opt/nyxid-build-tools
+ENV PATH=/opt/nyxid-build-tools/node_modules/.bin:$PATH
+COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
+RUN npm ci --ignore-scripts && node -e 'if(require("playwright/package.json").version!=="1.62.0")throw Error("browser image and locked Playwright must be updated together")'
+COPY frontend/playwright.production.config.ts ./
+COPY frontend/e2e-production/ ./e2e-production/
+COPY frontend/e2e/ ./e2e/
+USER pwuser
+ENTRYPOINT ["node", "node_modules/@playwright/test/cli.js", "test", "--config=playwright.production.config.ts", "--project=production-policy", "--grep=real microphone, shipped AudioWorklet, fonts and allowed websocket|rejects injected inline scripts, event handlers and unlisted connections", "--output=/results/artifacts"]

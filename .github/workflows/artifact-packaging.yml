@@ -20,6 +20,7 @@ jobs:
       - run: python3 scripts/test-credential-packaging.py
       - run: python3 scripts/test-source-artifacts.py
       - run: python3 scripts/test-build-local-image.py
+      - run: python3 scripts/test-built-image-csp.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .node-version
@@ -110,6 +111,74 @@ jobs:
       - name: Verify exported image inputs after build and extraction
         if: ${{ always() && steps.source.outcome == 'success' }}
         run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+
+  worklet:
+    name: Built Image Worklet CSP (${{ matrix.arch }})
+    needs: policy
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed image and browser-test inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual shipped frontend runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-worklet-frontend:ci
+          provenance: false
+          cache-from: type=gha,scope=frontend-pr-linux-${{ matrix.arch }}
+      - name: Build locked tests with digest-pinned native browsers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/frontend/Dockerfile.policy-tests
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: nyxid-worklet-browser:ci
+          provenance: false
+          cache-from: type=gha,scope=policy-browser-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=policy-browser-${{ matrix.arch }}
+      - name: Require real worklet and enforcing CSP through packaged default startup
+        run: |
+          python3 scripts/check-built-image-csp.py --image nyxid-worklet-frontend:ci --browser-image nyxid-worklet-browser:ci \
+            --source-root "$RUNNER_TEMP/image-source/source" --output "$RUNNER_TEMP/built-image-csp" \
+            --arch '${{ matrix.arch }}' --commit '${{ steps.source.outputs.commit }}' --epoch '${{ steps.source.outputs.epoch }}'
+      - name: Verify source after image builds and browser tests
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
+      - name: Preserve Playwright result and failure traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: built-image-csp-${{ matrix.arch }}
+          path: ${{ runner.temp }}/built-image-csp/browser
+          if-no-files-found: error
+          retention-days: 7
 
   images:
     name: Shipped Image Identity (${{ matrix.component }}, ${{ matrix.arch }})
@@ -269,7 +338,7 @@ jobs:
   packaging-pass:
     name: Artifact Packaging Passed
     if: always()
-    needs: [policy, credentials, images, archives]
+    needs: [policy, credentials, worklet, images, archives]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every packaging check
@@ -278,8 +347,10 @@ jobs:
           CREDENTIALS: ${{ needs.credentials.result }}
           IMAGES: ${{ needs.images.result }}
           ARCHIVES: ${{ needs.archives.result }}
+          WORKLET: ${{ needs.worklet.result }}
         run: |
           test "$POLICY" = success
           test "$CREDENTIALS" = success
           test "$IMAGES" = success
           test "$ARCHIVES" = success
+          test "$WORKLET" = success

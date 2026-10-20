@@ -30,6 +30,7 @@ def require_gates(data):
                                if step.get('uses', '').startswith('dorny/paths-filter@')))['packaging']
     for path in ('scripts/source_artifacts.py', 'scripts/image_artifacts.py', 'scripts/credential_packaging.py',
                  'scripts/check-cli-archive-identity.py', 'scripts/test-packaging-workflows.py',
+                 'scripts/check-built-image-csp.py', 'scripts/test-built-image-csp.py', 'frontend/Dockerfile.policy-tests',
                  'scripts/publication_contract.py', 'scripts/export-build-source.py', 'docs/site/index.md'):
         if not any(fnmatch.fnmatchcase(path, pattern) for pattern in filters):
             raise ValueError('packaging verifier input missing from PR selection')
@@ -56,6 +57,14 @@ def require_gates(data):
             'check-published-credentials.py' not in str(publisher['jobs']['credential-parity']['steps']) or \
             publisher['jobs']['credential-parity'].get('continue-on-error'):
         raise ValueError('publication promotion must require actual credential subjects')
+    worklet = jobs['worklet']
+    if {item['arch'] for item in worklet['strategy']['matrix']['include']} != {'amd64', 'arm64'} or \
+            any(item not in str(worklet['steps']) for item in ('frontend/Dockerfile', 'frontend/Dockerfile.policy-tests',
+                'scripts/check-built-image-csp.py', '--browser-image nyxid-worklet-browser:ci', '--commit', '--epoch')):
+        raise ValueError('both native built-image worklet/CSP browser gates required')
+    checks = [step for step in worklet['steps'] if 'scripts/check-built-image-csp.py' in step.get('run', '')]
+    if len(checks) != 1 or 'if' in checks[0] or any(value in checks[0]['run'] for value in ('||', 'set +e')):
+        raise ValueError('built-image browser acceptance must fail closed')
     image_job = jobs['images']
     if set(image_job['strategy']['matrix']['arch']) != {'amd64', 'arm64'} or \
             set(image_job['strategy']['matrix']['component']) != {'node-agent', 'nyxid-node-machine', 'nyxid-machine-updater',
@@ -88,6 +97,18 @@ def require_gates(data):
 class PackagingWorkflows(unittest.TestCase):
     def test_current_workflows_require_actual_packaging(self):
         require_gates(workflows())
+
+    def test_worklet_gate_cannot_be_missing_conditional_or_warning_only(self):
+        for mutation in ('missing', 'conditional', 'warning', 'ignore', 'arch'):
+            data = workflows()
+            job = data['artifact-packaging']['jobs']['worklet']
+            check = next(step for step in job['steps'] if 'check-built-image-csp.py' in step.get('run', ''))
+            if mutation == 'missing': job['steps'].remove(check)
+            elif mutation == 'conditional': check['if'] = 'false'
+            elif mutation == 'warning': check['continue-on-error'] = True
+            elif mutation == 'arch': job['strategy']['matrix']['include'].pop()
+            else: check['run'] += ' || true'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): require_gates(data)
 
     def test_removing_pr_gate_fails(self):
         data = workflows()

@@ -1479,6 +1479,28 @@
         }
       ],
       "observed_utc": "2026-10-18T22:29:20.477951+00:00"
+    },
+    {
+      "image": "mcr.microsoft.com/playwright:v1.62.0-noble",
+      "digest": "sha256:baed2032d533817f3dbe6425de795788430ba345e819a1201337009ba17c9d07",
+      "registry_url": "https://mcr.microsoft.com/v2/playwright/manifests/v1.62.0-noble",
+      "platforms": [
+        {
+          "digest": "sha256:02bbb2155cd7109e3e9c741941097ed1608cf8b6fa44ee2595896da2bdc1f471",
+          "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+          }
+        },
+        {
+          "digest": "sha256:5361940f845a5077926d54746122f7b68a121cc2aa27df6241087b774203fc44",
+          "platform": {
+            "architecture": "arm64",
+            "os": "linux"
+          }
+        }
+      ],
+      "observed_utc": "2026-10-20T01:58:10.858073+00:00"
     }
   ]
 }

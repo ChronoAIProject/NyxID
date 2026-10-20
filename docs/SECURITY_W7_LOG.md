@@ -120,3 +120,13 @@
 - Local: wrapper15, wiring11, identity16, credential21, exported runner7, CI helpers26, input policy20, YAML9 (125 passed/0 failed).
 - Workflow YAML/permissions/input policies, AST syntax and diff checks pass; Docker/private final-image execution remains hosted/operator evidence.
 - Documented mandatory passing receipt and registry digest provenance; raw Docker builds are unsupported for hosted deployment.
+
+## C-4c — actual frontend-image worklet/CSP
+- Required PR/weekly Built Image Worklet CSP jobs run on native amd64/arm64 with actual final frontend images and digest-pinned Playwright 1.62.0 browsers.
+- Inherit the packaged default entrypoint/Cmd; runtime has only writable tmpfs paths, with no injected nginx config, application assets or renderer.
+- Safe extraction and final frontend identity/seal checks bind the tested assets to the immutable image; HTTP checks require exact HTML/hashed-worklet bytes and enforcing microphone/CSP headers.
+- Reuse the two existing real microphone/worklet/font/WebSocket and CSP negative cases; require exact case names, one pass each, no skips/retries/errors.
+- Locked browser dependencies install without hooks; version/architecture resolution is recorded in existing input pins and covered by weekly frontend Docker/npm updates.
+- Local: harness11, wiring12, identity16, credential21, CI helpers26, input policy20, YAML9 (115 passed/0 failed); isolated Playwright lists exactly two cases.
+- Initial listing mixed scratch/shared Playwright modules; rerunning wholly within the locked scratch tree passed without repository dependency changes.
+- Workflow YAML/permissions/input policies, syntax and diff checks pass; actual Docker/browser execution requires Built Image Worklet CSP (amd64/arm64) in PR CI.
