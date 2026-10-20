@@ -1017,8 +1017,11 @@ const REDDIT: &[(&str, &str, &str, bool)] = &[
 ];
 
 // Lark / Feishu share the same scope grammar. This menu configures user OAuth
-// connections; inbound `im:resource` belongs on the bot app in the developer
-// console (docs/CHANNEL_BOT_RELAY.md), not in this connection picker.
+// connections. For inbound downloads, configure the channel bot app in the
+// developer console with any one of `im:message`, `im:message:readonly`, or
+// `im:message.history:readonly`, per the official "Obtain resource files in
+// messages" API (/reference/im-v1/message-resource/get).
+// See docs/CHANNEL_BOT_RELAY.md; this menu does not configure the channel bot.
 const LARK: &[(&str, &str, &str, bool)] = &[
     (
         "contact:user.base:readonly",
@@ -1255,7 +1258,10 @@ mod tests {
                 assert!(!entries[0].label.is_empty());
                 assert!(!entries[0].description.is_empty());
             }
-            assert!(catalog.iter().all(|e| e.scope != "im:resource"));
+            assert!(
+                catalog.iter().all(|e| e.scope != "im:resource"),
+                "{slug}: inbound downloads do not require im:resource; outbound IM upload scopes are outside this expansion"
+            );
         }
     }
 

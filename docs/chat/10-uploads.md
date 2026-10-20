@@ -118,9 +118,13 @@ Upgrade **all NyxID replicas** and drain pre-release workers before enabling
 `assistant:channel-media`. Gateway delivery also requires CMA at least
 `a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is
 30 seconds (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`); admission performs no downloads,
-and ingestion begins only in the run after admission. Grant the channel bot
-inbound `im:resource` in the Lark/Feishu developer console. This is separate
-from the service connection's permissions for writing files to Base.
+and ingestion begins only in the run after admission. For inbound downloads,
+the channel bot app needs any one of `im:message`, `im:message:readonly`, or
+`im:message.history:readonly`, configured in the Lark/Feishu developer console.
+The official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get)
+API (`/reference/im-v1/message-resource/get`) lists these alternatives. These
+bot-app permissions are separate from the service connection's permissions
+for writing files to Base.
 
 For rollback, disable both `assistant:channel-media` and
 `assistant:attachment-writes`. The flags stop new admission/calls; normal turn
