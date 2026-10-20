@@ -31,6 +31,10 @@ account-independent model generation from provider resource changes; approval
 classification reuses it. Normal inference does not grant permission to execute
 model-proposed tools. Unknowns remain writes.
 
+Method overrides in headers, query parameters or request fields remain writes,
+including overrides attached to GET/HEAD/OPTIONS on the LLM gateway. An already
+destructive operation retains its destructive classification.
+
 The verb default applies only after explicit per-service/granular and org policy
 resolution. Explicit true still gates reads, explicit false allows writes, Deny
 still wins over Session bypass, and guests are refused whenever approval would

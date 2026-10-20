@@ -166,8 +166,15 @@ pub fn apply_inference_contract(
     body: Option<&[u8]>,
     method_override: bool,
 ) {
-    if !method_override
-        && descriptor.verb != ApprovalVerb::Destructive
+    // An override makes even a GET/HEAD ambiguous. This also covers the LLM
+    // path, which derives its initial verb directly from the HTTP method.
+    if method_override {
+        if descriptor.verb != ApprovalVerb::Destructive {
+            descriptor.verb = ApprovalVerb::Write;
+        }
+        return;
+    }
+    if descriptor.verb != ApprovalVerb::Destructive
         && service.inference.is_some()
         && descriptor.method.as_deref() == Some("POST")
         && body
@@ -303,6 +310,31 @@ fn truncate_summary(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_method_overrides_never_retain_read_approval_classification() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        for inference in [false, true] {
+            service.inference =
+                inference.then_some(crate::models::downstream_service::ServiceInference {
+                    wire_protocol:
+                        crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
+                    model_list: true,
+                    realtime: false,
+                    voice: None,
+                });
+            for method in ["GET", "HEAD", "OPTIONS"] {
+                let mut descriptor = build_llm_descriptor(method, "/v1/models", None);
+                apply_inference_contract(&mut descriptor, &service, None, false);
+                assert_eq!(descriptor.verb, ApprovalVerb::Read);
+                apply_inference_contract(&mut descriptor, &service, None, true);
+                assert_eq!(descriptor.verb, ApprovalVerb::Write);
+            }
+            let mut descriptor = build_llm_descriptor("DELETE", "/v1/files/item", None);
+            apply_inference_contract(&mut descriptor, &service, None, true);
+            assert_eq!(descriptor.verb, ApprovalVerb::Destructive);
+        }
+    }
 
     #[test]
     fn unknown_verbs_and_untrusted_read_marks_cannot_bypass_write_approval() {
