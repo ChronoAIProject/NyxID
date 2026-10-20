@@ -502,7 +502,7 @@ async fn resource_org_ask_confirmation_rejects_mode_drift_and_recovers_in_full()
 fn org_resource_journey(
     mode: crate::models::assistant_settings::AccessMode,
     switch_to_full: bool,
-) -> futures::future::BoxFuture<'static, ()> {
+) -> impl std::future::Future<Output = ()> {
     // Keep the large journey fixture out of the test runtime's caller frames.
     Box::pin(org_resource_journey_inner(mode, switch_to_full))
 }
