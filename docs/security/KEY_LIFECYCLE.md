@@ -1,9 +1,9 @@
 # JWT overlap and independent HMAC keyset adoption
 
-This operator runbook describes the implementation draft under local review.
-Runtime acceptance for this batch is tracked in
-[the W1–W4 checklist](../SECURITY_REMEDIATION_W1_W4.md). No deployment or
-production key migration has been performed by this remediation work.
+This runbook describes independent HMAC keyset adoption and staged JWT signer
+rotation. Preserve the existing HMAC domain keys before changing JWT or
+encryption sources, then stage JWT verifier overlap before activating a new
+signer. Deployment operators must perform and verify each rollout step.
 
 ## Prepare stable HMAC keys before changing JWT or encryption sources
 
@@ -14,9 +14,9 @@ their respective domains. Audit-derived material also keys instruction context,
 call/channel identities and callbacks, voice credential revisions, Machine and
 Oracle lifecycle, service history and other persisted operation fingerprints.
 
-The remediation retains these audit-derived digests on
-`personal_erasure_effects` (receipt matching also uses the owner-scoped
-`personal_erasure_revocation_receipts` collection):
+Durable provider-revocation obligations retain these audit-derived digests on
+`personal_erasure_effects`. Delivery receipts use the separate, owner-scoped
+`personal_erasure_revocation_receipts` collection:
 
 | Digest domain | Key-dependent evidence | Recovery requirement |
 |---|---|---|
@@ -26,10 +26,12 @@ The remediation retains these audit-derived digests on
 
 Erasure attestations are ordinary chained audit rows. The digests and receipts
 are stable-key backup and retirement dependencies even after source ciphertext
-has been removed. There is no global cross-owner token-copy index or closure
-ledger. Independent keyset adoption keeps the existing digest bytes; the
-encryption migration runner does not rotate these identities, and arbitrary
-HMAC-key rotation remains unsupported.
+has been removed. Receipts remain until final owner cleanup, after every
+provider obligation settles. See the [personal-erasure runbook](PERSONAL_ERASURE_INVENTORY.md#durable-phases-and-completion)
+for dispatch limits, operator resolutions and completion rules. Independent
+keyset adoption keeps the existing digest bytes; the encryption migration
+runner does not rotate these identities, and arbitrary HMAC-key rotation
+remains unsupported.
 
 Independent keyset adoption preserves the **exact existing final domain keys**.
 It does not rotate those HMAC keys. Keeping their bytes unchanged preserves
@@ -72,9 +74,9 @@ throughout the adoption stage.
 
 Arbitrary HMAC-key rotation, versioned chain signing and re-keying all persisted
 fingerprints are outside this adoption contract. Replacing a chain key with a
-random environment override invalidates historical verification. W8 retention
-and external witnessing remain separate dependencies; no unsafe TTL, historic
-mutation or re-signing is authorized here.
+random environment override invalidates historical verification. Retention
+policy and external witnessing remain separate concerns; this adoption changes
+neither retention nor historical signatures.
 
 ## Stage JWT verifier overlap before activating the new signer
 
@@ -126,8 +128,9 @@ stable HMAC keyset alone do not prove ciphertext/backups ready for key retiremen
 
 OAuth consent revisions and signed delegation origins introduce an independent
 authority compatibility boundary. Follow the
-[coordinated OAuth authority cutover](OAUTH_AUTHORITY_ROLLOUT.md); JWT verifier
-overlap does not make mixed old/new authority readers safe. The runbook's PD-3
-eligibility rules allow eligible ordinary refresh records to upgrade once;
+[coordinated OAuth authority cutover](OAUTH_AUTHORITY_ROLLOUT.md#coordinated-drained-deployment);
+JWT verifier overlap does not make mixed old/new authority readers safe. Under
+the runbook's [refresh-record upgrade rules](OAUTH_AUTHORITY_ROLLOUT.md#compatibility-boundary),
+eligible ordinary refresh records upgrade once without reauthorization;
 ineligible records require authorization. Legacy delegation and callback work
 must drain before the cutover.
