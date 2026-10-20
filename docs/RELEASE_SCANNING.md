@@ -72,22 +72,35 @@ provider. A display prefix is not a full key, and the delivered refresh token is
 distinct from the API key and node identifier.
 Replacing current examples does not establish provenance for historical bytes.
 
-## Findings still requiring disposition
+## Resolved historical findings
 
-The local full-history review identified the following unresolved historical
-value identities. Hash prefixes identify findings without exposing values.
-All remain blocking; no exception has been written for these values. No live
-credential has been confirmed or tested. If owner review establishes that a real
-credential appeared, stop exception work and obtain the user's rotation decision.
+PM review resolved all six value identities below without testing any live
+credential. Eight exact finding identities cover ten history findings; each
+record binds rule, normalized path, exact match/value/line content and immutable
+introducing commits. `history_commits` makes annual entries unusable for the
+current tree or a newly introduced commit, even if copied bytes are identical.
+Current-tree entries expire monthly (at most 31 days); immutable history-only
+entries expire after 12 months (at most 366 days). Any expired entry fails the
+global gate, even if a scanner does not currently report it.
 
-| Value SHA-256 prefix | Historical path and introducing revision | Disposition |
+| Value SHA-256 prefix | Historical path / introducing revisions | Reviewed disposition and basis |
 | --- | --- | --- |
-| `a9d3c990476cf66f` | `docs/device-code-binding.md`, `skills/nyxid/references/devices.md`; `b73382431229`, later example at `80b347be7c04` | Three historical findings; refresh-token provenance unverified. |
-| `4e36e93944591d2a` | `docs/STREAMLINE_SERVICES_PROPOSAL.md` at `36652be933ec`; `docs/API.md` at `b8ecbd878dc8` | Two historical findings; provider-key provenance unverified. |
-| `a2c62cb92a6c0cd3` | `docs/API.md` at `a68fbc09c44c` | One historical finding; downstream-credential provenance unverified. |
-| `d134b5cf5427c235` | `docs/API.md` at `67f1d004ec31` and `a48180a2db19` | Two historical findings; rotated-key provenance unverified. |
-| `84033187c49cc376` | `docs/API.md` at `67f1d004ec31` | One historical finding; display-prefix provenance unverified. |
-| `823e6e6619dd8f27` | `docs/API.md` at `67f1d004ec31` | One historical finding; newly issued-key provenance unverified. |
+| `a9d3c990476cf66f` | Device-binding doc and devices skill; `b73382431229`, `80b347be7c04` | `inert-historical-credential`: no redemption lookup; only hash row TTL-expires 24 h after approval; introducing doc says the feature had not shipped with production data. Provenance remains unestablished. |
+| `4e36e93944591d2a` | Streamline proposal / API doc; `36652be933ec`, `b8ecbd878dc8` | `synthetic-document-example`: sequential hex structure. |
+| `a2c62cb92a6c0cd3` | API doc; `a68fbc09c44c` | `synthetic-document-example`: sequential hex structure. |
+| `d134b5cf5427c235` | API doc; `67f1d004ec31`, `a48180a2db19` | `synthetic-document-example`: sequential rotated-key groups. |
+| `84033187c49cc376` | API doc; `67f1d004ec31` | `synthetic-document-example`: 14-character display prefix, shorter than a usable issued key. |
+| `823e6e6619dd8f27` | API doc; `67f1d004ec31` | `synthetic-document-example`: sequential newly issued-key example. |
+
+The inert kind is restricted to the one reviewed value identity, detector and
+two documentation paths, with mandatory exact code-evidence fields. That evidence
+records `device_codes.refresh_token_hash` writes at `approve.rs:118/165`, the
+absence of a redemption lookup, the 24-hour TTL, and the unshipped-feature
+statement. It authorizes no other credential class. No token-format or revocation
+machinery is added; no endpoint currently redeems this device refresh token.
+For a new historical finding, review present redeemability, backing-record
+retention and provenance. A redeemable value of unverified provenance requires
+the user's rotation decision before any exception is written.
 
 The first isolated local dependency audit covered twelve roots: ten clean, the
 main Cargo lock with twelve advisory occurrences, and mobile with six. The main

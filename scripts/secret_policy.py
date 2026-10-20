@@ -1,5 +1,5 @@
 """Exact, expiring dispositions for scanner findings; never a detector allowlist."""
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -21,7 +21,17 @@ def normalized_path(value):
 
 IDENTITY = ('rule', 'path', 'match_sha256', 'value_sha256', 'content_sha256')
 KINDS = {'documentation-placeholder', 'synthetic-document-example', 'synthetic-test-fixture',
-         'non-secret-identifier', 'public-client-config'}
+         'non-secret-identifier', 'public-client-config', 'inert-historical-credential'}
+
+INERT_DEVICE_REFRESH_EVIDENCE = {
+    'credential_class': 'device-code-refresh-token',
+    'issuance': 'backend/src/services/device_code_service/approve.rs:118,165 writes device_codes.refresh_token_hash only',
+    'no_redemption': 'PM code review 2026-10-20: no handler/service redemption path looks up device_codes.refresh_token_hash; /auth/refresh requires a JWT jti',
+    'retention': 'DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS=86400 after approval; backend/src/db.rs TTL index on device_codes.expires_at',
+    'unshipped_provenance': 'b73382431229:docs/device-code-binding.md Migration Notes states this feature has not shipped with production data',
+}
+INERT_DEVICE_REFRESH_HASH = 'a9d3c990476cf66f93e1851f7d429699e7b1597f03cf778fc15b721b86288b66'  # One PM-reviewed historical identity.
+
 
 
 def load_exceptions(path, today=None):
@@ -34,7 +44,9 @@ def load_exceptions(path, today=None):
         raise ValueError('secret exceptions must be a list')
     seen = set()
     for entry in entries:
-        if set(entry) != set(IDENTITY) | {'kind', 'owner', 'expires', 'rationale', 'provenance'}:
+        extra = ({'history_commits'} if 'history_commits' in entry else set()) | \
+                ({'code_evidence'} if entry.get('kind') == 'inert-historical-credential' else set())
+        if set(entry) != set(IDENTITY) | {'kind', 'owner', 'expires', 'rationale', 'provenance'} | extra:
             raise ValueError('invalid secret disposition fields')
         if entry['kind'] not in KINDS or entry['path'] != normalized_path(entry['path']):
             raise ValueError('unreviewed kind or non-normalized exception path')
@@ -43,6 +55,18 @@ def load_exceptions(path, today=None):
         for field in ('match_sha256', 'value_sha256', 'content_sha256'):
             if not re.fullmatch(r'[0-9a-f]{64}', entry[field]):
                 raise ValueError('exception must bind exact reviewed content')
+        commits = entry.get('history_commits')
+        if commits is not None and (not isinstance(commits, list) or not commits or len(set(commits)) != len(commits) or
+                                    not all(isinstance(c, str) and re.fullmatch('[0-9a-f]{40}', c) for c in commits)):
+            raise ValueError('history-only disposition requires exact immutable commits')
+        if date.fromisoformat(entry['expires']) > today + timedelta(days=366 if commits else 31):
+            raise ValueError('secret disposition exceeds historical/current-tree expiry cadence')
+        if entry['kind'] == 'inert-historical-credential' and (
+                not commits or entry.get('code_evidence') != INERT_DEVICE_REFRESH_EVIDENCE or
+                entry['rule'] != 'generic-api-key' or entry['path'] not in
+                {'docs/device-code-binding.md', 'skills/nyxid/references/devices.md'} or
+                entry['value_sha256'] != INERT_DEVICE_REFRESH_HASH):
+            raise ValueError('inert historical kind requires the exact reviewed device-token identity and code evidence')
         if date.fromisoformat(entry['expires']) <= today:
             raise ValueError('expired secret exception: ' + entry['path'] + ' (' + entry['rule'] + ')')
         for field in ('owner', 'rationale', 'provenance'):
@@ -74,5 +98,7 @@ def finding_identity(finding, content):
                 content_sha256=digest(original))
 
 
-def disposition(identity, entries):
-    return next((entry for entry in entries if all(entry[key] == identity[key] for key in IDENTITY)), None)
+def disposition(identity, entries, *, scope='tree', commit=None):
+    return next((entry for entry in entries if all(entry[key] == identity[key] for key in IDENTITY)
+                 and ('history_commits' not in entry or
+                      (scope == 'history' and commit in entry['history_commits']))), None)

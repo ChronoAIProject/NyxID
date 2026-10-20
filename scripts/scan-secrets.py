@@ -96,7 +96,7 @@ def scan(root, scanner, output):
                         raise ValueError('invalid scanner commit')
                     content = git(root, 'show', commit + ':' + normalized_path(file))
                 identity = finding_identity(record, content)
-                accepted = disposition(identity, entries)
+                accepted = disposition(identity, entries, scope=scope, commit=commit)
                 counts['reviewed' if accepted else 'unresolved'] += 1
                 findings.append(dict(scope=scope, commit=commit, line=record['StartLine'], **identity,
                                      disposition=accepted['kind'] if accepted else 'UNRESOLVED'))

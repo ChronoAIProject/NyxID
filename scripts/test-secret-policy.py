@@ -107,13 +107,48 @@ class SecretPolicy(unittest.TestCase):
         entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
         for entry in entries:
             identity = {key: entry[key] for key in IDENTITY}
-            self.assertEqual(disposition(identity, entries), entry)
+            context = dict(scope='history', commit=entry['history_commits'][0]) if 'history_commits' in entry else {}
+            self.assertEqual(disposition(identity, entries, **context), entry)
             for field in IDENTITY:
                 changed = dict(identity)
                 changed[field] = ('unreviewed-rule' if field == 'rule' else
                                   'unreviewed/' + identity[field] if field == 'path' else '0' * 64)
                 with self.subTest(path=entry['path'], field=field):
-                    self.assertIsNone(disposition(changed, entries))
+                    self.assertIsNone(disposition(changed, entries, **context))
+
+    def test_inert_historical_kind_requires_all_reviewed_code_evidence(self):
+        entries = load_exceptions(ROOT / 'security/secret-exceptions.json')
+        inert = next(e for e in entries if e['kind'] == 'inert-historical-credential')
+        for field in [None, *inert['code_evidence']]:
+            entry = copy.deepcopy(inert)
+            if field is None: entry.pop('code_evidence')
+            else: entry['code_evidence'].pop(field)
+            self.policy_path.write_text(json.dumps(dict(schema_version=1, exceptions=[entry])))
+            with self.subTest(field=field), self.assertRaises(ValueError): load_exceptions(self.policy_path)
+        for field, value in [('path', 'docs/API.md'), ('value_sha256', '0' * 64), ('kind', 'unknown-kind')]:
+            entry = copy.deepcopy(inert); entry[field] = value
+            self.policy_path.write_text(json.dumps(dict(schema_version=1, exceptions=[entry])))
+            with self.subTest(field=field), self.assertRaises(ValueError): load_exceptions(self.policy_path)
+
+    def test_annual_history_disposition_cannot_apply_to_current_tree_or_other_commit(self):
+        entry = next(e for e in load_exceptions(ROOT / 'security/secret-exceptions.json') if 'history_commits' in e)
+        identity = {key: entry[key] for key in IDENTITY}
+        self.assertIsNone(disposition(identity, [entry]))
+        self.assertIsNone(disposition(identity, [entry], scope='tree', commit=entry['history_commits'][0]))
+        self.assertIsNone(disposition(identity, [entry], scope='history', commit='0' * 40))
+        self.assertEqual(disposition(identity, [entry], scope='history', commit=entry['history_commits'][0]), entry)
+
+    def test_expiry_cadence_is_monthly_for_tree_and_annual_for_immutable_history(self):
+        entry = copy.deepcopy(self.entry); entry['expires'] = (date.today() + timedelta(days=32)).isoformat()
+        self.policy_path.write_text(json.dumps(dict(schema_version=1, exceptions=[entry])))
+        with self.assertRaisesRegex(ValueError, 'cadence'): load_exceptions(self.policy_path)
+        entry['history_commits'] = ['1' * 40]
+        entry['expires'] = (date.today() + timedelta(days=365)).isoformat()
+        self.policy_path.write_text(json.dumps(dict(schema_version=1, exceptions=[entry])))
+        self.assertEqual(load_exceptions(self.policy_path), [entry])
+        entry['expires'] = (date.today() + timedelta(days=367)).isoformat()
+        self.policy_path.write_text(json.dumps(dict(schema_version=1, exceptions=[entry])))
+        with self.assertRaisesRegex(ValueError, 'cadence'): load_exceptions(self.policy_path)
 
     def test_path_normalization_cannot_escape_or_reopen_absolute_paths(self):
         self.assertEqual(normalized_path('./mobile//google-services.json'), 'mobile/google-services.json')

@@ -178,3 +178,11 @@
 - Validation: precise resolver updates pass; requested locked workspace check with both KMS features follows this commit using the exact shared-target environment.
 - Fold the final Cargo decisions into the same focused commit before another stream commits; all private bootstrap RSA operations use AWS-LC with canonical/bounded DER and Zeroizing buffers.
 - Preserve existing wire fixtures and add explicit RustCrypto-to-AWS-LC interop; machine rsa is test-only. No production private RustCrypto RSA remains in bootstrap.
+
+## C-5 D1 — resolved historical secret decisions
+- Add eight exact history-only finding identities covering ten findings / six value identities; five fabricated values use structural/provenance evidence.
+- The single inert device-token identity requires exact code evidence: no redemption lookup, 24-hour hash-row TTL, and the introducing unshipped-feature statement.
+- Annual history entries bind immutable commits and cannot cover current-tree/reintroduced copies; current-tree cadence remains monthly.
+- Both device references explicitly state no endpoint currently redeems the refresh token; no token format/revocation mechanism changes.
+- Local: real-detector policy17/17; full history215 + committed tree111, reviewed326, unresolved0; no credential probed.
+- Required PR jobs: Scanner Policy; Full History Secret Scan.
