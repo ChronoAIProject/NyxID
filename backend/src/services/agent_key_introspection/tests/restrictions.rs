@@ -98,7 +98,7 @@ async fn legacy_conversation_key_retains_guest_and_turn_authority() {
     let agent = crate::services::assistant_team_service::ensure_nyxbot(&f.db, &f.owner)
         .await
         .unwrap();
-    let conversation = Uuid::new_v4().to_string();
+    let conversation = format!("nyxa-{}", Uuid::new_v4().simple());
     let now = mongodb::bson::DateTime::now();
     // A valid legacy conversation row exercises the shared live authority loader,
     // including credentials predating the explicit assistant owner marker.
