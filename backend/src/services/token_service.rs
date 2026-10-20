@@ -515,6 +515,76 @@ pub async fn create_mfa_pending_session(
     Ok(prepared.session.id)
 }
 
+// First-party refresh grants have no OAuth client row. Both the preflight and
+// transactional recheck use the same active-client predicate.
+async fn refresh_client_is_active(
+    db: &mongodb::Database,
+    client_id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<bool> {
+    if client_id == Uuid::nil().to_string() {
+        return Ok(true);
+    }
+    let clients = db.collection::<OauthClient>(OAUTH_CLIENTS);
+    let query = clients.find_one(doc! {"_id": client_id, "is_active": true});
+    Ok(match session {
+        Some(session) => query.session(session).await?,
+        None => query.await?,
+    }
+    .is_some())
+}
+
+// Client failure is a committed Narrowing result, even when the grant's person
+// no longer exists or other grant inputs are invalid. Only the presented token
+// is revoked; its first transition owns the audit, so retries cannot duplicate it.
+async fn validate_refresh_client_in_session(
+    db: &mongodb::Database,
+    runtime: &AuditRuntime,
+    session: &mut mongodb::ClientSession,
+    stored: &RefreshToken,
+    audit: &SessionAudit,
+) -> AppResult<bool> {
+    if !refresh_client_is_active(db, &stored.client_id, Some(&mut *session)).await? {
+        let changed = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! {"_id": &stored.id, "revoked": false},
+                doc! {"$set": {"revoked": true, "revoked_at": bson::DateTime::now()}},
+            )
+            .session(&mut *session)
+            .await?;
+        if changed.modified_count != 0 {
+            let event = SessionAudit {
+                event_id: audit.event_id,
+                event: AuditEvent {
+                    action: "refresh_client_revoked",
+                    target_id: Some(stored.id.clone()),
+                    ..audit.event.clone()
+                },
+            };
+            event
+                .enqueue(db, runtime, session, AuditTier::Narrowing)
+                .await?;
+        }
+        return Ok(false);
+    }
+    if stored.client_id != Uuid::nil().to_string() {
+        // Share the client's write fence with deactivation/deletion.
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! {"_id": &stored.client_id, "is_active": true},
+                doc! {"$set": {"updated_at": bson::DateTime::now()}},
+            )
+            .session(session)
+            .await?;
+    }
+    Ok(true)
+}
+
+fn inactive_refresh_client() -> AppError {
+    AppError::AuthenticationFailed("Issuing OAuth client is no longer active".into())
+}
+
 /// Refresh an expired access token using a valid refresh token.
 ///
 /// Implements refresh token rotation: the old token is revoked and
@@ -539,14 +609,51 @@ pub async fn refresh_tokens(
     let owner = claims.sub.to_string();
     let user_uuid = Uuid::parse_str(&owner)
         .map_err(|_| AppError::Unauthorized("Invalid refresh identity".into()))?;
-    // Resolve and sign from prepared, immutable grant inputs before mutation.
-    // The transaction compares them with the live row/replacement and fences
-    // revocation; a rejected resource request must not consume a refresh token.
+    // Bind the verified refresh identity to its stored grant before checking
+    // its issuing client. No resource, person or session work precedes that gate.
     let grant = db
         .collection::<RefreshToken>(REFRESH_TOKENS)
         .find_one(doc! {"jti": &claims.jti, "user_id": &owner})
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
+    // RFC 6749: reject an inactive issuing client before resource/RBAC/person
+    // or grant-state processing can mask invalid_client. Recheck in the owned
+    // transaction before committing its narrowing revocation; a concurrent
+    // reactivation is evaluated from that transaction's live snapshot.
+    if !refresh_client_is_active(db, &grant.client_id, None).await? {
+        let rejection = SessionAudit::new(
+            AuditPrincipal::Person { id: owner.clone() },
+            &grant.user_id,
+            "refresh_client_revoked",
+            &grant.id,
+        );
+        let context = (db, runtime, &owner, &claims.jti, &rejection);
+        let active = transaction::run(
+            db,
+            &context,
+            |session, (db, runtime, owner, jti, rejection)| {
+                Box::pin(async move {
+                    let stored = db
+                        .collection::<RefreshToken>(REFRESH_TOKENS)
+                        .find_one(doc! {"jti": *jti, "user_id": *owner})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
+                    validate_refresh_client_in_session(db, runtime, session, &stored, rejection)
+                        .await
+                })
+            },
+        )
+        .await?;
+        if !active {
+            if let Some(mcp) = mcp_sessions {
+                mcp.remove_fallback_sessions_by_user_id(&owner).await?;
+            }
+            return Err(inactive_refresh_client());
+        }
+    }
+    // Prepare resource/RBAC/token material outside rotation retries. The live
+    // grant comparison and all authority fences remain in the rotation transaction.
     let scope = grant.scope.as_deref().unwrap_or(FIRST_PARTY_ACCESS_SCOPES);
     let resources = super::oauth_resource_service::resolve_token_resource_scope(
         db,
@@ -589,6 +696,9 @@ pub async fn refresh_tokens(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
+                if !validate_refresh_client_in_session(db, runtime, session, &stored, audit).await? {
+                    return Ok(Err(inactive_refresh_client()));
+                }
                 if stored.expires_at <= Utc::now() {
                     return Err(AppError::Unauthorized("Refresh token expired".into()));
                 }
@@ -608,47 +718,6 @@ pub async fn refresh_tokens(
                     if changed.matched_count != 1 {
                         return Err(AppError::Unauthorized("Session expired or revoked".into()));
                     }
-                }
-                if stored.client_id != Uuid::nil().to_string() {
-                    let active = db
-                        .collection::<OauthClient>(OAUTH_CLIENTS)
-                        .find_one(doc! {"_id": &stored.client_id, "is_active": true})
-                        .session(&mut *session)
-                        .await?;
-                    if active.is_none() {
-                        let changed = db
-                            .collection::<RefreshToken>(REFRESH_TOKENS)
-                            .update_one(
-                                doc! {"_id": &stored.id, "revoked": false},
-                                doc! {"$set": {"revoked": true, "revoked_at": bson::DateTime::now()}},
-                            )
-                            .session(&mut *session)
-                            .await?;
-                        if changed.modified_count != 0 {
-                            let event = SessionAudit {
-                                event_id: audit.event_id,
-                                event: AuditEvent {
-                                    action: "refresh_client_revoked",
-                                    target_id: Some(stored.id.clone()),
-                                    ..audit.event.clone()
-                                },
-                            };
-                            event
-                                .enqueue(db, runtime, session, AuditTier::Narrowing)
-                                .await?;
-                        }
-                        return Ok(Err(AppError::AuthenticationFailed(
-                            "Issuing OAuth client is no longer active".into(),
-                        )));
-                    }
-                    // Share the client's write fence with deactivation/deletion.
-                    db.collection::<OauthClient>(OAUTH_CLIENTS)
-                        .update_one(
-                            doc! {"_id": &stored.client_id, "is_active": true},
-                            doc! {"$set": {"updated_at": bson::DateTime::now()}},
-                        )
-                        .session(&mut *session)
-                        .await?;
                 }
                 let original_reference = stored.protected_consent.clone();
                 let reused = stored.revoked;
@@ -1059,29 +1128,21 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         };
-        let _guard = super::super::audit_state_service::tests::FAIL_COMMAND
-            .lock()
-            .await;
         let base = connect_transaction_test_database("w8_id_session_unknown").await;
-        let app = format!("w8-id-{}", Uuid::new_v4());
         let commands = Arc::new(Mutex::new(Vec::new()));
         let captured = commands.clone();
-        let mut options = mongodb::options::ClientOptions::parse(
-            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
+        let mut fault = crate::test_utils::fail_command::Guard::acquire(
+            &base,
+            Some(EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && event.command_name == "commitTransaction"
+                {
+                    captured.lock().unwrap().push(event.command);
+                }
+            })),
         )
-        .await
-        .unwrap();
-        options.app_name = Some(app.clone());
-        options.command_event_handler = Some(EventHandler::callback(move |event| {
-            if let CommandEvent::Started(event) = event
-                && event.command_name == "commitTransaction"
-            {
-                captured.lock().unwrap().push(event.command);
-            }
-        }));
-        let db = mongodb::Client::with_options(options)
-            .unwrap()
-            .database(base.name());
+        .await;
+        let db = fault.database().clone();
         let state = test_app_state(db.clone());
         let actor = Uuid::new_v4().to_string();
         seed_user(&db, &actor).await;
@@ -1089,15 +1150,15 @@ mod tests {
             prepare_session_tokens(&db, &state.config, &state.jwt_keys, &actor, None, None)
                 .await
                 .unwrap();
-        base.client()
-            .database("admin")
-            .run_command(doc! {
-                "configureFailPoint":"failCommand","mode":{"times":1},"data":{
-                    "failCommands":["commitTransaction"],"appName":&app,
-                    "writeConcernError":{"code":64,"errmsg":"injected uncertain session commit"},
-                    "errorLabels":["UnknownTransactionCommitResult"]
-                }
-            })
+        fault
+            .arm(
+                doc! {"times": 1},
+                doc! {
+                    "failCommands": ["commitTransaction"],
+                    "writeConcernError": {"code": 64, "errmsg": "injected uncertain session commit"},
+                    "errorLabels": ["UnknownTransactionCommitResult"]
+                },
+            )
             .await
             .unwrap();
         let attempts = AtomicUsize::new(0);
@@ -1373,6 +1434,277 @@ mod tests {
                     .revoked
             );
         }
+    }
+
+    fn w8_id_client_refresh(state: &crate::AppState) -> (String, RefreshToken) {
+        let user = Uuid::new_v4();
+        let (token, jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user).unwrap();
+        let now = Utc::now();
+        (
+            token,
+            RefreshToken {
+                id: Uuid::new_v4().to_string(),
+                jti,
+                user_id: user.to_string(),
+                client_id: Uuid::new_v4().to_string(),
+                session_id: None,
+                scope: Some("openid proxy".into()),
+                protected_consent: None,
+                expires_at: now + Duration::days(7),
+                revoked: false,
+                revoked_at: None,
+                replaced_by: None,
+                resource_uris: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: true,
+                created_at: now,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn w8_id_inactive_refresh_client_atomic_narrowing_c2_cells() {
+        use crate::models::audit_outbox::PENDING_COLLECTION_NAME as PENDING;
+        for (label, age, count, diverged) in [
+            ("stale", 0, 1, false),
+            ("standard_age", 7200, 1, false),
+            ("availability_age", 90000, 1, false),
+            ("standard_count", 0, 100000, false),
+            ("availability_count", 0, 1000000, false),
+            ("diverged", 0, 1, true),
+        ] {
+            let db =
+                connect_transaction_test_database(&format!("w8_id_refresh_client_{label}")).await;
+            let state = test_app_state(db.clone());
+            let (token, grant) = w8_id_client_refresh(&state);
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .insert_one(&grant)
+                .await
+                .unwrap();
+            db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+                .update_one(doc! {"singleton": true}, doc! {"$set": {
+                    "witness_enrolled": true, "pending_count": count, "next_order": count,
+                    "oldest_pending_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(age))
+                }}).await.unwrap();
+            if diverged {
+                let chain = super::super::audit_state_service::load(&db)
+                    .await
+                    .unwrap()
+                    .id;
+                db.collection::<bson::Document>(
+                    crate::models::audit_witness_delivery::COLLECTION_NAME,
+                )
+                .insert_one(doc! {"_id": &chain, "divergence": {"seq": 1_i64,
+                "local_hash": "a".repeat(64), "witnessed_hash": "b".repeat(64)}})
+                .await
+                .unwrap();
+                state
+                    .audit_runtime
+                    .restore_incident(&db, &chain)
+                    .await
+                    .unwrap();
+            }
+            let event = SessionAudit::new(
+                AuditPrincipal::Person {
+                    id: grant.user_id.clone(),
+                },
+                &grant.user_id,
+                "refresh_client_revoked",
+                &grant.id,
+            );
+            let context = (&db, &state.audit_runtime, &grant, &event);
+            let aborted: AppResult<()> =
+                transaction::run(&db, &context, |session, (db, runtime, grant, event)| {
+                    Box::pin(async move {
+                        assert!(
+                            !validate_refresh_client_in_session(db, runtime, session, grant, event)
+                                .await?
+                        );
+                        Err(AppError::Conflict("abort client rejection".into()))
+                    })
+                })
+                .await;
+            assert!(matches!(aborted, Err(AppError::Conflict(_))));
+            assert!(
+                !db.collection::<RefreshToken>(REFRESH_TOKENS)
+                    .find_one(doc! {"_id": &grant.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                super::super::audit_state_service::load(&db)
+                    .await
+                    .unwrap()
+                    .pending_count,
+                count
+            );
+            for _ in 0..2 {
+                let result = refresh_tokens(
+                    &db,
+                    &state.audit_runtime,
+                    &state.config,
+                    &state.jwt_keys,
+                    &token,
+                    None,
+                    Some(&["not-a-resource-uri".into()]),
+                )
+                .await;
+                assert!(
+                    matches!(result, Err(AppError::AuthenticationFailed(_))),
+                    "{label}"
+                );
+            }
+            let revoked = db
+                .collection::<RefreshToken>(REFRESH_TOKENS)
+                .find_one(doc! {"_id": &grant.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(revoked.revoked && revoked.revoked_at.is_some());
+            assert!(revoked.replaced_by.is_none());
+            assert_eq!(
+                db.collection::<bson::Document>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                super::super::audit_state_service::load(&db)
+                    .await
+                    .unwrap()
+                    .pending_count,
+                count + 1
+            );
+            assert_eq!(
+                db.collection::<RefreshToken>(REFRESH_TOKENS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                db.collection::<Session>(SESSIONS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn w8_id_inactive_refresh_client_unknown_commit_deduplicates_revoke() {
+        use crate::models::audit_outbox::PENDING_COLLECTION_NAME as PENDING;
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+        let base = connect_transaction_test_database("w8_id_refresh_client_unknown").await;
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let captured = commands.clone();
+        let mut fault = crate::test_utils::fail_command::Guard::acquire(
+            &base,
+            Some(EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event
+                    && event.command_name == "commitTransaction"
+                {
+                    captured.lock().unwrap().push(event.command);
+                }
+            })),
+        )
+        .await;
+        let db = fault.database().clone();
+        let state = test_app_state(db.clone());
+        let (token, grant) = w8_id_client_refresh(&state);
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        fault
+            .arm(
+                doc! {"times": 1},
+                doc! {
+                    "failCommands": ["commitTransaction"],
+                    "writeConcernError": {"code": 64, "errmsg": "injected uncertain client revoke"},
+                    "errorLabels": ["UnknownTransactionCommitResult"]
+                },
+            )
+            .await
+            .unwrap();
+        let result = refresh_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &token,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::AuthenticationFailed(_))));
+        let commits = commands.lock().unwrap().clone();
+        assert!(commits.len() >= 2);
+        for commit in &commits[1..] {
+            assert_eq!(commit.get("lsid"), commits[0].get("lsid"));
+            assert_eq!(commit.get("txnNumber"), commits[0].get("txnNumber"));
+        }
+        let revoked_before = db
+            .collection::<bson::Document>(REFRESH_TOKENS)
+            .find_one(doc! {"_id": &grant.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let replay = refresh_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &token,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(replay, Err(AppError::AuthenticationFailed(_))));
+        assert_eq!(
+            db.collection::<bson::Document>(REFRESH_TOKENS)
+                .find_one(doc! {"_id": &grant.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            revoked_before
+        );
+        for collection in [REFRESH_TOKENS, PENDING] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            super::super::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            1
+        );
     }
 
     async fn seed_user(db: &mongodb::Database, user_id: &str) {

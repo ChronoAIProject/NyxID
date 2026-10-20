@@ -6249,6 +6249,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn w8_id_inactive_refresh_client_precedes_grant_work_and_revokes_only_presented() {
+        use crate::models::{
+            audit_outbox::{PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent},
+            session::COLLECTION_NAME as SESSIONS,
+        };
+        use futures::TryStreamExt;
+        for case in [
+            "missing_client_person",
+            "inactive_client_person",
+            "inactive_client_live_person",
+        ] {
+            let db = crate::test_utils::connect_transaction_test_database(&format!(
+                "w8_id_client_{case}"
+            ))
+            .await;
+            let state = test_app_state(db.clone());
+            let user = Uuid::new_v4();
+            let client_id = Uuid::new_v4().to_string();
+            if case != "missing_client_person" {
+                insert_public_client(&db, &client_id, "openid proxy").await;
+                db.collection::<OauthClient>(OAUTH_CLIENTS)
+                    .update_one(
+                        doc! {"_id": &client_id},
+                        doc! {"$set": {"is_active": false}},
+                    )
+                    .await
+                    .unwrap();
+                let mut person = test_user(&user.to_string(), UserType::Person);
+                person.is_active = case == "inactive_client_live_person";
+                db.collection::<crate::models::user::User>(USERS)
+                    .insert_one(person)
+                    .await
+                    .unwrap();
+            }
+            let (refresh, jti) =
+                jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user).unwrap();
+            let mut presented = stored_refresh_token(&jti, &client_id, &user.to_string());
+            // An expired stored grant must not mask the client error either.
+            if case != "inactive_client_live_person" {
+                presented.expires_at = Utc::now() - Duration::hours(1);
+            }
+            let mut other = presented.clone();
+            other.id = Uuid::new_v4().to_string();
+            other.jti = Uuid::new_v4().to_string();
+            let tokens = db.collection::<RefreshToken>(REFRESH_TOKENS);
+            tokens.insert_many([&presented, &other]).await.unwrap();
+            let session = doc! {"_id": Uuid::new_v4().to_string(), "user_id": user.to_string(),
+            "revoked": false, "last_active_at": bson::DateTime::now()};
+            db.collection::<bson::Document>(SESSIONS)
+                .insert_one(&session)
+                .await
+                .unwrap();
+            let person_before = db
+                .collection::<bson::Document>(USERS)
+                .find_one(doc! {"_id": user.to_string()})
+                .await
+                .unwrap();
+            let client_before = db
+                .collection::<bson::Document>(OAUTH_CLIENTS)
+                .find_one(doc! {"_id": &client_id})
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let mut request = refresh_grant_request(&refresh);
+                request.resource = vec!["not-a-resource-uri".into()];
+                let response = token(
+                    State(state.clone()),
+                    axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
+                    TelemetryContext::default(),
+                    HeaderMap::new(),
+                    Form(request),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+                let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["error"], "invalid_client", "{case}");
+                for field in ["access_token", "refresh_token", "id_token"] {
+                    assert!(body.get(field).is_none(), "{case}: {field}");
+                }
+            }
+            let stored = tokens
+                .find_one(doc! {"_id": &presented.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(stored.revoked);
+            assert!(stored.revoked_at.is_some());
+            assert!(stored.replaced_by.is_none());
+            assert_eq!(tokens.count_documents(doc! {}).await.unwrap(), 2);
+            assert!(
+                !tokens
+                    .find_one(doc! {"_id": &other.id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .revoked
+            );
+            let sessions: Vec<bson::Document> = db
+                .collection(SESSIONS)
+                .find(doc! {})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(sessions, vec![session]);
+            assert_eq!(
+                db.collection::<bson::Document>(USERS)
+                    .find_one(doc! {"_id": user.to_string()})
+                    .await
+                    .unwrap(),
+                person_before
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(OAUTH_CLIENTS)
+                    .find_one(doc! {"_id": &client_id})
+                    .await
+                    .unwrap(),
+                client_before
+            );
+            assert_eq!(
+                db.collection::<PendingAuditEvent>(PENDING)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                1
+            );
+            let event = db
+                .collection::<PendingAuditEvent>(PENDING)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.event.action, "refresh_client_revoked");
+            assert_eq!(
+                event.event.target_id.as_deref(),
+                Some(presented.id.as_str())
+            );
+            assert_eq!(
+                event.event.principal,
+                crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: user.to_string()
+                }
+            );
+            assert_eq!(
+                event.event.owner,
+                crate::models::audit_outbox::AuditOwner::Person {
+                    id: user.to_string()
+                }
+            );
+            crate::services::audit_outbox_service::materialize_one(&db, &[2; 32])
+                .await
+                .unwrap();
+            for collection in [
+                PENDING,
+                crate::models::audit_log::COLLECTION_NAME,
+                crate::models::audit_outbox::COLLECTION_NAME,
+            ] {
+                let rows: Vec<bson::Document> = db
+                    .collection(collection)
+                    .find(doc! {})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1, "{case}: {collection}");
+                let encoded = serde_json::to_string(&rows).unwrap();
+                for secret in [&refresh, &jti] {
+                    assert!(!encoded.contains(secret), "{case}: {collection}");
+                }
+            }
+            if case == "inactive_client_live_person" {
+                // Re-enabling the app cannot revive a grant revoked during its outage.
+                db.collection::<OauthClient>(OAUTH_CLIENTS)
+                    .update_one(doc! {"_id": &client_id}, doc! {"$set": {"is_active": true}})
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    refresh_grant_error(&state, &refresh).await,
+                    (StatusCode::BAD_REQUEST, "invalid_grant".into())
+                );
+                assert_eq!(tokens.count_documents(doc! {}).await.unwrap(), 2);
+                assert_eq!(
+                    db.collection::<PendingAuditEvent>(PENDING)
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn token_inner_rejects_unsupported_grant_type() {
         let Some(db) = connect_test_database("oauth_ext_bad_grant").await else {
             return;
