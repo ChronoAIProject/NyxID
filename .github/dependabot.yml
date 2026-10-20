@@ -90,6 +90,9 @@ updates:
     directory: /security/npm-tools
     schedule: { interval: weekly }
   - package-ecosystem: npm
+    directory: /security/hosted-tools
+    schedule: { interval: weekly }
+  - package-ecosystem: npm
     directory: /.github/tools/claude
     schedule: { interval: weekly }
   - package-ecosystem: cargo

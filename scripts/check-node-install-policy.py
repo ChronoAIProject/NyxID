@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_ROOTS = {"frontend", "sdk", ".github/tools/claude", "security/npm-tools", "cli/tests/updater-npm"}
+REQUIRED_ROOTS = {"frontend", "sdk", ".github/tools/claude", "security/npm-tools", "cli/tests/updater-npm", "security/hosted-tools"}
 
 
 def check(root, required_roots=REQUIRED_ROOTS):

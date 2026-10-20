@@ -71,6 +71,10 @@
     {
       "path": "cli/tests/updater-npm",
       "install_scripts": []
+    },
+    {
+      "path": "security/hosted-tools",
+      "install_scripts": []
     }
   ]
 }
