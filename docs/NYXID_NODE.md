@@ -638,6 +638,23 @@ browser users. A configured username or kernel version alone is insufficient.
 The browser probe uses a fresh profile and the actual executable, including its
 AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
 
+Evidence v3 observes live renderer identities, executable, NNP, additional
+seccomp filters and user/PID/network namespaces without DevTools. It also
+positively verifies the secure policy's refusal of remote debugging and absence
+of a listener. v1/v2 and unknown reports cannot authorize new automatic/required
+assignments; existing stored assignments retain their mode.
+
+Linux setup detects the resolved browser and its package metadata before
+installing policies. Supported locations are Debian Chromium's
+`/etc/chromium/policies/managed`, the actual Ubuntu Snap Chromium binary's
+`/etc/chromium-browser/policies/managed`, and Google Chrome's
+`/etc/opt/chrome/policies/managed`. Unknown executable/package layouts stop with
+`managed_browser_policy_layout_unknown`; install a supported browser package
+and rerun setup. Setup never installs a policy-directory alias. A policy file
+alone is insufficient: `separated_browser_policy_not_effective` means the real
+secure browser did not prove its policy blocks DevTools. Reinstall managed
+policies for that executable and rerun; keep `RemoteDebuggingAllowed=false`.
+
 The setup page carries the reviewed choice into native `--separation` arguments
 or Docker's `NYXID_MACHINE_SEPARATION` environment variable. It preserves the
 capabilities you selected; it does not silently enable a browser to make probes
