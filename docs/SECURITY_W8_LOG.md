@@ -192,3 +192,11 @@
 - Measurement correction: the original cached pre-W8 binary has LLVM coverage instrumentation and default-only features; W8 is uninstrumented with both KMS features. Earlier 300/300 pass counts stand, but its 7.2% timing difference is not a clean W8 overhead estimate. Exact 8589cfd8 source is queued for a matching-profile/both-KMS baseline; hosted comparison and Mongo lock evidence are independent.
 - Confirmed PM's CORE-B transfer of workflows 14/15/42/48/56 and all 51 paths (44 source-index + seven support files); both user endpoint/service modules belong to C, admin.rs stays CORE. Accepted 31873a467 foundation now tested; caller checklist remains 57 pending / 1 tested.
 - Owned rustfmt/whitespace and inventory invariants pass (479 paths: ID95/ASSIST199/NODE67/CORE74/CORE-B44; 58 workflows). Existing compile blockers in NODE/CORE-B files were left to their editors; no foreign source changes were committed.
+
+## W8 Decision 6 — closed security detail (2026-10-20)
+
+- Added optional omitted-when-None SafeAuditEvent detail; existing six-field producer literals remain compatible via a sealed detailed-event wrapper and generic intent reservation. No historical row/v1 encoder changes.
+- Closed tagged variants: access/role/global and service approval mode/security flags/scope and resource deltas/expiry/session revocation count. Access old/new are optional: agent None inherits workspace; workspace requires Some; nonchanges rejected.
+- SessionRevocationCount takes Mongo modified_count through session_revocation_count, caps at 1,000,000 with explicit saturation. Scope registry/alphabet/64-byte, sorted disjoint 32-entry vectors, canonical v4 IDs, millisecond expiry and 2 KiB total enforced at enqueue and materialization; replay equality includes detail.
+- Added 12 focused tests for variants/invalid inputs, exact legacy JSON+BSON bytes, deterministic detail, live admitted replay and poisoned-storage rejection. Scoped rustfmt and git diff --check pass; full backend compile/tests/Clippy remain queued on the shared target and are not claimed passing.
+- Contract documents snapshot-derived required details, None semantics, resource_kind JSON naming and lane requests. Inventory flags affected ID/ASSIST/NODE rows detail-pending; no caller completion claimed. Runtime regression validation remains separately in progress.

@@ -85,7 +85,8 @@ does not supply cross-request business idempotency by itself.
   Reconciliation, Expiry or Delivery;
 - `owner`: `AuditOwner::Person { id }`, `Org { id }` or fixed `Platform`;
 - `action`: reviewed `&'static str`, bounded to 96 identifier characters;
-- `target_id`: optional UUID v4, never a label or provider reference string.
+- `target_id`: optional UUID v4, never a label or provider reference string;
+- `detail`: optional, closed `AuditDetail`, attached with `event.with_detail(detail)` (Decision 6).
 
 The enqueue/intent path validates every UUID/action before reservation and again
 before materialization. There is no arbitrary metadata/payload map. Never copy
@@ -138,6 +139,73 @@ For system work use the named system principal and owner from the authorized
 domain row (or Platform for platform maintenance). Do not impersonate the
 affected user. HTTP IP attribution continues to use strict `resolve_client_ip`;
 do not add a header/legacy fallback or an arbitrary string field to this event.
+
+## Closed security decision detail (Decision 6)
+
+`SafeAuditEvent.detail` is optional and omitted entirely when absent. Historical
+six-field producer literals, JSON/BSON bytes, v1 canonical bytes and their replay
+semantics remain unchanged. `AuditEvent::with_detail` returns
+`DetailedAuditEvent`; both producers use the same sealed `AuditEventSource`
+enqueue interface. `EffectReservation<E = AuditEvent>` also accepts the detailed
+producer. No stored model or arbitrary JSON implements this producer interface.
+
+Detail is **required** when the legacy event carried an enumerable security
+value: mode, role, approval mode, scope/allowlist delta, security flag or expiry.
+Omit it when legacy metadata contained only already-projected identities or
+content. Never copy the latter. Compute before/after values from the **same
+transaction snapshot** as the mutation, not the raw request patch. Detail is
+part of immutable replay equality; a changed value for the same operation/stage
+is `AuditIntegrityConflict`. It persists through materialization and effect
+terminal events, and contributes to the new row's hash. No historical row is
+rewritten or re-signed; the witness still receives hashes only.
+
+| Variant | Fields / meaning |
+| --- | --- |
+| `AccessModeChange` | `scope: Workspace/Agent`, `old/new: Option<assistant_settings::AccessMode>` (`autopilot/nyxmode/ask_every_time`). **None = inherited from workspace** for agent scope. Workspace requires both Some; equal old/new (including None/None) is rejected. This is the current settings enum, not the retired conversation Ask/Full enum. |
+| `OrgRoleChange` | Existing `OrgRole` old/new (`admin/member/viewer`). |
+| `ApprovalModeChange` | `AuditApprovalMode` old/new (`writes_only/all/off`); `writes_only` preserves the global stored tri-state None, rather than treating it as off. |
+| `ServiceApprovalModeChange` | Existing per-service `ApprovalMode` old/new (`per_request/grant`). |
+| `SecurityFlagChange` | Closed `SecurityFlag`: `MfaEnabled`, `EmailVerified`, `SkipDestructiveConfirmation`, `AllowAutoConnectedServices`, `BrokerEnabled`; bool old/new from effective stored policy. |
+| `ScopeSetChange` | `added/removed: Vec<ScopeIdent>`, `truncated: bool`; identifiers must belong to the server OIDC/delegation registries or the reviewed write/admin/account:read/sandbox:execute extensions. Use `audit_outbox_service::scope_ident`. |
+| `ResourceSetChange` | `kind: ResourceSetKind` (`Services/Nodes/Agents/OrgMembers`), UUID-v4 added/removed, truncated. JSON calls the resource field `resource_kind` because the enum's internal `kind` tag already identifies `resource_set_change`. |
+| `ExpiryChange` | Optional old/new BSON datetimes, millisecond precision; None = no expiry. |
+| `SessionRevocationCount` | `count: u64 <= 1_000_000`, `saturated: bool`. Use `session_revocation_count(update_many.modified_count)` from `revoke_all_user_sessions_in_session`, never request input. Actual counts above the cap become count=1_000_000/saturated=true; saturated implies count=cap. Zero is valid. |
+
+Every variant denies unknown kinds/fields. Scope identifiers use only
+`[a-z0-9:_.-]`, 1–64 bytes, and must be server-registered; free-form provider
+scopes, wildcard scopes, user-authored labels/names/emails/URLs and body content
+are unsupported. Each vector has at most 32 sorted unique entries; added and
+removed must be disjoint. Compute the complete delta first, sort, retain bounded
+prefixes and set `truncated=true` when clipping. Total serialized detail must
+also fit 2 KiB: shorten the retained sorted prefixes further if necessary and
+keep truncated=true. A truncation flag never permits oversized records. Enqueue
+and materialization both enforce all bounds; materialization checks persisted
+input again. Expiry values must already have millisecond precision to preserve
+JSON/BSON/replay equality.
+
+For any additional optional override, request an Option-valued variant with
+explicit None/inheritance semantics; do not coerce inheritance into a concrete
+mode or false. Lanes request new centrally owned variants through an inventory
+row (name, fields/types/bounds, example site), never define local variants or
+reintroduce free-form event data. Affected conversions remain
+`detail-pending: <Variant>` until the lane wires and tests them; adding this
+contract alone does not complete those workflows.
+
+Example inside the transaction, after loading and authorizing the before/after
+settings:
+
+```rust
+let event = AuditEvent { /* existing six fields */ }.with_detail(
+    AuditDetail::AccessModeChange {
+        scope: AccessModeScope::Workspace,
+        old: Some(before.access_mode),
+        new: Some(after.access_mode),
+    },
+);
+audit_outbox_service::enqueue_admitted_in_session(
+    db, session, runtime, tier, &event_id, &event,
+).await?;
+```
 
 ## T and deferred O
 

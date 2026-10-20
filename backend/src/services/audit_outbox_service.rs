@@ -9,8 +9,9 @@ use crate::{
     models::{
         audit_log::AuditLog,
         audit_outbox::{
-            AuditOutbox, AuditOwner, AuditPrincipal, AuditStage, COLLECTION_NAME as OUTBOX,
-            PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent, SafeAuditEvent,
+            AccessModeScope, AuditDetail, AuditOutbox, AuditOwner, AuditPrincipal, AuditStage,
+            COLLECTION_NAME as OUTBOX, PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent,
+            SafeAuditEvent, ScopeIdent,
         },
         audit_state::{AuditState, COLLECTION_NAME as STATE},
     },
@@ -29,6 +30,15 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
+    /// Construct inside the mutation transaction from its loaded before/after
+    /// snapshot. Existing six-field producers remain source/byte compatible.
+    pub fn with_detail(self, detail: AuditDetail) -> DetailedAuditEvent {
+        DetailedAuditEvent {
+            event: self,
+            detail,
+        }
+    }
+
     pub(super) fn safe_projection(&self) -> SafeAuditEvent {
         SafeAuditEvent {
             operation_id: self.operation_id.clone(),
@@ -37,8 +47,145 @@ impl AuditEvent {
             owner: self.owner.clone(),
             action: self.action.to_owned(),
             target_id: self.target_id.clone(),
+            detail: None,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct DetailedAuditEvent {
+    event: AuditEvent,
+    detail: AuditDetail,
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::AuditEvent {}
+    impl Sealed for super::DetailedAuditEvent {}
+}
+
+/// Sealed producer interface: stored models and arbitrary JSON cannot enqueue.
+pub trait AuditEventSource: sealed::Sealed + Sync {
+    #[doc(hidden)]
+    fn project(&self) -> SafeAuditEvent;
+}
+impl AuditEventSource for AuditEvent {
+    fn project(&self) -> SafeAuditEvent {
+        self.safe_projection()
+    }
+}
+impl AuditEventSource for DetailedAuditEvent {
+    fn project(&self) -> SafeAuditEvent {
+        let mut event = self.event.safe_projection();
+        event.detail = Some(self.detail.clone());
+        event
+    }
+}
+
+pub const MAX_DETAIL_BYTES: usize = 2048;
+pub const MAX_DETAIL_SET_ENTRIES: usize = 32;
+pub const MAX_SESSION_REVOCATION_COUNT: u64 = 1_000_000;
+
+pub fn session_revocation_count(modified_count: u64) -> AuditDetail {
+    AuditDetail::SessionRevocationCount {
+        count: modified_count.min(MAX_SESSION_REVOCATION_COUNT),
+        saturated: modified_count > MAX_SESSION_REVOCATION_COUNT,
+    }
+}
+
+pub fn scope_ident(value: &str) -> AppResult<ScopeIdent> {
+    validate_scope_ident(value)?;
+    Ok(ScopeIdent(value.to_owned()))
+}
+
+fn invalid_detail() -> AppError {
+    AppError::ValidationError("Invalid or oversized audit security detail".into())
+}
+
+fn validate_scope_ident(value: &str) -> AppResult<()> {
+    // NyxID's server-owned OIDC/delegation registries. Wildcard scopes and
+    // free-form provider scopes require a separately reviewed typed variant.
+    let registered = super::oauth_client_service::KNOWN_OIDC_SCOPES.contains(&value)
+        || super::oauth_client_service::OAUTH_CLIENT_DELEGATION_SCOPES.contains(&value)
+        || ["write", "admin", "account:read", "sandbox:execute"].contains(&value);
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b":_.-".contains(&b))
+        || !registered
+    {
+        return Err(invalid_detail());
+    }
+    Ok(())
+}
+
+fn validate_set<T: Ord>(added: &[T], removed: &[T]) -> AppResult<()> {
+    if added.len() > MAX_DETAIL_SET_ENTRIES
+        || removed.len() > MAX_DETAIL_SET_ENTRIES
+        || added.windows(2).any(|pair| pair[0] >= pair[1])
+        || removed.windows(2).any(|pair| pair[0] >= pair[1])
+        || added
+            .iter()
+            .any(|value| removed.binary_search(value).is_ok())
+    {
+        return Err(invalid_detail());
+    }
+    Ok(())
+}
+
+fn validate_detail(detail: &AuditDetail) -> AppResult<()> {
+    match detail {
+        AuditDetail::AccessModeChange { scope, old, new } => {
+            if old == new
+                || (*scope == AccessModeScope::Workspace && (old.is_none() || new.is_none()))
+            {
+                return Err(invalid_detail());
+            }
+        }
+        AuditDetail::ScopeSetChange { added, removed, .. } => {
+            validate_set(added, removed)?;
+            for ident in added.iter().chain(removed) {
+                validate_scope_ident(&ident.0)?;
+            }
+        }
+        AuditDetail::ResourceSetChange { added, removed, .. } => {
+            validate_set(added, removed)?;
+            for id in added.iter().chain(removed) {
+                uuid(id)?;
+                if Uuid::parse_str(id).is_ok_and(|value| value.to_string() != *id) {
+                    return Err(invalid_detail());
+                }
+            }
+        }
+        AuditDetail::SessionRevocationCount { count, saturated } => {
+            if *count > MAX_SESSION_REVOCATION_COUNT
+                || (*saturated && *count != MAX_SESSION_REVOCATION_COUNT)
+            {
+                return Err(invalid_detail());
+            }
+        }
+        AuditDetail::ExpiryChange { old, new } => {
+            // BSON persists milliseconds: reject lossy values before replay
+            // comparison rather than silently changing the queued decision.
+            if old
+                .iter()
+                .chain(new)
+                .any(|time| time.timestamp_subsec_nanos() % 1_000_000 != 0)
+            {
+                return Err(invalid_detail());
+            }
+        }
+        _ => (),
+    }
+    if serde_json::to_vec(detail)
+        .map_err(|_| invalid_detail())?
+        .len()
+        > MAX_DETAIL_BYTES
+    {
+        return Err(invalid_detail());
+    }
+    Ok(())
 }
 
 fn uuid(value: &str) -> AppResult<()> {
@@ -101,6 +248,9 @@ pub(super) fn validate(event: &SafeAuditEvent) -> AppResult<()> {
             "Audit action must be a bounded identifier".into(),
         ));
     }
+    if let Some(detail) = &event.detail {
+        validate_detail(detail)?;
+    }
     Ok(())
 }
 
@@ -110,7 +260,7 @@ pub async fn enqueue_in_session(
     db: &Database,
     session: &mut ClientSession,
     event_id: &str,
-    event: &AuditEvent,
+    event: &impl AuditEventSource,
 ) -> AppResult<String> {
     enqueue(db, session, event_id, event, None).await
 }
@@ -123,7 +273,7 @@ pub async fn enqueue_admitted_in_session(
     runtime: &super::audit_runtime::AuditRuntime,
     tier: super::audit_runtime::policy::AuditTier,
     event_id: &Uuid,
-    event: &AuditEvent,
+    event: &impl AuditEventSource,
 ) -> AppResult<String> {
     enqueue(
         db,
@@ -139,13 +289,13 @@ async fn enqueue(
     db: &Database,
     session: &mut ClientSession,
     event_id: &str,
-    event: &AuditEvent,
+    event: &impl AuditEventSource,
     admission: Option<(
         &super::audit_runtime::AuditRuntime,
         super::audit_runtime::policy::AuditTier,
     )>,
 ) -> AppResult<String> {
-    let event = event.safe_projection();
+    let event = event.project();
     uuid(event_id)?;
     validate(&event)?;
     // A replay is not permission to bypass a missing or rolled-back allocator.
@@ -279,6 +429,10 @@ pub async fn materialize_one(db: &Database, key: &[u8]) -> AppResult<bool> {
 #[cfg(test)]
 #[path = "audit_outbox_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "audit_detail_tests.rs"]
+mod detail_tests;
 
 async fn materialize_in_session(
     db: &Database,

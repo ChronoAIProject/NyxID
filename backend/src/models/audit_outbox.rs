@@ -59,6 +59,97 @@ pub enum AuditStage {
     Uncertain,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessModeScope {
+    Workspace,
+    Agent,
+}
+
+/// Global tri-state policy, distinct from the per-service grant policy.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditApprovalMode {
+    WritesOnly,
+    All,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityFlag {
+    MfaEnabled,
+    EmailVerified,
+    SkipDestructiveConfirmation,
+    AllowAutoConnectedServices,
+    BrokerEnabled,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceSetKind {
+    Services,
+    Nodes,
+    Agents,
+    OrgMembers,
+}
+
+/// Construct through audit_outbox_service::scope_ident; deserialized storage
+/// values are checked against the same server registry before materialization.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct ScopeIdent(pub(crate) String);
+
+/// Closed security decisions only. No user-authored or provider strings.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuditDetail {
+    AccessModeChange {
+        scope: AccessModeScope,
+        /// None means inherited from workspace, only valid at Agent scope.
+        old: Option<super::assistant_settings::AccessMode>,
+        new: Option<super::assistant_settings::AccessMode>,
+    },
+    OrgRoleChange {
+        old: super::org_membership::OrgRole,
+        new: super::org_membership::OrgRole,
+    },
+    ApprovalModeChange {
+        old: AuditApprovalMode,
+        new: AuditApprovalMode,
+    },
+    ServiceApprovalModeChange {
+        old: super::service_approval_config::ApprovalMode,
+        new: super::service_approval_config::ApprovalMode,
+    },
+    SecurityFlagChange {
+        flag: SecurityFlag,
+        old: bool,
+        new: bool,
+    },
+    ScopeSetChange {
+        added: Vec<ScopeIdent>,
+        removed: Vec<ScopeIdent>,
+        truncated: bool,
+    },
+    ResourceSetChange {
+        #[serde(rename = "resource_kind")]
+        kind: ResourceSetKind,
+        added: Vec<String>,
+        removed: Vec<String>,
+        truncated: bool,
+    },
+    ExpiryChange {
+        #[serde(with = "super::bson_datetime::optional")]
+        old: Option<DateTime<Utc>>,
+        #[serde(with = "super::bson_datetime::optional")]
+        new: Option<DateTime<Utc>>,
+    },
+    /// Mongo modified_count, capped at one million; saturated means the actual
+    /// count exceeded that cap. Never a request-supplied or content count.
+    SessionRevocationCount { count: u64, saturated: bool },
+}
+
 /// An allowlisted projection. No arbitrary event JSON, strings from provider
 /// responses, credentials, URLs or user-authored content are accepted here.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +160,8 @@ pub struct SafeAuditEvent {
     pub owner: AuditOwner,
     pub action: String,
     pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<AuditDetail>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

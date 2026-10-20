@@ -10,7 +10,7 @@ use crate::{
         audit_witness_delivery::{COLLECTION_NAME as DELIVERY, WitnessDelivery},
     },
     services::{
-        audit_outbox_service::{self, AuditEvent},
+        audit_outbox_service::{self, AuditEvent, AuditEventSource},
         audit_state_service,
     },
 };
@@ -33,8 +33,8 @@ pub(super) struct EffectContext {
 /// Allocate this once outside the business transaction's retry loop. A later
 /// process can recover by the stable logical operation UUID, without reusing it
 /// for a different effect. The owner must not generate a new UUID on retry.
-pub struct EffectReservation {
-    pub event: AuditEvent,
+pub struct EffectReservation<E = AuditEvent> {
+    pub event: E,
     pub event_id: Uuid,
     pub terminal_event_id: Uuid,
 }
@@ -109,14 +109,14 @@ impl AuditRuntime {
 
     /// Business mutation, intent event and both reservations share this caller
     /// session. The terminal slot has no event body until an outcome exists.
-    pub async fn begin_effect_in_session(
+    pub async fn begin_effect_in_session<E: AuditEventSource>(
         &self,
         db: &Database,
         session: &mut ClientSession,
         tier: AuditTier,
-        request: &EffectReservation,
+        request: &EffectReservation<E>,
     ) -> AppResult<String> {
-        let event = request.event.safe_projection();
+        let event = request.event.project();
         audit_outbox_service::validate(&event)?;
         if event.stage != AuditStage::Intent
             || request.event_id.get_version_num() != 4
