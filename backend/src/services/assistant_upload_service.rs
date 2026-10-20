@@ -1160,7 +1160,7 @@ pub async fn group_attachments(
 /// failed origin lookup against the other attachment model.
 pub enum EgressAttachment {
     User(Box<AssistantUpload>),
-    Tool(crate::models::assistant_attachment::AssistantAttachment),
+    Tool(Box<crate::models::assistant_attachment::AssistantAttachment>),
 }
 impl EgressAttachment {
     pub fn id(&self) -> &str {
@@ -1225,11 +1225,11 @@ pub async fn for_egress(
         Some("user_upload") => Ok(EgressAttachment::User(Box::new(
             for_chat(db, chat, id).await?,
         ))),
-        Some("tool") | None => Ok(EgressAttachment::Tool(
+        Some("tool") | None => Ok(EgressAttachment::Tool(Box::new(
             tool_image_for_chat(db, chat, id)
                 .await?
                 .ok_or_else(missing)?,
-        )),
+        ))),
         _ => Err(missing()),
     }
 }
