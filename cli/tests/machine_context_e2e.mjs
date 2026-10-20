@@ -174,11 +174,18 @@ except PermissionError: pass
 else: raise AssertionError('cross-context native socket accessible')`]);
   for(const actor of [allocation(from).command_uid,allocation(from).browsers['1'].secure_uid,allocation(from).browsers['1'].dev_uid]) {
    const denied=[`${root}/browser-profile`,`${role(to,'dev')}/home`,`${state}/contexts/${allocation(to).command_uid}/command/workspace`,`${state}/node/config.toml`,`${state}/desktop/browser-profile`,legacyWorkspace,...legacyUsers.map(user=>`/home/${user}`)];
+   const buses=[`${root}/tmp/bus`,`${role(to,'dev')}/tmp/bus`];
+   for(const bus of buses)assert((await fs.stat(bus)).isSocket(),'target private D-Bus socket exists');
    const policyGroup=actor===allocation(from).command_uid?undefined:run('id',['-g',actor===allocation(from).browsers['1'].secure_uid?legacyUsers[1]:legacyUsers[2]]).trim();
-   run('setpriv',[`--reuid=${actor}`,`--regid=${actor}`,...(policyGroup?[`--groups=${policyGroup}`]:['--clear-groups']),'python3','-c',`import os
+   run('setpriv',[`--reuid=${actor}`,`--regid=${actor}`,...(policyGroup?[`--groups=${policyGroup}`]:['--clear-groups']),'python3','-c',`import os,socket
 for path in ${JSON.stringify(denied)}:
  assert not os.access(path,os.R_OK), 'cross-context or legacy read permitted: '+path
- assert not os.access(path,os.W_OK), 'cross-context or legacy write permitted: '+path`]);
+ assert not os.access(path,os.W_OK), 'cross-context or legacy write permitted: '+path
+for path in ${JSON.stringify(buses)}:
+ with socket.socket(socket.AF_UNIX) as s:
+  try: s.connect(path)
+  except PermissionError: pass
+  else: raise AssertionError('cross-context D-Bus socket accessible: '+path)`]);
   }
   for(const targetRole of ['secure','dev']) {
    const targetUid=allocation(to).browsers['1'][`${targetRole}_uid`];
@@ -194,7 +201,7 @@ for path in ${JSON.stringify(denied)}:
   const attempt=await command(from,`cat ${role(to,'secure')}/browser-profile/Local\\ State`);
   assert.notEqual(attempt.exit_code,0,'command cannot read sibling browser');
  }
- checkpoint('cross-context profiles, workspace, legacy roots, native sockets and X11 displays denied');
+ checkpoint('cross-context profiles, workspace, legacy roots, native/D-Bus sockets and X11 displays denied');
  const desktops=[];
  for(const context of [a,b])for(const display of ['secure','dev']) {
   const session_id=randomUUID(),parameters={context_id:context.context_id,display,session_id};
