@@ -30,6 +30,13 @@ def evaluate(report, image_id, component):
         raise ValueError('Trivy produced no package coverage')
     if report.get('Metadata', {}).get('OS', {}).get('EOSL'):
         raise ValueError('end-of-support image distribution')
+    # Build headers have no role in the shipped supervisor runtime. Inspect
+    # the complete inventory, even when the scanner lists no CVE for a package.
+    if component in {'machine-node-only', 'nyxid-node-machine', 'machine-hosted-desktop', 'machine-hosted'}:
+        forbidden = sorted({pkg['Name'] for result in report['Results'] for pkg in result.get('Packages') or []
+                            if result.get('Class') == 'os-pkgs' and pkg.get('Name') in {'linux-libc-dev', 'build-essential'}})
+        if forbidden:
+            raise ValueError('build-only packages in final machine runtime: ' + ', '.join(forbidden))
     findings = []
     covered = 0
     for result in report['Results']:

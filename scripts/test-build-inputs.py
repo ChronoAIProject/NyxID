@@ -206,6 +206,33 @@ class BuildPolicy(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(list(tools.iterdir()), [])
 
+    def test_github_cli_uses_checksum_verified_host_archive_before_install(self):
+        tools = self.root / 'github-cli'
+        def download(item, archive):
+            self.assertIn('/cli/cli/releases/download/v2.102.0/', item['url'])
+            self.assertRegex(item['sha256'], '^[0-9a-f]{64}$')
+            with tarfile.open(archive, 'w:gz') as package:
+                binary = tarfile.TarInfo('gh_2.102.0_linux_arm64/bin/gh')
+                binary.size = len(b'synthetic gh'); package.addfile(binary, io.BytesIO(b'synthetic gh'))
+        with patch.object(sys, 'argv', ['bootstrap-build-tool.py', 'gh', '--bin-dir', str(tools)]), \
+                patch.object(bootstrap, 'host_target', return_value='aarch64-unknown-linux-gnu'), \
+                patch.object(bootstrap, 'download_verified', side_effect=download) as fetch, \
+                patch.object(bootstrap.subprocess, 'run') as run:
+            bootstrap.main()
+        fetch.assert_called_once()
+        self.assertEqual((tools / 'gh').read_bytes(), b'synthetic gh')
+        run.assert_called_once_with([str((tools / 'gh').resolve()), '--version'], check=True)
+
+    def test_corrupt_github_cli_archive_cannot_install_or_execute(self):
+        tools = self.root / 'github-cli'
+        with patch.object(sys, 'argv', ['bootstrap-build-tool.py', 'gh', '--bin-dir', str(tools)]), \
+                patch.object(bootstrap, 'host_target', return_value='x86_64-unknown-linux-gnu'), \
+                patch.object(bootstrap, 'download_verified', side_effect=ValueError('build tool checksum mismatch')), \
+                patch.object(bootstrap.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'checksum mismatch'): bootstrap.main()
+        run.assert_not_called()
+        self.assertEqual(list(tools.iterdir()), [])
+
     def test_unsafe_npm_archive_rejected(self):
         path = self.root / "npm.tar.gz"
         with tarfile.open(path, "w:gz") as archive:

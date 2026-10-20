@@ -62,7 +62,7 @@ RUN userdel -r ubuntu 2>/dev/null || true
 
 COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem security/apt-transport-ca.tsv scripts/apt-transport-ca.awk /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble -- \
-        ca-certificates curl git python3 nodejs npm ripgrep build-essential \
+        ca-certificates curl git python3 nodejs npm ripgrep \
         pkg-config tini procps libdbus-1-3 \
     && useradd --uid 1000 --create-home --shell /bin/sh agent \
     && useradd --uid 1001 --create-home --shell /usr/sbin/nologin browser \

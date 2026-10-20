@@ -427,3 +427,14 @@ requires its catalog checksum, Alpine signature and signed identity checks.
 After merge, dispatch `provision-apk-archives.yml` on `main` with `catalog_commit`
 set to the full reviewed commit containing the current catalogs, then rerun the
 availability check. No provisioning is performed by PR jobs.
+
+Machine runtime images omit `build-essential` and its Linux UAPI header closure;
+NyxID is compiled in the separate Rust builder. The final image scan also rejects
+`linux-libc-dev` or `build-essential` in machine runtime inventories even if no
+CVE is reported. Hosted desktop keeps GitHub CLI for agent workflows, installed
+from the checksum-pinned upstream gh 2.102.0 archives for each architecture,
+rather than Ubuntu's vulnerable gh 2.45.0. Renovate covers that version pin;
+changed release archive hashes require review. The Glama runtime now upgrades
+inherited packages through the same signed APT snapshot installer, including
+liblzma5. The October 20 catalog is accepted only after native APT replay and
+final-image scans in PR CI; local catalog validation is not Linux replay.

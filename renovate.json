@@ -227,6 +227,18 @@
       "depNameTemplate": "rhysd/actionlint",
       "datasourceTemplate": "github-releases",
       "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
+        "\"gh\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "cli/cli",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v?(?<version>.*)$"
     }
   ],
   "packageRules": [

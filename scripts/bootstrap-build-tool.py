@@ -111,7 +111,7 @@ def unpack_npm(archive, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tool", choices=["cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit", "actionlint", "regctl", "rustup", "npm"])
+    parser.add_argument("tool", choices=["cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit", "actionlint", "gh", "regctl", "rustup", "npm"])
     parser.add_argument("--bin-dir", type=Path, required=True)
     args = parser.parse_args()
     catalog = json.loads((ROOT / "security/build-tools.json").read_text())
@@ -125,7 +125,7 @@ def main():
         # the installer basename instead of entering an unsupported proxy mode.
         archive = stage / ("rustup-init" if args.tool == "rustup" else "download")
         download_verified(item, archive)
-        if args.tool in ("cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit", "actionlint"):
+        if args.tool in ("cargo-dist", "cargo-auditable", "syft", "gitleaks", "trivy", "cargo-audit", "actionlint", "gh"):
             executable = "dist" if args.tool == "cargo-dist" else args.tool
             names = ("dist", "cargo-dist") if args.tool == "cargo-dist" else (executable,)
             with tarfile.open(archive) as package:

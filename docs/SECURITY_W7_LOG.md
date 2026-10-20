@@ -311,3 +311,13 @@
 - Local: dispositions 19/19, catalog maintenance 29/29, packaging workflows 16/16, APK archives 35/35, scanner workflows 7/7: 106 tests passed, 0 failures; build-input policy and pinned actionlint over all workflows passed.
 - Committed-source guard matches f3d78472fe13cd8a5a36a8bd6f165d0be358dc06; no dirty source used. Python3.9 local tests reuse the existing verified Tomli compatibility alias.
 - Hosted evidence: Scanner Policy, Every Dependency Root Audit, Catalog Maintenance Policy, Backend Credential Packaging (both arches), APK durable archives present, Workflow Permissions and CI Pipeline. Image vulnerability repairs follow separately.
+
+## W7 CI82 follow-up — runtime image package repairs
+- Refresh all 12 APT InRelease pins to 20261020T000000Z; verify Debian native-index hashes and inspect candidate package versions; native signed replay stays mandatory in PR CI.
+- Glama final runtime now upgrades the inherited base through the snapshot installer; trixie-security contains fixed liblzma5 5.8.1-1+deb13u2.
+- Remove build-essential from machine, hosted desktop and node-only runtimes; retain separate Rust builders. Final scan rejects linux-libc-dev/build-essential even without reported CVEs.
+- Preserve hosted GitHub CLI with upstream 2.102.0 verified archives for both arches, replacing vulnerable Ubuntu gh 2.45.0; Renovate manager and checksum-failure tests cover the new pin.
+- Local: APT inputs 23, catalogs 29, image vulnerabilities 15, build inputs 22, source artifacts 16, local image wrapper 19, packaging workflows 16, staging 3, hosted context 20, scanner workflows 7: 170/170 passed, 0 failed.
+- Freshness/build-input gates, checksum-pinned actionlint, diff check and both real gh archive SHA-256 downloads pass. No local Docker or Cargo compilation used.
+- docs/RELEASE_IMAGE_REMEDIATION.md records 104 remaining exact no-Debian-fix findings across 14 advisories, without enabling any suppression; PM clarification pending on upstream-source-fix versus distro-package-fix eligibility.
+- Hosted: all APT Snapshot and APT Dockerfile Layers matrices, Shipped Image Identity (every component/arch), Backend Credential Packaging, publication final-image gates, Scanner Policy and CI Pipeline. Final green remains unproven until rebuilt scans and the remaining no-fix decision.

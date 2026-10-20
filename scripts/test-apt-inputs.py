@@ -80,10 +80,11 @@ class Catalog(unittest.TestCase):
                 self.reject(self.original.replace(old, new))
 
     def test_timestamp_mixed_root_and_path_injection_rejected(self):
-        for replacement in ('20261018', '20261018T000000Z/extra', '20261018T000000Z?mutable=1'):
+        stamp = self.original.splitlines()[1].split('\t')[4].rsplit('/', 1)[1]
+        for replacement in (stamp[:8], stamp + '/extra', stamp + '?mutable=1'):
             with self.subTest(replacement=replacement):
-                self.reject(self.original.replace('20261018T000000Z', replacement))
-        self.reject(self.original.replace('20261018T000000Z', '20261017T000000Z', 1))
+                self.reject(self.original.replace(stamp, replacement))
+        self.reject(self.original.replace(stamp, '20261017T000000Z', 1))
 
     def test_components_unknown_root_and_extra_field_rejected(self):
         self.reject(self.original.replace('main,universe', 'main'))

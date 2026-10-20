@@ -238,5 +238,20 @@
         "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
       }
     }
+  },
+  "gh": {
+    "version": "2.102.0",
+    "targets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz",
+        "sha256": "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386",
+        "source": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_arm64.tar.gz",
+        "sha256": "7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484",
+        "source": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0"
+      }
+    }
   }
 }
