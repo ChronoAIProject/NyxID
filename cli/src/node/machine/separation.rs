@@ -322,11 +322,7 @@ mod tests {
             assert!(!evidence.support().available);
             assert_eq!(
                 evidence.support().reason.as_deref(),
-                Some(if timed_out == Probe::BrowserPolicy {
-                    "separated_browser_policy_not_effective"
-                } else {
-                    "separated_probe_timeout"
-                })
+                Some("separated_probe_timeout")
             );
         }
     }

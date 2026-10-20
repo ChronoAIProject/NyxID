@@ -50,11 +50,11 @@ impl Evidence {
         if self.os != "linux" {
             return Some("separated_requires_linux");
         }
-        if self.managed_browser_policy == Some(false) {
-            return Some("separated_browser_policy_not_effective");
-        }
         if self.probe_timed_out {
             return Some("separated_probe_timeout");
+        }
+        if self.managed_browser_policy == Some(false) {
+            return Some("separated_browser_policy_not_effective");
         }
         if self.landlock_abi.is_none_or(|abi| abi < MIN_LANDLOCK_ABI) {
             return Some("separated_requires_landlock_abi_6");
