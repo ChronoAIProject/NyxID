@@ -391,6 +391,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_redemption_over_http_has_exactly_one_winner_across_app_states() {
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+            routing::post,
+        };
+        use tower::ServiceExt;
+        let db = crate::test_utils::connect_transaction_test_database("mfa_http_single_use").await;
+        let independent =
+            mongodb::Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+                .await
+                .unwrap()
+                .database(db.name());
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.mfa_enabled = true;
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let a = test_app_state(db.clone());
+        let b = test_app_state(independent);
+        let recovery = "0123456789abcdef0123456789abcdef";
+        let factor_id = uuid::Uuid::new_v4().to_string();
+        let secret_encrypted = crate::services::record_field_service::encrypt(
+            &a.encryption_keys,
+            MFA_FACTORS,
+            &factor_id,
+            &id,
+            "secret_encrypted",
+            b"JBSWY3DPEHPK3PXP",
+        )
+        .await
+        .unwrap();
+        db.collection::<MfaFactor>(MFA_FACTORS)
+            .insert_one(MfaFactor {
+                id: factor_id,
+                user_id: id.clone(),
+                factor_type: "totp".into(),
+                secret_encrypted: Some(secret_encrypted),
+                secret_context_version: a.encryption_keys.contextual_record_writes().then_some(3),
+                recovery_codes: Some(serde_json::json!([crate::crypto::password::hash_password(
+                    recovery
+                )
+                .unwrap()])),
+                last_totp_counter: None,
+                is_verified: true,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        // Independent, valid first-factor challenges must still contend on the
+        // one exact recovery hash. Neither challenge grants account authority.
+        let tokens = ["first-challenge", "second-challenge"];
+        for token in tokens {
+            token_service::create_mfa_pending_session(
+                &db,
+                &id,
+                &crate::crypto::token::hash_token(token),
+            )
+            .await
+            .unwrap();
+        }
+        let request = |token: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/verify")
+                .header("content-type", "application/json")
+                .extension(ConnectInfo(
+                    "127.0.0.1:43210".parse::<SocketAddr>().unwrap(),
+                ))
+                .body(Body::from(
+                    serde_json::json!({"mfa_token":token,"code":recovery,"client":"cli"})
+                        .to_string(),
+                ))
+                .unwrap()
+        };
+        let (first, second) = tokio::join!(
+            Router::new()
+                .route("/verify", post(verify))
+                .with_state(a)
+                .oneshot(request(tokens[0])),
+            Router::new()
+                .route("/verify", post(verify))
+                .with_state(b)
+                .oneshot(request(tokens[1])),
+        );
+        let responses = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|response| response.status() == StatusCode::OK)
+                .count(),
+            1
+        );
+        for response in responses {
+            let status = response.status();
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            if status == StatusCode::OK {
+                assert!(body["access_token"].is_string());
+                assert_eq!(body["user_id"], id);
+            } else {
+                assert!(matches!(
+                    status,
+                    StatusCode::UNAUTHORIZED | StatusCode::CONFLICT
+                ));
+                assert!(body.get("access_token").is_none());
+            }
+        }
+        let factor = db
+            .collection::<MfaFactor>(MFA_FACTORS)
+            .find_one(doc! {"user_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(factor.recovery_codes, Some(serde_json::json!([])));
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::session::COLLECTION_NAME)
+                .count_documents(doc! {"user_id":&id,"revoked":false})
+                .await
+                .unwrap(),
+            1
+        );
+        let audits: Vec<bson::Document> = {
+            use futures::TryStreamExt;
+            db.collection::<bson::Document>("audit_log")
+                .find(doc! {"user_id":&id,"event_type":"mfa_recovery_used"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        };
+        assert_eq!(audits.len(), 1);
+        assert!(!format!("{audits:?}").contains(recovery));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn setup_mfa_returns_secret_and_qr() {
         let Some(db) = connect_test_database("h_mfa_setup").await else {
             return;

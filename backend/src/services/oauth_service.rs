@@ -248,6 +248,18 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct IssuancePause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ISSUANCE_PAUSE: std::sync::Arc<IssuancePause>;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
@@ -286,6 +298,11 @@ pub async fn issue_oauth_refresh_token(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(pause) = ISSUANCE_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
     db.collection::<RefreshToken>(REFRESH_TOKENS)
         .insert_one(&new_refresh)
         .await?;

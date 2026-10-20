@@ -130,9 +130,18 @@ mod tests {
     fn import_rejects_weak_mismatched_and_invalid_material_and_accepts_strong_pair() {
         let dir = tempfile::tempdir().unwrap();
         let (private, public) = write_pair(dir.path(), 2048);
-        assert!(load(&private, &public).is_err());
+        let mut config = crate::test_utils::test_app_config();
+        config.jwt_private_key_path = private.to_str().unwrap().into();
+        config.jwt_public_key_path = public.to_str().unwrap().into();
+        assert!(
+            JwtKeys::from_config(&config)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("at least 3072 bits")
+        );
         let (private, public) = write_pair(dir.path(), 3072);
-        let keys = load(&private, &public).unwrap();
+        let keys = JwtKeys::from_config(&config).unwrap();
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(keys.kid.clone());
         let token = encode(
@@ -147,7 +156,13 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         let (_, other_public) = write_pair(other.path(), 3072);
         fs::copy(other_public, &public).unwrap();
-        assert!(load(&private, &public).is_err());
+        assert!(
+            JwtKeys::from_config(&config)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("do not match")
+        );
         fs::write(&private, "distinctive-secret-invalid-private-pem").unwrap();
         let error = load(&private, &public).err().unwrap();
         assert!(!format!("{error:?} {error}").contains("distinctive-secret"));
@@ -169,7 +184,26 @@ mod tests {
             generate_access_token(&old, &config, &user, "openid", None, None, None, None, None)
                 .unwrap();
         let refresh = generate_refresh_token(&old, &config, &user).unwrap().0;
-        for token in [&access, &refresh] {
+        let delegation =
+            generate_delegated_access_token(&old, &config, &user, "proxy:*", "service", 300, None)
+                .unwrap();
+        let relay = generate_relay_access_token(
+            &old,
+            &config,
+            &user,
+            "proxy",
+            None,
+            &RelayAgentScope {
+                api_key_id: "overlap-agent".into(),
+                api_key_name: "Agent".into(),
+                allowed_service_ids: vec!["service".into()],
+                allowed_node_ids: vec![],
+                allow_all_services: false,
+                allow_all_nodes: true,
+            },
+        )
+        .unwrap();
+        for token in [&access, &refresh, &delegation, &relay] {
             assert_eq!(
                 verify_token(&current, &config, token).unwrap().sub,
                 user.to_string()
@@ -190,14 +224,28 @@ mod tests {
         )
         .unwrap();
         validate_relay_callback_token(&current, &config, &callback).unwrap();
-        // ID tokens have their own audience and claims but the same header
-        // selection contract as consent requests and public assertions.
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(old.kid.clone());
-        let id=encode(&header,&serde_json::json!({"exp":Utc::now().timestamp()+60,"aud":"relying-party","sub":user.to_string()}),&old.encoding).unwrap();
+        let id = generate_id_token(
+            &old,
+            &config,
+            &user,
+            Some("overlap@example.test"),
+            Some(true),
+            None,
+            None,
+            "relying-party",
+            Some("overlap-nonce"),
+            Some(&access),
+            None,
+        )
+        .unwrap();
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_audience(&["relying-party"]);
-        decode::<serde_json::Value>(&id, current.decoding_key(&id).unwrap(), &validation).unwrap();
+        let identity =
+            decode::<IdTokenClaims>(&id, current.decoding_key(&id).unwrap(), &validation)
+                .unwrap()
+                .claims;
+        assert_eq!(identity.sub, user.to_string());
+        assert_eq!(identity.nonce.as_deref(), Some("overlap-nonce"));
         let new_access = generate_access_token(
             &current, &config, &user, "openid", None, None, None, None, None,
         )
@@ -238,11 +286,12 @@ mod tests {
         // A failed reload leaves the previously validated ring intact.
         assert!(verify_token(&current, &config, &access).is_ok());
         current.load_retained(&[]).unwrap();
-        for token in [&access, &refresh] {
+        for token in [&access, &refresh, &delegation, &relay] {
             assert!(verify_token(&current, &config, token).is_err());
         }
         assert!(validate_relay_reply_token(&current, &config, &reply).is_err());
         assert!(validate_relay_callback_token(&current, &config, &callback).is_err());
+        assert!(current.decoding_key(&id).is_err());
         assert!(verify_token(&current, &config, &new_access).is_ok());
         assert_eq!(current.public_keys(&serde_json::Value::Null).len(), 1);
     }

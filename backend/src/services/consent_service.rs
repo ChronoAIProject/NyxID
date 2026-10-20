@@ -1,7 +1,6 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use std::future::IntoFuture;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -246,6 +245,23 @@ pub async fn validate_protected_reference(
     scope: &str,
     reference: Option<&crate::models::consent::ProtectedConsentRef>,
 ) -> AppResult<Option<Consent>> {
+    validate_protected_reference_with_reads(
+        &mut super::oauth_token_authority_service::AuthorityReads::new(db),
+        user_id,
+        client_id,
+        scope,
+        reference,
+    )
+    .await
+}
+
+pub(super) async fn validate_protected_reference_with_reads(
+    reads: &mut super::oauth_token_authority_service::AuthorityReads<'_>,
+    user_id: &str,
+    client_id: &str,
+    scope: &str,
+    reference: Option<&crate::models::consent::ProtectedConsentRef>,
+) -> AppResult<Option<Consent>> {
     if (client_id.is_empty() || client_id == Uuid::nil().to_string())
         && !scope.split_whitespace().any(|s| s == "machine")
         && reference.is_none()
@@ -256,18 +272,9 @@ pub async fn validate_protected_reference(
     if reference.consent_id.trim().is_empty() || reference.consent_revision.trim().is_empty() {
         return Err(grant_changed());
     }
-    use mongodb::options::{CollectionOptions, ReadConcern, ReadPreference, SelectionCriteria};
-    let collection = db.collection_with_options::<Consent>(
-        CONSENTS,
-        CollectionOptions::builder()
-            .read_concern(ReadConcern::linearizable())
-            .selection_criteria(SelectionCriteria::ReadPreference(ReadPreference::Primary))
-            .build(),
-    );
-    let consent = tokio::time::timeout(std::time::Duration::from_millis(250),
-        collection.find_one(doc! {"_id":&reference.consent_id,"user_id":user_id,"client_id":client_id,"revision":&reference.consent_revision})
-            .max_time(std::time::Duration::from_millis(200)).into_future())
-        .await.map_err(|_| grant_changed())?.map_err(|_| grant_changed())?.ok_or_else(grant_changed)?;
+    let consent: Consent = reads.read(CONSENTS,
+        doc! {"_id":&reference.consent_id,"user_id":user_id,"client_id":client_id,"revision":&reference.consent_revision})
+        .await?.ok_or_else(grant_changed)?;
     let granted: std::collections::HashSet<_> = consent.scopes.split_whitespace().collect();
     if consent
         .expires_at

@@ -382,14 +382,20 @@ fn oauth_error_response(err: AppError) -> Response {
         other => other.to_string(),
     };
 
-    (
+    let mut response = (
         status,
         axum::Json(OAuthErrorBody {
             error: oauth_error,
             error_description: description,
         }),
     )
-        .into_response()
+        .into_response();
+    if matches!(err, AppError::OAuthAuthorityUnavailable) {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, "1".parse().expect("fixed Retry-After"));
+    }
+    response
 }
 
 fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
@@ -2412,7 +2418,8 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 }
 
 /// RFC 6749 §5.2: a refresh token that is malformed, expired, revoked,
-/// rotated away, or unknown is `invalid_grant`. MCP clients (Claude Code,
+/// rotated away, unknown, or no longer covered by consent is `invalid_grant`.
+/// MCP clients (Claude Code,
 /// Codex, web connectors) answer `invalid_grant` by discarding their tokens
 /// and asking the user to sign in again. `invalid_client` would make them
 /// discard their client registration too, and other codes leave them failing
@@ -2420,7 +2427,9 @@ fn authorization_code_grant_error(error: AppError) -> AppError {
 /// `invalid_client` so the client re-registers.
 fn refresh_token_grant_error(error: AppError) -> AppError {
     match error {
-        AppError::Unauthorized(message) => AppError::ExternalTokenInvalid(message),
+        AppError::Unauthorized(message) | AppError::Conflict(message) => {
+            AppError::ExternalTokenInvalid(message)
+        }
         AppError::TokenExpired => {
             AppError::ExternalTokenInvalid("Refresh token has expired".to_string())
         }
@@ -3059,7 +3068,7 @@ pub async fn userinfo(
 pub async fn introspect(
     State(state): State<AppState>,
     Form(body): Form<IntrospectRequest>,
-) -> Json<IntrospectResponse> {
+) -> AppResult<Json<IntrospectResponse>> {
     let inactive = IntrospectResponse {
         active: false,
         scope: None,
@@ -3080,18 +3089,21 @@ pub async fn introspect(
     // Authenticate the calling client (RFC 7662 requirement)
     let caller_client_id = match body.client_id.as_deref() {
         Some(id) if !id.is_empty() => id,
-        _ => return Json(inactive),
+        _ => return Ok(Json(inactive)),
     };
 
-    if oauth_service::authenticate_client(
+    match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
         body.client_secret.as_deref(),
     )
     .await
-    .is_err()
     {
-        return Json(inactive);
+        Ok(_) => {}
+        Err(AppError::DatabaseError(_) | AppError::OAuthAuthorityUnavailable) => {
+            return Err(AppError::OAuthAuthorityUnavailable);
+        }
+        Err(_) => return Ok(Json(inactive)),
     }
 
     // Broker-binding introspection: detect via the explicit token_type_hint
@@ -3115,10 +3127,10 @@ pub async fn introspect(
         .await
         {
             Ok(binding) if !binding.revoked => binding,
-            _ => return Json(inactive),
+            _ => return Ok(Json(inactive)),
         };
 
-        return Json(IntrospectResponse {
+        return Ok(Json(IntrospectResponse {
             active: true,
             scope: Some(binding.scopes.join(" ")),
             resource: None,
@@ -3133,22 +3145,24 @@ pub async fn introspect(
             roles: None,
             groups: None,
             permissions: None,
-        });
+        }));
     }
 
     // Try to verify the token
     let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
     {
         Ok(c) => c,
-        Err(_) => return Json(inactive),
+        Err(_) => return Ok(Json(inactive)),
     };
 
-    if !matches!(claims.token_type.as_str(), "access" | "refresh")
-        || crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims)
-            .await
-            .is_err()
+    if !matches!(claims.token_type.as_str(), "access" | "refresh") {
+        return Ok(Json(inactive));
+    }
+    match crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims).await
     {
-        return Json(inactive);
+        Ok(()) => {}
+        Err(error @ AppError::OAuthAuthorityUnavailable) => return Err(error),
+        Err(_) => return Ok(Json(inactive)),
     }
 
     // For refresh tokens, check if revoked in the database
@@ -3165,7 +3179,7 @@ pub async fn introspect(
             Ok(Some(rt))
                 if !rt.revoked && rt.user_id == claims.sub && rt.expires_at > Utc::now() =>
             {
-                if consent_service::validate_protected_reference(
+                match consent_service::validate_protected_reference(
                     &state.db,
                     &rt.user_id,
                     &rt.client_id,
@@ -3175,12 +3189,14 @@ pub async fn introspect(
                     rt.protected_consent.as_ref(),
                 )
                 .await
-                .is_err()
                 {
-                    return Json(inactive);
+                    Ok(_) => {}
+                    Err(error @ AppError::OAuthAuthorityUnavailable) => return Err(error),
+                    Err(_) => return Ok(Json(inactive)),
                 }
             }
-            _ => return Json(inactive),
+            Err(_) => return Err(AppError::OAuthAuthorityUnavailable),
+            _ => return Ok(Json(inactive)),
         }
     }
 
@@ -3189,7 +3205,7 @@ pub async fn introspect(
             .await
             .is_err()
     {
-        return Json(inactive);
+        return Ok(Json(inactive));
     }
 
     // Fetch user email for username field
@@ -3209,10 +3225,10 @@ pub async fn introspect(
     let rbac = match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &claims.sub).await
     {
         Ok(rbac) => rbac,
-        Err(_) => return Json(inactive),
+        Err(_) => return Ok(Json(inactive)),
     };
 
-    Json(IntrospectResponse {
+    Ok(Json(IntrospectResponse {
         active: true,
         scope: Some(claims.scope),
         resource: response_resources(claims.resources.unwrap_or_default()),
@@ -3227,7 +3243,7 @@ pub async fn introspect(
         roles: Some(rbac.role_slugs),
         groups: Some(rbac.group_slugs),
         permissions: Some(rbac.permissions),
-    })
+    }))
 }
 
 /// GET /oauth/bindings?external_subject_*=...
@@ -6268,6 +6284,29 @@ mod tests {
             refresh_grant_error(&state, &stale).await,
             (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
         );
+
+        // PD-3: a live legacy row without current consent must ask the client
+        // to authorize again, while leaving the unconsumed record untouched.
+        let (unbound, unbound_jti) =
+            jwt::generate_refresh_token(&state.jwt_keys, &state.config, &user)
+                .expect("mint legacy refresh token");
+        let row = stored_refresh_token(&unbound_jti, &client_id, &user.to_string());
+        refresh_tokens
+            .insert_one(&row)
+            .await
+            .expect("insert legacy");
+        assert_eq!(
+            refresh_grant_error(&state, &unbound).await,
+            (StatusCode::BAD_REQUEST, "invalid_grant".to_string())
+        );
+        let unchanged = refresh_tokens
+            .find_one(doc! {"_id": &row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unchanged.revoked);
+        assert!(unchanged.replaced_by.is_none());
+        assert!(unchanged.protected_consent.is_none());
     }
 
     #[tokio::test]

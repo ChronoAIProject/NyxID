@@ -440,7 +440,7 @@ pub async fn refresh_tokens(
     }
 
     // Look up the refresh token record by JTI
-    let stored = db
+    let mut stored = db
         .collection::<RefreshToken>(REFRESH_TOKENS)
         .find_one(doc! { "jti": &claims.jti })
         .await?
@@ -505,6 +505,95 @@ pub async fn refresh_tokens(
         }
     }
 
+    // PD-3: only an unused legacy OAuth record demonstrably newer than the
+    // current grant may acquire its revision. Keep the original row unbound:
+    // once consumed, it must never enter the normal rotation retry grace path.
+    let legacy_upgrade =
+        stored.client_id != Uuid::nil().to_string() && stored.protected_consent.is_none();
+    if legacy_upgrade {
+        if stored.revoked || stored.expires_at <= Utc::now() {
+            return Err(AppError::Unauthorized(
+                "Refresh token has expired or been revoked".into(),
+            ));
+        }
+        let consent =
+            super::consent_service::check_consent(db, &stored.user_id, &stored.client_id, "")
+                .await?
+                .ok_or_else(super::consent_service::grant_changed)?;
+        if stored.created_at <= consent.granted_at + Duration::seconds(60) {
+            return Err(super::consent_service::grant_changed());
+        }
+        let scope = stored
+            .scope
+            .as_deref()
+            .unwrap_or(FIRST_PARTY_ACCESS_SCOPES)
+            .split_whitespace()
+            .filter(|scope| {
+                *scope != "machine"
+                    && consent
+                        .scopes
+                        .split_whitespace()
+                        .any(|granted| granted == *scope)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if scope.is_empty() {
+            return Err(super::consent_service::grant_changed());
+        }
+        // Pre-default-deny consent has no service authority, including for a
+        // legacy resource-bearing record. Preserve identity-only refreshes.
+        if !consent.allow_all_services
+            && consent.allowed_service_ids.is_none()
+            && !stored.resource_uris.is_empty()
+        {
+            return Err(super::consent_service::grant_changed());
+        }
+        let consent_services = consent.allowed_service_ids.as_deref().unwrap_or_default();
+        let allowed_service_ids = match (stored.allow_all_services, consent.allow_all_services) {
+            (true, true) => Vec::new(),
+            (true, false) => consent_services.to_vec(),
+            (false, true) => stored.allowed_service_ids.clone(),
+            (false, false) => stored
+                .allowed_service_ids
+                .iter()
+                .filter(|id| consent_services.contains(id))
+                .cloned()
+                .collect(),
+        };
+        let allow_all_services = stored.allow_all_services && consent.allow_all_services;
+        // Validate every retained URI before ensure_issuance_reference can write
+        // an unversioned consent or rotation can consume the legacy record.
+        if !stored.resource_uris.is_empty() {
+            let resolved = super::oauth_resource_service::resolve_requested_resources(
+                db,
+                config,
+                &stored.user_id,
+                Some(&stored.resource_uris),
+            )
+            .await
+            .map_err(|error| match error {
+                AppError::InvalidTarget(_)
+                | AppError::RequiredServiceNotConnected { .. }
+                | AppError::Forbidden(_)
+                | AppError::NotFound(_) => super::consent_service::grant_changed(),
+                error => error,
+            })?
+            .ok_or_else(super::consent_service::grant_changed)?;
+            if !allow_all_services
+                && resolved
+                    .service_ids
+                    .iter()
+                    .any(|id| !allowed_service_ids.contains(id))
+            {
+                return Err(super::consent_service::grant_changed());
+            }
+        }
+        stored.protected_consent =
+            Some(super::consent_service::ensure_issuance_reference(db, &consent).await?);
+        stored.scope = Some(scope);
+        stored.allowed_service_ids = allowed_service_ids;
+        stored.allow_all_services = allow_all_services;
+    }
     let original_protected_consent = stored.protected_consent.clone();
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.
@@ -711,6 +800,9 @@ pub async fn refresh_tokens(
         .await?;
 
     if revoked.is_none() {
+        if legacy_upgrade {
+            return Err(super::consent_service::grant_changed());
+        }
         // Another concurrent request rotated this token after we loaded it.
         // Recover the new active replacement token and return it so clients
         // converge on the same cookie value instead of logging out.
@@ -1466,3 +1558,7 @@ mod tests {
         assert!(!session.revoked);
     }
 }
+
+#[cfg(test)]
+#[path = "token_service/legacy_tests.rs"]
+mod legacy_tests;

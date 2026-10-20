@@ -42,6 +42,36 @@ fn invalid() -> AppError {
     )
 }
 impl HmacKeyset {
+    // These accessors follow DOMAINS and KeyFile's persisted field order.
+    pub(crate) fn cli_pairing(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[0]
+    }
+    pub(crate) fn auth_device(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[1]
+    }
+    pub(crate) fn audit_chain(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[2]
+    }
+    pub(crate) fn assistant_action(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[3]
+    }
+    pub(crate) fn billing_ledger(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[4]
+    }
+    pub(crate) fn internal_dispatch(&self) -> &Zeroizing<[u8; 32]> {
+        &self.0[5]
+    }
+    #[cfg(test)]
+    pub(crate) fn with_changed_domain(&self, domain: &str) -> Self {
+        let mut changed = self.clone();
+        let key = DOMAINS
+            .iter()
+            .zip(changed.0.iter_mut())
+            .find_map(|(name, key)| (*name == domain).then_some(key))
+            .expect("known HMAC domain");
+        key[0] ^= 1;
+        changed
+    }
     pub(crate) fn load(path: &Path) -> AppResult<Self> {
         let file = fs::File::open(path).map_err(|_| invalid())?;
         #[cfg(unix)]
@@ -129,6 +159,23 @@ mod tests {
         let path = dir.path().join("hmac.json");
         keys.export_new(&path).unwrap();
         let loaded = HmacKeyset::load(&path).unwrap();
+        // Distinct fixture bytes detect an accessor drifting from the named
+        // persisted domain, even when export/load still agree positionally.
+        let exported: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for (domain, key) in [
+            ("cli_pairing", loaded.cli_pairing()),
+            ("auth_device", loaded.auth_device()),
+            ("audit_chain", loaded.audit_chain()),
+            ("assistant_action", loaded.assistant_action()),
+            ("billing_ledger", loaded.billing_ledger()),
+            ("internal_dispatch", loaded.internal_dispatch()),
+        ] {
+            assert_eq!(
+                exported[domain].as_str().unwrap(),
+                hex::encode(key.as_slice())
+            );
+        }
         assert_eq!(keys.commitments(), loaded.commitments());
         for (a, b) in keys.0.iter().zip(loaded.0.iter()) {
             assert_eq!(a.as_slice(), b.as_slice());
