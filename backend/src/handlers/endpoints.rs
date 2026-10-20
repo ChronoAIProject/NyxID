@@ -707,9 +707,20 @@ mod tests {
         use crate::test_utils::{connect_transaction_test_database, test_user};
 
         let db = connect_transaction_test_database("lark_rollback_endpoint_delete").await;
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
         let admin_id = uuid::Uuid::new_v4().to_string();
         let mut admin = test_user(&admin_id, UserType::Person);
         admin.is_admin = true;
+        // Platform authority comes from the seeded Admin role, not the legacy flag.
+        admin.role_ids.push(
+            crate::services::role_service::get_platform_role_ids(&db)
+                .await
+                .unwrap()
+                .admin,
+        );
         db.collection::<User>(crate::models::user::COLLECTION_NAME)
             .insert_one(admin)
             .await
@@ -728,10 +739,6 @@ mod tests {
             .unwrap();
             services.push(service);
         }
-        crate::test_utils::init_test_audit_chain_hmac_key();
-        crate::services::role_service::seed_system_roles(&db)
-            .await
-            .unwrap();
         crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
             .await
             .unwrap();
