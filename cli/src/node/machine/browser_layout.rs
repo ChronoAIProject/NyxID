@@ -27,8 +27,12 @@ impl Layout {
         Self::detect_at(Path::new("/"), binary)
     }
     fn detect_at(root: &Path, binary: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
         let root = root.canonicalize()?;
         let root = root.as_path();
+        // The real system root is owned by root even when an owner invokes
+        // setup before its sudo installation step. Tests use a private root.
+        let owner = root.metadata()?.uid();
         let resolved = root
             .join(binary.strip_prefix("/")?)
             .canonicalize()
@@ -43,7 +47,7 @@ impl Layout {
             snap.filter(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
         {
             let metadata = root.join(format!("snap/chromium/{revision}/meta/snap.yaml"));
-            if trusted_text(&metadata)?
+            if trusted_text(&metadata, owner)?
                 .lines()
                 .any(|line| line == "name: chromium")
             {
@@ -78,7 +82,7 @@ impl Layout {
                 {
                     continue;
                 }
-                if trusted_text(&entry.path())?
+                if trusted_text(&entry.path(), owner)?
                     .lines()
                     .any(|line| line.strip_prefix('/') == Some(relative.as_ref()))
                 {
@@ -91,7 +95,7 @@ impl Layout {
         )
     }
 }
-fn trusted_text(path: &Path) -> Result<String> {
+fn trusted_text(path: &Path, owner: u32) -> Result<String> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -100,7 +104,7 @@ fn trusted_text(path: &Path) -> Result<String> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
-            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.uid() == owner
             && metadata.mode() & 0o022 == 0
             && metadata.len() < 8 * 1024 * 1024,
         "managed_browser_package_metadata_untrusted"
@@ -146,6 +150,13 @@ mod tests {
                 Layout::detect_at(root.path(), &PathBuf::from(format!("/{binary}"))).unwrap(),
                 layout
             );
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = root
+                .path()
+                .join(format!("var/lib/dpkg/info/{package}.list"));
+            std::fs::set_permissions(&metadata, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert!(Layout::detect_at(root.path(), &PathBuf::from(format!("/{binary}"))).is_err());
+            std::fs::set_permissions(metadata, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
         put(
             root.path(),
