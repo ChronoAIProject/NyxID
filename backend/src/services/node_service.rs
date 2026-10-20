@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
+use crate::models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage};
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetadata, NodeStatus};
 use crate::models::node_pending_credential::{
     COLLECTION_NAME as NODE_PENDING_CREDENTIALS, NodePendingCredential,
@@ -26,6 +27,713 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
 use crate::services::org_service::{self, OwnerAccess};
+use crate::services::{
+    audit_outbox_service::{self, AuditEvent},
+    audit_runtime::{AuditRuntime, intent::EffectReservation, policy::AuditTier},
+};
+
+/// A verified actor's logical mutation. Keep this context across transaction
+/// retries; it shares the serving runtime rather than creating another one.
+#[derive(Clone)]
+pub struct NodeMutationAudit {
+    runtime: std::sync::Arc<AuditRuntime>,
+    actor: String,
+    principal: AuditPrincipal,
+    operation_id: uuid::Uuid,
+    event_id: uuid::Uuid,
+    destination_event_id: uuid::Uuid,
+    intent_id: uuid::Uuid,
+    terminal_id: uuid::Uuid,
+    disconnect: bool,
+    disconnect_owner: Option<super::node_owner_service::InvalidatedNodeOwner>,
+}
+
+impl NodeMutationAudit {
+    pub fn new(runtime: &std::sync::Arc<AuditRuntime>, actor: &str) -> Self {
+        Self {
+            runtime: runtime.clone(),
+            actor: actor.to_owned(),
+            principal: AuditPrincipal::Person {
+                id: actor.to_owned(),
+            },
+            operation_id: uuid::Uuid::new_v4(),
+            event_id: uuid::Uuid::new_v4(),
+            destination_event_id: uuid::Uuid::new_v4(),
+            intent_id: uuid::Uuid::new_v4(),
+            terminal_id: uuid::Uuid::new_v4(),
+            disconnect: false,
+            disconnect_owner: None,
+        }
+    }
+
+    /// Only call with identity from the authenticated request, never a stored
+    /// resource owner. The actor continues to drive the existing owner ACL.
+    pub fn with_verified_principal(mut self, principal: AuditPrincipal) -> Self {
+        self.principal = principal;
+        self
+    }
+
+    async fn require_uncommitted(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<()> {
+        if db
+            .collection::<bson::Document>(crate::models::audit_outbox::PENDING_COLLECTION_NAME)
+            .find_one(doc! {"_id": self.event_id.to_string()})
+            .session(session)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict("node_mutation_already_committed".into()));
+        }
+        Ok(())
+    }
+
+    pub async fn with_disconnect(
+        mut self,
+        db: &mongodb::Database,
+        node_id: &str,
+    ) -> AppResult<Self> {
+        let node = load_active_node(db, node_id).await?;
+        self.disconnect_owner =
+            node.connection_owner
+                .map(|owner| super::node_owner_service::InvalidatedNodeOwner {
+                    fence: super::node_owner_service::NodeOwnerFence::from_owner(node_id, &owner),
+                    internal_base_url: owner.internal_base_url,
+                });
+        self.disconnect = true;
+        Ok(self)
+    }
+
+    async fn record(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        owner: AuditOwner,
+        action: &'static str,
+        target: &str,
+        tier: AuditTier,
+    ) -> AppResult<()> {
+        let event = AuditEvent {
+            operation_id: self.operation_id.to_string(),
+            stage: AuditStage::Committed,
+            principal: self.principal.clone(),
+            owner,
+            action,
+            target_id: Some(target.to_owned()),
+        };
+        audit_outbox_service::enqueue_admitted_in_session(
+            db,
+            session,
+            &self.runtime,
+            tier,
+            &self.event_id,
+            &event,
+        )
+        .await?;
+        if self.disconnect {
+            if self
+                .disconnect_owner
+                .as_ref()
+                .is_some_and(|owner| owner.fence.node_id != target)
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            let mut filter = self.disconnect_owner.as_ref().map_or_else(
+                || doc! {"_id": target, "connection_owner": bson::Bson::Null},
+                |owner| owner.fence.filter(),
+            );
+            filter.insert("_id", target);
+            let invalidated = db
+                .collection::<Node>(NODES)
+                .update_one(
+                    filter,
+                    doc! {
+                        "$unset": {"connection_owner": ""}, "$set": {"status": "offline"},
+                    },
+                )
+                .session(&mut *session)
+                .await?;
+            if invalidated.matched_count != 1 {
+                return Err(AppError::Conflict("node_connection_changed".into()));
+            }
+        }
+        if self.disconnect_owner.is_some() {
+            self.runtime
+                .begin_effect_in_session(
+                    db,
+                    session,
+                    tier,
+                    &EffectReservation {
+                        event_id: self.intent_id,
+                        terminal_event_id: self.terminal_id,
+                        event: AuditEvent {
+                            stage: AuditStage::Intent,
+                            action: "node_disconnect",
+                            ..event
+                        },
+                    },
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Local revocation has already committed. Witness refusal leaves its
+    /// durable disconnect intent pending; it cannot undo that revocation.
+    pub async fn disconnect_after_commit(
+        &self,
+        db: &mongodb::Database,
+        dispatch: &super::node_dispatch::NodeDispatch,
+        node_id: &str,
+        code: u16,
+        reason: &'static str,
+    ) -> AppResult<bool> {
+        if !self.disconnect {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        let Some(owner) = &self.disconnect_owner else {
+            return Ok(false);
+        };
+        if owner.fence.node_id != node_id {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        let operation = self.operation_id.to_string();
+        let permit = match self.runtime.authorize_effect(db, &operation).await {
+            Ok(permit) => permit,
+            Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged) => {
+                tracing::warn!(operation_id = %operation, "node_disconnect_deferred");
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        let result = permit
+            .run(|| dispatch.disconnect_invalidated(owner.clone(), code, reason))
+            .await?;
+        let stage = if result.is_ok() {
+            AuditStage::Succeeded
+        } else {
+            AuditStage::Uncertain
+        };
+        let context = (db, &self.runtime, &operation, stage);
+        super::audit_runtime::transaction::run(
+            db,
+            &context,
+            |session, (db, runtime, operation, stage)| {
+                Box::pin(runtime.finish_effect_in_session(db, session, operation, stage.clone()))
+            },
+        )
+        .await?;
+        result
+    }
+
+    pub async fn create_registration_token(
+        &self,
+        db: &mongodb::Database,
+        owner: &str,
+        name: &str,
+        max_nodes: u32,
+        ttl_secs: i64,
+    ) -> AppResult<(String, String, DateTime<Utc>)> {
+        self.create_registration_token_with_id(
+            db,
+            owner,
+            name,
+            (max_nodes, ttl_secs),
+            uuid::Uuid::new_v4(),
+        )
+        .await
+    }
+
+    pub async fn create_registration_token_with_id(
+        &self,
+        db: &mongodb::Database,
+        owner: &str,
+        name: &str,
+        limits: (u32, i64),
+        id: uuid::Uuid,
+    ) -> AppResult<(String, String, DateTime<Utc>)> {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(AppError::ValidationError(
+                "Node name must be 1-64 lowercase letters, digits, or hyphens".into(),
+            ));
+        }
+        let raw = Zeroizing::new(format!(
+            "nyx_nreg_{}",
+            hex::encode(rand::random::<[u8; 32]>())
+        ));
+        let now = Utc::now();
+        let token = NodeRegistrationToken {
+            id: id.to_string(),
+            user_id: owner.to_owned(),
+            token_hash: hash_token(&raw),
+            name: name.to_owned(),
+            used: false,
+            expires_at: now + Duration::seconds(limits.1),
+            created_at: now,
+        };
+        let change = HumanNodeChange::Registration {
+            token,
+            max_nodes: limits.0,
+        };
+        self.apply(db, owner, &change).await?;
+        let HumanNodeChange::Registration { token, .. } = change else {
+            unreachable!()
+        };
+        Ok((token.id, raw.to_string(), token.expires_at))
+    }
+
+    pub async fn rotate_auth_token(
+        &self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        node_id: &str,
+    ) -> AppResult<(String, String)> {
+        let material = prepare_managed_credentials(keys).await?;
+        let change = HumanNodeChange::Rotation {
+            node_id: node_id.to_owned(),
+            auth_hash: hash_token(&material.auth_token),
+            signing_hash: hash_token(&material.signing_secret),
+            encrypted: material.signing_secret_encrypted,
+        };
+        let owner = load_active_node(db, node_id).await?.user_id;
+        self.apply(db, &owner, &change).await?;
+        Ok((
+            material.auth_token.to_string(),
+            material.signing_secret.to_string(),
+        ))
+    }
+
+    pub async fn create_binding(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+        service_id: &str,
+    ) -> AppResult<NodeServiceBinding> {
+        let node = load_active_node(db, node_id).await?;
+        let now = Utc::now();
+        let binding = NodeServiceBinding {
+            id: uuid::Uuid::new_v4().to_string(),
+            node_id: node_id.into(),
+            user_id: node.user_id.clone(),
+            service_id: service_id.into(),
+            is_active: true,
+            priority: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        self.apply(
+            db,
+            &node.user_id,
+            &HumanNodeChange::BindingCreate(binding.clone()),
+        )
+        .await?;
+        Ok(binding)
+    }
+
+    pub async fn update_binding_priority(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+        binding_id: &str,
+        priority: i32,
+    ) -> AppResult<()> {
+        let owner = load_active_node(db, node_id).await?.user_id;
+        self.apply(
+            db,
+            &owner,
+            &HumanNodeChange::BindingUpdate {
+                node_id: node_id.into(),
+                binding_id: binding_id.into(),
+                priority,
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_binding(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+        binding_id: &str,
+    ) -> AppResult<()> {
+        let owner = load_active_node(db, node_id).await?.user_id;
+        self.apply(
+            db,
+            &owner,
+            &HumanNodeChange::BindingDelete {
+                node_id: node_id.into(),
+                binding_id: binding_id.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn admin_delete_node(&self, db: &mongodb::Database, node_id: &str) -> AppResult<()> {
+        let owner = load_active_node(db, node_id).await?.user_id;
+        self.apply(
+            db,
+            &owner,
+            &HumanNodeChange::AdminDelete {
+                node_id: node_id.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn admin_disconnect_node(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+    ) -> AppResult<()> {
+        let owner = load_active_node(db, node_id).await?.user_id;
+        self.apply(
+            db,
+            &owner,
+            &HumanNodeChange::AdminDisconnect {
+                node_id: node_id.into(),
+            },
+        )
+        .await
+    }
+
+    pub async fn transfer_node_owner(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+        new_owner: &str,
+        max_nodes: u32,
+        expected_version: Option<i64>,
+    ) -> AppResult<TransferNodeResult> {
+        transfer_node_owner_impl(
+            db,
+            &self.actor,
+            node_id,
+            new_owner,
+            max_nodes,
+            expected_version,
+            Some(self),
+        )
+        .await
+    }
+
+    pub async fn delete_node(
+        &self,
+        db: &mongodb::Database,
+        node_id: &str,
+        expected_version: Option<i64>,
+    ) -> AppResult<()> {
+        delete_node_impl(db, &self.actor, node_id, expected_version, Some(self)).await
+    }
+
+    async fn apply(
+        &self,
+        db: &mongodb::Database,
+        owner: &str,
+        change: &HumanNodeChange,
+    ) -> AppResult<()> {
+        let admin = matches!(
+            change,
+            HumanNodeChange::AdminDelete { .. } | HumanNodeChange::AdminDisconnect { .. }
+        );
+        if !admin
+            && !org_service::resolve_owner_access(db, &self.actor, owner)
+                .await?
+                .can_write()
+        {
+            return Err(AppError::NodeNotFound("Node not found".into()));
+        }
+        let now = bson::DateTime::from_chrono(Utc::now());
+        let context = (db, self, owner, change, now);
+        super::audit_runtime::transaction::run(
+            db,
+            &context,
+            |session, (db, audit, owner, change, now)| {
+                Box::pin(change.apply_in_session(db, session, audit, owner, *now))
+            },
+        )
+        .await
+    }
+}
+
+enum HumanNodeChange {
+    Registration {
+        token: NodeRegistrationToken,
+        max_nodes: u32,
+    },
+    Rotation {
+        node_id: String,
+        auth_hash: String,
+        signing_hash: String,
+        encrypted: Vec<u8>,
+    },
+    BindingCreate(NodeServiceBinding),
+    BindingUpdate {
+        node_id: String,
+        binding_id: String,
+        priority: i32,
+    },
+    BindingDelete {
+        node_id: String,
+        binding_id: String,
+    },
+    AdminDelete {
+        node_id: String,
+    },
+    AdminDisconnect {
+        node_id: String,
+    },
+}
+
+impl HumanNodeChange {
+    async fn apply_in_session(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        audit: &NodeMutationAudit,
+        owner: &str,
+        now: bson::DateTime,
+    ) -> AppResult<()> {
+        let admin = matches!(
+            self,
+            Self::AdminDelete { .. } | Self::AdminDisconnect { .. }
+        );
+        let audit_owner = node_mutation_owner_in_session(db, session, audit, owner, admin).await?;
+        audit.require_uncommitted(db, session).await?;
+        if let HumanNodeChange::Registration { token, max_nodes } = self {
+            if db
+                .collection::<Node>(NODES)
+                .count_documents(doc! {"user_id": owner, "is_active": true})
+                .session(&mut *session)
+                .await?
+                >= u64::from(*max_nodes)
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Maximum of {max_nodes} nodes per user reached"
+                )));
+            }
+            if db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"user_id": owner, "name": &token.name, "is_active": true})
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "A node with that name already exists".into(),
+                ));
+            }
+            db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+                .insert_one(token)
+                .session(&mut *session)
+                .await?;
+            return audit
+                .record(
+                    db,
+                    session,
+                    audit_owner,
+                    "node_registration_token_created",
+                    &token.id,
+                    AuditTier::Standard,
+                )
+                .await;
+        }
+        let node_id = self.node_id();
+        let node = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": node_id, "user_id": owner, "is_active": true})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| AppError::NodeNotFound("Node not found".into()))?;
+        if matches!(
+            self,
+            HumanNodeChange::Rotation { .. }
+                | HumanNodeChange::AdminDelete { .. }
+                | HumanNodeChange::AdminDisconnect { .. }
+        ) {
+            guard_human_node_in_session(db, session, &node).await?;
+        }
+        let (action, target, tier) = match self {
+            HumanNodeChange::Rotation {
+                auth_hash,
+                signing_hash,
+                encrypted,
+                ..
+            } => {
+                db.collection::<Node>(NODES).update_one(doc! {"_id": node_id, "user_id": owner, "is_active": true}, doc! {"$set": {
+                    "auth_token_hash": auth_hash, "signing_secret_hash": signing_hash,
+                    "signing_secret_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone()}, "updated_at": now,
+                }, "$inc": {"access_revision": 1_i64, "state_version": 1_i64}}).session(&mut *session).await?;
+                ("node_token_rotated", node_id, AuditTier::Standard)
+            }
+            HumanNodeChange::BindingCreate(binding) => {
+                if db
+                    .collection::<bson::Document>(
+                        crate::models::downstream_service::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id": &binding.service_id, "is_active": true})
+                    .session(&mut *session)
+                    .await?
+                    .is_none()
+                {
+                    return Err(AppError::NotFound("Service not found".into()));
+                }
+                if db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS).find_one(doc! {"node_id": node_id, "user_id": owner, "service_id": &binding.service_id, "is_active": true}).session(&mut *session).await?.is_some() {
+                    return Err(AppError::Conflict("Binding already exists for this node and service".into()));
+                }
+                db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .insert_one(binding)
+                    .session(&mut *session)
+                    .await?;
+                (
+                    "node_binding_created",
+                    binding.id.as_str(),
+                    AuditTier::Standard,
+                )
+            }
+            HumanNodeChange::BindingUpdate {
+                binding_id,
+                priority,
+                ..
+            } => {
+                let updated = db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS).update_one(doc! {"_id": binding_id, "node_id": node_id, "user_id": owner, "is_active": true}, doc! {"$set": {"priority": priority, "updated_at": now}}).session(&mut *session).await?;
+                if updated.matched_count != 1 {
+                    return Err(AppError::NotFound("Binding not found".into()));
+                }
+                (
+                    "node_binding_updated",
+                    binding_id.as_str(),
+                    AuditTier::Standard,
+                )
+            }
+            HumanNodeChange::BindingDelete { binding_id, .. } => {
+                let updated = db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS).update_one(doc! {"_id": binding_id, "node_id": node_id, "user_id": owner, "is_active": true}, doc! {"$set": {"is_active": false, "updated_at": now}}).session(&mut *session).await?;
+                if updated.matched_count != 1 {
+                    return Err(AppError::NotFound("Binding not found".into()));
+                }
+                (
+                    "node_binding_deleted",
+                    binding_id.as_str(),
+                    AuditTier::Narrowing,
+                )
+            }
+            HumanNodeChange::AdminDelete { .. } => {
+                db.collection::<Node>(NODES).update_one(doc! {"_id": node_id, "user_id": owner, "is_active": true}, doc! {"$set": {"is_active": false, "status": "offline", "updated_at": now}, "$inc": {"state_version": 1_i64, "access_revision": 1_i64}}).session(&mut *session).await?;
+                db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .update_many(
+                        doc! {"node_id": node_id},
+                        doc! {"$set": {"is_active": false, "updated_at": now}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                ("admin_node_deleted", node_id, AuditTier::Narrowing)
+            }
+            HumanNodeChange::AdminDisconnect { .. } => {
+                ("admin_node_disconnected", node_id, AuditTier::Narrowing)
+            }
+            HumanNodeChange::Registration { .. } => unreachable!(),
+        };
+        audit
+            .record(db, session, audit_owner, action, target, tier)
+            .await
+    }
+
+    fn node_id(&self) -> &str {
+        match self {
+            Self::Registration { token, .. } => &token.id,
+            Self::BindingCreate(binding) => &binding.node_id,
+            Self::Rotation { node_id, .. }
+            | Self::BindingUpdate { node_id, .. }
+            | Self::BindingDelete { node_id, .. }
+            | Self::AdminDelete { node_id }
+            | Self::AdminDisconnect { node_id } => node_id,
+        }
+    }
+}
+
+async fn node_mutation_owner_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    audit: &NodeMutationAudit,
+    owner: &str,
+    admin: bool,
+) -> AppResult<AuditOwner> {
+    let actor = &audit.actor;
+    let actor_filter = match &audit.principal {
+        AuditPrincipal::Person { id } if id == actor => {
+            doc! {"_id": actor, "is_active": true, "user_type": "person"}
+        }
+        AuditPrincipal::ApiKey { owner_id, .. } if owner_id == actor && !admin => {
+            doc! {"_id": actor, "is_active": true}
+        }
+        _ => return Err(AppError::Forbidden("node_person_principal_required".into())),
+    };
+    let person = db
+        .collection::<User>(USERS)
+        .find_one(actor_filter)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("node_person_principal_required".into()))?;
+    if admin {
+        let role = db.collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME).find_one(doc! {"slug": crate::models::role::PLATFORM_ADMIN_ROLE_SLUG, "is_system": true, "client_id": bson::Bson::Null}).session(&mut *session).await?.ok_or_else(|| AppError::Forbidden("Admin access required".into()))?;
+        if !person.role_ids.contains(&role.id) {
+            return Err(AppError::Forbidden("Admin access required".into()));
+        }
+    }
+    if !admin
+        && !org_service::resolve_owner_access_in_session(db, session, actor, owner)
+            .await?
+            .can_write()
+    {
+        return Err(AppError::NodeNotFound("Node not found".into()));
+    }
+    let owner_row = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": owner})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Node owner not found".into()))?;
+    Ok(if owner_row.user_type.is_org() {
+        AuditOwner::Org { id: owner.into() }
+    } else {
+        AuditOwner::Person { id: owner.into() }
+    })
+}
+
+async fn guard_human_node_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    node: &Node,
+) -> AppResult<()> {
+    if db
+        .collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+        .find_one(doc! {"_id": &node.id})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "managed_node_mutation_requires_lifecycle".into(),
+        ));
+    }
+    if node
+        .metadata
+        .as_ref()
+        .and_then(|m| m.provisioning_source.as_deref())
+        .is_some_and(|s| matches!(s, "remote_machine" | "managed_machine" | "agent_sandbox"))
+    {
+        return Err(AppError::Conflict(
+            "managed_node_mapping_missing_reconciliation_required".into(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -135,6 +843,7 @@ const DEVICE_PROVISIONING_SOURCES: &[&str] = &[
 
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
+#[cfg(test)]
 pub async fn create_registration_token(
     db: &mongodb::Database,
     user_id: &str,
@@ -590,6 +1299,7 @@ pub async fn list_user_nodes(
 }
 
 /// Transfer an active node to another owner and detach owner-scoped routing state.
+#[cfg(test)]
 pub async fn transfer_node_owner(
     db: &mongodb::Database,
     actor_user_id: &str,
@@ -619,6 +1329,27 @@ pub async fn transfer_node_owner_with_expected_state_version(
     max_nodes_per_user: u32,
     expected_state_version: Option<i64>,
 ) -> AppResult<TransferNodeResult> {
+    transfer_node_owner_impl(
+        db,
+        actor_user_id,
+        node_id,
+        new_owner_user_id,
+        max_nodes_per_user,
+        expected_state_version,
+        None,
+    )
+    .await
+}
+
+async fn transfer_node_owner_impl(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    new_owner_user_id: &str,
+    max_nodes_per_user: u32,
+    expected_state_version: Option<i64>,
+    audit: Option<&NodeMutationAudit>,
+) -> AppResult<TransferNodeResult> {
     super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "transfer").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, actor_user_id, &node).await?;
@@ -642,6 +1373,8 @@ pub async fn transfer_node_owner_with_expected_state_version(
     let previous_owner_user_id = node.user_id;
     let node_name = node.name;
     let new_owner_user_id = new_owner_user_id.to_string();
+    let audit = audit.cloned();
+    let now = bson::DateTime::from_chrono(Utc::now());
     crate::services::service_history::transaction::run(&db.clone(), async move |session| {
             let operation: AppResult<TransferNodeResult> = async {
                 let current_filter = doc! {
@@ -655,6 +1388,14 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
+
+                let audit_owners = if let Some(audit) = audit.as_ref() {
+                    audit.require_uncommitted(&db, session).await?;
+                    let previous = node_mutation_owner_in_session(&db, session, audit, &previous_owner_user_id, false).await?;
+                    let destination = node_mutation_owner_in_session(&db, session, audit, &new_owner_user_id, false).await?;
+                    guard_human_node_in_session(&db, session, &current).await?;
+                    Some((previous, destination))
+                } else { None };
 
                 let destination_name_collision = db
                     .collection::<Node>(NODES)
@@ -687,7 +1428,6 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     )));
                 }
 
-                let now = bson::DateTime::from_chrono(Utc::now());
                 let pending_credential_result = db
                     .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
                     .update_many(
@@ -761,6 +1501,19 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     return Err(AppError::NodeNotFound("Node not found".to_string()));
                 }
 
+                if let (Some(audit), Some((previous, destination))) = (audit.as_ref(), audit_owners) {
+                    audit.record(&db, session, previous, "node_transferred", &node_id, AuditTier::Standard).await?;
+                    // Both tenants retain visibility of the authority transition.
+                    // The receiving owner's record has its own stable operation:
+                    // replay identity is (operation, stage), including any close outcome.
+                    let destination_event = AuditEvent {
+                        operation_id: audit.destination_event_id.to_string(), stage: AuditStage::Committed,
+                        principal: audit.principal.clone(), owner: destination,
+                        action: "node_transfer_received", target_id: Some(node_id.clone()),
+                    };
+                    audit_outbox_service::enqueue_admitted_in_session(&db, session, &audit.runtime, AuditTier::Standard, &audit.destination_event_id, &destination_event).await?;
+                }
+
                 Ok(TransferNodeResult {
                     node_id: node_id.clone(),
                     previous_owner_user_id: previous_owner_user_id.clone(),
@@ -791,6 +1544,16 @@ pub async fn delete_node_with_expected_state_version(
     node_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<()> {
+    delete_node_impl(db, user_id, node_id, expected_state_version, None).await
+}
+
+async fn delete_node_impl(
+    db: &mongodb::Database,
+    user_id: &str,
+    node_id: &str,
+    expected_state_version: Option<i64>,
+    audit: Option<&NodeMutationAudit>,
+) -> AppResult<()> {
     super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, user_id, &node).await?;
@@ -799,9 +1562,26 @@ pub async fn delete_node_with_expected_state_version(
     let node_id = node_id.to_string();
     let tracing_node_id = node_id.clone();
     let owner_user_id = node.user_id;
+    let audit = audit.cloned();
+    let now = bson::DateTime::from_chrono(Utc::now());
     crate::services::service_history::transaction::run(&db.clone(), async move |session| {
         let operation: AppResult<()> = async {
-            let now = bson::DateTime::from_chrono(Utc::now());
+            let audit_owner = if let Some(audit) = audit.as_ref() {
+                audit.require_uncommitted(&db, session).await?;
+                let current = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {"_id": &node_id, "user_id": &owner_user_id, "is_active": true})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NodeNotFound("Node not found".into()))?;
+                guard_human_node_in_session(&db, session, &current).await?;
+                Some(
+                    node_mutation_owner_in_session(&db, session, audit, &owner_user_id, false)
+                        .await?,
+                )
+            } else {
+                None
+            };
             let mut node_filter = doc! {
                 "_id": &node_id,
                 "user_id": &owner_user_id,
@@ -867,6 +1647,18 @@ pub async fn delete_node_with_expected_state_version(
                 )
                 .session(&mut *session)
                 .await?;
+            if let (Some(audit), Some(owner)) = (audit.as_ref(), audit_owner) {
+                audit
+                    .record(
+                        &db,
+                        session,
+                        owner,
+                        "node_deleted",
+                        &node_id,
+                        AuditTier::Narrowing,
+                    )
+                    .await?;
+            }
             Ok(())
         }
         .await;
@@ -1139,33 +1931,6 @@ pub(crate) async fn activate_managed_credentials(
     Ok(())
 }
 
-/// Update a binding's priority.
-pub async fn update_binding_priority(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-    binding_id: &str,
-    priority: i32,
-) -> AppResult<()> {
-    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_one(
-            doc! { "_id": binding_id, "user_id": &node.user_id, "node_id": node_id, "is_active": true },
-            doc! { "$set": { "priority": priority, "updated_at": &now } },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Binding not found".to_string()));
-    }
-
-    tracing::info!(binding_id = %binding_id, priority, "Binding priority updated");
-    Ok(())
-}
-
 /// Admin: list active operational nodes (no user filter).
 ///
 /// Device-code provisioning creates node-shaped ownership records, but those
@@ -1206,35 +1971,6 @@ pub async fn list_all_nodes(
         .await?;
 
     Ok((nodes, total))
-}
-
-/// Admin: soft-delete a node without ownership check.
-pub async fn admin_delete_node(db: &mongodb::Database, node_id: &str) -> AppResult<()> {
-    super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "delete").await?;
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    let result = db
-        .collection::<Node>(NODES)
-        .update_one(
-            doc! { "_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false, "status": NodeStatus::Offline.as_str(), "updated_at": &now } },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NodeNotFound("Node not found".to_string()));
-    }
-
-    // Deactivate all bindings for this node
-    db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_many(
-            doc! { "node_id": node_id },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
-        )
-        .await?;
-
-    tracing::info!(node_id = %node_id, "Node admin-deleted");
-    Ok(())
 }
 
 /// Validate a raw auth token. Returns the Node if valid.
@@ -1434,6 +2170,8 @@ async fn deactivate_binding_by_node_and_service(
     Ok(())
 }
 
+/// Fixture seeding only. All serving binding mutations use NodeMutationAudit.
+#[cfg(test)]
 pub async fn create_binding(
     db: &mongodb::Database,
     user_id: &str,
@@ -1502,32 +2240,6 @@ pub async fn list_bindings(
         .await?;
 
     Ok(bindings)
-}
-
-/// Delete a binding. Verifies the binding belongs to the specified node and user.
-pub async fn delete_binding(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-    binding_id: &str,
-) -> AppResult<()> {
-    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    let result = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_one(
-            doc! { "_id": binding_id, "user_id": &node.user_id, "node_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Binding not found".to_string()));
-    }
-
-    tracing::info!(binding_id = %binding_id, "Node service binding deleted");
-    Ok(())
 }
 
 async fn load_active_node(db: &mongodb::Database, node_id: &str) -> AppResult<Node> {
@@ -2174,14 +2886,10 @@ mod tests {
 
         for case in AccessCase::all() {
             let fixture = seed_acl_fixture(&db, case).await;
-            let result = update_binding_priority(
-                &db,
-                &fixture.actor_id,
-                &fixture.node.id,
-                &fixture.binding.id,
-                5,
-            )
-            .await;
+            let audit = NodeMutationAudit::new(&node_audit_runtime(false), &fixture.actor_id);
+            let result = audit
+                .update_binding_priority(&db, &fixture.node.id, &fixture.binding.id, 5)
+                .await;
             if case.can_write() {
                 result.expect("writable case should update binding");
                 let stored = db
@@ -2207,8 +2915,14 @@ mod tests {
         for case in AccessCase::all() {
             let fixture = seed_acl_fixture(&db, case).await;
             let service_id = Uuid::new_v4().to_string();
-            let result =
-                create_binding(&db, &fixture.actor_id, &fixture.node.id, &service_id).await;
+            db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+                .insert_one(doc! {"_id": &service_id, "is_active": true})
+                .await
+                .unwrap();
+            let audit = NodeMutationAudit::new(&node_audit_runtime(false), &fixture.actor_id);
+            let result = audit
+                .create_binding(&db, &fixture.node.id, &service_id)
+                .await;
             if case.can_write() {
                 let binding = result.expect("writable case should create binding");
                 assert_eq!(binding.user_id, fixture.owner_id, "case {case:?}");
@@ -2229,13 +2943,10 @@ mod tests {
 
         for case in AccessCase::all() {
             let fixture = seed_acl_fixture(&db, case).await;
-            let result = delete_binding(
-                &db,
-                &fixture.actor_id,
-                &fixture.node.id,
-                &fixture.binding.id,
-            )
-            .await;
+            let audit = NodeMutationAudit::new(&node_audit_runtime(false), &fixture.actor_id);
+            let result = audit
+                .delete_binding(&db, &fixture.node.id, &fixture.binding.id)
+                .await;
             if case.can_write() {
                 result.expect("writable case should delete binding");
                 let stored = db
@@ -2637,5 +3348,1146 @@ mod tests {
 
         assert_eq!(node.user_id, org_id);
         assert_eq!(node.name, "org-node");
+    }
+    fn node_audit_runtime(configured: bool) -> std::sync::Arc<AuditRuntime> {
+        std::sync::Arc::new(AuditRuntime::new(Default::default(), configured))
+    }
+
+    async fn node_audit_events(
+        db: &mongodb::Database,
+    ) -> Vec<crate::models::audit_outbox::PendingAuditEvent> {
+        db.collection(crate::models::audit_outbox::PENDING_COLLECTION_NAME)
+            .find(doc! {})
+            .sort(doc! {"order": 1})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    async fn node_audit_backlog(db: &mongodb::Database, count: i64, age: i64) {
+        let oldest = if count == 0 {
+            bson::Bson::Null
+        } else {
+            bson::Bson::DateTime(bson::DateTime::from_chrono(
+                Utc::now() - Duration::seconds(age),
+            ))
+        };
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .update_one(doc! {}, doc! {"$set": {"pending_count": count, "oldest_pending_at": oldest}, "$max": {"next_order": count}}).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn w8_node_registration_audit_failure_rolls_back_then_commits_safe_person_event() {
+        use crate::services::audit_state_service;
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_registration").await;
+        let fixture = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let runtime = node_audit_runtime(false);
+        let audit = NodeMutationAudit::new(&runtime, &fixture.actor_id);
+        let state = db
+            .collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        assert!(
+            audit
+                .create_registration_token(&db, &fixture.owner_id, "secret-bearing-name", 10, 60)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(node_audit_events(&db).await.is_empty());
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .insert_one(state)
+            .await
+            .unwrap();
+        let (id, raw, _) = audit
+            .create_registration_token(&db, &fixture.owner_id, "secret-bearing-name", 10, 60)
+            .await
+            .unwrap();
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].event.principal,
+            AuditPrincipal::Person {
+                id: fixture.actor_id.clone()
+            }
+        );
+        assert_eq!(
+            rows[0].event.owner,
+            AuditOwner::Person {
+                id: fixture.owner_id.clone()
+            }
+        );
+        assert_eq!(rows[0].event.target_id.as_deref(), Some(id.as_str()));
+        let serialized = serde_json::to_string(&rows).unwrap();
+        assert!(!serialized.contains(&raw));
+        assert!(!serialized.contains("secret-bearing-name"));
+        assert_eq!(
+            audit_state_service::load(&db).await.unwrap().pending_count,
+            1
+        );
+        assert!(matches!(
+            audit
+                .create_registration_token(&db, &fixture.owner_id, "another-name", 10, 60)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_rotation_rollback_preserves_secrets_and_replay_cannot_rotate_again() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_rotation").await;
+        let fixture = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let runtime = node_audit_runtime(true);
+        node_audit_backlog(&db, 100_000, 1).await;
+        let audit = NodeMutationAudit::new(&runtime, &fixture.actor_id);
+        assert!(matches!(
+            audit
+                .rotate_auth_token(&db, &test_encryption_keys(), &fixture.node.id)
+                .await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        let unchanged = load_active_node(&db, &fixture.node.id).await.unwrap();
+        assert_eq!(unchanged.auth_token_hash, fixture.node.auth_token_hash);
+        assert_eq!(
+            unchanged.signing_secret_hash,
+            fixture.node.signing_secret_hash
+        );
+        assert!(unchanged.signing_secret_encrypted.is_none());
+        assert!(node_audit_events(&db).await.is_empty());
+        node_audit_backlog(&db, 0, 0).await;
+        let (auth, signing) = audit
+            .rotate_auth_token(&db, &test_encryption_keys(), &fixture.node.id)
+            .await
+            .unwrap();
+        let updated = load_active_node(&db, &fixture.node.id).await.unwrap();
+        assert_eq!(updated.auth_token_hash, hash_token(&auth));
+        assert_eq!(updated.signing_secret_hash, hash_token(&signing));
+        assert!(updated.signing_secret_encrypted.is_some());
+        assert!(matches!(
+            audit
+                .rotate_auth_token(&db, &test_encryption_keys(), &fixture.node.id)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            load_active_node(&db, &fixture.node.id)
+                .await
+                .unwrap()
+                .auth_token_hash,
+            hash_token(&auth)
+        );
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 1);
+        let serialized = serde_json::to_string(&rows).unwrap();
+        assert!(!serialized.contains(&auth));
+        assert!(!serialized.contains(&signing));
+        assert!(!serialized.contains("encrypted"));
+    }
+
+    #[tokio::test]
+    async fn w8_node_binding_authority_matrix_and_live_revocation() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_binding_acl").await;
+        let runtime = node_audit_runtime(false);
+        let mut admitted = 0;
+        for case in AccessCase::all() {
+            let f = seed_acl_fixture(&db, case).await;
+            let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+            let result = audit
+                .update_binding_priority(&db, &f.node.id, &f.binding.id, 42)
+                .await;
+            if case.can_write() {
+                result.unwrap();
+                admitted += 1;
+                let row = node_audit_events(&db).await.pop().unwrap();
+                assert_eq!(
+                    row.event.principal,
+                    AuditPrincipal::Person {
+                        id: f.actor_id.clone()
+                    }
+                );
+                assert_eq!(
+                    row.event.owner,
+                    if f.actor_id == f.owner_id {
+                        AuditOwner::Person {
+                            id: f.owner_id.clone(),
+                        }
+                    } else {
+                        AuditOwner::Org {
+                            id: f.owner_id.clone(),
+                        }
+                    }
+                );
+            } else {
+                assert_node_not_found(result, case);
+            }
+            if matches!(case, AccessCase::AsOrgAdmin) {
+                // The prepared request cannot freeze a revoked membership.
+                let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+                db.collection::<bson::Document>(ORG_MEMBERSHIPS)
+                    .update_one(
+                        doc! {"member_user_id": &f.actor_id},
+                        doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    audit
+                        .delete_binding(&db, &f.node.id, &f.binding.id)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                        .find_one(doc! {"_id": &f.binding.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_active
+                );
+            }
+        }
+        assert_eq!(node_audit_events(&db).await.len(), admitted);
+    }
+
+    #[tokio::test]
+    async fn w8_node_standard_and_narrowing_tier_cells() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_tier_cells").await;
+        let runtime = node_audit_runtime(true); // no fabricated witness contact
+        for (count, age, allowed) in [
+            (0, 0, true),
+            (10_000, 30, true),
+            (99_999, 1, true),
+            (100_000, 1, false),
+            (1, 3600, false),
+            (1_000_000, 86_400, false),
+        ] {
+            let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+            node_audit_backlog(&db, count, age).await;
+            let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+            let result = audit
+                .update_binding_priority(&db, &f.node.id, &f.binding.id, 20)
+                .await;
+            assert_eq!(result.is_ok(), allowed, "count={count}, age={age}");
+            if !allowed {
+                assert!(matches!(result, Err(AppError::AuditAdmissionClosed { .. })));
+            }
+            NodeMutationAudit::new(&runtime, &f.actor_id)
+                .delete_binding(&db, &f.node.id, &f.binding.id)
+                .await
+                .unwrap();
+        }
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        node_audit_backlog(&db, 0, 0).await;
+        let state = crate::services::audit_state_service::load(&db)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME).insert_one(doc! {"_id": &state.id, "divergence": {"seq": 1_i64, "local_hash": "a".repeat(64), "witnessed_hash": "b".repeat(64)}}).await.unwrap();
+        assert!(matches!(
+            NodeMutationAudit::new(&runtime, &f.actor_id)
+                .update_binding_priority(&db, &f.node.id, &f.binding.id, 20)
+                .await,
+            Err(AppError::AuditWitnessDiverged)
+        ));
+        NodeMutationAudit::new(&runtime, &f.actor_id)
+            .delete_binding(&db, &f.node.id, &f.binding.id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn w8_node_transfer_two_people_two_orgs_and_revision_rollback() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_transfer").await;
+        let runtime = node_audit_runtime(false);
+        let a = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        let b = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        // The destination's unrelated node must not shadow the revision fence
+        // with the independently tested node-name collision refusal.
+        db.collection::<Node>(NODES)
+            .update_one(
+                doc! {"_id": &b.node.id},
+                doc! {"$set": {"name": "destination-existing-node"}},
+            )
+            .await
+            .unwrap();
+        let audit = NodeMutationAudit::new(&runtime, &a.actor_id);
+        assert!(matches!(
+            audit
+                .transfer_node_owner(&db, &a.node.id, &b.owner_id, 10, None)
+                .await,
+            Err(AppError::Forbidden(_))
+        ));
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &b.owner_id,
+                &a.actor_id,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(NODES)
+            .update_one(
+                doc! {"_id": &a.node.id},
+                doc! {"$set": {"state_version": 7_i64}},
+            )
+            .await
+            .unwrap();
+        let stale = audit
+            .transfer_node_owner(&db, &a.node.id, &b.owner_id, 10, Some(6))
+            .await;
+        assert!(matches!(stale, Err(AppError::Conflict(_))), "{stale:?}");
+        assert!(node_audit_events(&db).await.is_empty());
+        assert!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &a.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        let result = audit
+            .transfer_node_owner(&db, &a.node.id, &b.owner_id, 10, Some(7))
+            .await
+            .unwrap();
+        assert_eq!(result.previous_owner_user_id, a.owner_id);
+        assert_eq!(result.new_owner_user_id, b.owner_id);
+        assert_eq!(result.deactivated_bindings_count, 1);
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].event.principal,
+            AuditPrincipal::Person {
+                id: a.actor_id.clone()
+            }
+        );
+        assert_eq!(
+            rows[0].event.owner,
+            AuditOwner::Org {
+                id: a.owner_id.clone()
+            }
+        );
+        assert_eq!(
+            rows[1].event.owner,
+            AuditOwner::Org {
+                id: b.owner_id.clone()
+            }
+        );
+        assert!(
+            NodeMutationAudit::new(&runtime, &a.actor_id)
+                .delete_binding(&db, &b.node.id, &a.binding.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            NodeMutationAudit::new(&runtime, &b.actor_id)
+                .delete_node(&db, &a.node.id, Some(7))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            load_active_node(&db, &a.node.id).await.unwrap().user_id,
+            b.owner_id
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_delete_rolls_back_cleanup_without_audit_state() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_delete_atomic").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let runtime = node_audit_runtime(false);
+        let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+        let state = db
+            .collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        assert!(audit.delete_node(&db, &f.node.id, None).await.is_err());
+        assert!(load_active_node(&db, &f.node.id).await.unwrap().is_active);
+        assert!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .insert_one(state)
+            .await
+            .unwrap();
+        audit.delete_node(&db, &f.node.id, None).await.unwrap();
+        assert!(
+            !db.collection::<Node>(NODES)
+                .find_one(doc! {"_id": &f.node.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        assert_eq!(node_audit_events(&db).await.len(), 1);
+    }
+    async fn node_audit_connected_fixture(
+        db: &mongodb::Database,
+        f: &NodeAclFixture,
+        state: &crate::AppState,
+    ) -> String {
+        let connection = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let owner = crate::models::node::NodeConnectionOwner {
+            instance_name: state.replica_identity.instance_name.clone(),
+            generation_id: state.replica_identity.generation_id.clone(),
+            internal_base_url: state.replica_identity.internal_base_url.clone(),
+            connection_id: connection.clone(),
+            claimed_at: now,
+            renewed_at: now,
+            expires_at: now + Duration::minutes(5),
+            http_cancellation: false,
+            http_signature_v2: false,
+            proxy_upload_v1: false,
+            credential_ack_correlation: false,
+            remote_credential_crypto_v1: false,
+            proxy_max_body_size: None,
+            capabilities_resolved: true,
+        };
+        db.collection::<bson::Document>(NODES).update_one(doc! {"_id": &f.node.id}, doc! {"$set": {"connection_owner": bson::to_bson(&owner).unwrap(), "status": "online"}}).await.unwrap();
+        connection
+    }
+
+    #[tokio::test]
+    async fn w8_node_disconnect_defers_effect_after_local_revocation_and_consumes_once() {
+        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_disconnect").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        state
+            .audit_runtime
+            .bind_effects(
+                Uuid::new_v4(),
+                std::sync::Arc::new(Zeroizing::new([2; 32])),
+                None,
+            )
+            .unwrap();
+        let connection = node_audit_connected_fixture(&db, &f, &state).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection_with_id(&f.node.id, connection, tx);
+        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        audit
+            .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
+            .await
+            .unwrap();
+        assert!(
+            load_active_node(&db, &f.node.id)
+                .await
+                .unwrap()
+                .connection_owner
+                .is_none()
+        );
+        assert!(
+            !audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4002,
+                    "node credentials rotated"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "unmaterialized intent sends nothing"
+        );
+        assert_eq!(
+            crate::services::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            3
+        );
+        while audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+        {}
+        assert!(
+            audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4002,
+                    "node credentials rotated"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(rx.recv().await.is_some());
+        assert!(
+            !audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4002,
+                    "node credentials rotated"
+                )
+                .await
+                .unwrap()
+        );
+        let intent = db
+            .collection::<AuditEffectIntent>(INTENTS)
+            .find_one(doc! {"_id": audit.operation_id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.terminal_stage, Some(AuditStage::Succeeded));
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].event.stage, AuditStage::Intent);
+        assert_eq!(rows[2].event.stage, AuditStage::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn w8_node_connection_replacement_rolls_back_rotation_and_fenced_close_spares_successor()
+    {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_connection_fence").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let old = node_audit_connected_fixture(&db, &f, &state).await;
+        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        let successor = node_audit_connected_fixture(&db, &f, &state).await;
+        assert_ne!(old, successor);
+        assert!(matches!(
+            audit
+                .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            load_active_node(&db, &f.node.id)
+                .await
+                .unwrap()
+                .auth_token_hash,
+            f.node.auth_token_hash
+        );
+        assert!(node_audit_events(&db).await.is_empty());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection_with_id(&f.node.id, successor, tx);
+        assert!(
+            !state
+                .node_dispatch
+                .disconnect_invalidated(
+                    audit.disconnect_owner.unwrap(),
+                    4002,
+                    "node credentials rotated"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn w8_node_claimed_disconnect_is_uncertain_on_recovery_never_resent() {
+        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_disconnect_recovery")
+                .await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        state
+            .audit_runtime
+            .bind_effects(
+                Uuid::new_v4(),
+                std::sync::Arc::new(Zeroizing::new([2; 32])),
+                None,
+            )
+            .unwrap();
+        let connection = node_audit_connected_fixture(&db, &f, &state).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection_with_id(&f.node.id, connection, tx);
+        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        audit.delete_node(&db, &f.node.id, None).await.unwrap();
+        while audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+        {}
+        let paused = state
+            .audit_runtime
+            .authorize_effect(&db, &audit.operation_id.to_string())
+            .await
+            .unwrap();
+        let recovered = node_audit_runtime(false);
+        recovered
+            .bind_effects(
+                Uuid::new_v4(),
+                std::sync::Arc::new(Zeroizing::new([2; 32])),
+                None,
+            )
+            .unwrap();
+        let mut recovered_audit = audit.clone();
+        recovered_audit.runtime = recovered;
+        assert!(
+            !recovered_audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4006,
+                    "node deleted"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            paused
+                .run(|| state.node_dispatch.disconnect_invalidated(
+                    audit.disconnect_owner.clone().unwrap(),
+                    4006,
+                    "node deleted"
+                ))
+                .await
+                .is_err()
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "recovered/paused attempts cannot close twice"
+        );
+        let intent = db
+            .collection::<AuditEffectIntent>(INTENTS)
+            .find_one(doc! {"_id": audit.operation_id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.terminal_stage, Some(AuditStage::Uncertain));
+    }
+
+    #[tokio::test]
+    async fn w8_node_registration_key_principal_retains_verified_owner_without_human_impersonation()
+    {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_key_attribution").await;
+        let f = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        let runtime = node_audit_runtime(false);
+        let principal = AuditPrincipal::ApiKey {
+            id: Uuid::new_v4().to_string(),
+            owner_id: f.owner_id.clone(),
+        };
+        let audit = NodeMutationAudit::new(&runtime, &f.owner_id)
+            .with_verified_principal(principal.clone());
+        audit
+            .create_registration_token(&db, &f.owner_id, "org-key-node", 10, 60)
+            .await
+            .unwrap();
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows[0].event.principal, principal);
+        assert_eq!(rows[0].event.owner, AuditOwner::Org { id: f.owner_id });
+        audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap();
+        let row = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &rows[0].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.user_id.is_none());
+        assert!(row.api_key_id.is_some());
+        assert!(row.api_key_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn w8_node_admin_mutation_checks_live_role_and_narrows_during_backlog() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_admin").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let admin_id = Uuid::new_v4().to_string();
+        let mut admin = test_user(&admin_id, UserType::Person);
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .unwrap();
+        let roles = crate::services::role_service::get_platform_role_ids(&db)
+            .await
+            .unwrap();
+        admin.role_ids.push(roles.admin.clone());
+        db.collection::<User>(USERS)
+            .insert_one(&admin)
+            .await
+            .unwrap();
+        let runtime = node_audit_runtime(true);
+        node_audit_backlog(&db, 1_000_000, 86_400).await;
+        assert!(
+            NodeMutationAudit::new(&runtime, &f.actor_id)
+                .admin_delete_node(&db, &f.node.id)
+                .await
+                .is_err()
+        );
+        let audit = NodeMutationAudit::new(&runtime, &admin_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .update_one(doc! {"_id": &admin_id}, doc! {"$set": {"role_ids": []}})
+            .await
+            .unwrap();
+        assert!(audit.admin_delete_node(&db, &f.node.id).await.is_err());
+        assert!(load_active_node(&db, &f.node.id).await.is_ok());
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! {"_id": &admin_id},
+                doc! {"$set": {"role_ids": [&roles.admin]}},
+            )
+            .await
+            .unwrap();
+        audit.admin_delete_node(&db, &f.node.id).await.unwrap();
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].event.principal,
+            AuditPrincipal::Person { id: admin_id }
+        );
+        assert_eq!(rows[0].event.owner, AuditOwner::Person { id: f.owner_id });
+        assert!(
+            !db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_rotation_real_write_conflict_and_unknown_commit_keep_prepared_material() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+        let base = crate::test_utils::connect_transaction_test_database("w8_node_retry").await;
+        let f = seed_acl_fixture(&base, AccessCase::Direct).await;
+        let app_name = format!("w8-node-{}", Uuid::new_v4());
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let capture = commands.clone();
+        let mut options = mongodb::options::ClientOptions::parse(
+            std::env::var("NYXID_TEST_DATABASE_URL").unwrap(),
+        )
+        .await
+        .unwrap();
+        options.app_name = Some(app_name.clone());
+        options.command_event_handler = Some(EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && matches!(event.command_name.as_str(), "update" | "commitTransaction")
+            {
+                capture
+                    .lock()
+                    .unwrap()
+                    .push((event.command_name, event.command));
+            }
+        }));
+        let db = mongodb::Client::with_options(options)
+            .unwrap()
+            .database(base.name());
+        let runtime = node_audit_runtime(false);
+        for labeled in [false, true] {
+            commands.lock().unwrap().clear();
+            base.client()
+                .database("admin")
+                .run_command(
+                    doc! {"configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
+                        "failCommands": ["update"], "appName": &app_name, "errorCode": 112,
+                        "errorLabels": if labeled {vec!["TransientTransactionError"]} else {vec![]},
+                    }},
+                )
+                .await
+                .unwrap();
+            let result = NodeMutationAudit::new(&runtime, &f.actor_id)
+                .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
+                .await;
+            base.client()
+                .database("admin")
+                .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
+                .await
+                .unwrap();
+            let (auth, _) = result.unwrap();
+            let updates: Vec<_> = commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(name, cmd)| {
+                    if name != "update" || cmd.get_str("update").ok() != Some(NODES) {
+                        return None;
+                    }
+                    Some(
+                        cmd.get_array("updates").unwrap()[0]
+                            .as_document()
+                            .unwrap()
+                            .get_document("u")
+                            .unwrap()
+                            .get_document("$set")
+                            .unwrap()
+                            .get_str("auth_token_hash")
+                            .unwrap()
+                            .to_owned(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                updates.len(),
+                3,
+                "two definite conflicts retry the complete rotation"
+            );
+            assert!(
+                updates.iter().all(|hash| hash == &hash_token(&auth)),
+                "prepared material remains identical on every attempt"
+            );
+        }
+        commands.lock().unwrap().clear();
+        base.client().database("admin").run_command(doc! {"configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
+            "failCommands": ["commitTransaction"], "appName": &app_name,
+            "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"}, "errorLabels": ["UnknownTransactionCommitResult"],
+        }}).await.unwrap();
+        let result = NodeMutationAudit::new(&runtime, &f.actor_id)
+            .rotate_auth_token(&db, &test_encryption_keys(), &f.node.id)
+            .await;
+        base.client()
+            .database("admin")
+            .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
+            .await
+            .unwrap();
+        let (auth, _) = result.unwrap();
+        {
+            let commands = commands.lock().unwrap();
+            let commits: Vec<_> = commands
+                .iter()
+                .filter(|(name, _)| name == "commitTransaction")
+                .map(|(_, command)| command)
+                .collect();
+            assert_eq!(commits.len(), 2);
+            assert_eq!(commits[0].get("lsid"), commits[1].get("lsid"));
+            assert_eq!(commits[0].get("txnNumber"), commits[1].get("txnNumber"));
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(
+                        |(name, cmd)| name == "update" && cmd.get_str("update").ok() == Some(NODES)
+                    )
+                    .count(),
+                1,
+                "unknown commit cannot rerun rotation"
+            );
+        }
+        assert_eq!(
+            load_active_node(&db, &f.node.id)
+                .await
+                .unwrap()
+                .auth_token_hash,
+            hash_token(&auth)
+        );
+        assert_eq!(node_audit_events(&db).await.len(), 3);
+    }
+    #[tokio::test]
+    async fn w8_node_human_mutation_refuses_invented_machine_or_system_person() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_principal_fence").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let runtime = node_audit_runtime(false);
+        for principal in [
+            AuditPrincipal::Node {
+                id: f.actor_id.clone(),
+            },
+            AuditPrincipal::ServiceAccount {
+                id: f.actor_id.clone(),
+            },
+            AuditPrincipal::System {
+                actor: crate::models::audit_outbox::SystemAuditActor::Maintenance,
+            },
+            AuditPrincipal::Person {
+                id: Uuid::new_v4().to_string(),
+            },
+        ] {
+            let audit =
+                NodeMutationAudit::new(&runtime, &f.actor_id).with_verified_principal(principal);
+            assert!(matches!(
+                audit
+                    .update_binding_priority(&db, &f.node.id, &f.binding.id, 99)
+                    .await,
+                Err(AppError::Forbidden(_))
+            ));
+        }
+        assert!(node_audit_events(&db).await.is_empty());
+        assert_eq!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .priority,
+            0
+        );
+    }
+    #[tokio::test]
+    async fn w8_node_binding_creation_requires_live_service_and_rolls_back_at_standard_ceiling() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_binding_create").await;
+        let f = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        let service = Uuid::new_v4().to_string();
+        let runtime = node_audit_runtime(true);
+        let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+        assert!(matches!(
+            audit.create_binding(&db, &f.node.id, &service).await,
+            Err(AppError::NotFound(_))
+        ));
+        db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &service, "is_active": true})
+            .await
+            .unwrap();
+        node_audit_backlog(&db, 100_000, 1).await;
+        assert!(matches!(
+            audit.create_binding(&db, &f.node.id, &service).await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        assert_eq!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .count_documents(doc! {"service_id": &service})
+                .await
+                .unwrap(),
+            0
+        );
+        node_audit_backlog(&db, 0, 0).await;
+        let binding = audit
+            .create_binding(&db, &f.node.id, &service)
+            .await
+            .unwrap();
+        assert_eq!(binding.user_id, f.owner_id);
+        assert!(matches!(
+            NodeMutationAudit::new(&runtime, &f.actor_id)
+                .create_binding(&db, &f.node.id, &service)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(node_audit_events(&db).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn w8_node_transfer_requires_the_complete_two_owner_audit_bundle() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_transfer_bundle").await;
+        let f = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        let runtime = node_audit_runtime(true);
+        node_audit_backlog(&db, 99_999, 1).await;
+        let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+        assert!(matches!(
+            audit
+                .transfer_node_owner(&db, &f.node.id, &f.actor_id, 10, None)
+                .await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        assert_eq!(
+            load_active_node(&db, &f.node.id).await.unwrap().user_id,
+            f.owner_id
+        );
+        assert!(node_audit_events(&db).await.is_empty());
+        assert!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
+        node_audit_backlog(&db, 99_998, 1).await;
+        audit
+            .transfer_node_owner(&db, &f.node.id, &f.actor_id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(node_audit_events(&db).await.len(), 2);
+        assert_eq!(
+            crate::services::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            100_000
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_online_transfer_preserves_destination_event_and_disconnect_terminal() {
+        use crate::models::audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS};
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_transfer_close").await;
+        let f = seed_acl_fixture(&db, AccessCase::AsOrgAdmin).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        state
+            .audit_runtime
+            .bind_effects(
+                Uuid::new_v4(),
+                std::sync::Arc::new(Zeroizing::new([2; 32])),
+                None,
+            )
+            .unwrap();
+        let connection = node_audit_connected_fixture(&db, &f, &state).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection_with_id(&f.node.id, connection, tx);
+        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        audit
+            .transfer_node_owner(&db, &f.node.id, &f.actor_id, 10, None)
+            .await
+            .unwrap();
+        let received = node_audit_events(&db)
+            .await
+            .into_iter()
+            .find(|row| row.event.action == "node_transfer_received")
+            .unwrap();
+        let intent = db
+            .collection::<AuditEffectIntent>(INTENTS)
+            .find_one(doc! {"_id": audit.operation_id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(received.id, intent.terminal_event_id);
+        assert_ne!(received.event.operation_id, intent.id);
+        assert_eq!(received.event.stage, AuditStage::Committed);
+        assert_eq!(received.event.owner, AuditOwner::Person { id: f.actor_id });
+        while audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+        {}
+        assert!(
+            audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4007,
+                    "node ownership transferred"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(rx.recv().await.is_some());
+        while audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+        {}
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.materialized_seq.is_some()));
+        assert!(
+            rows.iter()
+                .any(|row| { row.id == received.id && row.event == received.event })
+        );
+        assert!(rows.iter().any(|row| {
+            row.id == intent.terminal_event_id
+                && row.event.action == "node_disconnect"
+                && row.event.stage == AuditStage::Succeeded
+        }));
+    }
+
+    #[tokio::test]
+    async fn w8_node_delete_narrows_with_three_reserved_slots_while_close_defers() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_delete_deferred").await;
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let mut state = crate::test_utils::test_app_state(db.clone());
+        state.audit_runtime = node_audit_runtime(true);
+        state
+            .audit_runtime
+            .bind_effects(
+                Uuid::new_v4(),
+                std::sync::Arc::new(Zeroizing::new([2; 32])),
+                None,
+            )
+            .unwrap();
+        let connection = node_audit_connected_fixture(&db, &f, &state).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection_with_id(&f.node.id, connection, tx);
+        let audit = NodeMutationAudit::new(&state.audit_runtime, &f.actor_id)
+            .with_disconnect(&db, &f.node.id)
+            .await
+            .unwrap();
+        node_audit_backlog(&db, 1_000_000, 86_400).await;
+        audit.delete_node(&db, &f.node.id, None).await.unwrap();
+        assert!(
+            !audit
+                .disconnect_after_commit(
+                    &db,
+                    &state.node_dispatch,
+                    &f.node.id,
+                    4006,
+                    "node deleted"
+                )
+                .await
+                .unwrap()
+        );
+        assert!(rx.try_recv().is_err());
+        let node = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &f.node.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!node.is_active);
+        assert!(node.connection_owner.is_none());
+        assert_eq!(
+            node_audit_events(&db).await.len(),
+            2,
+            "terminal slot is reserved without inventing a terminal outcome"
+        );
+        assert_eq!(
+            crate::services::audit_state_service::load(&db)
+                .await
+                .unwrap()
+                .pending_count,
+            1_000_003
+        );
     }
 }

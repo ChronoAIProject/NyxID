@@ -11,16 +11,16 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::handlers::node_admin::{
     NodeDispatchInfo, NodeMetricsInfo, build_dispatch_info, build_metrics_info,
 };
-use crate::models::node::{Node, NodeMetadata, NodeStatus};
+use crate::models::node::{Node, NodeMetadata};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::node_service;
 use crate::services::node_ws_manager::{NodeCapabilitiesFlags, NodeWsManager};
-use crate::services::{audit_service, node_service};
 use crate::telemetry::{
     context::{TelemetryContext, emit_event},
     sampling::hash_short_id,
@@ -258,22 +258,25 @@ pub async fn admin_disconnect_node(
         "disconnect",
     )
     .await?;
-
-    let was_connected = state
-        .node_dispatch
-        .disconnect(&node_id, 4000, "admin disconnected node")
+    let actor = auth_user.user_id.to_string();
+    let audit = match node_service::NodeMutationAudit::new(&state.audit_runtime, &actor)
+        .with_disconnect(&state.db, &node_id)
+        .await
+    {
+        Ok(audit) => audit,
+        Err(AppError::NodeNotFound(_)) => return Ok(StatusCode::NO_CONTENT),
+        Err(error) => return Err(error),
+    };
+    audit.admin_disconnect_node(&state.db, &node_id).await?;
+    let was_connected = audit
+        .disconnect_after_commit(
+            &state.db,
+            &state.node_dispatch,
+            &node_id,
+            4000,
+            "admin disconnected node",
+        )
         .await?;
-    if was_connected {
-        node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await?;
-    }
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_node_disconnected",
-        Some(serde_json::json!({ "node_id": &node_id })),
-    );
-
     // Only emit when a real disconnect actually happened. Posting to
     // /disconnect for an already-offline node (or a typo / nonexistent
     // id) is idempotent and should not fabricate disconnect activity
@@ -307,19 +310,20 @@ pub async fn admin_delete_node(
         &state.db, &node_id, "delete",
     )
     .await?;
-
-    node_service::admin_delete_node(&state.db, &node_id).await?;
-    let _ = state
-        .node_dispatch
-        .disconnect(&node_id, 4006, "node deleted by admin")
+    let actor = auth_user.user_id.to_string();
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &actor)
+        .with_disconnect(&state.db, &node_id)
         .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin_node_deleted",
-        Some(serde_json::json!({ "node_id": &node_id })),
-    );
+    audit.admin_delete_node(&state.db, &node_id).await?;
+    let _ = audit
+        .disconnect_after_commit(
+            &state.db,
+            &state.node_dispatch,
+            &node_id,
+            4006,
+            "node deleted by admin",
+        )
+        .await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -539,6 +543,67 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn w8_node_admin_disconnect_noop_preserves_the_managed_lifecycle_guard() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "w8_node_admin_disconnect_missing",
+        )
+        .await;
+        let admin_id = insert_admin(&db).await;
+        let state = test_app_state(db.clone());
+        let response = admin_disconnect_node(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            Path(Uuid::new_v4().to_string()),
+        )
+        .await
+        .expect("disconnecting a nonexistent node is idempotent")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut tombstone = make_test_node(&admin_id);
+        tombstone.is_active = false;
+        tombstone.metadata = Some(NodeMetadata {
+            agent_version: None,
+            os: None,
+            arch: None,
+            ip_address: None,
+            provisioning_source: Some("managed_machine".into()),
+        });
+        db.collection::<Node>(NODES)
+            .insert_one(&tombstone)
+            .await
+            .unwrap();
+        assert!(matches!(
+            admin_disconnect_node(
+                State(state),
+                test_auth_user(&admin_id),
+                TelemetryContext::default(),
+                Path(tombstone.id),
+            )
+            .await,
+            Err(AppError::Conflict(_)),
+        ));
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0,
+        );
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::audit_effect_intent::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0,
+        );
     }
 
     #[tokio::test]

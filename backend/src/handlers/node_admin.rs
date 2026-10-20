@@ -477,6 +477,7 @@ fn node_session_info(
     }
 }
 
+#[cfg(test)]
 fn audit_event_data_with_owner(
     actor_user_id: &str,
     owner_user_id: &str,
@@ -493,6 +494,7 @@ fn audit_event_data_with_owner(
     event_data
 }
 
+#[cfg(test)]
 fn transfer_audit_event_data(
     actor_user_id: &str,
     result: &node_service::TransferNodeResult,
@@ -1012,8 +1014,32 @@ pub async fn create_registration_token(
         }
     }
 
-    let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) =
-        node_service::create_registration_token(
+    // Registration-token issuance is also mounted on the machine/key router.
+    // Keep its authenticated identity instead of projecting the key owner as
+    // a human. Human-only mutation routes use the Person constructor below.
+    let principal = match auth_user.auth_method {
+        crate::mw::auth::AuthMethod::ApiKey => {
+            crate::models::audit_outbox::AuditPrincipal::ApiKey {
+                id: auth_user
+                    .api_key_id
+                    .clone()
+                    .ok_or(AppError::AuditIntegrityConflict)?,
+                owner_id: user_id_str.clone(),
+            }
+        }
+        crate::mw::auth::AuthMethod::ServiceAccount => {
+            crate::models::audit_outbox::AuditPrincipal::ServiceAccount {
+                id: user_id_str.clone(),
+            }
+        }
+        _ => crate::models::audit_outbox::AuditPrincipal::Person {
+            id: user_id_str.clone(),
+        },
+    };
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str)
+        .with_verified_principal(principal);
+    let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) = audit
+        .create_registration_token(
             &state.db,
             owner_user_id,
             &body.name,
@@ -1021,28 +1047,6 @@ pub async fn create_registration_token(
             state.config.node_registration_token_ttl_secs,
         )
         .await?;
-    let owner_differs = owner_user_id != user_id_str;
-    let owner_user_id_for_audit = owner_user_id.to_string();
-    let event_data = if owner_differs {
-        serde_json::json!({
-            "token_id": &token_id,
-            "name": &body.name,
-            "owner_user_id": &owner_user_id_for_audit,
-        })
-    } else {
-        serde_json::json!({
-            "token_id": &token_id,
-            "name": &body.name,
-        })
-    };
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_registration_token_created",
-        Some(event_data),
-    );
-
     Ok(Json(CreateRegistrationTokenResponse {
         token_id,
         token: raw_token,
@@ -1185,24 +1189,19 @@ pub async fn delete_node(
         &state.db, &node_id, "delete",
     )
     .await?;
-    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
-
-    node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
-    let _ = state
-        .node_dispatch
-        .disconnect(&node_id, 4006, "node deleted")
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str)
+        .with_disconnect(&state.db, &node_id)
         .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_deleted",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &node.user_id,
-            serde_json::json!({ "node_id": &node_id }),
-        )),
-    );
+    audit.delete_node(&state.db, &node_id, None).await?;
+    let _ = audit
+        .disconnect_after_commit(
+            &state.db,
+            &state.node_dispatch,
+            &node_id,
+            4006,
+            "node deleted",
+        )
+        .await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -1230,36 +1229,24 @@ pub async fn rotate_token(
         &state.db, &node_id, "rotate",
     )
     .await?;
-    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str)
+        .with_disconnect(&state.db, &node_id)
+        .await?;
 
-    let (raw_token, raw_signing_secret) =
-        node_service::rotate_auth_token(&state.db, &state.encryption_keys, &user_id_str, &node_id)
-            .await?;
+    let (raw_token, raw_signing_secret) = audit
+        .rotate_auth_token(&state.db, &state.encryption_keys, &node_id)
+        .await?;
 
     // Disconnect the node since its old token is now invalid
-    if state
-        .node_dispatch
-        .disconnect(&node_id, 4002, "node credentials rotated")
-        .await?
-    {
-        node_service::set_node_status(
+    let _ = audit
+        .disconnect_after_commit(
             &state.db,
+            &state.node_dispatch,
             &node_id,
-            crate::models::node::NodeStatus::Offline,
+            4002,
+            "node credentials rotated",
         )
         .await?;
-    }
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_token_rotated",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &node.user_id,
-            serde_json::json!({ "node_id": &node_id }),
-        )),
-    );
 
     Ok(Json(RotateTokenResponse {
         auth_token: raw_token,
@@ -1297,25 +1284,20 @@ pub async fn transfer_node(
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
     let previous_owner = node_service::owner_info_for_node(&state.db, &node).await?;
 
-    let result = node_service::transfer_node_owner(
-        &state.db,
-        &user_id_str,
-        &node_id,
-        &body.new_owner_user_id,
-        state.config.node_max_per_user,
-    )
-    .await?;
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str);
+    let result = audit
+        .transfer_node_owner(
+            &state.db,
+            &node_id,
+            &body.new_owner_user_id,
+            state.config.node_max_per_user,
+            None,
+        )
+        .await?;
 
     let mut transferred_node = node.clone();
     transferred_node.user_id = result.new_owner_user_id.clone();
     let new_owner = node_service::owner_info_for_node(&state.db, &transferred_node).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_transferred",
-        Some(transfer_audit_event_data(&user_id_str, &result)),
-    );
 
     Ok(Json(TransferNodeResponse {
         node_id: result.node_id,
@@ -1980,23 +1962,10 @@ pub async fn create_binding(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
-    let binding =
-        node_service::create_binding(&state.db, &user_id_str, &node_id, &body.service_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_binding_created",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &binding.user_id,
-            serde_json::json!({
-                "binding_id": &binding.id,
-                "node_id": &node_id,
-                "service_id": &body.service_id,
-            }),
-        )),
-    );
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str);
+    let binding = audit
+        .create_binding(&state.db, &node_id, &body.service_id)
+        .await?;
 
     Ok(Json(CreateBindingResponse {
         id: binding.id,
@@ -2014,33 +1983,14 @@ pub async fn update_binding(
     Json(body): Json<UpdateBindingRequest>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
-    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    node_service::get_node(&state.db, &user_id_str, &node_id).await?;
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str);
 
     if let Some(priority) = body.priority {
-        node_service::update_binding_priority(
-            &state.db,
-            &user_id_str,
-            &node_id,
-            &binding_id,
-            priority,
-        )
-        .await?;
+        audit
+            .update_binding_priority(&state.db, &node_id, &binding_id, priority)
+            .await?;
     }
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_binding_updated",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &node.user_id,
-            serde_json::json!({
-                "binding_id": &binding_id,
-                "node_id": &node_id,
-                "priority": body.priority,
-            }),
-        )),
-    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2052,23 +2002,10 @@ pub async fn delete_binding(
     Path((node_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
-    let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
-
-    node_service::delete_binding(&state.db, &user_id_str, &node_id, &binding_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "node_binding_deleted",
-        Some(audit_event_data_with_owner(
-            &user_id_str,
-            &node.user_id,
-            serde_json::json!({
-                "binding_id": &binding_id,
-                "node_id": &node_id,
-            }),
-        )),
-    );
+    let audit = node_service::NodeMutationAudit::new(&state.audit_runtime, &user_id_str);
+    audit
+        .delete_binding(&state.db, &node_id, &binding_id)
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2772,6 +2709,122 @@ mod tests {
         let token = access_token(&state, &actor_id);
         let app = api_app(state.clone());
         (db, state, app, token, node, pending)
+    }
+
+    #[tokio::test]
+    async fn w8_node_registration_http_atomically_records_verified_person_and_refuses_closed_standard()
+     {
+        use crate::models::audit_outbox::{
+            AuditOwner, AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_registration_http").await;
+        let actor = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor, UserType::Person)]).await;
+        let mut state = test_app_state(db.clone());
+        state.audit_runtime = std::sync::Arc::new(
+            crate::services::audit_runtime::AuditRuntime::new(Default::default(), true),
+        );
+        let token = access_token(&state, &actor);
+        let app = api_app(state);
+        let (status, body) = route_json(
+            app.clone(),
+            Method::POST,
+            "/api/v1/nodes/register-token".into(),
+            &token,
+            Some(serde_json::json!({"name": "http-node"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = db
+            .collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.event.principal,
+            AuditPrincipal::Person { id: actor.clone() }
+        );
+        assert_eq!(row.event.owner, AuditOwner::Person { id: actor });
+        assert_eq!(row.event.target_id.as_deref(), body["token_id"].as_str());
+        db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .update_one(
+                doc! {},
+                doc! {"$set": {"pending_count": 100_000_i64}, "$max": {"next_order": 100_000_i64}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = route_json(
+            app,
+            Method::POST,
+            "/api/v1/nodes/register-token".into(),
+            &token,
+            Some(serde_json::json!({"name": "refused-http-node"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.collection::<PendingAuditEvent>(PENDING_COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_empty_binding_patch_preserves_owner_access_without_audit() {
+        let db = crate::test_utils::connect_transaction_test_database("w8_node_binding_noop").await;
+        let owner = Uuid::new_v4().to_string();
+        let outsider = Uuid::new_v4().to_string();
+        insert_users(
+            &db,
+            vec![
+                test_user(&owner, UserType::Person),
+                test_user(&outsider, UserType::Person),
+            ],
+        )
+        .await;
+        let node = test_node(&owner, "binding-noop");
+        insert_node(&db, &node).await;
+        let state = test_app_state(db.clone());
+        let owner_token = access_token(&state, &owner);
+        let outsider_token = access_token(&state, &outsider);
+        let app = api_app(state);
+        let uri = format!("/api/v1/nodes/{}/bindings/{}", node.id, Uuid::new_v4(),);
+        let (status, body) = route_json(
+            app.clone(),
+            Method::PATCH,
+            uri.clone(),
+            &outsider_token,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, body) = route_json(
+            app,
+            Method::PATCH,
+            uri,
+            &owner_token,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::audit_outbox::PENDING_COLLECTION_NAME,)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+        );
     }
 
     #[tokio::test]

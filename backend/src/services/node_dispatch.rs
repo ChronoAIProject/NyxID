@@ -1116,7 +1116,19 @@ impl NodeDispatch {
         else {
             return Ok(false);
         };
+        self.disconnect_invalidated(owner, code, reason).await
+    }
+
+    /// The caller has already invalidated this exact connection in its audited
+    /// transaction. Never look up and disconnect a replacement connection.
+    pub(crate) async fn disconnect_invalidated(
+        &self,
+        owner: crate::services::node_owner_service::InvalidatedNodeOwner,
+        code: u16,
+        reason: &str,
+    ) -> AppResult<bool> {
         let fence = owner.fence;
+        let node_id = &fence.node_id;
         if fence.instance_name == self.identity.instance_name
             && fence.generation_id == self.identity.generation_id
         {
