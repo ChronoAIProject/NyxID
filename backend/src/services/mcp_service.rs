@@ -5324,15 +5324,14 @@ async fn execute_tool_resolved_inner(
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
-    if let Some(base) = &prepared.managed_base {
-        if base.chat.user_id != user_id
+    if let Some(base) = &prepared.managed_base
+        && (base.chat.user_id != user_id
             || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
             || prepared.async_submission.is_some()
             || prepared.async_continuation.is_some()
-            || node_route.is_some()
-        {
-            return Err(super::lark_attachment_tool::refused());
-        }
+            || node_route.is_some())
+    {
+        return Err(super::lark_attachment_tool::refused());
     }
     super::org_agent_service::authorize_service_with_access(
         db,
