@@ -680,6 +680,81 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Informational measurement on a dedicated runner. Reuse the test archive;
+  # this job must remain outside Backend Test and CI Pipeline required checks.
+  audit-append-benchmark:
+    name: Audit Append Benchmark
+    needs: backend-test-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Start transaction-capable MongoDB
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - name: Install checksum-locked nextest 0.9.146
+        run: |
+          python3 scripts/bootstrap-build-tool.py cargo-nextest --bin-dir "$RUNNER_TEMP/backend-test-tools"
+          echo "$RUNNER_TEMP/backend-test-tools" >> "$GITHUB_PATH"
+      - name: Download backend test archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: backend-test-archive
+          path: ${{ runner.temp }}/backend-test-archive
+      - name: Measure controlled audit append A/B
+        run: |
+          set -euo pipefail
+          unset NYXID_BENCHMARK_HOST_MONITOR
+          mkdir -p "$RUNNER_TEMP/audit-append-benchmark-run" "$RUNNER_TEMP/audit-append-benchmark"
+          python3 .github/scripts/ci_resources.py audit-append-benchmark cargo nextest run --archive-file "$RUNNER_TEMP/backend-test-archive/backend-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$RUNNER_TEMP/audit-append-benchmark-run" --profile ci --run-ignored only -E 'test(=services::audit_runtime::transaction::tests::benchmark::audit_append_throughput_durable_fifo_vs_unqueued)' --no-capture 2>&1 | tee "$RUNNER_TEMP/audit-append-benchmark/benchmark.log"
+      - name: Preserve benchmark summary
+        if: always()
+        run: |
+          python3 - <<'PY_SUMMARY'
+          import json
+          import os
+          from pathlib import Path
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "audit-append-benchmark"
+          prefix = "audit_fifo_ab SUMMARY "
+          lines = [line for line in (evidence / "benchmark.log").read_text().splitlines() if line.startswith(prefix)]
+          if len(lines) != 1:
+              raise SystemExit("Expected exactly one audit FIFO A/B summary; inspect benchmark.log")
+          summary = json.loads(lines[0][len(prefix):])
+          if summary.get("schema") != 1 or summary.get("all_success") is not True or summary.get("integrity_verified") is not True:
+              raise SystemExit("Audit FIFO A/B did not report complete successful integrity checks")
+          if {shape["tasks"] for shape in summary["shapes"]} != {1, 16}:
+              raise SystemExit("Audit FIFO A/B summary is missing a concurrency shape")
+          (evidence / "summary-line.txt").write_text(lines[0] + "\n")
+          (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+              output.write("Audit append A/B measurement (informational):\n\n```json\n" + json.dumps(summary, indent=2) + "\n```\n")
+          PY_SUMMARY
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
+      - name: Upload audit append benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: audit-append-benchmark
+          path: |
+            ${{ runner.temp }}/audit-append-benchmark
+            ${{ runner.temp }}/audit-append-benchmark-run/target/nextest/ci/junit.xml
+            ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: warn
+          retention-days: 14
+
   # Keep the required check name and fail closed when an expected partition is
   # skipped, cancelled or failed. Docs-only changes may intentionally skip both.
   backend-test:

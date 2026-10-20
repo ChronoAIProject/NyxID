@@ -4,6 +4,7 @@ import itertools
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 import yaml
 from workflow_yaml import RUST_ACTION, load_unique, validate_rust_steps
@@ -197,6 +198,65 @@ class BackendTestPartitions(unittest.TestCase):
                 self.assertNotIn('continue-on-error', install)
                 rust = next(step for step in steps if step.get('uses', '').startswith('dtolnay/rust-toolchain@'))
                 self.assertEqual(rust['uses'], RUST_ACTION)
+
+    def test_audit_benchmark_is_optional_and_replays_only_the_exact_ignored_test(self):
+        job = self.jobs['audit-append-benchmark']
+        self.assertEqual(job['name'], 'Audit Append Benchmark')
+        self.assertEqual(job['needs'], 'backend-test-build')
+        self.assertEqual(job['timeout-minutes'], 30)
+        self.assertIs(job['continue-on-error'], True)
+        self.assertEqual(job['runs-on'], self.jobs['backend-test-build']['runs-on'])
+        for aggregate in ('backend-test', 'ci-pass'):
+            self.assertNotIn('audit-append-benchmark', self.jobs[aggregate]['needs'])
+            self.assertNotIn('needs.audit-append-benchmark', str(self.jobs[aggregate]['steps']))
+        steps = job['steps']
+        self.assertTrue(any(step.get('run') == 'bash .github/scripts/start-test-mongodb.sh' for step in steps))
+        download = next(step for step in steps if step.get('name') == 'Download backend test archive')
+        self.assertEqual(download['with']['name'], 'backend-test-archive')
+        install = next(step for step in steps if step.get('name') == 'Install checksum-locked nextest 0.9.146')
+        self.assertIn('python3 scripts/bootstrap-build-tool.py cargo-nextest', install['run'])
+        command = next(step['run'] for step in steps if step.get('name') == 'Measure controlled audit append A/B')
+        for argument in ('--archive-file', '--workspace-remap', '--extract-to', '--profile ci',
+                         '--run-ignored only', '--no-capture',
+                         "-E 'test(=services::audit_runtime::transaction::tests::benchmark::audit_append_throughput_durable_fifo_vs_unqueued)'"):
+            self.assertIn(argument, command)
+        self.assertIn('set -euo pipefail', command)
+        self.assertIn('unset NYXID_BENCHMARK_HOST_MONITOR', command)
+        for compile_option in ('cargo nextest archive', 'cargo build', 'cargo test', '--features', '--package'):
+            self.assertNotIn(compile_option, command)
+        artifact = next(step for step in steps if step.get('name') == 'Upload audit append benchmark evidence')
+        self.assertEqual(artifact['if'], 'always()')
+        self.assertEqual(artifact['with']['name'], 'audit-append-benchmark')
+        self.assertIn('${{ runner.temp }}/audit-append-benchmark', artifact['with']['path'])
+
+    def test_benchmark_summary_preserves_measurements_and_rejects_missing_or_failed_evidence(self):
+        step = next(step for step in self.jobs['audit-append-benchmark']['steps']
+                    if step.get('name') == 'Preserve benchmark summary')
+        self.assertEqual(step['if'], 'always()')
+        valid = {'schema': 1, 'all_success': True, 'integrity_verified': True,
+                 'shapes': [{'tasks': 1, 'fifo_throughput_over_unqueued': 0.01},
+                            {'tasks': 16, 'fifo_throughput_over_unqueued': 0.01}]}
+        prefix = 'audit_fifo_ab SUMMARY '
+        good_line = prefix + json.dumps(valid) + '\n'
+        cases = [('success with slow FIFO', 'round output\n' + good_line, True),
+                 ('missing summary', 'round output only\n', False),
+                 ('duplicate summary', good_line + good_line, False),
+                 ('failed appends', prefix + json.dumps(dict(valid, all_success=False)), False),
+                 ('failed integrity', prefix + json.dumps(dict(valid, integrity_verified=False)), False),
+                 ('missing shape', prefix + json.dumps(dict(valid, shapes=[{'tasks': 1}])), False)]
+        for label, log, succeeds in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary)
+                evidence = path / 'audit-append-benchmark'
+                evidence.mkdir()
+                (evidence / 'benchmark.log').write_text(log)
+                env = dict(os.environ, RUNNER_TEMP=temporary, GITHUB_STEP_SUMMARY=str(path / 'step-summary.md'))
+                result = subprocess.run(['bash', '-c', step['run']], env=env, text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, succeeds, result.stdout + result.stderr)
+                if succeeds:
+                    self.assertEqual(json.loads((evidence / 'summary.json').read_text()), valid)
+                    self.assertEqual((evidence / 'summary-line.txt').read_text(), good_line)
+                    self.assertIn('0.01', (path / 'step-summary.md').read_text())
 
     def test_required_name_and_pipeline_keep_the_fail_closed_aggregate(self):
         aggregate = self.jobs['backend-test']
