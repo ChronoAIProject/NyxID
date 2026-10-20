@@ -271,3 +271,10 @@
 - Actual pinned amd64 CUA archive SHA/size and safe complete driver/SDK extraction passed; shell/Python syntax, workflow mapping/permissions, pin policy and diff checks passed.
 - Native root/browser and Docker execution remain hosted-only evidence; no local destructive acceptance or image builds attempted. D's 16/16 native and 44/44 adversarial results are separate PM-provided evidence.
 - PR jobs: Machine Native Acceptance / Native Machine Separation (amd64), Machine Container E2E, existing Artifact Packaging / Machine Docker CLI E2E, Workflow Permissions, Detect Changes, CI Pipeline.
+
+## W7 release readiness checklist
+- Consolidated 13 admin/maintainer prerequisites in RELEASE_SIGNING.md; each states missing-setup effects and completion evidence.
+- Covers APK durability, Renovate/Dependabot/private CMA, scheduled refresh and bot-PR CI, protected signing custody/OIDC/permissions, expiry reviews and required hosted acceptance.
+- Includes conditional private hosted-image receipts/digest pinning and independent credential-manifest hosting; distinguishes availability gaps from publication blockers.
+- Local documentation audit: 13/13 entries have effects and verification, 4/4 relative links resolve, required workflow/input/environment/scope names match implemented gates; git diff --check passed.
+- Documentation only; no new tests or hosted jobs required. W7 source acceptance remains conditional on the existing hosted jobs turning green.

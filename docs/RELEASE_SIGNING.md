@@ -123,6 +123,70 @@ is required hosted evidence, but cannot substitute for the production custody
 review. Existing APK durable archive provisioning and Renovate/private-CMA
 requirements are separate prerequisites documented in [BUILD_SECURITY.md](BUILD_SECURITY.md).
 
+## Release readiness checklist
+
+Use this checklist with the provisioning instructions above and
+[BUILD_SECURITY.md](BUILD_SECURITY.md). Each item states the effect of missing
+setup and the completion evidence. No new signing secret or custom trust root is
+needed.
+
+- [ ] **Repository custody:** Protect `main`, version tags and publisher workflows;
+  require **CI Pipeline** and name a release/security incident owner. Missing:
+  review/custody gap. Verify effective rulesets, code-owner coverage and owner.
+- [ ] **Production environment:** Protect `official-release` with reviewers,
+  self-review/bypass prevention and allowed `main`/`v*` refs; set
+  `OFFICIAL_RELEASE_AUTHORIZATION=github-oidc-public-good-v1`. Missing/wrong value:
+  publication blocked; the variable alone does not prove custody. Verify
+  environment rules and the exact variable in repository settings.
+- [ ] **Signing identity/trust:** Permit pinned Actions, GitHub OIDC and public-good
+  Sigstore/TUF egress; retain the public repository and exact identities above.
+  Missing: signing/verification fails. Verify both native **W6 Signing
+  Compatibility** jobs and an authorized publisher's mandatory verification.
+- [ ] **Publication permissions:** Allow job-scoped `GITHUB_TOKEN`
+  `contents: write` for releases, `packages: write` plus GHCR package access for
+  images, and `attestations: write`/`id-token: write` for production signing.
+  Missing: affected operation fails. Verify Actions/package access settings and
+  authorized publisher results.
+- [ ] **PR rehearsal OIDC:** Permit the rehearsal job's `id-token: write` under the
+  intended PR/fork policy. Missing: required rehearsal fails. Verify **OIDC
+  Rehearsal and Production Rejection** and its retained evidence, without
+  production environment access or secrets.
+- [ ] **Update bots:** Activate Renovate for NyxID; keep Dependabot version updates
+  enabled. Missing: corresponding update proposals are absent. Verify Renovate's
+  dashboard/run and Dependabot update-job results; proposed hashes, locks and pin
+  receipts still need review.
+- [ ] **Private CMA access:** Grant Renovate read access to `ChronoAIProject/cma`.
+  Missing: CMA lookups/proposals fail. Verify a successful private CMA revision
+  lookup in Renovate's run/dashboard.
+- [ ] **Durable APK archives:** After merge, dispatch **Provision APK Archives** on
+  **main** with the full reviewed SHA in `catalog_commit`; retain its
+  `build-inputs-apk-YYYY-MM-DD` releases. Missing: durable HTTP 404s warn and use verified
+  upstream archives, whose removal can break builds. Verify **APK durable
+  archives present** passes; missing-archive failures are non-blocking only on PRs.
+- [ ] **Scheduled refresh and PR checks:** Enable schedules, Actions PR creation
+  and the maintenance publisher's `contents: write`/`pull-requests: write`
+  permissions. Missing: no published refresh; inputs eventually go stale.
+  Verify **Weekly Build Input Refresh** produces verified archives and a PR;
+  start PR CI through a maintainer push or account-based close/reopen, since
+  `GITHUB_TOKEN`-created PRs do not start it.
+- [ ] **Continuing reviews:** Assign refresh/disposition owners. Missing reviews:
+  catalog/CA checks older than 14 days, CA sources older than 90 days and expired
+  monthly/90-day/history-only annual dispositions block their gates. Verify freshness, history scan,
+  dependency audit and scanner policy jobs; follow [RELEASE_SCANNING.md](RELEASE_SCANNING.md).
+- [ ] **Private hosted deployments, when used:** Supply reviewed CMA context and
+  use `build-local-image.py`. Missing context/checks: no qualifying build. Verify
+  passing identity/scan/SBOM receipts and the deployment's registry digest per
+  [MACHINE_HECA_CMA_IMAGE.md](MACHINE_HECA_CMA_IMAGE.md); public desktop CI ends
+  before private final layers.
+- [ ] **Independent credential-manifest hosting, when configured:** Host verified
+  release `releases.json` and set `RELEASE_INTEGRITY_MANIFEST_URL`. Missing:
+  independent manifest comparison is unavailable. Verify page retrieval and the
+  signed-release fingerprint per [RELEASE_INTEGRITY.md](RELEASE_INTEGRITY.md).
+- [ ] **Hosted acceptance:** Allow required native Linux/macOS runners and packaged
+  browser prerequisites, including native root/Landlock ABI >= 6. Missing:
+  required jobs fail. Verify **CI Pipeline** is green at the reviewed PR head,
+  including packaging, scans, SBOM closure, signing rehearsal and machine checks.
+
 ## Verification and incident handling
 
 A maintainer can rebuild the adapter with the locked workspace and verify a
