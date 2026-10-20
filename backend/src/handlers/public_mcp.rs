@@ -205,6 +205,7 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,

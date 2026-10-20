@@ -167,25 +167,42 @@ pub(crate) async fn observe(
             doc! {"$set": set},
         ];
         let col = db.collection::<Document>(COLLECTION_NAME);
-        for attempt in 0..3 {
-            match col
-                .update_one(doc! {"identity_key":&id}, update.clone())
-                .upsert(true)
-                .await
-            {
+        for attempt in 0..8 {
+            // Receipt merging is idempotent (set-union/max). Retry a definite
+            // transaction conflict from either owner admission or row creation;
+            // never retry an indeterminate commit or a closed-owner denial.
+            let result = async {
+                let mut tx = super::erasure_admission::begin_write(db, &bot.user_id).await?;
+                let result = col
+                    .update_one(doc! {"identity_key":&id}, update.clone())
+                    .upsert(true)
+                    .session(&mut tx)
+                    .await
+                    .map_err(crate::errors::AppError::from);
+                super::org_membership_authority::finish(tx, result).await
+            }
+            .await;
+            match result {
                 Ok(result) if result.matched_count == 1 || result.upserted_id.is_some() => break,
                 Ok(_) => {
                     return Err(crate::errors::AppError::Internal(
                         "Receipt update did not persist an observation".into(),
                     ));
                 }
-                Err(error)
-                    if attempt < 2
-                        && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) if e.code == 11000) =>
+                Err(crate::errors::AppError::DatabaseError(error))
+                    if attempt < 7
+                        && (error.contains_label("TransientTransactionError")
+                            || matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) if e.code == 11000)) =>
                 {
                     continue;
                 }
-                Err(error) => return Err(error.into()),
+                Err(crate::errors::AppError::Conflict(message))
+                    if attempt < 7
+                        && message == "Security state changed; restart the operation" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
             }
         }
     }

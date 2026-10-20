@@ -240,9 +240,9 @@ async fn all_header_layers_cannot_spoof_resource_request_authority() {
     let f = Fixture::new().await;
     let mut target = f.target().await;
     target.catalog_default_headers = vec![
-        crate::models::default_request_header::DefaultRequestHeader {
+        crate::models::default_request_header::ResolvedDefaultRequestHeader {
             name: HEADER.into(),
-            value: "catalog-spoof".into(),
+            value: "catalog-spoof".to_owned().into(),
             overridable: false,
             sensitive: false,
         },

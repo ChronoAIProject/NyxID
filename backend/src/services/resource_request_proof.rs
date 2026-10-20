@@ -252,17 +252,17 @@ pub async fn introspect(
     }
     descriptor.validate()?;
     let header = decode_header(token).map_err(|_| refused())?;
-    if header.alg != Algorithm::RS256
-        || header.typ.as_deref() != Some(JWT_TYPE)
-        || header.kid.as_deref() != Some(state.jwt_keys.kid.as_str())
-    {
+    if header.alg != Algorithm::RS256 || header.typ.as_deref() != Some(JWT_TYPE) {
         return Err(refused());
     }
+    // Use the same explicit verifier overlap as other NyxID JWT consumers;
+    // unknown/missing key IDs never fall back to the active signing key.
+    let decoding = state.jwt_keys.decoding_key(token).map_err(|_| refused())?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[service_id]);
     validation.set_issuer(&[&state.config.jwt_issuer]);
     validation.leeway = 0;
-    let claims = decode::<Claims>(token, &state.jwt_keys.decoding, &validation)
+    let claims = decode::<Claims>(token, decoding, &validation)
         .map_err(|_| refused())?
         .claims;
     let now = Utc::now().timestamp();

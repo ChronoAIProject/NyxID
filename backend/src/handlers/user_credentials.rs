@@ -239,6 +239,7 @@ mod tests {
     fn test_provider(provider_id: &str, credential_mode: &str, is_active: bool) -> ProviderConfig {
         let now = chrono::Utc::now();
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: provider_id.to_string(),
             slug: format!("test-{}", &provider_id[..8]),
             name: "Test Provider".to_string(),
@@ -312,6 +313,11 @@ mod tests {
             .insert_one(test_provider(&provider_id, "user", true))
             .await
             .unwrap();
+        // Credential writes require the authenticated owner to be a live account.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
 
         let state = test_app_state(db);
 
@@ -355,6 +361,11 @@ mod tests {
 
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(test_provider(&provider_id, "both", true))
+            .await
+            .unwrap();
+        // Credential writes require the authenticated owner to be a live account.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, crate::models::user::UserType::Person))
             .await
             .unwrap();
 

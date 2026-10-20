@@ -541,7 +541,8 @@ pub async fn ssh_exec(
                             service_slug: service_slug.clone(),
                             mode: "exec".to_string(),
                         },
-                    );
+                    )
+                    .await;
 
                     if response.exit_code == 0 && !response.timed_out {
                         crate::services::approval_service::record_chat_approval(

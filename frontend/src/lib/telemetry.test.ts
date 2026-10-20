@@ -1,363 +1,123 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// PostHog mock. `vi.mock` is hoisted above imports, so the factory can't
-// reference a top-level `const`. `vi.hoisted` lets us declare the spy
-// object in the same hoisted scope so `./telemetry`'s `import posthog
-// from 'posthog-js'` resolves to these stubs from the first call.
-const mockPosthog = vi.hoisted(() => ({
-  init: vi.fn(),
-  capture: vi.fn(),
-  captureException: vi.fn(),
-  identify: vi.fn(),
-  reset: vi.fn(),
-  opt_out_capturing: vi.fn(),
-  opt_in_capturing: vi.fn(),
-  has_opted_out_capturing: vi.fn(() => false),
+const state = vi.hoisted(() => ({
+  actor: 'account-a' as string | null,
+  device: { accountId: 'account-a', enabled: true, revision: 0 },
+  api: vi.fn(),
 }));
+vi.mock('./api-client', () => ({ apiClient: state.api }));
+vi.mock('@/stores/auth-store', () => ({ useAuthStore: { getState: () => ({ user: state.actor ? { id: state.actor } : null }) } }));
+vi.mock('@/stores/consent-store', () => ({ useConsentStore: { getState: () => state.device } }));
+import { capture, captureException, identify, reset, initTelemetry, disableTelemetry, isTelemetryActive } from './telemetry';
 
-vi.mock("posthog-js", () => ({
-  default: mockPosthog,
-}));
-
-import {
-  initTelemetry,
-  isTelemetryActive,
-  disableTelemetry,
-  identify,
-  reset as telemetryReset,
-  capture,
-  captureException,
-} from "./telemetry";
-
-const validArgs = {
-  dsn: "phc_test_dsn",
-  host: "https://us.i.posthog.com",
-  shareBack: false,
-  consent: true,
-};
+const event = { name: 'ui.docs_opened', props: { page: 'encryption' } } as const;
+const config = { dsn: 'configured', consent: true };
+const permission = { account_id: 'account-a', enabled: true, revision: 'revision-a' };
+function boot() { identify('account-a'); initTelemetry(config); }
 
 beforeEach(() => {
-  // Clear spy history. Module-level `inited` state is reset via the
-  // `disableTelemetry()` call in afterEach of the prior test.
-  vi.clearAllMocks();
-});
-
-afterEach(() => {
+  reset(); state.api.mockReset(); state.actor = 'account-a';
+  state.device = { accountId: 'account-a', enabled: true, revision: 0 };
+  Object.defineProperty(navigator, 'doNotTrack', { value: '0', configurable: true });
   window.history.replaceState(null, '', '/');
-  // Return `telemetry.ts` module state to pre-init. Safe to call
-  // unconditionally — it's a no-op when `inited === false`.
-  disableTelemetry();
+  state.api.mockImplementation(async (path: string, options?: { authorityGuard?: () => void }) => {
+    options?.authorityGuard?.();
+    return path.endsWith('/analytics') ? permission : undefined;
+  });
 });
 
-describe("isTelemetryActive", () => {
-  it("returns false before any init", () => {
-    expect(isTelemetryActive()).toBe(false);
+describe('authenticated relay analytics', () => {
+  it('admits each event with a fresh permission and sends its exact revision', async () => {
+    boot();
+    await capture(event); await capture(event);
+    expect(state.api.mock.calls.map(([path]) => path)).toEqual([
+      '/users/me/preferences/analytics', '/users/me/analytics/events',
+      '/users/me/preferences/analytics', '/users/me/analytics/events',
+    ]);
+    expect(state.api.mock.calls[1]![1].body).toEqual({ account_id: 'account-a', revision: 'revision-a', event });
   });
 
-  it("returns true after successful init", () => {
-    initTelemetry(validArgs);
-    expect(isTelemetryActive()).toBe(true);
+  it('never reuses a cached positive after remote withdrawal', async () => {
+    boot(); await capture(event);
+    state.api.mockResolvedValue({ ...permission, enabled: false, revision: 'withdrawn' });
+    await capture(event);
+    expect(state.api.mock.calls.filter(([path]) => path.endsWith('/events'))).toHaveLength(1);
   });
 
-  it("returns false after disableTelemetry", () => {
-    initTelemetry(validArgs);
-    disableTelemetry();
-    expect(isTelemetryActive()).toBe(false);
+  it('lookup failure and mismatched response actor cannot dispatch', async () => {
+    boot(); state.api.mockRejectedValueOnce(new Error('unavailable'));
+    await capture(event);
+    state.api.mockResolvedValueOnce({ ...permission, account_id: 'account-b' });
+    await capture(event);
+    expect(state.api.mock.calls.filter(([path]) => path.endsWith('/events'))).toHaveLength(0);
   });
 
-  it("returns false when navigator.doNotTrack is '1', even after successful init", () => {
-    // The privacy policy promises we honor DNT. This must be true
-    // across the whole surface, not just inside the PostHog SDK —
-    // api-client.ts reads this flag to decide whether to send
-    // `X-NyxID-Client: ui` headers, which drive backend-side
-    // surface-tagged telemetry.
-    const original = Object.getOwnPropertyDescriptor(
-      Navigator.prototype,
-      "doNotTrack",
-    );
-    Object.defineProperty(navigator, "doNotTrack", {
-      value: "1",
-      configurable: true,
-    });
-    try {
-      initTelemetry(validArgs);
-      expect(isTelemetryActive()).toBe(false);
-    } finally {
-      if (original) {
-        Object.defineProperty(navigator, "doNotTrack", original);
-      } else {
-        // happy-dom may not have set a descriptor; best-effort reset.
-        Object.defineProperty(navigator, "doNotTrack", {
-          value: "unspecified",
-          configurable: true,
-        });
-      }
+  it('fences a late admission result after account switch', async () => {
+    boot();
+    let release!: (value: typeof permission) => void;
+    state.api.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const pending = capture(event);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    state.actor = 'account-b'; state.device = { accountId: 'account-b', enabled: true, revision: 1 };
+    identify('account-b');
+    release(permission); await pending;
+    expect(state.api.mock.calls.filter(([path]) => path.endsWith('/events'))).toHaveLength(0);
+  });
+
+  it('fences withdrawal while admission is pending', async () => {
+    boot();
+    let release!: (value: typeof permission) => void;
+    state.api.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const pending = capture(event);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    disableTelemetry(); release(permission); await pending;
+    expect(state.api.mock.calls).toHaveLength(1);
+  });
+
+  it('cross-tab withdrawal and regrant cannot revive an in-flight admission', async () => {
+    boot();
+    let release!: (value: typeof permission) => void;
+    state.api.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const pending = capture(event);
+    state.device.enabled = false; state.device.revision++;
+    state.device.enabled = true; state.device.revision++;
+    release(permission); await pending;
+    expect(state.api.mock.calls).toHaveLength(1);
+  });
+
+  it('bounds concurrent admissions and drops overflow without queueing', async () => {
+    boot();
+    const releases: Array<(value: typeof permission) => void> = [];
+    state.api.mockImplementation(() => new Promise((resolve) => { releases.push(resolve); }));
+    const pending = Array.from({ length: 16 }, () => capture(event));
+    await vi.waitFor(() => expect(releases).toHaveLength(16));
+    await capture(event); expect(state.api).toHaveBeenCalledTimes(16);
+    for (const release of releases) release({ ...permission, enabled: false });
+    await Promise.all(pending);
+  });
+
+  it('requires both local restriction and configured authenticated identity', async () => {
+    await capture(event);
+    boot(); state.device.enabled = false; await capture(event);
+    state.device.enabled = true; state.device.accountId = 'account-b'; await capture(event);
+    state.device.accountId = 'account-a'; initTelemetry({ ...config, consent: false }); await capture(event);
+    initTelemetry({ ...config, dsn: '' }); await capture(event);
+    expect(state.api).not.toHaveBeenCalled();
+  });
+
+  it('honors DNT and suppresses authentication/token-bearing pages', async () => {
+    boot();
+    Object.defineProperty(navigator, 'doNotTrack', { value: '1', configurable: true });
+    expect(isTelemetryActive()).toBe(false); await capture(event);
+    Object.defineProperty(navigator, 'doNotTrack', { value: '0', configurable: true });
+    for (const path of ['/login/agent-key/secret', '/reset-password/secret', '/oauth/callback?code=secret', '/approve/secret']) {
+      window.history.replaceState(null, '', path); await capture(event);
     }
-  });
-});
-
-describe("initTelemetry", () => {
-  it("no-ops when consent is false", () => {
-    initTelemetry({ ...validArgs, consent: false });
-    expect(mockPosthog.init).not.toHaveBeenCalled();
-    expect(isTelemetryActive()).toBe(false);
+    expect(state.api).not.toHaveBeenCalled();
   });
 
-  it("no-ops when dsn is empty", () => {
-    initTelemetry({ ...validArgs, dsn: "" });
-    expect(mockPosthog.init).not.toHaveBeenCalled();
-    expect(isTelemetryActive()).toBe(false);
+  it('never forwards raw exception text or stacks', async () => {
+    boot(); captureException(new Error('distinctive-secret')); await Promise.resolve();
+    expect(state.api).not.toHaveBeenCalled();
   });
-
-  it("calls posthog.init exactly once when consent + dsn are present", () => {
-    initTelemetry(validArgs);
-    expect(mockPosthog.init).toHaveBeenCalledTimes(1);
-    expect(mockPosthog.init).toHaveBeenCalledWith(
-      "phc_test_dsn",
-      expect.objectContaining({
-        api_host: "https://us.i.posthog.com",
-        mask_all_text: true,
-        respect_dnt: true,
-        ip: false,
-      }),
-    );
-  });
-
-  it("is idempotent — second call with same args is a no-op", () => {
-    initTelemetry(validArgs);
-    initTelemetry(validArgs);
-    expect(mockPosthog.init).toHaveBeenCalledTimes(1);
-  });
-
-  it("defaults host to PostHog US when host is empty", () => {
-    initTelemetry({ ...validArgs, host: "" });
-    expect(mockPosthog.init).toHaveBeenCalledWith(
-      "phc_test_dsn",
-      expect.objectContaining({ api_host: "https://us.i.posthog.com" }),
-    );
-  });
-});
-
-describe("disableTelemetry", () => {
-  it("no-ops when not inited", () => {
-    disableTelemetry();
-    expect(mockPosthog.opt_out_capturing).not.toHaveBeenCalled();
-    expect(mockPosthog.reset).not.toHaveBeenCalled();
-  });
-
-  it("calls opt_out_capturing and reset when inited", () => {
-    initTelemetry(validArgs);
-    disableTelemetry();
-    expect(mockPosthog.opt_out_capturing).toHaveBeenCalledTimes(1);
-    expect(mockPosthog.reset).toHaveBeenCalledTimes(1);
-  });
-
-  it("flips isTelemetryActive to false", () => {
-    initTelemetry(validArgs);
-    expect(isTelemetryActive()).toBe(true);
-    disableTelemetry();
-    expect(isTelemetryActive()).toBe(false);
-  });
-
-  it("swallows vendor errors during teardown", () => {
-    initTelemetry(validArgs);
-    mockPosthog.opt_out_capturing.mockImplementationOnce(() => {
-      throw new Error("SDK teardown failed");
-    });
-    // Must not throw — state reset is the source of truth for the app.
-    expect(() => disableTelemetry()).not.toThrow();
-    expect(isTelemetryActive()).toBe(false);
-  });
-});
-
-describe("re-init after disable (consent withdrawal + re-opt-in flow)", () => {
-  it("runs initTelemetry cleanly after disableTelemetry", () => {
-    initTelemetry(validArgs);
-    expect(mockPosthog.init).toHaveBeenCalledTimes(1);
-
-    disableTelemetry();
-    expect(isTelemetryActive()).toBe(false);
-
-    initTelemetry(validArgs);
-    expect(mockPosthog.init).toHaveBeenCalledTimes(2);
-    expect(isTelemetryActive()).toBe(true);
-  });
-
-  it("clears the persistent PostHog opt-out flag on re-enable so events flow again", () => {
-    // PostHog's `opt_out_capturing` writes a flag to localStorage that
-    // survives `init()`. Without this explicit `opt_in_capturing`, a
-    // user who toggles OFF in Settings and later toggles back ON would
-    // silently get no events — `telemetryActive` says yes but PostHog's
-    // own flag says no.
-    mockPosthog.has_opted_out_capturing.mockReturnValue(true);
-    initTelemetry(validArgs);
-    expect(mockPosthog.opt_in_capturing).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not fire opt_in_capturing on a fresh init (avoids noisy $opt_in events)", () => {
-    mockPosthog.has_opted_out_capturing.mockReturnValue(false);
-    initTelemetry(validArgs);
-    expect(mockPosthog.opt_in_capturing).not.toHaveBeenCalled();
-  });
-});
-
-describe("emit helpers (identify / reset / capture) are gated on init", () => {
-  it("identify is a no-op before init", () => {
-    identify("user-123");
-    expect(mockPosthog.identify).not.toHaveBeenCalled();
-  });
-
-  it("identify calls posthog.identify after init", () => {
-    initTelemetry(validArgs);
-    identify("user-123");
-    expect(mockPosthog.identify).toHaveBeenCalledWith("user-123");
-  });
-
-  it("identify is a no-op with empty user id", () => {
-    initTelemetry(validArgs);
-    identify("");
-    expect(mockPosthog.identify).not.toHaveBeenCalled();
-  });
-
-  it("reset is a no-op before init", () => {
-    telemetryReset();
-    expect(mockPosthog.reset).not.toHaveBeenCalled();
-  });
-
-  it("reset calls posthog.reset after init", () => {
-    initTelemetry(validArgs);
-    telemetryReset();
-    expect(mockPosthog.reset).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("capture / captureException are gated on init", () => {
-  it("capture is a no-op before init", () => {
-    capture({ name: "test_event", props: {} } as never);
-    expect(mockPosthog.capture).not.toHaveBeenCalled();
-  });
-
-  it("capture forwards name and props after init", () => {
-    initTelemetry(validArgs);
-    capture({ name: "test_event", props: { foo: "bar" } } as never);
-    expect(mockPosthog.capture).toHaveBeenCalledWith("test_event", { foo: "bar" });
-  });
-
-  it("captureException is a no-op before init", () => {
-    captureException(new Error("boom"));
-    expect(mockPosthog.captureException).not.toHaveBeenCalled();
-  });
-
-  it("captureException forwards the error after init", () => {
-    initTelemetry(validArgs);
-    const err = new Error("boom");
-    captureException(err);
-    expect(mockPosthog.captureException).toHaveBeenCalledWith(err);
-  });
-});
-
-describe("before_send privacy hook", () => {
-  type PostHogEvent = { properties?: Record<string, unknown> } | null;
-  type BeforeSend = (event: PostHogEvent) => PostHogEvent;
-
-  function getBeforeSend(): BeforeSend {
-    initTelemetry(validArgs);
-    const config = mockPosthog.init.mock.calls[0]?.[1] as { before_send: BeforeSend };
-    return config.before_send;
-  }
-
-  it("suppresses captures from a tracked bot link containing a one-time token", () => {
-    const beforeSend = getBeforeSend();
-    window.history.replaceState(null, '', '/connect/bot/nyx_bcl_private');
-    expect(beforeSend({ properties: { $current_url: window.location.href } })).toBeNull();
-  });
-
-  it("suppresses SPA login-grant capture after init and resumes on return", () => {
-    window.history.replaceState(null, '', '/settings');
-    const beforeSend = getBeforeSend();
-    for (const route of ['code', 'device', 'agent-key']) {
-      window.history.pushState(null, '', `/login/${route}`);
-      expect(isTelemetryActive()).toBe(false);
-      capture({ name: 'test_event', props: {} } as never);
-      captureException(new Error('private fixture'));
-      identify('private-fixture');
-      expect(beforeSend({ properties: {} })).toBeNull();
-      expect(beforeSend({ properties: { $pathname: '/settings' } })).toBeNull();
-    }
-    expect(mockPosthog.capture).not.toHaveBeenCalled();
-    expect(mockPosthog.captureException).not.toHaveBeenCalled();
-    expect(mockPosthog.identify).not.toHaveBeenCalled();
-    window.history.pushState(null, '', '/settings');
-    expect(isTelemetryActive()).toBe(true);
-    expect(beforeSend({ properties: { $current_url: `${window.location.origin}/login/code?code=fixture` } })).toBeNull();
-    capture({ name: 'test_event', props: {} } as never);
-    expect(mockPosthog.capture).toHaveBeenCalledTimes(1);
-    expect(mockPosthog.opt_out_capturing).not.toHaveBeenCalled();
-  });
-
-  it("suppresses onboarding codes after SPA navigation and in URL/referrer metadata", () => {
-    window.history.replaceState(null, '', '/onboarding');
-    const beforeSend = getBeforeSend();
-    expect(beforeSend({ properties: {$current_url: window.location.href} })).not.toBeNull();
-    window.history.pushState(null, '', '/onboarding/link?code=ABCD1234');
-    expect(isTelemetryActive()).toBe(false);
-    capture({name: 'test_event', props: {}} as never);
-    captureException(new Error('private code fixture'));
-    expect(mockPosthog.capture).not.toHaveBeenCalled();
-    expect(mockPosthog.captureException).not.toHaveBeenCalled();
-    expect(beforeSend({properties: {}})).toBeNull();
-    window.history.pushState(null, '', '/onboarding');
-    for (const field of ['$current_url', '$referrer']) {
-      expect(beforeSend({properties: {[field]: `${window.location.origin}/onboarding/link?code=ABCD1234`}})).toBeNull();
-    }
-    expect(isTelemetryActive()).toBe(true);
-    capture({name: 'test_event', props: {}} as never);
-    expect(mockPosthog.capture).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns null for a null event", () => {
-    expect(getBeforeSend()(null)).toBeNull();
-  });
-
-  it("strips query strings from $current_url and $referrer", () => {
-    const result = getBeforeSend()({
-      properties: {
-        $current_url: "https://app.nyxid.dev/keys?token=secret123",
-        $referrer: "https://app.nyxid.dev/login?next=%2Fkeys",
-      },
-    });
-    expect(result?.properties?.$current_url).toBe("https://app.nyxid.dev/keys");
-    expect(result?.properties?.$referrer).toBe("https://app.nyxid.dev/login");
-  });
-
-  it("drops pageviews on sensitive paths (reset-password, verify-email, oauth completion, approve)", () => {
-    const beforeSend = getBeforeSend();
-    for (const pathname of [
-      "/reset-password/abc-token",
-      "/verify-email/xyz",
-      "/oauth/callback",
-      "/oauth-complete",
-      "/approve/req-1",
-    ]) {
-      expect(beforeSend({ properties: { $pathname: pathname } })).toBeNull();
-    }
-  });
-
-  it("passes through events on non-sensitive paths", () => {
-    const event = { properties: { $pathname: "/dashboard" } };
-    expect(getBeforeSend()(event)).toBe(event);
-  });
-});
-
-it("suppresses personal linking telemetry and strips bearer fragments from other URLs", () => {
-  initTelemetry(validArgs);
-  const options = mockPosthog.init.mock.calls.at(-1)![1] as { before_send: (event: unknown) => unknown };
-  window.history.replaceState(null, "", "/nyxbot/link");
-  expect(isTelemetryActive()).toBe(false);
-  expect(options.before_send({ properties: { $current_url: location.href } })).toBeNull();
-  window.history.replaceState(null, "", "/");
-  expect(options.before_send({ properties: { $referrer: "http://localhost/nyxbot/link#intent_token=private" } })).toBeNull();
-  const event = { properties: { $current_url: "http://localhost/services#intent_token=private" } };
-  options.before_send(event);
-  expect(event.properties.$current_url).toBe("http://localhost/services");
 });

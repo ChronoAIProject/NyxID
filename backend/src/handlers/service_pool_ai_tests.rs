@@ -74,16 +74,18 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
         catalog.default_request_headers = Some(vec![
             crate::models::default_request_header::DefaultRequestHeader {
                 name: "x-review-trace".into(),
-                value: "catalog-trace".into(),
+                value: "catalog-trace".to_owned().into(),
                 overridable: true,
                 sensitive: false,
-            },
+            }
+            .into(),
             crate::models::default_request_header::DefaultRequestHeader {
                 name: "x-review-default".into(),
-                value: "catalog-default".into(),
+                value: "catalog-default".to_owned().into(),
                 overridable: false,
                 sensitive: false,
-            },
+            }
+            .into(),
         ]);
         catalog.inference = Some(ServiceInference {
             wire_protocol: protocol,
@@ -856,15 +858,27 @@ async fn pool_ai_codex_node_transport_preserves_headers_and_local_destination() 
         let node = Uuid::new_v4().to_string();
         let now = bson::DateTime::now();
         fixture.state.db.collection::<Document>("nodes").insert_one(doc! {"_id":&node,"user_id":fixture.auth.user_id.to_string(),"name":"Codex node","status":"online","is_active":true,"auth_token_hash":"test","created_at":now,"updated_at":now,"connection_owner":{"instance_name":&fixture.state.replica_identity.instance_name,"generation_id":&fixture.state.replica_identity.generation_id,"connection_id":"socket","internal_base_url":"http://127.0.0.1","claimed_at":now,"renewed_at":now,"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(5)),"http_cancellation":true}}).await.unwrap();
-        let signing_secret = fixture
-            .state
-            .encryption_keys
-            .encrypt("11".repeat(32).as_bytes())
-            .await
-            .unwrap();
+        let credentials = crate::services::node_service::prepare_managed_credentials(
+            &fixture.state.encryption_keys,
+            &node,
+            &fixture.auth.user_id.to_string(),
+        )
+        .await
+        .unwrap();
         fixture.state.db.collection::<Document>("nodes").update_one(doc! {"_id":&node},
-            doc! {"$set":{"signing_secret_encrypted":bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:signing_secret }}}
+            doc! {"$set":{
+                "signing_secret_encrypted":bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:credentials.signing_secret_encrypted },
+                "signing_secret_hash":crate::crypto::token::hash_token(&credentials.signing_secret),
+                "signing_secret_context_version":credentials.signing_secret_context_version,
+            }}
         ).await.unwrap();
+        crate::services::node_service::get_node_signing_secret(
+            &fixture.state.db,
+            &fixture.state.encryption_keys,
+            &node,
+        )
+        .await
+        .expect("node fixture must have authenticated signing material before testing transport");
         fixture.state.db.collection::<Document>("downstream_services").update_one(doc! {"slug":"review-inference-1"},doc! {"$set":{"slug":"llm-openai-codex","inference.wire_protocol":"openai_responses"}}).await.unwrap();
         fixture.state.db.collection::<Document>("user_services").update_one(doc! {"slug":"review-ai-1"},doc! {"$set":{"node_id":&node,"custom_user_agent": if custom_ua {Some("node-configured-UA")} else {None}}}).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);

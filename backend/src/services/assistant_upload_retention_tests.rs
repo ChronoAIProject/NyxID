@@ -63,6 +63,7 @@ async fn root(
         sections: Vec::new(),
     };
     let row = AssistantUpload {
+        secret_context_versions: Default::default(),
         extracted_chars: None,
         id: id.clone(),
         origin: "user_upload".into(),
@@ -593,10 +594,11 @@ async fn pending_expiry_is_not_retained_and_owner_purge_removes_tombstones() {
             .unwrap()
             .is_none()
     );
-    crate::services::admin_user_service::delete_current_user_cascade(
-        &state.db,
+    crate::test_utils::accept_and_process_erasure_with_state(
+        &state,
         &owner,
-        crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
+        &owner,
+        Some(crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
     )
     .await
     .unwrap();
@@ -870,6 +872,7 @@ async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
     let (state, owner, thread) = fixture().await;
     let id = Uuid::new_v4().to_string();
     let row = crate::models::assistant_attachment::AssistantAttachment {
+        secret_context_versions: Default::default(),
         id: id.clone(),
         origin: "machine_preview".into(),
         user_id: owner.clone(),

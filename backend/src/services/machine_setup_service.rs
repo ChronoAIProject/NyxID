@@ -393,8 +393,9 @@ pub async fn mint(
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"user_id":owner,"status":expected_status,"expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":set},
     ).return_document(ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Setup expired or its command was already issued; create a new setup".into()))?;
-    let result = super::node_service::create_registration_token_with_id(
+    let result = super::node_service::create_registration_token_with_id_for_actor(
         db,
+        owner,
         row.choices.owner_id.as_deref().unwrap_or(owner),
         &row.choices.name,
         max_nodes,

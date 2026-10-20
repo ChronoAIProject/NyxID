@@ -905,7 +905,8 @@ pub(crate) async fn create_bot_with_link(
             TelemetryEvent::ChannelBotRegistered {
                 platform: body.platform.clone(),
             },
-        );
+        )
+        .await;
     }
 
     audit_service::log_for_user(
@@ -1290,7 +1291,8 @@ pub async fn delete_bot(
         TelemetryEvent::ChannelBotDeleted {
             platform: bot.platform.clone(),
         },
-    );
+    )
+    .await;
 
     audit_service::log_for_user(
         state.db.clone(),

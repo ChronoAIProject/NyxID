@@ -228,7 +228,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
         {step === "recovery" && recoveryCodes.length > 0 && (
           <div className="space-y-4">
             <div
-              className="grid grid-cols-2 gap-2"
+              className="grid min-w-0 grid-cols-1 gap-2"
               role="list"
               aria-label="Recovery codes"
             >
@@ -237,18 +237,18 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   key={code}
                   type="button"
                   onClick={() => void handleCopyCode(code, index)}
-                  className="flex items-center justify-between rounded-lg bg-muted px-3 py-2 font-mono text-12 transition-colors duration-300 hover:bg-muted/80"
+                  className="flex min-w-0 items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-left font-mono text-12 transition-colors duration-300 hover:bg-muted/80"
                   aria-label={`Copy recovery code ${String(index + 1)}`}
                 >
-                  <span>{code}</span>
+                  <span className="min-w-0 break-all">{code}</span>
                   {copiedIndex === index ? (
                     <Check
-                      className="h-3 w-3 text-success"
+                      className="h-3 w-3 shrink-0 text-success"
                       aria-hidden="true"
                     />
                   ) : (
                     <Copy
-                      className="h-3 w-3 text-muted-foreground"
+                      className="h-3 w-3 shrink-0 text-muted-foreground"
                       aria-hidden="true"
                     />
                   )}

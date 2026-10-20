@@ -16,6 +16,7 @@ pub(super) async fn ssh_fixture(
     let catalog = catalog(f).await;
     let n = node(f, owner).await;
     let config = SshServiceConfig {
+        ca_context_version: None,
         host: "10.0.0.5".into(),
         port: 22,
         ssh_auth_mode: SshAuthMode::NodeKey,

@@ -42,7 +42,7 @@ use crate::telemetry::{
 const WS_WRITER_CHANNEL_SIZE: usize = 256;
 
 /// JSON messages from node -> NyxID (first message must be register or auth).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "type")]
 enum NodeMessage {
     #[serde(rename = "managed_machine_usage")]
@@ -53,14 +53,14 @@ enum NodeMessage {
     MachineResult(nyxid_machine::Response),
     #[serde(rename = "register")]
     Register {
-        token: String,
+        token: zeroize::Zeroizing<String>,
         #[serde(default)]
         metadata: Option<NodeMetadata>,
     },
     #[serde(rename = "auth")]
     Auth {
         node_id: String,
-        token: String,
+        token: zeroize::Zeroizing<String>,
         #[serde(default)]
         managed_runtime: Option<nyxid_machine::managed::Binding>,
     },
@@ -1001,7 +1001,8 @@ async fn handle_node_connection(
                                     node_platform,
                                     profile: "unknown".to_string(),
                                 },
-                            );
+                            )
+                            .await;
 
                             return Some((node.id, node.user_id, false, None));
                         }
@@ -1307,7 +1308,8 @@ async fn handle_node_connection(
                 node_id: hash_short_id(&node_id),
                 profile: "unknown".to_string(),
             },
-        );
+        )
+        .await;
     }
 
     let mut writer_task = tokio::spawn(run_node_writer(ws_sink, rx, close_rx, node_id.clone()));
@@ -1334,7 +1336,7 @@ async fn handle_node_connection(
                 }
                 let window = crate::services::remote_machine_runtime::signed_node_window(&db, &state.encryption_keys, &node_id_reader, binding).await;
                 let sent = if let Ok(window) = window {
-                    managed_window_tx.try_send(NodeOutboundMessage::Text(serde_json::json!({"type":"managed_runtime_window","window":window}).to_string())).is_ok()
+                    managed_window_tx.try_send(NodeOutboundMessage::Text((serde_json::json!({"type":"managed_runtime_window","window":window}).to_string()).into())).is_ok()
                 } else { false };
                 if !sent {
                     ws_manager.disconnect_connection_if(&node_id_reader, &connection_id, 4007, "managed runtime window unavailable").await;
@@ -1881,7 +1883,8 @@ async fn handle_node_connection(
                 node_id: hash_short_id(&node_id),
                 reason: reason.to_string(),
             },
-        );
+        )
+        .await;
     }
 }
 
@@ -1914,7 +1917,7 @@ async fn run_node_writer<S>(
             }
         };
         match msg {
-            NodeOutboundMessage::Text(text) => {
+            NodeOutboundMessage::Text(mut text) => {
                 // Large proxy requests may legitimately take longer than
                 // the handshake timeout. Heartbeat/operation policies own
                 // their deadlines; lifecycle cancellation interrupts even
@@ -1925,7 +1928,7 @@ async fn run_node_writer<S>(
                         if result.is_err() { break; }
                         continue;
                     },
-                    result = ws_sink.send(Message::Text(text.into())) => {
+                    result = ws_sink.send(Message::Text(std::mem::take(&mut *text).into())) => {
                         if result.is_err() {
                             tracing::debug!(node_id = %node_id, "WebSocket send failed, closing writer");
                             break;
@@ -2174,9 +2177,11 @@ mod tests {
     async fn reconnect_writer_allows_slow_upload_until_lifecycle_cancellation() {
         let (tx, rx) = mpsc::channel(1);
         let (close_tx, close_rx) = tokio::sync::watch::channel(None);
-        tx.send(NodeOutboundMessage::Text("large proxy upload".to_string()))
-            .await
-            .unwrap();
+        tx.send(NodeOutboundMessage::Text(
+            ("large proxy upload".to_string()).into(),
+        ))
+        .await
+        .unwrap();
         let writer = tokio::spawn(super::run_node_writer(
             BlockedNodeSink,
             rx,
@@ -2410,6 +2415,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: hash_token(raw_auth_token),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -3398,7 +3404,7 @@ mod tests {
                     method: "GET".to_string(),
                     path: "/stream".to_string(),
                     query: None,
-                    headers: vec![],
+                    headers: (vec![]).into(),
                     body: None,
                 },
                 None,
@@ -3746,7 +3752,7 @@ mod tests {
         let msg: NodeMessage = serde_json::from_str(json).unwrap();
         match msg {
             NodeMessage::Register { token, metadata } => {
-                assert_eq!(token, "nyx_nreg_abc123");
+                assert_eq!(token.as_str(), "nyx_nreg_abc123");
                 assert!(metadata.is_none());
             }
             _ => panic!("expected Register variant"),
@@ -3760,7 +3766,7 @@ mod tests {
         match msg {
             NodeMessage::Auth { node_id, token, .. } => {
                 assert_eq!(node_id, "n-1");
-                assert_eq!(token, "nyx_nauth_xyz");
+                assert_eq!(token.as_str(), "nyx_nauth_xyz");
             }
             _ => panic!("expected Auth variant"),
         }
@@ -3911,5 +3917,23 @@ mod tests {
     #[test]
     fn ws_writer_channel_size_is_256() {
         assert_eq!(WS_WRITER_CHANNEL_SIZE, 256);
+    }
+}
+
+crate::errors::redacted_debug!(NodeMessage);
+#[cfg(test)]
+mod auth_message_debug_tests {
+    use super::*;
+    #[test]
+    fn auth_and_registration_capabilities_and_arbitrary_error_payload_are_redacted() {
+        let secret = "distinctive-node-auth-ciphertext-289c";
+        for wire in [
+            serde_json::json!({"type":"auth","node_id":"node","token":secret}),
+            serde_json::json!({"type":"register","token":secret}),
+            serde_json::json!({"type":"proxy_error","request_id":"request","error":secret}),
+        ] {
+            let message: NodeMessage = serde_json::from_value(wire).unwrap();
+            assert!(!format!("{message:?}").contains(secret));
+        }
     }
 }

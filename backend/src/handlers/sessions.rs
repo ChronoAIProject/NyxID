@@ -50,11 +50,11 @@ pub async fn list_sessions(
     let sessions: Vec<Session> = state
         .db
         .collection::<Session>(SESSIONS)
-        .find(doc! {
+        .find(crate::services::session_authority::authenticated(doc! {
             "user_id": &user_id,
             "revoked": false,
             "expires_at": { "$gt": now },
-        })
+        }))
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()

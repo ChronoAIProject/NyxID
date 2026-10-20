@@ -819,6 +819,7 @@ export interface ProviderRevocationConfig {
   readonly url: string;
   readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";
   readonly revokes_grant: boolean;
+  readonly effect_scope?: "token_only" | "grant_wide" | "request_scoped" | null;
 }
 
 export interface UserProviderCredentials {

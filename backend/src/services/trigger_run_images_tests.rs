@@ -438,6 +438,24 @@ async fn settle(db: &Database, attachment: &str, audience: &str, state: ImageDel
 #[tokio::test]
 async fn full_runs_evict_the_oldest_ref_terminal_for_the_configured_audience_only() {
     let db = crate::test_utils::connect_transaction_test_database("run_images_evict").await;
+    // Delivery claims admit only a live owner's persisted delivering thread.
+    db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            OWNER,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .insert_one(conversation(
+            "thread",
+            "t1",
+            "trigger",
+            Some("run"),
+            Vec::new(),
+        ))
+        .await
+        .unwrap();
     let (deliver_to, audience) = chat_destination(&db).await;
     insert_run(&db, "run", "thread", "t1", &deliver_to).await;
     let first: Vec<_> = (0..16).map(|index| image(&format!("i{index}"))).collect();

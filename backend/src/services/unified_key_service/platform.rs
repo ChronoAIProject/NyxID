@@ -211,6 +211,7 @@ pub async fn set_platform_connection_active(
 #[allow(clippy::too_many_arguments)]
 pub async fn update_platform_connection_cosmetics(
     db: &mongodb::Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
     owner_id: &str,
     actor_id: &str,
     service_id: &str,
@@ -243,9 +244,22 @@ pub async fn update_platform_connection_cosmetics(
         user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
         skills.clone(),
     )?;
-    user_service_service::update_user_service(
-        db, owner_id, actor_id, service_id, None, None, None, None, active, None, user_agent,
-        headers, None, admin_only,
+    user_service_service::update_user_service_with_keys(
+        db,
+        Some(keys),
+        owner_id,
+        actor_id,
+        service_id,
+        None,
+        None,
+        None,
+        None,
+        active,
+        None,
+        user_agent,
+        headers,
+        None,
+        admin_only,
     )
     .await?;
     user_endpoint_service::update_endpoint(

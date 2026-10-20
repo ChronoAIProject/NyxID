@@ -125,6 +125,7 @@ pub async fn create(
     .await?;
     let mut signing_secret = None;
     let mut signing_key_id = None;
+    let id = Uuid::new_v4().to_string();
     let receiver = if let Some(app) = &app {
         Some(Receiver::App {
             app_id: app.id.clone(),
@@ -133,7 +134,15 @@ pub async fn create(
         let url = webhook_delivery_service::validate_webhook_url(url, "webhook_url").await?;
         let secret = Zeroizing::new(format!("nyx_bwh_{}", generate_random_token()));
         let key_id = webhook_delivery_service::generate_signing_key_id();
-        let encrypted = keys.encrypt(secret.as_bytes()).await?;
+        let encrypted = super::record_field_service::encrypt(
+            keys,
+            LINKS,
+            &id,
+            &input.owner,
+            RECEIVER_SECRET,
+            secret.as_bytes(),
+        )
+        .await?;
         signing_secret = Some(secret);
         signing_key_id = Some(key_id.clone());
         Some(Receiver::Direct {
@@ -146,8 +155,12 @@ pub async fn create(
     };
     let requested_by = app.map(|a| a.client_name).or(input.requested_by.clone());
     let label = label.to_owned();
-    let (link, token) = build_link(input, label, callback_url, receiver, requested_by);
-    db.collection::<Link>(LINKS).insert_one(&link).await?;
+    let (mut link, token) = build_link(id, input, label, callback_url, receiver, requested_by);
+    if matches!(&link.receiver, Some(Receiver::Direct { .. })) && keys.contextual_record_writes() {
+        link.secret_context_versions
+            .insert(RECEIVER_SECRET.into(), 3);
+    }
+    super::erasure_admission::insert_owned(db, LINKS, &link.user_id, &link).await?;
     Ok(Created {
         link,
         token,
@@ -157,6 +170,7 @@ pub async fn create(
 }
 
 fn build_link(
+    id: String,
     input: CreateInput,
     label: String,
     callback_url: Option<String>,
@@ -166,7 +180,8 @@ fn build_link(
     let token = Zeroizing::new(format!("{TOKEN_PREFIX}{}", generate_random_token()));
     let now = Utc::now();
     let link = Link {
-        id: Uuid::new_v4().to_string(),
+        id,
+        secret_context_versions: Default::default(),
         user_id: input.owner,
         created_by_user_id: input.actor,
         platform: input.platform,
@@ -227,6 +242,7 @@ pub(crate) async fn create_personal_telegram_in_session(
         expires_in: Some(900),
     };
     let (link, token) = build_link(
+        Uuid::new_v4().to_string(),
         input,
         "New Telegram bot".into(),
         None,
@@ -744,6 +760,152 @@ pub async fn dispatch(
     Ok(())
 }
 
+const RECEIVER_SECRET: &str = "receiver.secret_encrypted";
+
+fn invalid_receiver() -> AppError {
+    AppError::Internal("Channel receiver credential storage is invalid".into())
+}
+
+fn validate_receiver(link: &Link) -> AppResult<()> {
+    if link.id.is_empty()
+        || link.user_id.is_empty()
+        || link
+            .secret_context_versions
+            .iter()
+            .any(|(field, version)| field != RECEIVER_SECRET || *version != 3)
+    {
+        return Err(invalid_receiver());
+    }
+    match &link.receiver {
+        Some(Receiver::Direct {
+            secret_encrypted,
+            key_id,
+            url,
+        }) => {
+            if secret_encrypted.is_empty()
+                || key_id.is_empty()
+                || key_id.len() > 128
+                || url.len() > 8192
+            {
+                return Err(invalid_receiver());
+            }
+        }
+        None | Some(Receiver::App { .. }) if link.secret_context_versions.is_empty() => {}
+        _ => return Err(invalid_receiver()),
+    }
+    Ok(())
+}
+
+async fn receiver_secret(keys: &EncryptionKeys, link: &Link) -> AppResult<Zeroizing<Vec<u8>>> {
+    validate_receiver(link)?;
+    let Some(Receiver::Direct {
+        secret_encrypted, ..
+    }) = &link.receiver
+    else {
+        return Err(invalid_receiver());
+    };
+    let secret = super::record_field_service::decrypt(
+        keys,
+        LINKS,
+        &link.id,
+        &link.user_id,
+        RECEIVER_SECRET,
+        link.secret_context_versions.get(RECEIVER_SECRET).copied(),
+        secret_encrypted,
+    )
+    .await?;
+    if secret.is_empty() || secret.len() > 4096 || std::str::from_utf8(&secret).is_err() {
+        return Err(invalid_receiver());
+    }
+    Ok(secret)
+}
+
+pub(crate) async fn verify_current_receiver_snapshot(
+    keys: &EncryptionKeys,
+    source: &Document,
+) -> AppResult<()> {
+    let link: Link = bson::from_document(source.clone()).map_err(|_| invalid_receiver())?;
+    validate_receiver(&link)?;
+    let Some(Receiver::Direct {
+        secret_encrypted, ..
+    }) = &link.receiver
+    else {
+        return Ok(());
+    };
+    super::record_field_service::verify_current(
+        keys,
+        LINKS,
+        &link.id,
+        &link.user_id,
+        RECEIVER_SECRET,
+        link.secret_context_versions.get(RECEIVER_SECRET).copied(),
+        secret_encrypted,
+    )
+    .await?;
+    receiver_secret(keys, &link).await?;
+    Ok(())
+}
+
+pub(crate) async fn migrate_receiver_snapshot(
+    db: &Database,
+    keys: &EncryptionKeys,
+    source: &Document,
+) -> AppResult<bool> {
+    if !keys.contextual_record_writes() {
+        return Err(AppError::Conflict(
+            "Contextual writer cutover is required before migration".into(),
+        ));
+    }
+    let link: Link = bson::from_document(source.clone()).map_err(|_| invalid_receiver())?;
+    validate_receiver(&link)?;
+    if !matches!(&link.receiver, Some(Receiver::Direct { .. })) {
+        return Ok(false);
+    }
+    if verify_current_receiver_snapshot(keys, source).await.is_ok() {
+        return Ok(false);
+    }
+    let secret = receiver_secret(keys, &link).await?;
+    let encrypted = super::record_field_service::encrypt(
+        keys,
+        LINKS,
+        &link.id,
+        &link.user_id,
+        RECEIVER_SECRET,
+        &secret,
+    )
+    .await?;
+    let encrypted = bson::Bson::Binary(bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes: encrypted,
+    });
+    let mut versions = link.secret_context_versions.clone();
+    versions.insert(RECEIVER_SECRET.into(), 3);
+    let versions = bson::to_bson(&versions).map_err(|_| invalid_receiver())?;
+    let mut candidate = source.clone();
+    candidate
+        .get_document_mut("receiver")
+        .map_err(|_| invalid_receiver())?
+        .insert("secret_encrypted", encrypted.clone());
+    candidate.insert("secret_context_versions", versions.clone());
+    verify_current_receiver_snapshot(keys, &candidate).await?;
+    let durable = super::transaction_service::durable_database(db);
+    let result = durable
+        .collection::<Document>(LINKS)
+        .update_one(
+            super::record_storage::exact_document_predicate(source),
+            doc! {"$set":{RECEIVER_SECRET:encrypted,"secret_context_versions":versions}},
+        )
+        .await?;
+    if let Some(winner) = durable
+        .collection::<Document>(LINKS)
+        .find_one(doc! {"_id":&link.id})
+        .await?
+    {
+        verify_current_receiver_snapshot(keys, &winner).await?;
+    }
+    Ok(result.matched_count == 1)
+}
+
 async fn deliver_direct(
     client: &reqwest::Client,
     keys: &EncryptionKeys,
@@ -751,7 +913,7 @@ async fn deliver_direct(
 ) -> Result<(), webhook_delivery_service::DeliveryFailure> {
     let Some(Receiver::Direct {
         url,
-        secret_encrypted,
+        secret_encrypted: _,
         key_id,
     }) = &link.receiver
     else {
@@ -762,11 +924,9 @@ async fn deliver_direct(
         .as_deref()
         .ok_or_else(|| delivery_failure("missing_event"))?;
     let event_type = format!("channel_connect.{}", status_name(link.status));
-    let secret = Zeroizing::new(
-        keys.decrypt(secret_encrypted)
-            .await
-            .map_err(|_| delivery_failure("secret_unavailable"))?,
-    );
+    let secret = receiver_secret(keys, link)
+        .await
+        .map_err(|_| delivery_failure("secret_unavailable"))?;
     let body = serde_json::to_vec(&serde_json::json!({"event_id": event_id, "event_type": event_type, "occurred_at": link.terminal_at, "data": link.event_data})).map_err(|_| delivery_failure("serialization_failed"))?;
     if body.len() > 16 * 1024 {
         return Err(delivery_failure("body_too_large"));
@@ -1205,6 +1365,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receiver_readiness_rejects_dangling_versions_and_malformed_material() {
+        let db = connect_transaction_test_database("channel_link_receiver_lifecycle").await;
+        let created = fixture(&db).await;
+        let keys = test_encryption_keys();
+        let mut link = created.link;
+        let source = bson::to_document(&link).unwrap();
+        verify_current_receiver_snapshot(&keys, &source)
+            .await
+            .unwrap();
+        link.secret_context_versions
+            .insert(RECEIVER_SECRET.into(), 3);
+        assert!(
+            verify_current_receiver_snapshot(&keys, &bson::to_document(&link).unwrap())
+                .await
+                .is_err()
+        );
+        link.receiver = Some(Receiver::App {
+            app_id: "registered-app".into(),
+        });
+        assert!(
+            verify_current_receiver_snapshot(&keys, &bson::to_document(&link).unwrap())
+                .await
+                .is_err()
+        );
+        link.secret_context_versions.clear();
+        verify_current_receiver_snapshot(&keys, &bson::to_document(&link).unwrap())
+            .await
+            .unwrap();
+        link.receiver = Some(Receiver::Direct {
+            url: "https://receiver.example.test/hook".into(),
+            key_id: "key-id".into(),
+            secret_encrypted: Vec::new(),
+        });
+        let empty = bson::to_document(&link).unwrap();
+        assert!(
+            verify_current_receiver_snapshot(&keys, &empty)
+                .await
+                .is_err()
+        );
+        assert!(migrate_receiver_snapshot(&db, &keys, &empty).await.is_err());
+        let Some(Receiver::Direct {
+            secret_encrypted, ..
+        }) = &mut link.receiver
+        else {
+            unreachable!()
+        };
+        *secret_encrypted = super::super::record_field_service::encrypt(
+            &keys,
+            LINKS,
+            &link.id,
+            &link.user_id,
+            RECEIVER_SECRET,
+            b"receiver-test-secret",
+        )
+        .await
+        .unwrap();
+        link.secret_context_versions
+            .insert(RECEIVER_SECRET.into(), 3);
+        let current = bson::to_document(&link).unwrap();
+        let roundtrip: Link = bson::from_document(current.clone()).unwrap();
+        assert!(
+            matches!(&roundtrip.receiver, Some(Receiver::Direct { secret_encrypted, .. }) if !secret_encrypted.is_empty())
+        );
+        verify_current_receiver_snapshot(&keys, &current)
+            .await
+            .unwrap();
+        link.secret_context_versions
+            .insert(RECEIVER_SECRET.into(), 4);
+        assert!(
+            verify_current_receiver_snapshot(&keys, &bson::to_document(&link).unwrap())
+                .await
+                .is_err()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn channel_link_direct_delivery_signs_stable_terminal_snapshot() {
         use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
         let server = MockServer::start().await;
@@ -1215,21 +1452,104 @@ mod tests {
             .await;
         let db = connect_transaction_test_database("channel_link_signed_callback").await;
         let c = fixture(&db).await;
-        let keys = test_encryption_keys();
+        let mut keys = test_encryption_keys();
+        keys.set_contextual_record_writes(false);
         let secret = "nyx_bwh_test_only";
         let mut terminal = cancel(&db, &c.link).await.unwrap();
         terminal.receiver = Some(Receiver::Direct {
             url: server.uri(),
-            secret_encrypted: keys.encrypt(secret.as_bytes()).await.unwrap(),
+            secret_encrypted: super::super::record_field_service::encrypt(
+                &keys,
+                LINKS,
+                &terminal.id,
+                &terminal.user_id,
+                RECEIVER_SECRET,
+                secret.as_bytes(),
+            )
+            .await
+            .unwrap(),
             key_id: "test-key-id".into(),
         });
         // Exercise the production serializer, decryption and signed sender with a local receiver.
         // Destination validation is covered separately; production constructs a DNS-pinned client.
-        for _ in 0..2 {
-            deliver_direct(&reqwest::Client::new(), &keys, &terminal)
+        let mut legacy = bson::to_document(&terminal).unwrap();
+        let receiver = legacy.get_document_mut("receiver").unwrap();
+        let bytes = receiver
+            .get_binary_generic("secret_encrypted")
+            .unwrap()
+            .clone();
+        receiver.insert(
+            "secret_encrypted",
+            bson::Bson::Array(
+                bytes
+                    .into_iter()
+                    .map(|byte| bson::Bson::Int32(i32::from(byte)))
+                    .collect(),
+            ),
+        );
+        legacy.insert("future_metadata", doc! {"keep":true});
+        db.collection::<Document>(LINKS)
+            .replace_one(doc! {"_id":&terminal.id}, &legacy)
+            .await
+            .unwrap();
+        assert!(
+            verify_current_receiver_snapshot(&keys, &legacy)
                 .await
-                .unwrap();
-        }
+                .is_err()
+        );
+        assert!(
+            migrate_receiver_snapshot(&db, &keys, &legacy)
+                .await
+                .is_err()
+        );
+        deliver_direct(&reqwest::Client::new(), &keys, &terminal)
+            .await
+            .unwrap();
+        keys.set_contextual_record_writes(true);
+        assert!(
+            migrate_receiver_snapshot(&db, &keys, &legacy)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !migrate_receiver_snapshot(&db, &keys, &legacy)
+                .await
+                .unwrap(),
+            "stale raw source overwrote contextual winner"
+        );
+        let current = db
+            .collection::<Document>(LINKS)
+            .find_one(doc! {"_id":&terminal.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.get_document("future_metadata").unwrap(),
+            legacy.get_document("future_metadata").unwrap()
+        );
+        assert!(
+            current
+                .get_document("receiver")
+                .unwrap()
+                .get_binary_generic("secret_encrypted")
+                .is_ok()
+        );
+        keys.set_allow_legacy_record_reads(false);
+        verify_current_receiver_snapshot(&keys, &current)
+            .await
+            .unwrap();
+        let mut bound: Link = bson::from_document(current).unwrap();
+        assert_eq!(bound.secret_context_versions.get(RECEIVER_SECRET), Some(&3));
+        bound.user_id = Uuid::new_v4().to_string();
+        let error = deliver_direct(&reqwest::Client::new(), &keys, &bound)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason, "secret_unavailable");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        bound.user_id = terminal.user_id.clone();
+        deliver_direct(&reqwest::Client::new(), &keys, &bound)
+            .await
+            .unwrap();
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests[0].body, requests[1].body);
         for request in requests {

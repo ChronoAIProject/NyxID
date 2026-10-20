@@ -288,6 +288,44 @@ pub async fn initiate_password_reset(
     Ok(Some(reset_token))
 }
 
+/// Bind a password already verified by authenticate_user to the live credential
+/// and MFA requirement. The write serializes installation of its authority with
+/// reset/deletion/enrollment. Never accept a stale verified User snapshot alone.
+pub(crate) async fn fence_password_proof(
+    db: &mongodb::Database,
+    user: &User,
+    transaction: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let hash = user.password_hash.as_deref().ok_or_else(|| {
+        AppError::AuthenticationFailed("Password authentication is unavailable".into())
+    })?;
+    let mut filter = doc! {"_id":&user.id,"password_hash":hash,"is_active":true,
+    "user_type":{"$ne":"org"},"platform_personal_deleting":{"$ne":true}};
+    filter.insert(
+        "mfa_enabled",
+        if user.mfa_enabled {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! {"$ne":true})
+        },
+    );
+    let changed = db
+        .collection::<bson::Document>(USERS)
+        .update_one(
+            filter,
+            doc! {"$set":{"password_login_fence":Uuid::new_v4().to_string()}},
+        )
+        .session(transaction)
+        .await
+        .map_err(super::transaction_service::map_error)?;
+    if changed.matched_count != 1 {
+        return Err(AppError::AuthenticationFailed(
+            "Authentication changed; sign in again".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Complete a password reset with the token and new password.
 ///
 /// Hashes the incoming token for comparison against stored hash.
@@ -331,9 +369,17 @@ pub async fn reset_password(
     let new_hash = password::hash_password(new_password)?;
     let now = Utc::now();
 
-    db.collection::<User>(USERS)
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let changed = db
+        .collection::<User>(USERS)
         .update_one(
-            doc! { "_id": &user.id },
+            doc! { "_id": &user.id, "password_reset_token": &token_hash,
+            "is_active": true, "platform_personal_deleting": {"$ne": true},
+            "$expr": {"$gt": ["$password_reset_expires_at", "$$NOW"]} },
             doc! { "$set": {
                 "password_hash": &new_hash,
                 "password_reset_token": null,
@@ -341,7 +387,15 @@ pub async fn reset_password(
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )
+        .session(&mut transaction)
         .await?;
+    if changed.modified_count != 1 {
+        return Err(AppError::BadRequest(
+            "Invalid or expired reset token".into(),
+        ));
+    }
+    super::session_authority::revoke_all_in_transaction(db, &user.id, &mut transaction).await?;
+    super::transaction_service::commit(&mut transaction).await?;
 
     tracing::info!(user_id = %user.id, "Password reset completed");
 

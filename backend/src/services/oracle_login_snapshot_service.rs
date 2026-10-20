@@ -65,7 +65,7 @@ impl fmt::Debug for LoginSnapshotPayload {
     }
 }
 
-fn snapshot_aad(pool_id: &str, snapshot_id: &str, format_version: u32) -> String {
+pub(crate) fn snapshot_aad(pool_id: &str, snapshot_id: &str, format_version: u32) -> String {
     format!("oracle-login-snapshot:{pool_id}:{snapshot_id}:v{format_version}")
 }
 
@@ -250,13 +250,16 @@ pub async fn fetch_for_worker(
         })
         .await?
         .ok_or_else(|| AppError::OracleLoginSnapshotNotFound(snapshot_id.to_string()))?;
-    let aad = snapshot_aad(pool_id, snapshot_id, snapshot.format_version);
-    let sealed_envelope = encryption_keys
-        .decrypt_with_aad(&snapshot.encrypted_envelope, aad.as_bytes())
-        .await?;
+    let sealed_envelope = super::oracle_login_record_service::decrypt(
+        encryption_keys,
+        ORACLE_LOGIN_SNAPSHOTS,
+        &bson::to_document(&snapshot)
+            .map_err(|_| AppError::Internal("Invalid Oracle login envelope".into()))?,
+    )
+    .await?;
     Ok(LoginSnapshotPayload {
         format_version: snapshot.format_version,
-        sealed_envelope: Zeroizing::new(sealed_envelope),
+        sealed_envelope,
     })
 }
 

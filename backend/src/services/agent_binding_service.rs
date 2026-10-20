@@ -702,6 +702,7 @@ mod tests {
 
     fn make_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
             id: id.to_string(),

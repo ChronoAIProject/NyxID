@@ -47,6 +47,8 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -82,7 +84,7 @@ pub struct AsyncServiceOperation {
     pub poll_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub result_encrypted: Option<Vec<u8>>,
 }
 

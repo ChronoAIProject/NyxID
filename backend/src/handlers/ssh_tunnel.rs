@@ -189,7 +189,8 @@ pub async fn issue_ssh_certificate(
             service_slug,
             ttl_secs,
         },
-    );
+    )
+    .await;
 
     approval_service::record_chat_approval(
         &state.db,
@@ -307,12 +308,7 @@ pub async fn ssh_tunnel_ws(
     // task) can carry the original `X-NyxID-Client` surface. Without this
     // the websocket task falls back to `TelemetryContext::default()` and
     // every SSH session gets recorded as `surface="backend"`.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::from_request_headers(&headers);
 
     let concurrency = crate::services::service_concurrency_service::acquire_policy(
         &state.db,
@@ -678,7 +674,8 @@ async fn handle_ssh_socket(
             service_slug: service_slug.clone(),
             mode: "tunnel".to_string(),
         },
-    );
+    )
+    .await;
 
     let mut read_buf = vec![0_u8; 16 * 1024];
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
@@ -793,7 +790,8 @@ async fn handle_ssh_socket(
             service_slug,
             duration_ms,
         },
-    );
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1080,7 +1078,8 @@ async fn handle_node_ssh_socket(
             service_slug: service_slug.clone(),
             mode: "tunnel".to_string(),
         },
-    );
+    )
+    .await;
 
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
         state.config.ssh_max_tunnel_duration_secs,
@@ -1211,7 +1210,8 @@ async fn handle_node_ssh_socket(
             service_slug,
             duration_ms,
         },
-    );
+    )
+    .await;
 }
 
 pub(crate) async fn session_connection(
@@ -1664,6 +1664,7 @@ mod tests {
         validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
+                ca_context_version: None,
                 host: "192.168.1.50".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,
@@ -1683,6 +1684,7 @@ mod tests {
         let error = validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
+                ca_context_version: None,
                 host: "metadata.google.internal".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,
@@ -1708,6 +1710,7 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -1733,6 +1736,7 @@ mod tests {
             asyncapi_spec_url: None,
             streaming_supported: false,
             ssh_config: Some(SshServiceConfig {
+                ca_context_version: None,
                 host: "10.0.0.5".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::Cert,

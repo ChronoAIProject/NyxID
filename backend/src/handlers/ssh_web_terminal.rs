@@ -159,12 +159,7 @@ pub async fn ssh_web_terminal(
     // socket task keeps the original `X-NyxID-Client` surface on
     // SshTunnelOpened / SshTunnelClosed. Without this every web-terminal
     // session is recorded as `surface="backend"`.
-    let tele = TelemetryContext::from_headers(
-        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
-        headers
-            .get("x-nyxid-client-version")
-            .and_then(|v| v.to_str().ok()),
-    );
+    let tele = TelemetryContext::from_request_headers(&headers);
 
     let concurrency = crate::services::service_concurrency_service::acquire_policy(
         &state.db,
@@ -318,7 +313,7 @@ async fn handle_web_terminal(
 /// Ephemeral SSH credentials (key + certificate) for node-routed SSH sessions.
 /// Sent to the node agent as strings -- no files written to the NyxID server.
 pub(crate) struct EphemeralSshCredentials {
-    pub(crate) private_key_pem: String,
+    pub(crate) private_key_pem: zeroize::Zeroizing<String>,
     pub(crate) certificate_openssh: String,
 }
 
@@ -597,7 +592,8 @@ async fn handle_node_web_terminal(
             service_slug: service_slug.clone(),
             mode: "terminal".to_string(),
         },
-    );
+    )
+    .await;
 
     // ----- Bridge loop: browser WebSocket <-> node agent -----
     let idle_timeout = Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS);
@@ -732,7 +728,8 @@ async fn handle_node_web_terminal(
             service_slug,
             duration_ms,
         },
-    );
+    )
+    .await;
 }
 
 fn close_node_web_terminal(state: &AppState, node_id: &str, session_id: &str, reason: &str) {
@@ -790,7 +787,7 @@ pub(crate) async fn generate_ephemeral_credentials(
     .await?;
 
     Ok(EphemeralSshCredentials {
-        private_key_pem: private_key_openssh.to_string(),
+        private_key_pem: private_key_openssh.to_string().into(),
         certificate_openssh: issued.certificate,
     })
 }

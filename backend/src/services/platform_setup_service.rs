@@ -251,9 +251,7 @@ async fn person(db: &Database, owner: &str) -> AppResult<()> {
 }
 
 pub async fn decrypt_facts(keys: &EncryptionKeys, row: &PlatformSetup) -> AppResult<SetupFacts> {
-    let bytes = Zeroizing::new(keys.decrypt(&row.facts_ciphertext).await?);
-    serde_json::from_slice(&bytes)
-        .map_err(|_| AppError::Internal("Setup facts are unavailable".into()))
+    super::platform_setup_record_service::decrypt(keys, row).await
 }
 
 pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<PlatformSetup> {
@@ -376,8 +374,14 @@ pub async fn create_owned(
     let facts_bytes =
         Zeroizing::new(serde_json::to_vec(facts).map_err(|_| invalid("Malformed setup facts"))?);
     let now = Utc::now();
+    let id = uuid::Uuid::new_v4().to_string();
+    let scope = format!("person:{owner}");
+    let ciphertext =
+        super::platform_setup_record_service::encrypt(keys, &id, Some(owner), &scope, &facts_bytes)
+            .await?;
     let row = PlatformSetup {
-        id: uuid::Uuid::new_v4().to_string(),
+        facts_context_version: super::platform_setup_record_service::version(keys),
+        id,
         owner_user_id: Some(owner.into()),
         initiating_actor_id: Some(owner.into()),
         platform_config_id: None,
@@ -386,13 +390,13 @@ pub async fn create_owned(
         profile_generation: None,
         source: "web".into(),
         idempotency_key: idempotency.to_string(),
-        idempotency_scope: format!("person:{owner}"),
+        idempotency_scope: scope,
         template,
         template_version: TEMPLATE_VERSION,
         revision: 1,
         authority_generation: 1,
         state: SetupState::Collecting,
-        facts_ciphertext: keys.encrypt(&facts_bytes).await?,
+        facts_ciphertext: ciphertext,
         limits: default_limits(),
         resources: SetupResources::default(),
         approved_digest: None,
@@ -493,13 +497,18 @@ pub async fn edit_owned(
     }
     validate_facts(row.template, facts, false)?;
     validate_limits(limits)?;
-    let encrypted = keys
-        .encrypt(&Zeroizing::new(
-            serde_json::to_vec(facts).map_err(|_| invalid("Malformed setup facts"))?,
-        ))
-        .await?;
+    let plaintext =
+        Zeroizing::new(serde_json::to_vec(facts).map_err(|_| invalid("Malformed setup facts"))?);
+    let encrypted = super::platform_setup_record_service::encrypt(
+        keys,
+        &row.id,
+        row.owner_user_id.as_deref(),
+        &row.idempotency_scope,
+        &plaintext,
+    )
+    .await?;
     let limits = bson::to_bson(limits).map_err(|_| invalid("Malformed limits"))?;
-    mutate_owned(db, owner, id, revision, doc! {"$set": {"facts_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted},
+    mutate_owned(db, owner, id, revision, doc! {"$set": {"facts_context_version":super::platform_setup_record_service::version(keys).map(i32::from),"facts_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted},
         "limits": limits, "state": "collecting", "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null,
         "approved_by": bson::Bson::Null, "approved_at": bson::Bson::Null, "delivery_tested": false, "delivery_test_message_id": bson::Bson::Null,
         "updated_at": bson::DateTime::now()}, "$inc": {"revision": 1_i64, "authority_generation": 1_i64}}).await
@@ -705,6 +714,8 @@ pub(crate) async fn runtime_notice(
 /// Retain installation provenance after account retirement; no child can become
 /// an ordinary personal route when its owner or encrypted setup disappears.
 pub(crate) async fn retire_owner(db: &Database, owner: &str, deleted: bool) -> AppResult<()> {
+    let durable = super::transaction_service::durable_database(db);
+    let db = &durable;
     let user = db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
         .find_one(doc! {"_id": owner})
@@ -740,7 +751,10 @@ pub(crate) async fn retire_owner(db: &Database, owner: &str, deleted: bool) -> A
     let db = db.clone();
     let owner = owner.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
         let result: AppResult<()> = async {
             let users = db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME);
             if users.find_one_and_update(doc! {"_id": &owner, "is_active": false},
@@ -753,6 +767,7 @@ pub(crate) async fn retire_owner(db: &Database, owner: &str, deleted: bool) -> A
                 "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null,
                 "delivery_tested": false, "updated_at": bson::DateTime::now(), "owner_retirement": if deleted {"deleted"} else {"disabled"}};
             if deleted {
+                changes.insert("facts_context_version", bson::Bson::Null);
                 changes.insert("facts_ciphertext", bson::Bson::Binary(bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: Vec::new()}));
                 changes.insert("published", bson::Bson::Null);
                 changes.insert("purge_after", bson::DateTime::from_chrono(Utc::now() + Duration::days(30)));
@@ -1223,8 +1238,20 @@ pub(crate) async fn guide_draft(
         .binding
         .as_ref()
         .map(|binding| binding.user_id.clone());
+    let id = uuid::Uuid::new_v4().to_string();
+    let ciphertext = super::platform_setup_record_service::encrypt(
+        &state.encryption_keys,
+        &id,
+        owner.as_deref(),
+        &scope,
+        &bytes,
+    )
+    .await?;
     let row = PlatformSetup {
-        id: uuid::Uuid::new_v4().to_string(),
+        facts_context_version: super::platform_setup_record_service::version(
+            &state.encryption_keys,
+        ),
+        id,
         owner_user_id: owner.clone(),
         initiating_actor_id: owner,
         platform_config_id: Some(authority.profile.id.clone()),
@@ -1243,7 +1270,7 @@ pub(crate) async fn guide_draft(
         } else {
             SetupState::AwaitingIdentity
         },
-        facts_ciphertext: state.encryption_keys.encrypt(&bytes).await?,
+        facts_ciphertext: ciphertext,
         limits: default_limits(),
         resources: SetupResources::default(),
         approved_digest: None,
@@ -1332,7 +1359,16 @@ pub(crate) async fn guide_update_current(
     }
     let bytes =
         Zeroizing::new(serde_json::to_vec(facts).map_err(|_| invalid("Malformed setup facts"))?);
-    let ciphertext = state.encryption_keys.encrypt(&bytes).await?;
+    let ciphertext = super::platform_setup_record_service::encrypt(
+        &state.encryption_keys,
+        &captured.id,
+        captured.owner_user_id.as_deref(),
+        &captured.idempotency_scope,
+        &bytes,
+    )
+    .await?;
+    let facts_context_version =
+        super::platform_setup_record_service::version(&state.encryption_keys).map(i32::from);
     let db = state.db.clone();
     let a = a.clone();
     let captured = captured.clone();
@@ -1348,7 +1384,7 @@ pub(crate) async fn guide_update_current(
                 "idempotency_scope": &scope, "platform_config_id": &a.profile.id, "profile_generation": a.profile.generation,
                 "binding_id": a.binding.as_ref().map(|binding| &binding.id), "binding_generation": a.binding.as_ref().map(|binding| binding.generation), "revision": captured.revision, "authority_generation": captured.authority_generation,
                 "state": {"$in": ["draft", "collecting", "awaiting_identity", "awaiting_approval"]}, "$expr": {"$gt": ["$expires_at", "$$NOW"]}},
-                doc! {"$set": {"facts_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext.clone()},
+                doc! {"$set": {"facts_context_version": facts_context_version,"facts_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext.clone()},
                     "state": if owner.is_some() {"collecting"} else {"awaiting_identity"}, "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null, "delivery_tested": false,
                     "updated_at": bson::DateTime::now()}, "$inc": {"revision": 1_i64, "authority_generation": 1_i64}})
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("The draft changed; review its latest facts".into()))
@@ -1410,20 +1446,75 @@ pub(crate) async fn adopt_anonymous(
     let profile =
         super::platform_bot_config_service::get(&state.db, &binding.platform_config_id).await?;
     let scope = native_scope(state, &profile.id, &binding.telegram_sender_id)?;
+    // Authenticate the captured anonymous material before entering the retryable
+    // transaction. Its owner changes here, so its ciphertext must change with it.
+    let source = state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id": id})
+        .await?
+        .ok_or_else(|| AppError::Conflict("Anonymous draft expired or changed".into()))?;
+    let captured: PlatformSetup = bson::from_document(source.clone())
+        .map_err(|_| AppError::Internal("Setup facts require authenticated repair".into()))?;
+    let already_adopted = captured.owner_user_id.as_deref() == Some(owner)
+        && captured.binding_id.as_deref() == Some(binding_id)
+        && captured.binding_generation == Some(generation);
+    let replacement = if already_adopted {
+        None
+    } else {
+        if captured.owner_user_id.is_some()
+            || captured.revision != revision
+            || captured.idempotency_scope != scope
+            || captured.platform_config_id.as_deref() != Some(profile.id.as_str())
+            || captured.profile_generation != Some(profile.generation)
+            || captured.state != SetupState::AwaitingIdentity
+            || captured
+                .expires_at
+                .is_none_or(|expires_at| expires_at <= Utc::now())
+        {
+            return Err(AppError::Conflict(
+                "Anonymous draft expired or changed".into(),
+            ));
+        }
+        let bytes =
+            super::platform_setup_record_service::bytes(&state.encryption_keys, &captured).await?;
+        Some(
+            super::platform_setup_record_service::encrypt(
+                &state.encryption_keys,
+                id,
+                Some(owner),
+                &scope,
+                &bytes,
+            )
+            .await?,
+        )
+    };
+    #[cfg(test)]
+    if let Ok(pause) = ADOPTION_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+    let version =
+        super::platform_setup_record_service::version(&state.encryption_keys).map(i32::from);
     let db = state.db.clone();
     let owner = owner.to_owned();
     let id = id.to_owned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
         let result: AppResult<_> = async {
             super::platform_binding_service::fence_reply(&db, &profile, Some(&binding), session).await?;
             let collection = db.collection::<PlatformSetup>(COLLECTION_NAME);
             if let Some(row) = collection.find_one(doc! {"_id": &id, "owner_user_id": &owner, "binding_id": &binding.id, "binding_generation": generation}).session(&mut *session).await? { return Ok(row); }
             if collection.count_documents(doc! {"owner_user_id": &owner}).session(&mut *session).await? >= MAX_RETAINED_OWNER_SETUPS
                 || collection.count_documents(doc! {"owner_user_id": &owner, "state": {"$nin": ["cancelled", "expired"]}}).session(&mut *session).await? >= MAX_OWNER_SETUPS { return Err(AppError::RateLimited); }
-            collection.find_one_and_update(doc! {"_id": &id, "revision": revision, "owner_user_id": bson::Bson::Null, "idempotency_scope": &scope,
-                "platform_config_id": &profile.id, "profile_generation": profile.generation, "state": "awaiting_identity", "$expr": {"$gt": ["$expires_at", "$$NOW"]}},
-                vec![doc! {"$set": {"owner_user_id": &owner, "initiating_actor_id": &owner, "binding_id": &binding.id, "binding_generation": generation,
+            let ciphertext = replacement.as_ref().ok_or_else(|| AppError::Conflict("Adopted draft changed".into()))?;
+            let authority = doc! {"_id": &id, "revision": revision, "owner_user_id": bson::Bson::Null, "idempotency_scope": &scope,
+                "platform_config_id": &profile.id, "profile_generation": profile.generation, "state": "awaiting_identity", "$expr": {"$gt": ["$expires_at", "$$NOW"]}};
+            collection.find_one_and_update(doc! {"$and": [authority, super::record_storage::exact_document_predicate(&source)]},
+                vec![doc! {"$set": {"facts_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext.clone() }, "facts_context_version": version, "owner_user_id": &owner, "initiating_actor_id": &owner, "binding_id": &binding.id, "binding_generation": generation,
                     "state": "collecting", "approved_digest": bson::Bson::Null, "approved_revision": bson::Bson::Null, "delivery_tested": false,
                     "purge_after": bson::Bson::Null, "expires_at": {"$dateAdd": {"startDate": "$$NOW", "unit": "day", "amount": 30_i64}},
                     "updated_at": "$$NOW", "revision": {"$add": ["$revision", 1_i64]}, "authority_generation": {"$add": ["$authority_generation", 1_i64]}}}])
@@ -1890,3 +1981,12 @@ mod signup_journey_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct AdoptionPause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! { pub(crate) static ADOPTION_PAUSE: std::sync::Arc<AdoptionPause>; }

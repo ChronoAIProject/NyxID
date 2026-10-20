@@ -8,11 +8,27 @@ pub async fn begin_model_attempt(
     row: &crate::models::assistant_conversation::AssistantConversation,
 ) -> AppResult<String> {
     let attempt = uuid::Uuid::new_v4().to_string();
-    db.collection::<Document>(COLLECTION).insert_one(doc! {
-        "_id": &attempt, "kind":"model_attempt", "active":true,
-        "user_id":&row.user_id,"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,
-        "turn_id":&row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?.turn_id,
-        "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35)),
+    let turn = &row
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?
+        .turn_id;
+    let context = (db.clone(), row.clone(), turn.clone(), attempt.clone());
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,row,turn,attempt)| {
+        Box::pin(async move {
+        crate::services::erasure_admission::fence_in_session(db,&row.user_id,tx).await?;
+        let live=db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(
+            doc! {"_id":&row.id,"user_id":&row.user_id,"credential_api_key_id":&row.credential_api_key_id,"active_turn.turn_id":turn},
+            doc! {"$inc":{"model_attempt_fence":1_i64}}
+        ).session(&mut *tx).await?;
+        if live.matched_count!=1 {return Err(AppError::AssistantTurnRequired);}
+        db.collection::<Document>(COLLECTION).insert_one(doc! {
+            "_id":&attempt,"kind":"model_attempt","active":true,"user_id":&row.user_id,
+            "conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"turn_id":turn,
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))
+        }).session(&mut *tx).await?;
+        Ok(())
+        })
     }).await?;
     Ok(attempt)
 }

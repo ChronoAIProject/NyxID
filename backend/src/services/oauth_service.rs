@@ -96,81 +96,7 @@ pub fn resolve_authorize_scope_for_client(
     )
 }
 
-/// Create an authorization code for the OAuth authorization code flow.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub async fn create_authorization_code(
-    db: &mongodb::Database,
-    client_id: &str,
-    user_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    code_challenge: Option<&str>,
-    code_challenge_method: Option<&str>,
-    nonce: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-    binding_grant_id: Option<&str>,
-    resource_uris: &[String],
-    allowed_service_ids: &[String],
-    allow_all_services: bool,
-) -> AppResult<String> {
-    create_authorization_code_with_incremental(
-        db,
-        client_id,
-        user_id,
-        redirect_uri,
-        scope,
-        code_challenge,
-        code_challenge_method,
-        nonce,
-        external_subject,
-        binding_grant_id,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub async fn create_authorization_code_with_incremental(
-    db: &mongodb::Database,
-    client_id: &str,
-    user_id: &str,
-    redirect_uri: &str,
-    scope: &str,
-    code_challenge: Option<&str>,
-    code_challenge_method: Option<&str>,
-    nonce: Option<&str>,
-    external_subject: Option<&ExternalSubjectRef>,
-    binding_grant_id: Option<&str>,
-    resource_uris: &[String],
-    allowed_service_ids: &[String],
-    allow_all_services: bool,
-    incremental_consent: Option<&crate::models::consent::IncrementalConsent>,
-) -> AppResult<String> {
-    create_authorization_code_with_consent(
-        db,
-        client_id,
-        user_id,
-        redirect_uri,
-        scope,
-        code_challenge,
-        code_challenge_method,
-        nonce,
-        external_subject,
-        binding_grant_id,
-        resource_uris,
-        allowed_service_ids,
-        allow_all_services,
-        incremental_consent,
-        None,
-    )
-    .await
-}
-
+/// Create a code bound to the live protected-consent authority.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_authorization_code_with_consent(
     db: &mongodb::Database,
@@ -322,6 +248,18 @@ pub struct IssuedOAuthRefreshToken {
     pub refresh_token_jti: String,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct IssuancePause {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ISSUANCE_PAUSE: std::sync::Arc<IssuancePause>;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_oauth_refresh_token(
     db: &mongodb::Database,
@@ -360,6 +298,11 @@ pub async fn issue_oauth_refresh_token(
         created_at: now,
     };
 
+    #[cfg(test)]
+    if let Ok(pause) = ISSUANCE_PAUSE.try_with(Clone::clone) {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
     db.collection::<RefreshToken>(REFRESH_TOKENS)
         .insert_one(&new_refresh)
         .await?;
@@ -919,7 +862,17 @@ mod tests {
             external_user_id: "ou_123".to_string(),
         };
 
-        let code = create_authorization_code(
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            "user-1",
+            "client-1",
+            "openid profile",
+            Some(vec!["svc-1".into()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+        let code = create_authorization_code_with_consent(
             &db,
             "client-1",
             "user-1",
@@ -933,6 +886,8 @@ mod tests {
             &["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             &["svc-1".to_string()],
             false,
+            None,
+            Some(&reference),
         )
         .await
         .expect("create authorization code");
@@ -947,6 +902,7 @@ mod tests {
         assert_ne!(stored.code_hash, code);
         assert_eq!(stored.client_id, "client-1");
         assert_eq!(stored.user_id, "user-1");
+        assert_eq!(stored.protected_consent, Some(reference));
         assert_eq!(stored.redirect_uri, "https://app.example/callback");
         assert_eq!(stored.scope, "openid profile");
         assert_eq!(stored.code_challenge.as_deref(), Some("challenge"));
@@ -975,9 +931,20 @@ mod tests {
         let code = "empty-service-grant-code";
         let now = Utc::now();
 
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1077,9 +1044,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
@@ -1181,9 +1159,20 @@ mod tests {
         .expect("insert user services");
 
         let code = "consent-only-resource-reject-code";
+        let consent = super::super::consent_service::grant_consent_with_services(
+            &db,
+            &user_id,
+            &client.id,
+            "openid",
+            Some(vec![service_a_id.clone()]),
+        )
+        .await
+        .unwrap();
+        let reference = super::super::consent_service::protected_reference(&consent).unwrap();
+
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
-                protected_consent: None,
+                protected_consent: Some(reference.clone()),
                 incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),

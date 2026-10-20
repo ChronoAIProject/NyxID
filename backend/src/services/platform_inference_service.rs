@@ -371,6 +371,7 @@ async fn revalidate_prepared_target(
     // Material is compared only in memory: never serialized into a filter, log or diagnostic.
     if readiness_projection(captured) != readiness_projection(&live)
         || captured.credential_encrypted != live.credential_encrypted
+        || captured.secret_context_versions != live.secret_context_versions
         || captured.default_request_headers != live.default_request_headers
         || auth_method != target.auth_method
         || auth_key_name != target.auth_key_name
@@ -1252,6 +1253,7 @@ mod tests {
         };
         turns.insert_one(&legacy).await.unwrap();
         let mut runtime = PlatformPublicTurn {
+            secret_context_versions: Default::default(),
             proof_record_id: uuid::Uuid::new_v4().to_string(),
             id: uuid::Uuid::new_v4().to_string(),
             public_session_id: uuid::Uuid::new_v4().to_string(),

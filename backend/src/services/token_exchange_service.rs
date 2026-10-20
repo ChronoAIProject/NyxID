@@ -131,6 +131,9 @@ pub async fn exchange_token_with_authority(
     }
 
     let user_id_str = &subject_claims.sub;
+    let consent_bindings =
+        super::oauth_token_authority_service::exchange_bindings(db, &subject_claims, client_id)
+            .await?;
 
     // Step 4: Verify user has consented to this client
     let consent = consent_service::check_consent(db, user_id_str, client_id, "openid").await?;
@@ -167,7 +170,7 @@ pub async fn exchange_token_with_authority(
             "Catalog delegation requires a client-bound subject token".to_string(),
         ));
     }
-    let (restrictions, authority) = if catalog_scope {
+    let (mut restrictions, authority) = if catalog_scope {
         catalog_delegation_service::ensure_client_can_delegate_catalog(
             db,
             actor_client_id.expect("catalog source client checked above"),
@@ -198,6 +201,13 @@ pub async fn exchange_token_with_authority(
         restrictions.allow_all_nodes.get_or_insert(true);
         (restrictions, None)
     };
+    restrictions.oauth_lineage = Some(
+        crate::models::oauth_delegation_authority::OauthAuthorityLineage {
+            delegation_jti: None,
+            consents: consent_bindings.clone(),
+            source_session_id: subject_claims.sid.clone(),
+        },
+    );
     let (delegated_token, jti) = if catalog_scope {
         jwt::generate_delegated_access_token_for_client(
             jwt_keys,
@@ -210,16 +220,16 @@ pub async fn exchange_token_with_authority(
             Some(&restrictions),
         )?
     } else {
-        let token = jwt::generate_delegated_access_token(
+        jwt::generate_delegated_access_token_for_client(
             jwt_keys,
             config,
             &user_uuid,
             &scope,
             client_id,
+            None,
             DELEGATED_TOKEN_TTL_SECS,
             Some(&restrictions),
-        )?;
-        (token, String::new())
+        )?
     };
 
     if let Some(authority) = authority {
@@ -235,6 +245,15 @@ pub async fn exchange_token_with_authority(
         )
         .await?;
     }
+
+    let claims = jwt::verify_token(jwt_keys, config, &delegated_token)?;
+    super::oauth_token_authority_service::persist(
+        db,
+        &claims,
+        consent_bindings,
+        subject_claims.sid.clone(),
+    )
+    .await?;
 
     Ok(TokenExchangeResponse {
         access_token: delegated_token,
@@ -273,7 +292,26 @@ pub async fn refresh_delegation_token(
     receiving_client_id: Option<&str>,
     scope: &str,
     restrictions: &jwt::TokenRestrictionClaims,
+    source_jti: &str,
 ) -> AppResult<DelegationRefreshResponse> {
+    if scope
+        .split_whitespace()
+        .any(|item| item == ACCOUNT_READ_SCOPE)
+    {
+        return Err(AppError::InvalidScope(
+            "OAuth delegation cannot grant account:read".into(),
+        ));
+    }
+    let original = super::oauth_token_authority_service::load_delegation(db, source_jti).await?;
+    if original.user_id != user_id
+        || original.actor_client_id != acting_client_id
+        || original.receiving_client_id.as_deref() != receiving_client_id
+        || original.scope != scope
+    {
+        return Err(AppError::Unauthorized(
+            "Delegation authority does not match this token".into(),
+        ));
+    }
     // Verify user still exists and is active
     let user = db
         .collection::<User>(USERS)
@@ -411,18 +449,16 @@ pub async fn refresh_delegation_token(
             Some(restrictions),
         )?
     } else {
-        (
-            jwt::generate_delegated_access_token(
-                jwt_keys,
-                config,
-                &user_uuid,
-                &validated_scope,
-                acting_client_id,
-                DELEGATED_TOKEN_TTL_SECS,
-                Some(restrictions),
-            )?,
-            String::new(),
-        )
+        jwt::generate_delegated_access_token_for_client(
+            jwt_keys,
+            config,
+            &user_uuid,
+            &validated_scope,
+            acting_client_id,
+            None,
+            DELEGATED_TOKEN_TTL_SECS,
+            Some(restrictions),
+        )?
     };
 
     if let Some(authority) = authority {
@@ -438,6 +474,15 @@ pub async fn refresh_delegation_token(
         )
         .await?;
     }
+
+    let claims = jwt::verify_token(jwt_keys, config, &new_token)?;
+    super::oauth_token_authority_service::persist(
+        db,
+        &claims,
+        original.consents,
+        original.source_session_id,
+    )
+    .await?;
 
     Ok(DelegationRefreshResponse {
         access_token: new_token,
@@ -964,7 +1009,7 @@ mod tests {
         ))
         .await
         .expect("insert user service");
-        consent_service::grant_consent_with_services(
+        let consent = consent_service::grant_consent_with_services(
             &db,
             &user_id.to_string(),
             client_id,
@@ -974,7 +1019,10 @@ mod tests {
         .await
         .expect("grant restricted consent");
 
-        let source_token = jwt::generate_oauth_access_token(
+        let reference = consent_service::ensure_issuance_reference(&db, &consent)
+            .await
+            .unwrap();
+        let source_token = jwt::generate_oauth_access_token_with_consent(
             &state.jwt_keys,
             &state.config,
             &user_id,
@@ -990,6 +1038,7 @@ mod tests {
                 allow_all_nodes: true,
             }),
             client_id,
+            Some(&reference),
         )
         .expect("generate restricted source token");
 
@@ -1210,6 +1259,7 @@ mod tests {
             None,
             ACCOUNT_READ_SCOPE,
             &jwt::TokenRestrictionClaims::default(),
+            "untrusted-test-jti",
         )
         .await
         .err()

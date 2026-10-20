@@ -300,6 +300,7 @@ async fn mcp_delegation_relay_and_delegated_restrictions_match_rest() {
     )
     .unwrap();
     let restrictions = TokenRestrictionClaims {
+        oauth_lineage: None,
         resources: Some(vec![format!("{}/mcp", f.state.config.base_url)]),
         allowed_service_ids: Some(vec![f.service.clone()]),
         allowed_node_ids: Some(vec![f.node.clone()]),

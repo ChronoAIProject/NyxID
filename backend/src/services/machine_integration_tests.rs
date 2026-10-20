@@ -42,13 +42,94 @@ pub(crate) async fn ungranted_node(f: &Fixture, owner: &str) -> Node {
     Box::pin(ungranted_node_named(f, owner, "test-machine")).await
 }
 pub(crate) async fn ungranted_node_named(f: &Fixture, owner: &str, name: &str) -> Node {
-    let (_, token, _) = node_service::create_registration_token(&f.state.db, owner, name, 100, 300)
-        .await
-        .unwrap();
+    // Resource ownership and the human issuer are distinct. A dedicated
+    // fixture admin provisions org nodes without changing the tested actor's
+    // membership or granting that actor additional execution authority.
+    let users = f
+        .state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME);
+    let target = match users.find_one(doc! {"_id":owner}).await.unwrap() {
+        Some(target) => target,
+        None => {
+            let target = test_user(owner, UserType::Person);
+            users.insert_one(&target).await.unwrap();
+            target
+        }
+    };
+    let mut temporary_issuer = None;
+    let issuer = if target.user_type == UserType::Org {
+        let memberships = f
+            .state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            );
+        let mut candidates = memberships
+            .find(doc! {"org_user_id":owner,"role":"admin","revoked_at":bson::Bson::Null})
+            .await
+            .unwrap();
+        use futures::TryStreamExt;
+        let mut existing = None;
+        while let Some(membership) = candidates.try_next().await.unwrap() {
+            if users
+                .find_one(
+                    doc! {"_id":&membership.member_user_id,"is_active":true,"user_type":"person"},
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                existing = Some(membership.member_user_id);
+                break;
+            }
+        }
+        if let Some(issuer) = existing {
+            issuer
+        } else {
+            let issuer = Uuid::new_v4().to_string();
+            users
+                .insert_one(test_user(&issuer, UserType::Person))
+                .await
+                .unwrap();
+            let membership = test_membership(
+                owner,
+                &issuer,
+                crate::models::org_membership::OrgRole::Admin,
+                None,
+            );
+            memberships.insert_one(&membership).await.unwrap();
+            temporary_issuer = Some((issuer.clone(), membership.id));
+            issuer
+        }
+    } else {
+        owner.to_owned()
+    };
+    let (_, token, _) = node_service::create_registration_token_for_actor(
+        &f.state.db,
+        &issuer,
+        owner,
+        name,
+        100,
+        300,
+    )
+    .await
+    .unwrap();
     let (mut node, _, _) =
         node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
             .await
             .unwrap();
+    if let Some((issuer, membership)) = temporary_issuer {
+        // Redemption consumed the capability. Restore exactly the membership
+        // population this fixture had before temporary provisioning.
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .delete_one(doc! {"_id":membership,"member_user_id":&issuer})
+            .await
+            .unwrap();
+        users.delete_one(doc! {"_id":issuer}).await.unwrap();
+    }
     node.status = NodeStatus::Online;
     node.machine = Some(MachineProfile {
         version: 1,

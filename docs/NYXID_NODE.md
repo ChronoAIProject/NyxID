@@ -647,7 +647,7 @@ beginning and end of large output with byte totals; background output paginates
 by absolute offset from a bounded ring. Both share the configured memory cap.
 Background jobs survive socket reconnects, but a daemon restart ends them.
 
-Computer use runs the MIT cua driver **0.30.4**, verified against the release
+Computer use runs the MIT cua driver **0.31.0** (`cua-driver-rs-v0.31.0`; authoritative pin: `cli/src/node/machine/cua.rs`), verified against the release
 hashes in `cli/resources/cua/release.json`, through MCP stdio with telemetry
 disabled. NyxID never installs the AGPL perception extension. `--cua-driver PATH`
 uses an existing binary after checking its version. Standard mode may require

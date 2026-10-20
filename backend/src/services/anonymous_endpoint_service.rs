@@ -498,6 +498,7 @@ mod tests {
 
     fn compatible_service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,

@@ -213,8 +213,10 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
             &service,
             actor,
             &input,
-            &request_id,
-            "stable-local-intent",
+            catalog_skill_service::CreateIntent {
+                request_id: &request_id,
+                fingerprint: "stable-local-intent",
+            },
             &[],
         )
         .await
@@ -234,8 +236,10 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
             &service,
             actor,
             &input,
-            &request_id,
-            "stable-local-intent",
+            catalog_skill_service::CreateIntent {
+                request_id: &request_id,
+                fingerprint: "stable-local-intent",
+            },
             &[],
         )
         .await
@@ -253,8 +257,10 @@ async fn tools_manager_all_tool_creation_fences_live_roles_but_receipt_replay_is
                     &service,
                     actor,
                     &input,
-                    &Uuid::new_v4().to_string(),
-                    "new-local-intent",
+                    catalog_skill_service::CreateIntent {
+                        request_id: &Uuid::new_v4().to_string(),
+                        fingerprint: "new-local-intent"
+                    },
                     &[]
                 )
                 .await,
@@ -1037,8 +1043,12 @@ async fn tools_manager_catalog_auth_scheme_reaches_http_ws_and_mcp_user_connecti
         );
         let response = http.post(format!("{base}/mcp")).bearer_auth(&token).header("Mcp-Session-Id", &session).header("Accept", "application/json, text/event-stream")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nyx__call_tool","arguments":{"tool_name":"scheme-personal__read","arguments_json":"{}"}}})).send().await.unwrap();
-        assert!(response.status().is_success());
+        let status = response.status();
         let result = response.text().await.unwrap();
+        assert!(
+            status.is_success(),
+            "MCP scheme request failed ({status}): {result}"
+        );
         assert!(
             !result.contains("\"isError\":true") && !result.contains("\"error\":"),
             "MCP scheme call failed: {result}"
@@ -1508,12 +1518,11 @@ async fn tools_manager_first_secret_races_and_freeze_survives_admin_clear() {
         .unwrap()
         .unwrap();
     assert!(stored.tools_credential_frozen);
-    let plain = state
-        .encryption_keys
-        .decrypt(&stored.credential_encrypted)
-        .await
-        .unwrap();
-    assert!(plain == b"fake-secret-a" || plain == b"fake-secret-b");
+    let plain =
+        crate::services::catalog_credential_record_service::bytes(&state.encryption_keys, &stored)
+            .await
+            .unwrap();
+    assert!(plain.as_slice() == b"fake-secret-a" || plain.as_slice() == b"fake-secret-b");
     assert!(!format!("{stored:?}").contains("fake-secret"));
     assert!(
         update(
@@ -1630,10 +1639,11 @@ async fn tools_manager_twin_sanitizes_source_and_keeps_drafts() {
     source.default_request_headers = Some(vec![
         crate::models::default_request_header::DefaultRequestHeader {
             name: "X-Secret".into(),
-            value: "fake-source-secret".into(),
+            value: "fake-source-secret".to_owned().into(),
             sensitive: true,
             overridable: false,
-        },
+        }
+        .into(),
     ]);
     db.collection::<DownstreamService>(SERVICES)
         .insert_one(&source)
@@ -3938,20 +3948,36 @@ async fn tools_manager_transfer_requires_live_human_admin_and_binds_receipt() {
         expected_version: &preview.version,
         capacity: 5,
     };
-    assert!(transfers::transfer(&db, command(false)).await.is_err());
-    let receipt = transfers::transfer(&db, command(true)).await.unwrap();
+    assert!(
+        transfers::transfer_with_keys(&db, None, command(false))
+            .await
+            .is_err()
+    );
+    let receipt = transfers::transfer_with_keys(&db, None, command(true))
+        .await
+        .unwrap();
     assert!(receipt.tool_transfer);
     assert_eq!(
-        transfers::transfer(&db, command(true)).await.unwrap().id,
+        transfers::transfer_with_keys(&db, None, command(true))
+            .await
+            .unwrap()
+            .id,
         receipt.id
     );
-    assert!(transfers::transfer(&db, command(false)).await.is_err());
+    assert!(
+        transfers::transfer_with_keys(&db, None, command(false))
+            .await
+            .is_err()
+    );
     db.collection::<Document>(SERVICES)
         .delete_one(doc! {"_id":&tool.id})
         .await
         .unwrap();
     assert_eq!(
-        transfers::transfer(&db, command(true)).await.unwrap().id,
+        transfers::transfer_with_keys(&db, None, command(true))
+            .await
+            .unwrap()
+            .id,
         receipt.id
     );
     let admin_role = db
@@ -3967,7 +3993,11 @@ async fn tools_manager_transfer_requires_live_human_admin_and_binds_receipt() {
         )
         .await
         .unwrap();
-    assert!(transfers::transfer(&db, command(true)).await.is_err());
+    assert!(
+        transfers::transfer_with_keys(&db, None, command(true))
+            .await
+            .is_err()
+    );
     db.drop().await.unwrap();
 }
 
@@ -5279,5 +5309,84 @@ async fn tools_manager_endpoint_readers_keep_published_only_identity_fallback() 
         super::tools::list(State(state.clone()), test_auth_user(&manager)).await,
         Err(AppError::DatabaseError(_))
     ));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn admin_twin_http_reencrypts_sensitive_headers_and_manager_never_inherits() {
+    let db = crate::test_utils::connect_transaction_test_database("twin_contextual_http").await;
+    let state = test_app_state(db.clone());
+    let admin = seed(&db, "admin", false, false).await;
+    let manager = seed(&db, "operator", true, false).await;
+    let source=create(&state,&admin,json!({"name":"Source","slug":"contextual-source","base_url":"https://api.example.test","auth_method":"none",
+        "default_request_headers":[{"name":"X-Private","value":"distinctive-twin-header-secret","sensitive":true}]})).await.unwrap();
+    let token = |actor: &str| {
+        crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(actor).unwrap(),
+            "openid profile email admin write",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    for (actor, slug, inherits) in [
+        (&admin, "admin-header-twin", true),
+        (&manager, "manager-header-twin", false),
+    ] {
+        let (status, response) = super::curation_tests::request(
+            &state,
+            "POST",
+            "/api/v1/services",
+            &token(actor),
+            Some(json!({"slug":slug,"twin_of_service_id":source.id})),
+        )
+        .await;
+        assert_eq!(status, 200, "twin creation failed: {response}");
+        assert!(
+            !response
+                .to_string()
+                .contains("distinctive-twin-header-secret")
+        );
+        assert!(!response.to_string().contains("value_encrypted"));
+        let row = db
+            .collection::<DownstreamService>(SERVICES)
+            .find_one(doc! {"slug":slug})
+            .await
+            .unwrap()
+            .unwrap();
+        if inherits {
+            let headers = row.default_request_headers.as_ref().unwrap();
+            assert_eq!(headers[0].value_context_version, Some(4));
+            let decoded = crate::services::default_header_service::catalog(
+                Some(state.encryption_keys.as_ref()),
+                &row,
+            )
+            .await
+            .unwrap();
+            assert_eq!(decoded[0].value.as_str(), "distinctive-twin-header-secret");
+            assert!(
+                crate::services::default_header_service::decode(
+                    Some(state.encryption_keys.as_ref()),
+                    SERVICES,
+                    &source.id,
+                    &admin,
+                    Some(headers)
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                response["default_request_headers"][0]["value"],
+                crate::models::default_request_header::REDACTED_PLACEHOLDER
+            );
+        } else {
+            assert!(row.default_request_headers.is_none());
+        }
+    }
     db.drop().await.unwrap();
 }

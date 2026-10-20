@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::crypto::aes::EncryptionKeys;
+use crate::crypto::aes::{EncryptionKeys, RecordContext};
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetadata, NodeStatus};
@@ -26,6 +26,133 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
 use crate::services::org_service::{self, OwnerAccess};
+
+const SIGNING_SECRET_CONTEXT_VERSION: u32 = 3;
+const SIGNING_SECRET_FIELD: &[&str] = &["signing_secret_encrypted"];
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SecretMigrationOutcome {
+    Rewritten,
+    ConcurrentChange,
+    NoSecret,
+}
+
+/// One bounded adapter. CAS source ownership, format and exact ciphertext so
+/// rotation/transfer wins. The runner retains failures and retries changed rows.
+pub(crate) async fn migrate_signing_secret_snapshot(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    source: &bson::Document,
+) -> AppResult<SecretMigrationOutcome> {
+    let node: Node = bson::from_document(source.clone())
+        .map_err(|_| AppError::Internal("Invalid node storage".into()))?;
+    if node.signing_secret_encrypted.is_none() {
+        if node.signing_secret_context_version.is_some() {
+            return Err(AppError::Internal(
+                "Node secret storage is incomplete".into(),
+            ));
+        }
+        return Ok(SecretMigrationOutcome::NoSecret);
+    }
+    if !keys.contextual_record_writes() {
+        return Err(AppError::Conflict(
+            "Contextual writer cutover is required before migration".into(),
+        ));
+    }
+    let plaintext = decrypt_signing_secret(keys, &node).await?;
+    drop(validate_node_signing_secret(&plaintext, &node)?);
+    let encrypted = encrypt_signing_secret(keys, &node.id, &node.user_id, &plaintext).await?;
+    let context = RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD)?;
+    keys.authenticate_current_record(&encrypted, &context)
+        .await?;
+    let predicate = super::record_storage::source_predicate(
+        source,
+        &[
+            "user_id",
+            "auth_token_hash",
+            "signing_secret_hash",
+            "signing_secret_encrypted",
+            "signing_secret_context_version",
+        ],
+    );
+    let changed=db.collection::<bson::Document>(NODES).update_one(
+        predicate,
+        doc! {"$set":{"signing_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"signing_secret_context_version":SIGNING_SECRET_CONTEXT_VERSION}},
+    ).write_concern(mongodb::options::WriteConcern::majority()).await?;
+    Ok(if changed.matched_count == 1 {
+        SecretMigrationOutcome::Rewritten
+    } else {
+        SecretMigrationOutcome::ConcurrentChange
+    })
+}
+
+pub(crate) async fn verify_current_signing_secret(
+    keys: &EncryptionKeys,
+    node: &Node,
+) -> AppResult<()> {
+    if node.signing_secret_context_version != Some(SIGNING_SECRET_CONTEXT_VERSION) {
+        return Err(AppError::Conflict(
+            "Node secret still requires contextual migration".into(),
+        ));
+    }
+    let encrypted = node
+        .signing_secret_encrypted
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("Node secret storage is incomplete".into()))?;
+    let context = RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD)?;
+    keys.authenticate_current_record(encrypted, &context)
+        .await?;
+    drop(signing_secret_from_node(keys, node).await?);
+    Ok(())
+}
+
+async fn encrypt_signing_secret(
+    keys: &EncryptionKeys,
+    node_id: &str,
+    owner: &str,
+    secret: &[u8],
+) -> AppResult<Vec<u8>> {
+    if keys.contextual_record_writes() {
+        keys.encrypt_record(
+            secret,
+            &RecordContext::new(NODES, node_id, owner, SIGNING_SECRET_FIELD)?,
+        )
+        .await
+    } else {
+        // Preserve the historical encrypted bytes/decoder contract while
+        // compatible readers are staged. No contextual marker is written.
+        keys.encrypt(secret).await
+    }
+}
+
+async fn decrypt_signing_secret(
+    keys: &EncryptionKeys,
+    node: &Node,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let ciphertext = node
+        .signing_secret_encrypted
+        .as_deref()
+        .ok_or_else(|| AppError::NodeOffline("Node is missing its signing secret".into()))?;
+    match node.signing_secret_context_version {
+        // Exact legacy decode; random v0 nonces may start with any magic bytes.
+        None if keys.allow_legacy_record_reads() => {
+            keys.decrypt(ciphertext).await.map(Zeroizing::new)
+        }
+        None => Err(AppError::Internal(
+            "Legacy node secret reads are disabled".into(),
+        )),
+        Some(SIGNING_SECRET_CONTEXT_VERSION) => {
+            keys.decrypt_record(
+                ciphertext,
+                &RecordContext::new(NODES, &node.id, &node.user_id, SIGNING_SECRET_FIELD)?,
+            )
+            .await
+        }
+        Some(_) => Err(AppError::Internal(
+            "Unsupported node secret storage version".into(),
+        )),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -133,8 +260,9 @@ const DEVICE_PROVISIONING_SOURCES: &[&str] = &[
     DEVICE_ONBOARD_PROVISIONING_SOURCE,
 ];
 
-/// Create a one-time registration token for a new node.
-/// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
+/// Test convenience for direct personal registration. Production always supplies
+/// the authenticated issuer independently from the chosen resource owner.
+#[cfg(test)]
 pub async fn create_registration_token(
     db: &mongodb::Database,
     user_id: &str,
@@ -142,8 +270,21 @@ pub async fn create_registration_token(
     max_nodes_per_user: u32,
     ttl_secs: i64,
 ) -> AppResult<(String, String, DateTime<Utc>)> {
-    create_registration_token_with_id(
+    create_registration_token_for_actor(db, user_id, user_id, name, max_nodes_per_user, ttl_secs)
+        .await
+}
+
+pub async fn create_registration_token_for_actor(
+    db: &mongodb::Database,
+    issuer_user_id: &str,
+    user_id: &str,
+    name: &str,
+    max_nodes_per_user: u32,
+    ttl_secs: i64,
+) -> AppResult<(String, String, DateTime<Utc>)> {
+    create_registration_token_with_id_for_actor(
         db,
+        issuer_user_id,
         user_id,
         name,
         max_nodes_per_user,
@@ -153,11 +294,11 @@ pub async fn create_registration_token(
     .await
 }
 
-/// Create a one-time registration token whose id is reserved by the caller.
-/// Assistant effects use the same UUID as the eventual node id so their safe
-/// `node` resource remains authoritative before and after token redemption.
-pub async fn create_registration_token_with_id(
+/// Owner and issuer are fenced with membership changes in the insertion
+/// transaction; preflight ACL checks alone cannot authorize a late mint.
+pub async fn create_registration_token_with_id_for_actor(
     db: &mongodb::Database,
+    issuer_user_id: &str,
     user_id: &str,
     name: &str,
     max_nodes_per_user: u32,
@@ -215,6 +356,7 @@ pub async fn create_registration_token_with_id(
     let token = NodeRegistrationToken {
         id: token_id.clone(),
         user_id: user_id.to_string(),
+        issuer_user_id: Some(issuer_user_id.to_owned()),
         token_hash,
         name: name.to_string(),
         used: false,
@@ -222,11 +364,71 @@ pub async fn create_registration_token_with_id(
         created_at: now,
     };
 
-    db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
-        .insert_one(&token)
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
+    let result: AppResult<()> = async {
+        fence_registration_lifecycle(db, user_id, issuer_user_id, &mut tx).await?;
+        if user_id != issuer_user_id && db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        ).find_one(doc! {"org_user_id":user_id,"member_user_id":issuer_user_id,"role":"admin","revoked_at":null})
+            .session(&mut tx).await?.is_none() {
+            return Err(invalid_registration());
+        }
+        db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+            .insert_one(&token)
+            .session(&mut tx)
+            .await?;
+        Ok(())
+    }
+    .await;
+    super::org_membership_authority::finish(tx, result).await?;
     Ok((token_id, raw_token, expires_at))
+}
+
+fn invalid_registration() -> AppError {
+    AppError::NodeRegistrationFailed("Invalid, expired or revoked registration authority".into())
+}
+
+async fn fence_registration_lifecycle(
+    db: &mongodb::Database,
+    owner: &str,
+    issuer: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    super::org_membership_authority::fence_live_member(db, issuer, tx).await?;
+    if owner == issuer {
+        return Ok(());
+    }
+    super::org_membership_authority::fence_org(db, owner, tx).await?;
+    if db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id":owner,"is_active":true,"user_type":"org"})
+        .session(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Err(invalid_registration());
+    }
+    Ok(())
+}
+
+/// Called while holding the same org write fence as mint/redemption. Legacy
+/// org rows lack attribution, so all pending legacy registrations are retired.
+pub(crate) async fn retire_org_registrations_in_session(
+    db: &mongodb::Database,
+    org: &str,
+    issuer: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+        .delete_many(doc! {
+            "user_id":org,"used":false,"$or":[{"issuer_user_id":issuer},{"issuer_user_id":null}]
+        })
+        .session(tx)
+        .await?;
+    Ok(())
 }
 
 /// Consume a registration token and create a new Node record.
@@ -240,24 +442,15 @@ pub async fn register_node(
     let token_hash = hash_token(raw_token);
     let now = Utc::now();
 
-    // Find and consume the token atomically
-    let token = db
-        .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
-        .find_one_and_update(
-            doc! {
-                "token_hash": &token_hash,
-                "used": false,
-                "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-            },
-            doc! {
-                "$set": { "used": true },
-            },
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::NodeRegistrationFailed("Invalid or expired registration token".to_string())
-        })?;
-
+    // Crypto may await KMS before the transaction. The token and issuer's live
+    // authority are checked again together at the final consume+insert boundary.
+    let token = db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+        .find_one(doc! {"token_hash":&token_hash,"used":false,"expires_at":{"$gt":bson::DateTime::from_chrono(now)}})
+        .await?.ok_or_else(invalid_registration)?;
+    let issuer = token
+        .issuer_user_id
+        .clone()
+        .unwrap_or_else(|| token.user_id.clone());
     // Validate metadata fields if present
     if let Some(ref meta) = metadata {
         validate_node_metadata(meta)?;
@@ -270,9 +463,13 @@ pub async fn register_node(
     // Generate HMAC signing secret
     let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
     let signing_secret_encrypted = Some(
-        encryption_keys
-            .encrypt(raw_signing_secret.as_bytes())
-            .await?,
+        encrypt_signing_secret(
+            encryption_keys,
+            &token.id,
+            &token.user_id,
+            raw_signing_secret.as_bytes(),
+        )
+        .await?,
     );
     let signing_secret_hash = hash_token(&raw_signing_secret);
 
@@ -289,6 +486,9 @@ pub async fn register_node(
         status: NodeStatus::Online,
         auth_token_hash,
         signing_secret_encrypted,
+        signing_secret_context_version: encryption_keys
+            .contextual_record_writes()
+            .then_some(SIGNING_SECRET_CONTEXT_VERSION),
         signing_secret_hash,
         last_heartbeat_at: Some(now),
         connected_at: Some(now),
@@ -300,7 +500,23 @@ pub async fn register_node(
         updated_at: now,
     };
 
-    db.collection::<Node>(NODES).insert_one(&node).await?;
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        // A missing legacy issuer works only for direct personal ownership;
+        // treating an org as its own issuer is rejected by the personal fence.
+        fence_registration_lifecycle(db, &node.user_id, &issuer, &mut tx).await?;
+        let consumed = db.collection::<NodeRegistrationToken>(NODE_REG_TOKENS).update_one(
+            doc! {"_id":&node.id,"token_hash":&token_hash,"user_id":&node.user_id,"issuer_user_id":token.issuer_user_id.as_deref(),"used":false,"expires_at":{"$gt":bson::DateTime::now()}},
+            doc! {"$set":{"used":true}},
+        ).session(&mut tx).await?;
+        if consumed.matched_count != 1 { return Err(invalid_registration()); }
+        db.collection::<Node>(NODES).insert_one(&node).session(&mut tx).await?;
+        Ok(())
+    }.await;
+    super::org_membership_authority::finish(tx, result).await?;
 
     tracing::info!(
         node_id = %node.id,
@@ -351,9 +567,13 @@ pub async fn create_for_device(
     ));
     let auth_token_hash = hash_token(raw_auth_token.as_str());
     let raw_signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-    let signing_secret_encrypted = encryption_keys
-        .encrypt(raw_signing_secret.as_bytes())
-        .await?;
+    let signing_secret_encrypted = encrypt_signing_secret(
+        encryption_keys,
+        &node_id,
+        input.user_id,
+        raw_signing_secret.as_bytes(),
+    )
+    .await?;
     let signing_secret_hash = hash_token(raw_signing_secret.as_str());
 
     let node = Node {
@@ -366,6 +586,9 @@ pub async fn create_for_device(
         status: NodeStatus::Offline,
         auth_token_hash,
         signing_secret_encrypted: Some(signing_secret_encrypted),
+        signing_secret_context_version: encryption_keys
+            .contextual_record_writes()
+            .then_some(SIGNING_SECRET_CONTEXT_VERSION),
         signing_secret_hash,
         last_heartbeat_at: None,
         connected_at: None,
@@ -443,26 +666,8 @@ pub(crate) async fn signing_secret_from_node(
     encryption_keys: &EncryptionKeys,
     node: &Node,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    let node_id = &node.id;
-
-    let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
-        return Err(AppError::NodeOffline(format!(
-            "Node {node_id} is missing its signing secret"
-        )));
-    };
-
-    let decrypted_secret = Zeroizing::new(
-        encryption_keys
-            .decrypt(encrypted_secret)
-            .await
-            .map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to decrypt node signing secret for {node_id}: {e}"
-                ))
-            })?,
-    );
-
-    decode_node_signing_secret(&decrypted_secret, node_id)
+    let decrypted_secret = decrypt_signing_secret(encryption_keys, node).await?;
+    validate_node_signing_secret(&decrypted_secret, node)
 }
 
 /// Get a single node by ID, verifying ownership.
@@ -592,6 +797,7 @@ pub async fn list_user_nodes(
 /// Transfer an active node to another owner and detach owner-scoped routing state.
 pub async fn transfer_node_owner(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     node_id: &str,
     new_owner_user_id: &str,
@@ -599,6 +805,7 @@ pub async fn transfer_node_owner(
 ) -> AppResult<TransferNodeResult> {
     transfer_node_owner_with_expected_state_version(
         db,
+        encryption_keys,
         actor_user_id,
         node_id,
         new_owner_user_id,
@@ -613,6 +820,7 @@ pub async fn transfer_node_owner(
 /// the legacy version-one row, matching the authorization projection.
 pub async fn transfer_node_owner_with_expected_state_version(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     node_id: &str,
     new_owner_user_id: &str,
@@ -637,10 +845,35 @@ pub async fn transfer_node_owner_with_expected_state_version(
         ));
     }
 
+    // KMS work precedes the transaction. The exact source material is checked
+    // again inside its node write fence; rotation/transfer races reject rather
+    // than rebinding a stale secret. Only owned ciphertext enters the retry
+    // callback, avoiding borrowed crypto state across its HRTB boundary.
+    let (rebound_secret, context_version) = if node.signing_secret_encrypted.is_some() {
+        let secret = decrypt_signing_secret(encryption_keys, &node).await?;
+        let encrypted =
+            encrypt_signing_secret(encryption_keys, node_id, new_owner_user_id, &secret).await?;
+        (
+            bson::Bson::Binary(bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            }),
+            if encryption_keys.contextual_record_writes() {
+                bson::Bson::Int32(SIGNING_SECRET_CONTEXT_VERSION as i32)
+            } else {
+                bson::Bson::Null
+            },
+        )
+    } else {
+        (bson::Bson::Null, bson::Bson::Null)
+    };
+    let expected_secret = node.signing_secret_encrypted.clone();
+    let expected_context_version = node.signing_secret_context_version;
+    let expected_auth_hash = node.auth_token_hash.clone();
+    let expected_signing_hash = node.signing_secret_hash.clone();
     let db = db.clone();
     let node_id = node_id.to_string();
     let previous_owner_user_id = node.user_id;
-    let node_name = node.name;
     let new_owner_user_id = new_owner_user_id.to_string();
     crate::services::service_history::transaction::run(&db.clone(), async move |session| {
             let operation: AppResult<TransferNodeResult> = async {
@@ -661,7 +894,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     .find_one(doc! {
                         "_id": { "$ne": &node_id },
                         "user_id": &new_owner_user_id,
-                        "name": &node_name,
+                        "name": &current.name,
                         "is_active": true,
                     })
                     .session(&mut *session)
@@ -685,6 +918,13 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     return Err(AppError::BadRequest(format!(
                         "Maximum of {max_nodes_per_user} nodes per user reached"
                     )));
+                }
+
+                if current.signing_secret_encrypted != expected_secret
+                    || current.signing_secret_context_version != expected_context_version
+                    || current.auth_token_hash != expected_auth_hash
+                    || current.signing_secret_hash != expected_signing_hash {
+                    return Err(AppError::Conflict("Node credentials changed; reload before transferring".into()));
                 }
 
                 let now = bson::DateTime::from_chrono(Utc::now());
@@ -740,6 +980,8 @@ pub async fn transfer_node_owner_with_expected_state_version(
                         vec![doc! {
                             "$set": {
                                 "user_id": &new_owner_user_id,
+                                "signing_secret_encrypted": rebound_secret.clone(),
+                                "signing_secret_context_version": context_version.clone(),
                                 "updated_at": &now,
                                 "state_version": {
                                     "$add": [
@@ -1049,21 +1291,25 @@ pub async fn rotate_auth_token(
     node_id: &str,
 ) -> AppResult<(String, String)> {
     super::remote_machine_service::guard_legacy_node_mutation(db, node_id, "rotate").await?;
-    let _node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
+    let node = ensure_node_writable_by_actor(db, user_id, node_id).await?;
 
     let raw_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
     let token_hash = hash_token(&raw_token);
     let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
-    let signing_secret_encrypted = encryption_keys
-        .encrypt(raw_signing_secret.as_bytes())
-        .await?;
+    let signing_secret_encrypted = encrypt_signing_secret(
+        encryption_keys,
+        node_id,
+        &node.user_id,
+        raw_signing_secret.as_bytes(),
+    )
+    .await?;
     let signing_secret_hash = hash_token(&raw_signing_secret);
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db
         .collection::<Node>(NODES)
         .update_one(
-            doc! { "_id": node_id, "is_active": true },
+            doc! { "_id": node_id, "user_id":&node.user_id, "auth_token_hash":&node.auth_token_hash, "is_active": true },
             doc! { "$set": {
                 "auth_token_hash": &token_hash,
                 "signing_secret_encrypted": bson::Binary {
@@ -1071,6 +1317,7 @@ pub async fn rotate_auth_token(
                     bytes: signing_secret_encrypted,
                 },
                 "signing_secret_hash": &signing_secret_hash,
+                "signing_secret_context_version": if encryption_keys.contextual_record_writes() { bson::Bson::Int32(SIGNING_SECRET_CONTEXT_VERSION as i32) } else { bson::Bson::Null },
                 "updated_at": &now,
             }, "$inc": {
                 "access_revision": 1_i64,
@@ -1093,21 +1340,33 @@ pub(crate) struct ManagedNodeCredentialMaterial {
     pub auth_token: Zeroizing<String>,
     pub signing_secret: Zeroizing<String>,
     pub signing_secret_encrypted: Vec<u8>,
+    pub signing_secret_context_version: Option<u32>,
 }
 
 pub(crate) async fn prepare_managed_credentials(
     encryption_keys: &EncryptionKeys,
+    node_id: &str,
+    owner_id: &str,
 ) -> AppResult<ManagedNodeCredentialMaterial> {
     let auth_token = Zeroizing::new(format!(
         "nyx_nauth_{}",
         hex::encode(rand::random::<[u8; 32]>())
     ));
     let signing_secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-    let signing_secret_encrypted = encryption_keys.encrypt(signing_secret.as_bytes()).await?;
+    let signing_secret_encrypted = encrypt_signing_secret(
+        encryption_keys,
+        node_id,
+        owner_id,
+        signing_secret.as_bytes(),
+    )
+    .await?;
     Ok(ManagedNodeCredentialMaterial {
         auth_token,
         signing_secret,
         signing_secret_encrypted,
+        signing_secret_context_version: encryption_keys
+            .contextual_record_writes()
+            .then_some(SIGNING_SECRET_CONTEXT_VERSION),
     })
 }
 
@@ -1120,6 +1379,7 @@ pub(crate) async fn activate_managed_credentials(
     auth_hash: &str,
     signing_hash: &str,
     signing_secret_encrypted: &[u8],
+    signing_secret_context_version: Option<u32>,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
     let updated = db.collection::<Node>(NODES).update_one(
@@ -1127,6 +1387,7 @@ pub(crate) async fn activate_managed_credentials(
         doc! {"$set": {
             "auth_token_hash": auth_hash, "signing_secret_hash": signing_hash,
             "signing_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: signing_secret_encrypted.to_vec() },
+            "signing_secret_context_version": signing_secret_context_version.map(|v| bson::Bson::Int32(v as i32)).unwrap_or(bson::Bson::Null),
             "is_active": true, "status": NodeStatus::Offline.as_str(),
             "connection_owner": bson::Bson::Null, "updated_at": bson::DateTime::from_chrono(now),
         }, "$inc": {"access_revision": 1_i64, "state_version": 1_i64}},
@@ -1251,19 +1512,35 @@ fn decode_node_signing_secret(
     secret_hex_bytes: &[u8],
     node_id: &str,
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    let secret_hex = std::str::from_utf8(secret_hex_bytes).map_err(|e| {
+    let secret_hex = std::str::from_utf8(secret_hex_bytes).map_err(|_| {
         AppError::Internal(format!(
-            "Node signing secret for {node_id} is not valid UTF-8: {e}"
+            "Node signing secret for {node_id} is not valid UTF-8"
         ))
     })?;
 
-    let secret = hex::decode(secret_hex).map_err(|e| {
+    // Every supported writer has always minted 32 bytes encoded as 64 hex
+    // characters. Decode directly into an owned zeroizing allocation.
+    let mut secret = Zeroizing::new(vec![0_u8; 32]);
+    hex::decode_to_slice(secret_hex, secret.as_mut_slice()).map_err(|_| {
         AppError::Internal(format!(
-            "Node signing secret for {node_id} is not valid hex: {e}"
+            "Node signing secret for {node_id} is not valid 32-byte hex"
         ))
     })?;
+    Ok(secret)
+}
 
-    Ok(Zeroizing::new(secret))
+fn validate_node_signing_secret(bytes: &[u8], node: &Node) -> AppResult<Zeroizing<Vec<u8>>> {
+    let decoded = decode_node_signing_secret(bytes, &node.id)?;
+    let encoded = std::str::from_utf8(bytes)
+        .map_err(|_| AppError::Internal("Invalid node signing secret encoding".into()))?;
+    // The legacy hash authenticates the EXACT hex text, not the decoded bytes.
+    // Storage-only migration preserves that historical contract.
+    if hash_token(encoded) != node.signing_secret_hash {
+        return Err(AppError::Internal(
+            "Node signing secret hash mismatch".into(),
+        ));
+    }
+    Ok(decoded)
 }
 
 // --- Binding operations ---
@@ -1695,6 +1972,7 @@ fn admin_info_from_user(user_id: &str, user: Option<&User>, role: NodeAdminRole)
 
 #[cfg(test)]
 mod tests {
+    mod contextual_secrets;
     use super::*;
     use crate::models::node::NodeMetrics;
     use crate::models::node_service_binding::COLLECTION_NAME as NODE_SERVICE_BINDINGS;
@@ -1882,6 +2160,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -1972,8 +2251,9 @@ mod tests {
 
     #[test]
     fn decodes_node_signing_secret_hex() {
-        let secret = decode_node_signing_secret(b"616263", "node-1").expect("valid secret");
-        assert_eq!(secret.as_slice(), b"abc");
+        let secret =
+            decode_node_signing_secret("ab".repeat(32).as_bytes(), "node-1").expect("valid secret");
+        assert_eq!(secret.as_slice(), &[0xab; 32]);
     }
 
     #[test]
@@ -1985,7 +2265,7 @@ mod tests {
     #[test]
     fn rejects_node_signing_secret_invalid_hex() {
         let error = decode_node_signing_secret(b"not-hex", "node-1").expect_err("invalid hex");
-        assert!(error.to_string().contains("not valid hex"));
+        assert!(error.to_string().contains("not valid 32-byte hex"));
     }
 
     #[tokio::test]
@@ -2123,6 +2403,7 @@ mod tests {
 
         let error = transfer_node_owner_with_expected_state_version(
             &db,
+            &crate::test_utils::test_encryption_keys(),
             &actor_id,
             &node.id,
             &destination_id,
@@ -2620,14 +2901,9 @@ mod tests {
             return;
         };
 
-        let org_id = Uuid::new_v4().to_string();
-        db.collection::<User>(USERS)
-            .insert_one(test_user(&org_id, UserType::Org))
-            .await
-            .expect("insert org user");
-
+        let (actor, org_id) = contextual_secrets::transfer_fixture(&db).await;
         let (_token_id, raw_token, _expires_at) =
-            create_registration_token(&db, &org_id, "org-node", 10, 3600)
+            create_registration_token_for_actor(&db, &actor, &org_id, "org-node", 10, 3600)
                 .await
                 .expect("create org-owned token");
         let (node, _raw_auth_token, _raw_signing_secret) =

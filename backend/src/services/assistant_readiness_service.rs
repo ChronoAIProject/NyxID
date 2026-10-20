@@ -430,7 +430,15 @@ async fn execution_state_for_user_service(
     user_id: &str,
     user_service_id: &str,
 ) -> AppResult<Option<bool>> {
-    let tools = mcp_service::load_user_tools_all(db, node_ws_manager, user_id).await?;
+    let allowed = [user_service_id.to_string()];
+    let tools = mcp_service::load_user_tools_all_scoped(
+        db,
+        node_ws_manager,
+        user_id,
+        mcp_service::NodeScope::Unrestricted,
+        mcp_service::ServiceScope::Allowed(&allowed),
+    )
+    .await?;
     Ok(Some(tools.iter().any(|tool| {
         tool.executable
             && matches!(
@@ -905,6 +913,86 @@ mod tests {
         let capability = &snapshot.capabilities[0];
         assert_eq!(capability.status, CapabilityStatus::CannotUse);
         assert_eq!(capability.reason_code, Some(ReasonCode::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn readiness_exact_service_id_remains_executable_through_a_slug_collision() {
+        let Some(db) = connect_test_database("assistant_readiness_exact_service_id").await else {
+            eprintln!("skipping assistant readiness exact-ID test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let personal_id = uuid::Uuid::new_v4().to_string();
+        let organization_id = uuid::Uuid::new_v4().to_string();
+        let personal_endpoint = uuid::Uuid::new_v4().to_string();
+        let organization_endpoint = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_many([
+            crate::test_utils::test_user_endpoint(
+                &personal_endpoint,
+                &actor_id,
+                "Personal GitHub",
+                "https://personal.example.test",
+                None,
+                None,
+            ),
+            crate::test_utils::test_user_endpoint(
+                &organization_endpoint,
+                &org_id,
+                "Organization GitHub",
+                "https://organization.example.test",
+                None,
+                None,
+            ),
+        ])
+        .await
+        .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([
+                test_user_service(
+                    &personal_id,
+                    &actor_id,
+                    "api-github",
+                    &personal_endpoint,
+                    None,
+                    None,
+                ),
+                test_user_service(
+                    &organization_id,
+                    &org_id,
+                    "api-github",
+                    &organization_endpoint,
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+
+        let executable = execution_state_for_user_service(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &actor_id,
+            &organization_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(executable, Some(true));
+        db.drop().await.unwrap();
     }
 
     #[test]

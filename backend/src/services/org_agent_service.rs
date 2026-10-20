@@ -185,6 +185,17 @@ pub struct RequestAccess {
 }
 
 impl RequestAccess {
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Whether this request snapshot permits the given organization service.
+    /// The snapshot is the authoritative ACL for an organization-bound key;
+    /// callers must not resolve membership a second time.
+    pub(crate) fn allows_service(&self, service: &UserService) -> bool {
+        self.acl.allows_resource(&service.id) && (!service.admin_only || self.acl.can_write())
+    }
+
     pub(crate) fn can_maintain(&self) -> bool {
         can_maintain(&self.acl)
     }
@@ -252,6 +263,15 @@ impl RequestAccess {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_request_access(actor: &str, owner: &str, acl: OwnerAccess) -> RequestAccess {
+    RequestAccess {
+        actor: actor.into(),
+        owner: owner.into(),
+        acl,
     }
 }
 
@@ -372,7 +392,6 @@ pub async fn key_services(
         return Ok(None);
     };
     let owner = &access.owner;
-    let acl = &access.acl;
     let rows: Vec<UserService> = db
         .collection(SERVICES)
         .find(doc! {"_id": {"$in": &key.allowed_service_ids}, "user_id": owner, "is_active": true})
@@ -381,7 +400,7 @@ pub async fn key_services(
         .await?;
     Ok(Some(
         rows.into_iter()
-            .filter(|s| acl.allows_resource(&s.id) && (!s.admin_only || acl.can_write()))
+            .filter(|s| access.allows_service(s))
             .map(|s| s.id)
             .collect(),
     ))
@@ -458,8 +477,7 @@ pub async fn authorize_service_with_access(
         .collection::<UserService>(SERVICES)
         .find_one(doc! {"_id": id, "user_id": owner, "is_active": true})
         .await?;
-    let acl = &access.acl;
-    if row.is_none_or(|s| !acl.allows_resource(id) || (s.admin_only && !acl.can_write())) {
+    if row.is_none_or(|s| !access.allows_service(&s)) {
         return Err(AppError::Forbidden(
             "This service is outside the organization's live member access".into(),
         ));

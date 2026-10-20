@@ -11,24 +11,6 @@ use crate::services::{api_key_mutation_service as key_mutations, role_service};
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
 
-// Collection name constants for cascade delete
-const REFRESH_TOKENS: &str = "refresh_tokens";
-const API_KEYS: &str = "api_keys";
-const USER_SERVICE_CONNECTIONS: &str = "user_service_connections";
-const USER_PROVIDER_TOKENS: &str = "user_provider_tokens";
-const MFA_FACTORS: &str = "mfa_factors";
-const AUTHORIZATION_CODES: &str = "authorization_codes";
-const OAUTH_STATES: &str = "oauth_states";
-const CONSENTS: &str = "consents";
-const MCP_SESSIONS: &str = "mcp_sessions";
-const APPROVAL_REQUESTS: &str = "approval_requests";
-const APPROVAL_GRANTS: &str = "approval_grants";
-const SERVICE_APPROVAL_CONFIGS: &str = "service_approval_configs";
-const NOTIFICATION_CHANNELS: &str = "notification_channels";
-const OAUTH_CLIENTS: &str = "oauth_clients";
-const SERVICE_ACCOUNTS: &str = "service_accounts";
-const SERVICE_ACCOUNT_TOKENS: &str = "service_account_tokens";
-
 /// Look up the email for `user_id` without erroring on "not found".
 ///
 /// Returns `Ok(None)` if the user doesn't exist (or any other lookup
@@ -435,102 +417,136 @@ async fn apply_user_security_state_with_deletion_policy(
         .start_transaction()
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
-            let result: AppResult<()> = async {
-                let current = db
-                    .collection::<bson::Document>(USERS)
-                    .find_one(doc! {"_id":&user_id})
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("User not found".into()))?;
-                if active
-                    && current
-                        .get("deletion_requested_at")
-                        .is_some_and(|value| !matches!(value, bson::Bson::Null))
-                {
-                    return Err(AppError::Conflict(
-                        "Account deletion has already been accepted".into(),
-                    ));
-                }
-                let mut filter = doc! {"_id":&user_id};
-                if let Some(expected_active) = expected_active {
-                    filter.insert("is_active", expected_active);
-                }
-                if active {
-                    filter.insert("platform_personal_retirement_pending", doc! {"$ne":true});
-                    filter.insert("platform_personal_deleting", doc! {"$ne":true});
-                }
-                let now = bson::DateTime::now();
-                let mut set = doc! {"is_active":active,"updated_at":now};
-                if !active {
-                    set.insert("platform_personal_retirement_pending", true);
-                }
-                if deleting {
-                    set.insert("platform_personal_deleting", true);
-                    let requested = current
-                        .get("deletion_requested_at")
-                        .filter(|value| !matches!(value, bson::Bson::Null))
-                        .cloned()
-                        .unwrap_or(bson::Bson::DateTime(now));
-                    set.insert("deletion_requested_at", requested);
-                }
-                let changed = db
-                    .collection::<bson::Document>(USERS)
-                    .update_one(
-                        filter,
-                        doc! {"$set":set,"$inc":{"platform_personal_effect_revision":1_i64}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if changed.matched_count != 1 {
-                    return Err(AppError::Conflict(
-                        "Account state changed; refresh before retrying".into(),
-                    ));
-                }
-                if let Some(policy) = &owner_deletion_policy {
-                    // Same transaction as the account/source fence. These
-                    // retained lifecycle records outlive the user cascade;
-                    // replay preserves the original consent and timestamp.
-                    let accepted_at = current
-                        .get_datetime("deletion_requested_at")
-                        .copied()
-                        .unwrap_or(now);
-                    let basis = crate::models::remote_machine::MachineDeletionBasis {
-                        owner_id: user_id.clone(),
-                        source: crate::models::remote_machine::MachineDeletionSource::AccountOwner,
-                        policy_version: policy.clone(),
-                        accepted_at: accepted_at.to_chrono(),
-                    };
-                    let basis = bson::to_bson(&basis).map_err(|_| {
-                        AppError::Internal("Machine deletion basis encoding failed".into())
-                    })?;
-                    db.collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
-                        .update_many(
-                            doc! {"owner_id":&user_id,"deletion_basis":bson::Bson::Null},
-                            doc! {"$set":{"deletion_basis":basis}},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                }
-                if !active {
-                    super::machine_external_grant_service::user_security_changed_in_session(
-                        &db,
-                        &user_id,
-                        if deleting {
-                            "user_deletion_requested"
-                        } else {
-                            "user_disabled"
-                        },
-                        session,
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
+            let result = apply_user_security_state_in_session(
+                &db,
+                session,
+                &user_id,
+                active,
+                deleting,
+                owner_deletion_policy.as_deref(),
+                expected_active,
+            )
             .await;
             key_mutations::transaction_result(result)
         })
         .await
         .map_err(key_mutations::map_transaction_error)
+}
+
+/// Shared atomic account fence. Personal-erasure acceptance owns its transaction
+/// and persists its intent beside this state transition before any cleanup.
+pub(crate) async fn apply_user_security_state_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    user_id: &str,
+    active: bool,
+    deleting: bool,
+    owner_deletion_policy: Option<&str>,
+    expected_active: Option<bool>,
+) -> AppResult<()> {
+    if let Some(policy) = owner_deletion_policy {
+        validate_account_deletion_policy(policy)?;
+        if active || !deleting {
+            return Err(AppError::ValidationError(
+                "Owner deletion policy requires account deletion".into(),
+            ));
+        }
+    }
+    let owner_deletion_policy = owner_deletion_policy.map(str::to_owned);
+    let current = db
+        .collection::<bson::Document>(USERS)
+        .find_one(doc! {"_id":&user_id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".into()))?;
+    if active
+        && current
+            .get("deletion_requested_at")
+            .is_some_and(|value| !matches!(value, bson::Bson::Null))
+    {
+        return Err(AppError::Conflict(
+            "Account deletion has already been accepted".into(),
+        ));
+    }
+    if !active {
+        super::org_membership_authority::fence_person_authority_loss(
+            db, user_id, session, deleting,
+        )
+        .await?;
+    }
+    let mut filter = doc! {"_id":&user_id};
+    if let Some(expected_active) = expected_active {
+        filter.insert("is_active", expected_active);
+    }
+    if active {
+        filter.insert("platform_personal_retirement_pending", doc! {"$ne":true});
+        filter.insert("platform_personal_deleting", doc! {"$ne":true});
+    }
+    let now = bson::DateTime::now();
+    let mut set = doc! {"is_active":active,"updated_at":now};
+    if !active {
+        set.insert("platform_personal_retirement_pending", true);
+    }
+    if deleting {
+        set.insert("platform_personal_deleting", true);
+        let requested = current
+            .get("deletion_requested_at")
+            .filter(|value| !matches!(value, bson::Bson::Null))
+            .cloned()
+            .unwrap_or(bson::Bson::DateTime(now));
+        set.insert("deletion_requested_at", requested);
+    }
+    let changed = db
+        .collection::<bson::Document>(USERS)
+        .update_one(
+            filter,
+            doc! {"$set":set,"$inc":{"platform_personal_effect_revision":1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
+    if changed.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Account state changed; refresh before retrying".into(),
+        ));
+    }
+    if let Some(policy) = &owner_deletion_policy {
+        // Same transaction as the account/source fence. These
+        // retained lifecycle records outlive the user cascade;
+        // replay preserves the original consent and timestamp.
+        let accepted_at = current
+            .get_datetime("deletion_requested_at")
+            .copied()
+            .unwrap_or(now);
+        let basis = crate::models::remote_machine::MachineDeletionBasis {
+            owner_id: user_id.to_owned(),
+            source: crate::models::remote_machine::MachineDeletionSource::AccountOwner,
+            policy_version: policy.clone(),
+            accepted_at: accepted_at.to_chrono(),
+        };
+        let basis = bson::to_bson(&basis)
+            .map_err(|_| AppError::Internal("Machine deletion basis encoding failed".into()))?;
+        db.collection::<bson::Document>(crate::models::remote_machine::COLLECTION_NAME)
+            .update_many(
+                doc! {"owner_id":&user_id,"deletion_basis":bson::Bson::Null},
+                doc! {"$set":{"deletion_basis":basis}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    if !active {
+        super::machine_external_grant_service::user_security_changed_in_session(
+            db,
+            user_id,
+            if deleting {
+                "user_deletion_requested"
+            } else {
+                "user_disabled"
+            },
+            session,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Initiate a forced password reset for a user.
@@ -561,287 +577,17 @@ pub async fn force_password_reset(
     Ok(token)
 }
 
-/// Delete a user and cascade-delete all related documents.
-///
-/// Self-protection: admin_user_id must differ from target_user_id.
-/// Audit log entries are retained (orphaned reference).
-pub async fn delete_user_cascade(
-    db: &mongodb::Database,
-    admin_user_id: &str,
-    target_user_id: &str,
-) -> AppResult<()> {
-    if admin_user_id == target_user_id {
-        return Err(AppError::ValidationError(
-            "Cannot delete yourself".to_string(),
-        ));
-    }
-
-    delete_user_cascade_internal(db, target_user_id, None).await
-}
-
-/// Delete the currently authenticated user and cascade-delete all related documents.
-///
-/// This is intended for self-service account deletion flows (e.g. DELETE /users/me).
-pub const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data";
+/// Explicit owner acknowledgement required before accepting Machine erasure.
+pub const ACCOUNT_DELETION_POLICY_VERSION: &str = "machine-data-provider-revocation-v2";
 pub const ACCOUNT_DELETION_POLICY_HEADER: &str = "x-nyxid-account-deletion-policy";
 
 pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
     if policy != ACCOUNT_DELETION_POLICY_VERSION {
         return Err(AppError::ValidationError(
-            "Confirm the current account deletion policy, including all managed Machine data"
+            "Confirm the current account deletion policy, including provider revocation and all managed Machine data"
                 .into(),
         ));
     }
-    Ok(())
-}
-
-pub async fn delete_current_user_cascade(
-    db: &mongodb::Database,
-    user_id: &str,
-    deletion_policy_version: &str,
-) -> AppResult<()> {
-    validate_account_deletion_policy(deletion_policy_version)?;
-    delete_user_cascade_internal(db, user_id, Some(deletion_policy_version)).await
-}
-
-async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
-    use futures::TryStreamExt;
-    let links: Vec<bson::Document> = db
-        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .find(doc! {"user_id": user_id, "bot_owner_id": {"$type": "string"}})
-        .projection(doc! {"bot_owner_id": 1, "route_id": 1, "route_api_key_id": 1})
-        .await?
-        .try_collect()
-        .await?;
-    for link in links {
-        let Ok(org) = link.get_str("bot_owner_id") else {
-            continue;
-        };
-        if let Ok(route) = link.get_str("route_id") {
-            match crate::services::channel_routing_service::delete_conversation(db, route, org)
-                .await
-            {
-                Ok(()) | Err(AppError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        if let Ok(key) = link.get_str("route_api_key_id") {
-            match crate::services::key_service::delete_api_key(db, org, key).await {
-                Ok(()) | Err(AppError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn delete_user_cascade_internal(
-    db: &mongodb::Database,
-    target_user_id: &str,
-    owner_deletion_policy: Option<&str>,
-) -> AppResult<()> {
-    let _target = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": target_user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    // Stop admission before erasing credentials. Unsettled provider evidence
-    // retains its owner until cleanup/settlement; deletion is safely retryable.
-    super::call_channels::owner_admission::close(db, target_user_id).await?;
-    db.collection::<bson::Document>(crate::models::channel_adapter::BINDINGS)
-        .update_many(
-            doc! {"user_id":target_user_id,"enabled":true},
-            doc! {"$set":{"enabled":false},"$inc":{"revision":1}},
-        )
-        .await?;
-    db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS)
-        .update_many(
-            doc! {"user_id":target_user_id,"state":{"$ne":"closed"}},
-            doc! {"$inc":{"generation":1},"$set":{"lease_expires_at":bson::DateTime::now()}},
-        )
-        .await?;
-    if db.collection::<bson::Document>(crate::models::channel_adapter::SESSIONS).find_one(doc!{"user_id":target_user_id,"$or":[{"state":{"$ne":"closed"}},{"billing_finalized":false}]}).await?.is_some() || db.collection::<bson::Document>(crate::models::channel_adapter::EVENTS).find_one(doc!{"user_id":target_user_id,"event_kind":"sms_send","billing_finalized":false}).await?.is_some(){return Err(AppError::Conflict("External call or message usage is still being reconciled. Retry deletion after it settles.".into()));}
-
-    // Busy email effects must leave the user able to authenticate and retry.
-    crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
-
-    // Only self-service owner confirmation grants Machine erasure authority.
-    // Admin removal fences execution but preserves indefinite workspace data.
-    apply_user_security_state_with_deletion_policy(
-        db,
-        target_user_id,
-        false,
-        true,
-        owner_deletion_policy,
-        None,
-    )
-    .await?;
-
-    super::platform_personal_owner_lifecycle::retire(db, target_user_id, true).await?;
-
-    // Org bots the user linked to their NyxBot keep an org-owned route and
-    // route key; remove them so the org's bot is free for its admins.
-    release_nyxbot_org_links(db, target_user_id).await?;
-
-    // Phase 2: cascade delete user-owned documents keyed by user_id
-    let user_filter = doc! { "user_id": target_user_id };
-
-    let user_scoped_collections = [
-        crate::models::channel_adapter::BINDINGS,
-        crate::models::channel_adapter::ALLOCATIONS,
-        crate::models::channel_adapter::SESSIONS,
-        crate::models::channel_adapter::EVENTS,
-        crate::models::channel_adapter::CLAIMS,
-        crate::models::async_service_operation::COLLECTION_NAME,
-        crate::models::async_service_operation::QUOTAS_COLLECTION_NAME,
-        crate::models::saved_login::COLLECTION_NAME,
-        crate::models::machine_setup::COLLECTION_NAME,
-        crate::models::machine_desktop::COLLECTION_NAME,
-        crate::models::machine_update::COLLECTION_NAME,
-        crate::models::machine_update::ATTEMPTS_COLLECTION_NAME,
-        crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
-        crate::models::channel_email::SUBSCRIPTIONS,
-        crate::models::channel_email::SENDS,
-        crate::models::channel_email::BATCHES,
-        crate::models::channel_email::RECEIPTS,
-        SESSIONS,
-        REFRESH_TOKENS,
-        API_KEYS,
-        crate::models::permission_policy::COLLECTION_NAME,
-        crate::models::assistant_acknowledgement::COLLECTION_NAME,
-        crate::models::assistant_agent::COLLECTION_NAME,
-        crate::models::assistant_group::COLLECTION_NAME,
-        crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
-        crate::models::assistant_attachment::COLLECTION_NAME,
-        crate::models::assistant_resource::COLLECTION_NAME,
-        crate::models::nyxbot_image_delivery::COLLECTION_NAME,
-        crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
-        crate::models::assistant_upload_retention::TOMBSTONES,
-        crate::models::assistant_agent_credential::COLLECTION_NAME,
-        crate::models::assistant_conversation::COLLECTION_NAME,
-        crate::models::assistant_message::COLLECTION_NAME,
-        crate::models::assistant_invocation::COLLECTION_NAME,
-        crate::models::assistant_invocation::TURNS,
-        crate::models::assistant_message_feedback::COLLECTION_NAME,
-        crate::models::assistant_checkpoint::COLLECTION_NAME,
-        super::assistant_service_execution::COLLECTION,
-        crate::models::nyxbot_channel::COLLECTION_NAME,
-        crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
-        crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
-        crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
-        USER_SERVICE_CONNECTIONS,
-        USER_PROVIDER_TOKENS,
-        MFA_FACTORS,
-        AUTHORIZATION_CODES,
-        OAUTH_STATES,
-        CONSENTS,
-        MCP_SESSIONS,
-        APPROVAL_REQUESTS,
-        APPROVAL_GRANTS,
-        SERVICE_APPROVAL_CONFIGS,
-        NOTIFICATION_CHANNELS,
-    ];
-
-    for coll_name in user_scoped_collections {
-        db.collection::<bson::Document>(coll_name)
-            .delete_many(user_filter.clone())
-            .await?;
-    }
-    // Machine job metadata remains until its existing retention worker can
-    // retire it. Revocation consumers still need the exact persisted binding
-    // to cancel submitted work after the account row has been removed.
-    db.collection::<bson::Document>(
-        crate::models::assistant_agent_learning::AUTHORED_CLAIMS_COLLECTION_NAME,
-    )
-    .delete_many(doc! {"owner_id":target_user_id})
-    .await?;
-    // NyxBot settings are keyed by the user ID itself.
-    db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
-        .update_many(
-            doc! {"user_id":target_user_id},
-            doc! {"$set":{"end_requested":true,"purge_requested":true}},
-        )
-        .await?;
-    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
-        .delete_many(doc! {"user_id": target_user_id})
-        .await?;
-    db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
-        .delete_one(doc! {"_id": target_user_id})
-        .await?;
-
-    // Consume the source owner's existing fenced deactivation API before
-    // removing authored clients. Each bounded pass preserves exact revocation
-    // receipts for other users who had granted Machine access to that client.
-    loop {
-        use futures::TryStreamExt;
-        let clients: Vec<bson::Document> = db
-            .collection::<bson::Document>(OAUTH_CLIENTS)
-            .find(doc! {"created_by":target_user_id})
-            .projection(doc! {"_id":1})
-            .sort(doc! {"_id":1})
-            .limit(100)
-            .await?
-            .try_collect()
-            .await?;
-        if clients.is_empty() {
-            break;
-        }
-        for client in clients {
-            let id = client
-                .get_str("_id")
-                .map_err(|_| AppError::Internal("OAuth client identity invalid".into()))?;
-            super::oauth_client_service::delete_client_for_creator(db, id, target_user_id).await?;
-            db.collection::<bson::Document>(OAUTH_CLIENTS)
-                .delete_one(doc! {"_id":id,"created_by":target_user_id,"is_active":false})
-                .await?;
-        }
-    }
-
-    // Delete service accounts owned by the deleted user and their issued tokens.
-    let service_account_owner_filter = doc! {
-        "$or": [
-            { "owner_user_id": target_user_id },
-            { "owner_user_id": bson::Bson::Null, "created_by": target_user_id },
-            { "owner_user_id": { "$exists": false }, "created_by": target_user_id },
-        ]
-    };
-
-    let owned_service_account_ids: Vec<String> = db
-        .collection::<bson::Document>(SERVICE_ACCOUNTS)
-        .distinct("_id", service_account_owner_filter.clone())
-        .await?
-        .into_iter()
-        .filter_map(|value| match value {
-            bson::Bson::String(id) => Some(id),
-            _ => None,
-        })
-        .collect();
-
-    db.collection::<bson::Document>(SERVICE_ACCOUNTS)
-        .delete_many(service_account_owner_filter)
-        .await?;
-
-    if !owned_service_account_ids.is_empty() {
-        db.collection::<bson::Document>(SERVICE_ACCOUNT_TOKENS)
-            .delete_many(doc! { "service_account_id": { "$in": owned_service_account_ids } })
-            .await?;
-    }
-
-    // Phase 3: delete the user document itself
-    let user_delete_result = db
-        .collection::<User>(USERS)
-        .delete_one(doc! { "_id": target_user_id, "is_active": false,
-        "platform_personal_deleting": true,
-        "platform_personal_retirement_pending": {"$ne": true} })
-        .await?;
-
-    if user_delete_result.deleted_count != 1 {
-        return Err(AppError::Internal(
-            "Failed to delete user record".to_string(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -887,7 +633,9 @@ pub async fn list_user_sessions(db: &mongodb::Database, user_id: &str) -> AppRes
 
     let sessions: Vec<Session> = db
         .collection::<Session>(SESSIONS)
-        .find(doc! { "user_id": user_id })
+        .find(super::session_authority::authenticated(
+            doc! { "user_id": user_id },
+        ))
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -900,33 +648,33 @@ pub async fn list_user_sessions(db: &mongodb::Database, user_id: &str) -> AppRes
 ///
 /// Returns the number of sessions revoked.
 pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> AppResult<u64> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    // Revoke active sessions
-    let result = db
-        .collection::<Session>(SESSIONS)
-        .update_many(
-            doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true, "last_active_at": &now } },
-        )
+    let mut transaction = db.client().start_session().await?;
+    transaction
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-
-    let revoked_count = result.modified_count;
-
-    // Revoke associated refresh tokens
-    db.collection::<bson::Document>(REFRESH_TOKENS)
-        .update_many(
-            doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true } },
-        )
-        .await?;
-
-    Ok(revoked_count)
+    let count =
+        match super::session_authority::revoke_all_in_transaction(db, user_id, &mut transaction)
+            .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                transaction.abort_transaction().await?;
+                return Err(error);
+            }
+        };
+    super::transaction_service::commit(&mut transaction).await?;
+    Ok(count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runtime test credential; never a fixed password.
+    fn test_password() -> String {
+        crate::crypto::token::generate_random_token()
+    }
     use crate::models::role::{
         COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, Role,
     };
@@ -974,7 +722,7 @@ mod tests {
         let user = User {
             id: user_id.to_string(),
             email: email.to_string(),
-            password_hash: Some(crate::crypto::password::hash_password("password123").unwrap()),
+            password_hash: Some(crate::crypto::password::hash_password(&test_password()).unwrap()),
             display_name: Some("Test".to_string()),
             slug: None,
             avatar_url: None,
@@ -1014,7 +762,7 @@ mod tests {
         let user = create_user(
             &db,
             "newuser@example.com",
-            "strongpass123",
+            &test_password(),
             Some("Alice"),
             "user",
         )
@@ -1036,7 +784,7 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let user = create_user(&db, "admin@example.com", "strongpass123", None, "admin")
+        let user = create_user(&db, "admin@example.com", &test_password(), None, "admin")
             .await
             .unwrap();
 
@@ -1054,7 +802,7 @@ mod tests {
         let user = create_user(
             &db,
             "operator@example.com",
-            "strongpass123",
+            &test_password(),
             None,
             "operator",
         )
@@ -1072,7 +820,7 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "notanemail", "strongpass123", None, "user").await;
+        let result = create_user(&db, "notanemail", &test_password(), None, "user").await;
         assert!(result.is_err());
     }
 
@@ -1083,7 +831,8 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result = create_user(&db, "user@example.com", "short", None, "user").await;
+        let result =
+            create_user(&db, "user@example.com", &test_password()[..5], None, "user").await;
         assert!(result.is_err());
     }
 
@@ -1094,8 +843,14 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        let result =
-            create_user(&db, "user@example.com", "strongpass123", None, "superadmin").await;
+        let result = create_user(
+            &db,
+            "user@example.com",
+            &test_password(),
+            None,
+            "superadmin",
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1106,11 +861,11 @@ mod tests {
         };
         seed_platform_roles(&db).await;
 
-        create_user(&db, "dup@example.com", "strongpass123", None, "user")
+        create_user(&db, "dup@example.com", &test_password(), None, "user")
             .await
             .unwrap();
 
-        let result = create_user(&db, "DUP@EXAMPLE.COM", "strongpass123", None, "user").await;
+        let result = create_user(&db, "DUP@EXAMPLE.COM", &test_password(), None, "user").await;
         assert!(result.is_err());
     }
 
@@ -1435,6 +1190,7 @@ mod tests {
         seed_person(&db, &target_id, "target-disable@example.com").await;
 
         let session = crate::models::session::Session {
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             id: Uuid::new_v4().to_string(),
             user_id: target_id.clone(),
             token_hash: "hash".to_string(),
@@ -1494,7 +1250,7 @@ mod tests {
         assert!(sess.revoked);
 
         let disabled_key = db
-            .collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
             .find_one(doc! { "_id": &api_key.id })
             .await
             .unwrap()
@@ -1521,7 +1277,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_user_cascade() {
+    async fn personal_erasure_rejects_org_without_mutation_through_service_and_admin() {
+        use crate::models::user::UserType;
+        use axum::extract::{Path, State};
+        use axum::http::HeaderMap;
+        use futures::TryStreamExt;
+
+        async fn snapshot(
+            db: &mongodb::Database,
+        ) -> std::collections::BTreeMap<String, Vec<bson::Document>> {
+            let mut result = std::collections::BTreeMap::new();
+            for collection in db.list_collection_names().await.unwrap() {
+                let rows = db
+                    .collection::<bson::Document>(&collection)
+                    .find(doc! {})
+                    .sort(doc! {"_id":1})
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                result.insert(collection, rows);
+            }
+            result
+        }
+
+        let db = connect_transaction_test_database("person_erasure_org_boundary").await;
+        let (admin_role, _) = seed_platform_roles(&db).await;
+        let admin_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let mut admin = test_user(&admin_id, UserType::Person);
+        admin.role_ids.push(admin_role);
+        db.collection::<User>(USERS)
+            .insert_many([admin, test_user(&org_id, UserType::Org)])
+            .await
+            .unwrap();
+        // Creator attribution does not make these organization-owned resources
+        // eligible for personal erasure, even when a platform admin requests it.
+        for collection in [
+            crate::models::user_service::COLLECTION_NAME,
+            crate::models::user_api_key::COLLECTION_NAME,
+            crate::models::node::COLLECTION_NAME,
+            crate::models::channel_adapter::BINDINGS,
+        ] {
+            db.collection::<bson::Document>(collection)
+                .insert_one(doc! {
+                    "_id":Uuid::new_v4().to_string(), "user_id":&org_id,
+                    "created_by":&admin_id, "is_active":true, "enabled":true,
+                    "revision":1, "credential":"unchanged-ciphertext-fixture"
+                })
+                .await
+                .unwrap();
+        }
+        let state = test_app_state(db.clone());
+        // Startup installs erasure indexes before requests. Include that empty
+        // bookkeeping schema in the baseline so every request mutation remains
+        // covered by the exact snapshot comparison below.
+        crate::services::personal_erasure_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let before = snapshot(&db).await;
+        assert!(matches!(
+            crate::test_utils::accept_and_process_admin_erasure(&db, &admin_id, &org_id).await,
+            Err(AppError::ValidationError(_))
+        ));
+        assert_eq!(snapshot(&db).await, before);
+        assert!(matches!(
+            crate::test_utils::accept_and_process_owner_erasure(
+                &db,
+                &org_id,
+                ACCOUNT_DELETION_POLICY_VERSION
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        assert_eq!(snapshot(&db).await, before);
+        assert!(matches!(
+            crate::handlers::admin::delete_user(
+                State(state),
+                test_auth_user(&admin_id),
+                HeaderMap::new(),
+                Path(org_id)
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        assert_eq!(snapshot(&db).await, before);
+    }
+
+    #[tokio::test]
+    async fn test_accepted_admin_erasure() {
         let Some(db) = connect_test_database("admin_user").await else {
             return;
         };
@@ -1531,6 +1376,7 @@ mod tests {
         seed_person(&db, &target_id, "target-del@example.com").await;
 
         let session = crate::models::session::Session {
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             id: Uuid::new_v4().to_string(),
             user_id: target_id.clone(),
             token_hash: "hash".to_string(),
@@ -1569,7 +1415,7 @@ mod tests {
             .await
             .unwrap();
 
-        delete_user_cascade(&db, &admin_id, &target_id)
+        crate::test_utils::accept_and_process_admin_erasure(&db, &admin_id, &target_id)
             .await
             .unwrap();
 
@@ -1617,7 +1463,8 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         seed_person(&db, &user_id, "self-del@example.com").await;
 
-        let result = delete_user_cascade(&db, &user_id, &user_id).await;
+        let result =
+            crate::test_utils::accept_and_process_admin_erasure(&db, &user_id, &user_id).await;
         assert!(result.is_err());
     }
 
@@ -1629,7 +1476,12 @@ mod tests {
         let admin_id = Uuid::new_v4().to_string();
         seed_person(&db, &admin_id, "admin-nf@example.com").await;
 
-        let result = delete_user_cascade(&db, &admin_id, &Uuid::new_v4().to_string()).await;
+        let result = crate::test_utils::accept_and_process_admin_erasure(
+            &db,
+            &admin_id,
+            &Uuid::new_v4().to_string(),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -1642,6 +1494,7 @@ mod tests {
         seed_person(&db, &user_id, "reset-target@example.com").await;
 
         let session = crate::models::session::Session {
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             token_hash: "hash".to_string(),

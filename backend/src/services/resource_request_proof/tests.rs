@@ -260,7 +260,7 @@ impl Fixture {
             base_url: service.base_url.clone(),
             auth_method: "none".into(),
             auth_key_name: String::new(),
-            credential: String::new(),
+            credential: Default::default(),
             service,
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
@@ -373,6 +373,72 @@ async fn expired_forged_identity_and_future_proofs_are_inactive() {
         )
         .await
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn verifier_overlap_preserves_read_proofs_until_key_retirement() {
+    let (old, current) = crate::crypto::jwt::test_rotation_keys();
+    let mut f = Fixture::new().await;
+    f.state.jwt_keys = old;
+    let (token, descriptor) = f.signed().await;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[&f.catalog]);
+    let claims = decode::<Claims>(&token, &f.state.jwt_keys.decoding, &validation)
+        .unwrap()
+        .claims;
+    let mut rotated = f.state.clone();
+    rotated.jwt_keys = current;
+    assert!(
+        introspect(&rotated, &f.client, &f.catalog, &token, descriptor.clone())
+            .await
+            .is_ok()
+    );
+    for kid in [None, Some("unregistered-signing-key".into())] {
+        let mut header = decode_header(&token).unwrap();
+        header.kid = kid;
+        let changed = encode(&header, &claims, &f.state.jwt_keys.encoding).unwrap();
+        assert!(
+            introspect(
+                &rotated,
+                &f.client,
+                &f.catalog,
+                &changed,
+                descriptor.clone()
+            )
+            .await
+            .is_err()
+        );
+    }
+    f.state.jwt_keys = rotated.jwt_keys.clone();
+    let (active_token, active_descriptor) = f.signed().await;
+    assert!(
+        introspect(
+            &rotated,
+            &f.client,
+            &f.catalog,
+            &active_token,
+            active_descriptor.clone()
+        )
+        .await
+        .is_ok()
+    );
+    rotated.jwt_keys.retained.clear();
+    assert!(
+        introspect(&rotated, &f.client, &f.catalog, &token, descriptor)
+            .await
+            .is_err()
+    );
+    assert!(
+        introspect(
+            &rotated,
+            &f.client,
+            &f.catalog,
+            &active_token,
+            active_descriptor
+        )
+        .await
+        .is_ok()
     );
 }
 

@@ -97,3 +97,7 @@ export const mfaVerifySchema = z.object({
 });
 
 export type MfaVerifyFormData = z.infer<typeof mfaVerifySchema>;
+
+/** Login only: enrollment still requires a six-digit authenticator code. */
+export const mfaLoginCodeSchema = z.string().regex(/^(?:\d{6}|[A-Za-z0-9_-]{8}|[a-fA-F0-9]{32})$/, "Enter a six-digit authenticator code or a recovery code");
+export const mfaLoginSchema = z.object({ code: mfaLoginCodeSchema });

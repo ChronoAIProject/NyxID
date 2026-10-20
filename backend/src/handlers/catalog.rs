@@ -163,6 +163,7 @@ pub struct CatalogEntryResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogRevocationResponse {
     pub revokes_grant: bool,
+    pub effect_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -254,7 +255,8 @@ pub async fn list_catalog(
             filter: None,
             result_count: items.len() as i64,
         },
-    );
+    )
+    .await;
 
     Ok(Json(CatalogListResponse { entries: items }))
 }
@@ -310,7 +312,8 @@ pub async fn get_catalog_entry(
             catalog_slug,
             has_openapi_spec,
         },
-    );
+    )
+    .await;
 
     Ok(Json(catalog_entry_response(&state.config, entry)))
 }
@@ -346,7 +349,10 @@ pub(crate) fn catalog_entry_response(
         provider_type: entry.provider_type,
         revocation: entry
             .revokes_grant
-            .map(|revokes_grant| CatalogRevocationResponse { revokes_grant }),
+            .map(|revokes_grant| CatalogRevocationResponse {
+                revokes_grant,
+                effect_scope: entry.revocation_effect_scope,
+            }),
         requires_gateway_url: entry.requires_gateway_url,
         api_key_instructions: entry.api_key_instructions,
         api_key_url: entry.api_key_url,
@@ -509,7 +515,8 @@ pub async fn list_catalog_endpoints(
                     catalog_slug: slug.clone(),
                     endpoint_count: 0,
                 },
-            );
+            )
+            .await;
             return Ok(Json(CatalogEndpointsListResponse {
                 slug,
                 openapi_spec_url: None,
@@ -547,7 +554,8 @@ pub async fn list_catalog_endpoints(
                 catalog_slug: slug.clone(),
                 endpoint_count: endpoints.len() as i64,
             },
-        );
+        )
+        .await;
 
         return Ok(Json(CatalogEndpointsListResponse {
             slug,
@@ -582,7 +590,8 @@ pub async fn list_catalog_endpoints(
                 catalog_slug: slug.clone(),
                 endpoint_count: 0,
             },
-        );
+        )
+        .await;
         return Ok(Json(CatalogEndpointsListResponse {
             slug,
             openapi_spec_url: None,
@@ -616,7 +625,8 @@ pub async fn list_catalog_endpoints(
             catalog_slug: slug.clone(),
             endpoint_count: endpoints.len() as i64,
         },
-    );
+    )
+    .await;
 
     Ok(Json(CatalogEndpointsListResponse {
         slug,
