@@ -53,6 +53,23 @@ class CatalogWorkflowBoundary(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         return load_unique((root / '.github/workflows' / name).read_text())
 
+    def test_actionlint_is_required_in_both_early_workflow_policy_jobs(self):
+        ci = self.load('ci.yml')
+        for job_name in ('changes', 'workflow-permissions'):
+            with self.subTest(job=job_name):
+                job = ci['jobs'][job_name]
+                self.assertNotIn('if', job)
+                steps = [step for step in job['steps'] if 'scripts/check-actionlint.py' in step.get('run', '')]
+                self.assertEqual(len(steps), 1)
+                step = steps[0]
+                self.assertIn('python3 scripts/check-actionlint.py --bin-dir "$RUNNER_TEMP/actionlint"', step['run'])
+                self.assertNotIn('if', step)
+                self.assertNotIn('continue-on-error', step)
+                self.assertNotIn('||', step['run'])
+        native = self.load('machine-native-acceptance.yml')['jobs']['native']
+        self.assertNotIn('CARGO_TARGET_DIR', native['env'])
+        self.assertEqual(native['steps'][0]['run'], 'echo "CARGO_TARGET_DIR=$RUNNER_TEMP/machine-native-target" >> "$GITHUB_ENV"')
+
     def test_pr_candidate_workflow_is_required_and_read_only(self):
         ci = self.load('ci.yml')
         job = ci['jobs']['catalog-maintenance']

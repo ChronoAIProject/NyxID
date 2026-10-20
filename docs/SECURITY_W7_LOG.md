@@ -278,3 +278,12 @@
 - Includes conditional private hosted-image receipts/digest pinning and independent credential-manifest hosting; distinguishes availability gaps from publication blockers.
 - Local documentation audit: 13/13 entries have effects and verification, 4/4 relative links resolve, required workflow/input/environment/scope names match implemented gates; git diff --check passed.
 - Documentation only; no new tests or hosted jobs required. W7 source acceptance remains conditional on the existing hosted jobs turning green.
+
+## W7 hosted follow-up — GitHub workflow semantic validation
+- Reproduced CI's zero-job failure with checksum-verified actionlint 1.7.12: runner context is invalid in job-level env; initialize the target through GITHUB_ENV in the first native step.
+- Pin official actionlint archives/SHA-256 for both macOS/Linux architectures, use the existing verified bootstrap and add weekly Renovate coverage.
+- Mandatory semantic validation runs in Detect Changes and Workflow Permissions; real negative fixtures cover context, expressions, needs, local calls, input/secret declarations and permission syntax.
+- Local: exact CI-helper discovery 45/45; workflow policy 10/10; all 17 workflows and 14 permission call edges pass; default actionlint also passes.
+- All 17 pinned-input/publication checks plus native/packaging/signing/SBOM/scanner workflow suites pass: 22 commands, 163 tests; 218 tests total, 0 failures; diff check passes.
+- GitHub annotations show Release and Release Build Cache did create jobs: remaining secret/dependency audit and arm64 cache runtime failures are separate from CI's invalid-workflow blocker.
+- PR jobs: Detect Changes, Workflow Permissions, Machine Native Acceptance / Native Machine Separation (amd64), CI Pipeline; no push, workflow dispatch or remote provisioning.
