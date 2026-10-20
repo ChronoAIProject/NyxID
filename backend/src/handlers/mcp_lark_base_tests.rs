@@ -512,7 +512,7 @@ async fn lark_base_write_upload_busy_codes_have_three_bounded_retries_and_a_succ
                 ResponseTemplate::new(200).set_body_json(if succeeds && index == 2 {
                     json!({"code":0,"data":{"file_token":"retry-token"}})
                 } else {
-                    json!({"code":if index%2==0{1061045}else{1061006}})
+                    json!({"code":if index.is_multiple_of(2){1061045}else{1061006}})
                 })
             })
             .with_priority(1)
