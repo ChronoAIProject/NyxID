@@ -186,3 +186,10 @@
 - Both device references explicitly state no endpoint currently redeems the refresh token; no token format/revocation mechanism changes.
 - Local: real-detector policy17/17; full history215 + committed tree111, reviewed326, unresolved0; no credential probed.
 - Required PR jobs: Scanner Policy; Full History Secret Scan.
+
+## C-5 scoped YAML parser compatibility
+- Add only js-yaml@3>argparse 2.0.1; remove argparse 1 / sprintf-js from the frozen mobile graph, retaining the legacy js-yaml 3 CLI API.
+- Commit executable tests resolving the actual React Native → babel-jest → Istanbul → js-yaml 3 consumer, including NYC YAML config loading.
+- Local: locked pnpm10.34.7 clean frozen install without hooks passes; actual consumer/CLI compatibility5/5.
+- Full production bundle proof is implemented separately; a pre-existing undeclared Babel preset requires the pending per-change PM manifest approval.
+- Required PR jobs: Mobile; Every Dependency Root Audit.
