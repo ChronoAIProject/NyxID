@@ -142,6 +142,28 @@ async fn bind_upload(f: &Fixture, bytes: &[u8]) -> String {
     session.commit_transaction().await.unwrap();
     item.id
 }
+
+async fn bump_credential_epoch(f: &Fixture, credential: &str, previous: i64) {
+    let credentials = f.state.db.collection::<bson::Document>("user_api_keys");
+    // Legacy credentials omit the stored field but deserialize with epoch 1.
+    let changed = credentials
+        .update_one(
+            doc! {"_id":credential},
+            vec![doc! {
+                "$set":{"credential_epoch":{"$add":[{"$ifNull":["$credential_epoch",1i64]},1i64]}}
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.matched_count, 1);
+    let stored = credentials
+        .find_one(doc! {"_id":credential})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.get_i64("credential_epoch").unwrap(), previous + 1);
+}
+
 fn setup(name: &'static str) -> futures::future::BoxFuture<'static, BaseFixture> {
     Box::pin(async move {
         let f = orchestrator_fixture(name).await;
@@ -468,15 +490,12 @@ async fn lark_base_write_success_replay_after_credential_rotation_makes_no_provi
     );
     let before = ledger(&u).await;
     assert_eq!(requests(&u).await.len(), 3);
-    u.f.state
-        .db
-        .collection::<bson::Document>("user_api_keys")
-        .update_one(
-            doc! {"_id":&before.principal.credential_id},
-            doc! {"$inc":{"credential_epoch":1i64}},
-        )
-        .await
-        .unwrap();
+    bump_credential_epoch(
+        &u.f,
+        &before.principal.credential_id,
+        before.principal.epoch,
+    )
+    .await;
     let fresh_auth = authenticate(&u.f).await;
     let replay = call(&u, &fresh_auth, true, args(&u.attachment_id)).await;
     assert_eq!(payload(&replay)["record_id"], "rec_receipt", "{replay}");
@@ -1668,15 +1687,8 @@ async fn lark_base_write_final_create_revalidates_after_delayed_tenant_token_pre
                         .unwrap();
                 }
                 "credential" => {
-                    u.f.state
-                        .db
-                        .collection::<bson::Document>("user_api_keys")
-                        .update_one(
-                            doc! {"_id":&credential},
-                            doc! {"$inc":{"credential_epoch":1i64}},
-                        )
-                        .await
-                        .unwrap();
+                    bump_credential_epoch(&u.f, &credential, ledger(&u).await.principal.epoch)
+                        .await;
                 }
                 "token_preparation" => {}
                 _ => {
