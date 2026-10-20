@@ -19,14 +19,15 @@ spec.loader.exec_module(audit)
 class DependencyAudits(unittest.TestCase):
     def test_all_current_roots_and_workspace_members_are_covered(self):
         roots = discover(ROOT)
-        self.assertEqual(len(roots), 12)
+        self.assertEqual(len(roots), 13)
         self.assertEqual({item['lock'] for item in roots if item['manager'] == 'cargo'},
                          {'Cargo.lock', 'cli/tests/machine_context_spike/Cargo.lock', 'security/artifact-tools/Cargo.lock'})
         covered = {name for item in roots for name in item['manifests']}
         for name in ('backend', 'cli', 'machine', 'machine-updater', 'mcp-demo', 'cloud-auth'):
             self.assertIn(name + '/Cargo.toml', covered)
-        for name in ('sdk/oauth-core', 'sdk/oauth-react', 'sdk/demo-react', 'security/hosted-tools', '.github/tools/claude'):
+        for name in ('sdk/oauth-core', 'sdk/oauth-react', 'sdk/demo-react', 'security/hosted-tools', 'security/signing-tools', '.github/tools/claude'):
             self.assertIn(name + '/package.json', covered)
+        self.assertEqual(next(item for item in roots if item['lock'] == 'security/signing-tools/package-lock.json')['manager'], 'npm')
         self.assertEqual(next(item for item in roots if item['manager'] == 'pnpm')['lock'], 'mobile/pnpm-lock.yaml')
 
     def test_new_unlocked_independent_manifest_and_orphan_lock_fail(self):

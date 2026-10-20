@@ -30,10 +30,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
-  pull-requests: write
-  id-token: write
-  attestations: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -47,6 +43,8 @@ jobs:
     permissions:
       contents: read
       attestations: read
+      # The nested rehearsal alone requests OIDC; it never publishes.
+      id-token: write
     with:
       # The publish gate is a release validation, not a PR check, so path
       # filtering must not skip anything. Force the full suite to run
@@ -58,6 +56,14 @@ jobs:
   # Build and scan each final native image locally, then copy its exact digest.
   # ---------------------------------------------------------------------------
   build:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
     needs: ci-gate
     runs-on: ${{ matrix.runner }}
@@ -228,11 +234,34 @@ jobs:
           path: ${{ runner.temp }}/scanned-image/sbom/
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official platform publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope platform --stage "$RUNNER_TEMP/scanned-image" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact platform subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before platform publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope platform --stage "$RUNNER_TEMP/scanned-image" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - name: Copy only the passing immutable OCI subject to GHCR
         id: publish
         run: |
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/publish-scanned-image.py --stage "$RUNNER_TEMP/scanned-image" \
-            --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/scan-tools/regctl"
+            --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/scan-tools/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - name: Preserve final image vulnerability report and digest binding
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -243,13 +272,6 @@ jobs:
             ${{ runner.temp }}/scanned-image/image-scan.json
           if-no-files-found: error
           retention-days: 7
-
-      - name: Attest published image digest
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-name: ${{ steps.repo.outputs.image }}
-          subject-digest: ${{ steps.publish.outputs.digest }}
-          push-to-registry: true
 
       - name: Export digest
         run: |
@@ -308,6 +330,14 @@ jobs:
   # validate each index before a separate complete-set tag promotion.
   # ---------------------------------------------------------------------------
   merge:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     name: Merge ${{ matrix.component }} manifest and SBOM
     runs-on: ubuntu-24.04
     needs: [ci-gate, build, credential-parity]
@@ -342,17 +372,34 @@ jobs:
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py index \
             --component '${{ matrix.component }}' --commit "$(git rev-parse HEAD)" --epoch "$(git show -s --format=%ct HEAD)" \
             --evidence "$RUNNER_TEMP/platform-sboms" --output "$RUNNER_TEMP/index-sbom"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official index publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope index --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact index subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before index publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope index --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - name: Publish verified index and attach its SBOM without promoting tags
         id: merged
         run: |
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py publish-index \
-            --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl"
-      - name: Attest multi-architecture release
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-        with:
-          subject-name: ${{ steps.repo.outputs.image }}
-          subject-digest: ${{ steps.merged.outputs.digest }}
-          push-to-registry: true
+            --evidence "$RUNNER_TEMP/index-sbom" --repository '${{ steps.repo.outputs.image }}' --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: published-index-sbom-${{ matrix.component }}
@@ -361,11 +408,16 @@ jobs:
           retention-days: 14
 
   image-sbom-closure:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: Complete Image Publication SBOM Closure
     needs: merge
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -381,8 +433,42 @@ jobs:
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-image-publication-sboms.py closure \
             --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" --output "$RUNNER_TEMP/image-sboms.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - name: Prepare mandatory official images publication manifest
+        run: |
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope images --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest and every exact images subject
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before images publication
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope images --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-image-release
+          path: ${{ runner.temp }}/official-release/
+          if-no-files-found: error
+          retention-days: 14
 
   promote:
+    environment: official-release
+    env:
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
+    permissions:
+      contents: read
+      packages: write
     name: Promote ${{ matrix.component }} verified tags
     needs: [merge, image-sbom-closure, credential-parity]
     runs-on: ubuntu-24.04
@@ -424,6 +510,15 @@ jobs:
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=short,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - run: chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: official-image-release
+          path: ${{ runner.temp }}/official-release
       - name: Revalidate every planned SBOM subject then promote exact verified index
         env:
           PROMOTION_TAGS: ${{ steps.meta.outputs.tags }}
@@ -434,7 +529,8 @@ jobs:
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/make-publication-plan.py images --output "$RUNNER_TEMP/image-plan.json"
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/promote-sbom-images.py \
             --plan "$RUNNER_TEMP/image-plan.json" --evidence "$RUNNER_TEMP/index-sboms" \
-            --component '${{ matrix.component }}' --tags "$PROMOTION_TAGS" --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl"
+            --component '${{ matrix.component }}' --tags "$PROMOTION_TAGS" --regctl "$RUNNER_TEMP/sbom-tools/bin/regctl" \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
 
   # ---------------------------------------------------------------------------
   # Flip new packages to public visibility. Idempotent: a no-op once public.

@@ -96,6 +96,13 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             packaging:
+              - 'scripts/*official*'
+              - 'scripts/*release*sign*'
+              - 'scripts/*rehearsal*'
+              - 'scripts/*signing*'
+              - 'scripts/release_verifier.rs'
+              - 'cli/examples/release-verifier*'
+              - 'security/signing-tools/**'
               - 'scripts/*sbom*'
               - 'scripts/machine_fixture_tls.py'
               - 'scripts/check-dist-artifacts.py'
@@ -697,6 +704,20 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/artifact-packaging.yml
+
+  release-signing:
+    name: Release Signing Policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-signing.yml
+
+  signing-rehearsal:
+    name: Signing Rehearsal
+    needs: [artifact-packaging, release-signing]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/security-release-rehearsal.yml
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -1534,6 +1555,8 @@ jobs:
       - backend-billing-smoke
       - backend-image-inputs
       - artifact-packaging
+      - release-signing
+      - signing-rehearsal
       - cli-test
       - machine-container
       - rust-features
@@ -1570,6 +1593,8 @@ jobs:
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
             artifact-packaging=${{ needs.artifact-packaging.result }}
+            release-signing=${{ needs.release-signing.result }}
+            signing-rehearsal=${{ needs.signing-rehearsal.result }}
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}

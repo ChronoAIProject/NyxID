@@ -131,6 +131,18 @@ class PublicationContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 contract.dist_contract(dist, metadata, "a" * 40, 1792367116)
 
+    def test_verifier_example_cannot_enter_any_release_archive_or_publication_set(self):
+        for mutation in ('archive', 'artifact'):
+            dist, metadata = dist_fixture()
+            if mutation == 'archive':
+                archive = next(a for a in dist['artifacts'].values() if a['kind'] == 'executable-zip')
+                archive['assets'].append(dict(path='release-verifier', kind='executable'))
+            else:
+                dist['artifacts']['release-verifier'] = dict(name='release-verifier', kind='executable')
+                dist['releases'][0]['artifacts'].append('release-verifier')
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                contract.dist_contract(dist, metadata, 'a' * 40, 1792367116)
+
     def test_missing_duplicate_extra_and_stale_subjects_fail(self):
         for plan in (cli_plan(), images_plan()):
             good = records(plan)

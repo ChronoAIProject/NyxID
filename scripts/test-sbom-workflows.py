@@ -70,7 +70,7 @@ def require(data):
     checks=[i for i,s in enumerate(host['steps']) if 'scripts/check-release-sboms.py' in s.get('run','')]
     writes=[i for i,s in enumerate(host['steps']) if any(c in s.get('run','') for c in ('dist host ','gh release create '))]
     if len(checks)!=2 or len(writes)!=2 or not checks[0]<writes[0]<checks[1]<writes[1]:raise ValueError('release bytes must be reverified before each publication path')
-    signer = next(i for i,s in enumerate(host['steps']) if s.get('name') == 'Sign and publish release integrity manifest')
+    signer = next(i for i,s in enumerate(host['steps']) if s.get('name') == 'Prepare mandatory official release manifest from complete final bytes')
     if signer <= checks[0]: raise ValueError('manifest publication must follow complete SBOM closure')
     for i in checks:
         if any(k in host['steps'][i] for k in ('if','continue-on-error')) or '||' in host['steps'][i]['run']:raise ValueError('release SBOM replay must fail closed')

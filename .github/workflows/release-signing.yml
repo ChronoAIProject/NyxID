@@ -1,0 +1,71 @@
+name: Release Signing Policy
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '23 5 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: W6 Signing Compatibility (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: w6-signing-${{ matrix.arch }}
+      - name: Test exact production verifier and authentic published fixtures
+        run: |
+          cargo test --locked -p nyxid-cli --example release-verifier
+          cargo build --locked -p nyxid-cli --example release-verifier
+          cargo clippy --locked -p nyxid-cli --example release-verifier -- -D warnings
+      - name: Test missing, failed and substituted signing/publication paths
+        run: |
+          sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/signing-tools"
+          "$RUNNER_TEMP/signing-tools/python/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
+          "$RUNNER_TEMP/signing-tools/python/bin/python" scripts/test-release-signing.py
+          "$RUNNER_TEMP/signing-tools/python/bin/python" scripts/test-signing-workflows.py
+          python3 scripts/test-signing-tools.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Validate reviewed producer lock and install checksummed npm
+        run: |
+          python3 scripts/check-signing-tools.py
+          python3 scripts/bootstrap-build-tool.py npm --bin-dir "$RUNNER_TEMP/signing-npm"
+      - name: Install exact signing dependencies without lifecycle hooks
+        working-directory: security/signing-tools
+        run: '"$RUNNER_TEMP/signing-npm/npm" ci --ignore-scripts --no-audit --no-fund'
+      - name: Require offline DSSE compatibility, type binding and OIDC refusal cases
+        run: node --test scripts/test-sign-rehearsal.cjs
+      - name: Preserve native exact-W6 adapter for this run's publishers and rehearsal
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: w6-release-verifier-${{ matrix.arch }}
+          path: target/debug/examples/release-verifier
+          if-no-files-found: error
+          retention-days: 7

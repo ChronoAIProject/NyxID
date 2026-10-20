@@ -148,7 +148,7 @@ class ImageVulnerabilities(unittest.TestCase):
     def test_changed_image_archive_blocks_any_registry_operation(self):
         with (self.stage / 'image.tar').open('ab') as stream: stream.write(b'changed')
         with patch.object(publisher.subprocess, 'run') as run, self.assertRaisesRegex(ValueError, 'archive/report changed'):
-            publisher.publish(self.stage, 'ghcr.io/fixture/nyxid/backend', self.regctl)
+            publisher.publish(self.stage, 'ghcr.io/fixture/nyxid/backend', self.regctl, self.stage / 'proof', Path('/verifier'))
         run.assert_not_called()
 
     def test_changed_scanner_report_blocks_publication(self):
@@ -186,9 +186,12 @@ class ImageVulnerabilities(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'nonregular'): policy.verify_stage(self.stage)
 
     def test_publisher_copies_only_passing_digest_without_rebuilding_or_tags(self):
-        with patch.object(publisher, 'verify_sbom', return_value={}), patch.object(publisher.subprocess, 'run') as run, \
+        with patch.dict(os.environ, GITHUB_REF='refs/heads/main'), patch.object(publisher, 'verify_sbom', return_value={}), \
+                patch.object(publisher.official_release, 'authorize'), patch.object(publisher.official_release, 'manifest'), \
+                patch.object(publisher.official_release, 'verify'), patch.object(publisher.official_release, 'attach'), \
+                patch.object(publisher.subprocess, 'run') as run, \
                 patch.object(publisher.subprocess, 'check_output', return_value=self.digest + '\n'):
-            self.assertEqual(publisher.publish(self.stage, 'ghcr.io/fixture/nyxid/backend', self.regctl), self.digest)
+            self.assertEqual(publisher.publish(self.stage, 'ghcr.io/fixture/nyxid/backend', self.regctl, self.stage / 'proof', Path('/verifier')), self.digest)
         command = run.call_args_list[0].args[0]
         self.assertEqual(command, [str(self.regctl), 'image', 'copy',
             'ocidir://' + str(self.stage / 'oci') + '@' + self.digest, 'ghcr.io/fixture/nyxid/backend@' + self.digest])

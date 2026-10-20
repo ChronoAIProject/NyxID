@@ -246,3 +246,16 @@
 - PR jobs: Security Scans / Scanner Policy, Every Dependency Root Audit; Artifact Packaging / Shipped Image Identity (all components/arches), Backend Credential Packaging; APT Policy, APT Snapshots and APT Dockerfile Layers (both arches); Detect Changes and CI Pipeline.
 - APK durable archives present remains outside apk-pass/CI required dependencies and continue-on-error on PRs; missing provisioning still fails its scheduled job.
 - No local Docker or Linux replay claimed; final image, signed snapshot/tamper and timing acceptance must come from these PR jobs. No remote mutation performed.
+
+## C-7 — mandatory official signing and distinct OIDC rehearsal
+- Derive signed official manifests from the complete final-byte scan/SBOM closure; reverify before CLI hosting/upload, platform/index publication and tag promotion.
+- Require protected official-release authority and exact configuration; missing/failed signing, verifier, trust metadata or subject/provenance binding blocks publication.
+- PR/weekly nonpublishing OIDC rehearsal must pass exact W6 cryptography, then fail specifically under each production workflow identity; no production trust source changed.
+- Approved producer lock: sign/bundle 3.0.0, core 3.2.1, protobuf 0.3.2; 91 SHA-512 packages, zero hooks, pinned npm ci --ignore-scripts, npm audit 0 vulnerabilities.
+- Local scripts/JS: 187 passed, 0 failed across signing, publication, dependency-root, scanner, packaging, SBOM, build-input, YAML and CI-helper suites.
+- Shared-target cargo test --locked -p nyxid-cli --example release-verifier: 58 passed, 0 failed, 1 existing live-mirror ignored; locked example build passed.
+- Shared-target cargo clippy --locked -p nyxid-cli --all-targets -- -D warnings passed; all required shared build settings used.
+- Actual pinned cargo-dist plan exposes only nyxid in executable archives; metadata marks verifier as example, and publication negatives reject its addition.
+- Workflow YAML, permission ceilings, pin policy and diff checks passed; signing root is automatically audited and receives weekly Dependabot updates.
+- PR evidence: Release Signing Policy / W6 Signing Compatibility (amd64/arm64); Signing Rehearsal / OIDC Rehearsal and Production Rejection; Every Dependency Root Audit; Rust Clippy; CI Pipeline.
+- RELEASE_SIGNING.md specifies admin rulesets/environment/reviewers/variable/OIDC permissions and public-trust prerequisites; no remote provisioning or publication performed.

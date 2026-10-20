@@ -15,9 +15,7 @@
 
 name: Release
 permissions:
-  "attestations": "write"
-  "contents": "write"
-  "id-token": "write"
+  contents: read
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -47,6 +45,12 @@ on:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
+  release-signing:
+    name: Release Signing Policy
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-signing.yml
+
   security-gate:
     name: Release Security Scans
     permissions:
@@ -402,7 +406,13 @@ jobs:
           if-no-files-found: error
 
   host:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    environment: official-release
     needs:
+      - release-signing
       - sbom-gate
       - security-gate
       - plan
@@ -410,14 +420,9 @@ jobs:
       - build-global-artifacts
       - release-integrity-manifest
     # Every required build must succeed, independently of artifact presence.
-    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.sbom-gate.result == 'success' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.sbom-gate.result == 'success' && needs.release-signing.result == 'success' && needs.security-gate.result == 'success' && needs.release-integrity-manifest.result == 'success' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
-      RELEASE_INTEGRITY_SIGNING_ENABLED: ${{ vars.RELEASE_INTEGRITY_SIGNING_ENABLED || 'false' }}
-      RELEASE_INTEGRITY_SIGN_CMD: ${{ secrets.RELEASE_INTEGRITY_SIGN_CMD || vars.RELEASE_INTEGRITY_SIGN_CMD }}
-      RELEASE_INTEGRITY_PUBLISH_CMD: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_CMD || vars.RELEASE_INTEGRITY_PUBLISH_CMD }}
-      RELEASE_INTEGRITY_MANIFEST_URL: ${{ vars.RELEASE_INTEGRITY_MANIFEST_URL }}
-      RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
-      RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
+      OFFICIAL_RELEASE_AUTHORIZATION: ${{ vars.OFFICIAL_RELEASE_AUTHORIZATION }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"
     outputs:
@@ -452,30 +457,30 @@ jobs:
           sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
             --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib
-      - name: Sign and publish release integrity manifest
-        shell: bash
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: w6-release-verifier-amd64
+          path: ${{ runner.temp }}/verifier
+      - name: Prepare mandatory official release manifest from complete final bytes
         run: |
-          if [ "${{ needs.plan.outputs.publishing }}" != "true" ]; then
-            echo "::warning::Release integrity signing skipped because this is not a publishing run."
-            exit 0
-          fi
-          if [ "${RELEASE_INTEGRITY_SIGNING_ENABLED:-false}" != "true" ]; then
-            echo "::warning::Release integrity signing disabled; set RELEASE_INTEGRITY_SIGNING_ENABLED=true and provide command env vars to publish a signed manifest."
-            exit 0
-          fi
-
-          missing=()
-          [ -n "${RELEASE_INTEGRITY_SIGN_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_SIGN_CMD")
-          [ -n "${RELEASE_INTEGRITY_PUBLISH_CMD:-}" ] || missing+=("RELEASE_INTEGRITY_PUBLISH_CMD")
-          [ -n "${RELEASE_INTEGRITY_MANIFEST_URL:-}" ] || missing+=("RELEASE_INTEGRITY_MANIFEST_URL")
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Release integrity signing enabled but missing required env: %s\n' "${missing[*]}"
-            exit 1
-          fi
-
-          export RELEASE_INTEGRITY_MANIFEST_PATH="$GITHUB_WORKSPACE/target/distrib/releases.json"
-          bash -c "$RELEASE_INTEGRITY_SIGN_CMD"
-          bash -c "$RELEASE_INTEGRITY_PUBLISH_CMD"
+          chmod 755 "$RUNNER_TEMP/verifier/release-verifier"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py prepare --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib \
+            --proof "$RUNNER_TEMP/official-release"
+      - name: Sign official manifest, credential manifest, archives and SBOM subjects
+        id: official-signature
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-checksums: ${{ runner.temp }}/official-release/subjects.sha256
+          push-to-registry: false
+      - name: Require W6-verified signing before any release hosting
+        env:
+          SIGNED_BUNDLE: ${{ steps.official-signature.outputs.bundle-path }}
+        run: |
+          cp "$SIGNED_BUNDLE" "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json"
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts target/distrib --evidence target/distrib \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier"
       - id: host
         shell: bash
         run: |
@@ -504,10 +509,13 @@ jobs:
         run: |
           "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-release-sboms.py \
             --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts artifacts --evidence artifacts
-      - name: Attest release artifacts
-        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
-        with:
-          subject-path: artifacts/*
+      - name: Require W6-verified unchanged official subjects before GitHub Release publication
+        run: |
+          cp "$RUNNER_TEMP/official-release/official-release-manifest.json" artifacts/
+          cp "$RUNNER_TEMP/official-release/official-release-manifest.sigstore.json" artifacts/
+          "$RUNNER_TEMP/sbom-tools/python/bin/python" scripts/check-official-release.py verify --scope release \
+            --plan "$RUNNER_TEMP/release-plan/publication-plan.json" --artifacts artifacts --evidence artifacts \
+            --proof "$RUNNER_TEMP/official-release" --verifier "$RUNNER_TEMP/verifier/release-verifier" --final-upload
       - name: Generate changelog
         id: changelog
         shell: bash

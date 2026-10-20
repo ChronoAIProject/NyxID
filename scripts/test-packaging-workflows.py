@@ -32,6 +32,7 @@ def require_gates(data):
                  'scripts/check-cli-archive-identity.py', 'scripts/test-packaging-workflows.py',
                  'scripts/check-built-image-csp.py', 'scripts/test-built-image-csp.py', 'frontend/Dockerfile.policy-tests',
                  'scripts/check-machine-docker-cli.py', 'scripts/machine_docker_fixture.mjs', 'scripts/test-machine-docker-fixture.mjs',
+                 'scripts/release_verifier.rs', 'security/signing-tools/package-lock.json', 'scripts/sign-rehearsal.cjs',
                  'cli/tests/updater-npm/package-lock.json', 'scripts/publication_contract.py', 'scripts/export-build-source.py', 'docs/site/index.md'):
         if not any(fnmatch.fnmatchcase(path, pattern) for pattern in filters):
             raise ValueError('packaging verifier input missing from PR selection')
@@ -105,10 +106,10 @@ def require_gates(data):
     if targets != set(policy['cli']['targets']) or 'run-dist-build.py' not in str(jobs['archives']['steps']) or \
             'check-cli-archive-identity.py' not in str(jobs['archives']['steps']):
         raise ValueError('every actual stripped CLI archive identity required')
-    for steps, checker, end in ((publisher['jobs']['build']['steps'], 'check-image-identity.py', 'Attest published image digest'),
+    for steps, checker, end in ((publisher['jobs']['build']['steps'], 'check-image-identity.py', 'scripts/publish-scanned-image.py'),
                                 (data['release']['jobs']['build-local-artifacts']['steps'], 'check-cli-archive-identity.py', 'Upload artifacts')):
         gates = [i for i, step in enumerate(steps) if checker in step.get('run', '')]
-        stops = [i for i, step in enumerate(steps) if step.get('name') == end]
+        stops = [i for i, step in enumerate(steps) if step.get('name') == end or end in step.get('run', '')]
         if len(gates) != 1 or not stops or gates[0] >= stops[0] or steps[gates[0]].get('continue-on-error') or \
                 'if' in steps[gates[0]] or any(bypass in steps[gates[0]]['run'] for bypass in ('||', 'set +e')):
             raise ValueError('final identity gate must precede required publication output')

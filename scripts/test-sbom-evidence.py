@@ -214,11 +214,13 @@ class SbomEvidence(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('promote',Path(__file__).with_name('promote-sbom-images.py'))
         promote=importlib.util.module_from_spec(spec);spec.loader.exec_module(promote)
         digest=receipt['subjects']['index:frontend'];tag='ghcr.io/chronoaiproject/nyxid/frontend:test'
-        with patch.object(promote.subprocess,'run') as run,patch.object(promote.subprocess,'check_output',return_value=digest+'\n'):
-            promote.promote(plan,evidence,'frontend',tag,Path('regctl'))
+        with patch.dict(os.environ,GITHUB_REF='refs/heads/main'),patch.object(promote.official_release,'authorize'),patch.object(promote.official_release,'manifest'), \
+                patch.object(promote.official_release,'verify'),patch.object(promote.official_release,'attach'), \
+                patch.object(promote.subprocess,'run') as run,patch.object(promote.subprocess,'check_output',return_value=digest+'\n'):
+            promote.promote(plan,evidence,'frontend',tag,Path('regctl'),self.root/'proof',Path('/verifier'))
         self.assertEqual(run.call_args.args[0],['regctl','image','copy','ghcr.io/chronoaiproject/nyxid/frontend@'+digest,tag])
         shutil.rmtree(evidence/'backend')
-        with patch.object(promote.subprocess,'run') as run,self.assertRaises(ValueError):promote.promote(plan,evidence,'frontend',tag,Path('regctl'))
+        with patch.object(promote.subprocess,'run') as run,self.assertRaises(ValueError):promote.promote(plan,evidence,'frontend',tag,Path('regctl'),self.root/'proof',Path('/verifier'))
         run.assert_not_called()
 
     def test_binary_wizard_and_package_graph_cannot_be_changed_by_rehashing_bundle(self):
@@ -234,7 +236,7 @@ class SbomEvidence(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('publisher',Path(__file__).with_name('publish-scanned-image.py'))
         publisher=importlib.util.module_from_spec(spec);spec.loader.exec_module(publisher)
         with patch.object(publisher,'verify_stage',return_value={'subject':{'digest':'sha256:'+'1'*64}}),patch.object(publisher.subprocess,'run') as run:
-            with self.assertRaises((ValueError,OSError)):publisher.publish(self.root,'ghcr.io/fixture/nyxid/frontend',Path('regctl'))
+            with self.assertRaises((ValueError,OSError)):publisher.publish(self.root,'ghcr.io/fixture/nyxid/frontend',Path('regctl'),self.root/'proof',Path('/verifier'))
         run.assert_not_called()
 
     def test_final_release_archive_composition_and_every_subject_digest_replay(self):

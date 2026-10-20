@@ -189,41 +189,20 @@ Org owners can opt out at:
 The flag is effective only for `user_type=Org`. Missing `profile_config`,
 missing `release_integrity`, and missing flag values default to `false`.
 
-## Release Workflow
+## Release workflow
 
-The release workflow builds and uploads the generated manifest as a workflow
-artifact. Signing and publication are disabled unless
-`RELEASE_INTEGRITY_SIGNING_ENABLED=true`.
+Official release signing and verification are mandatory in both publishers.
+The generated `releases.json` is a named signed subject alongside the final
+archives, SBOMs and `official-release-manifest.json`. The CLI publisher requires
+successful verification with the unchanged W6 verifier before release hosting
+and again before creating the GitHub Release. The image publisher signs and
+verifies its actual platform/index subjects before each registry write and
+requires a signed complete-set manifest before tag promotion.
 
-When enabled, maintainers must provide:
-
-- `RELEASE_INTEGRITY_SIGN_CMD`
-- `RELEASE_INTEGRITY_PUBLISH_CMD`
-- `RELEASE_INTEGRITY_MANIFEST_URL`
-
-Optional secret material can be provided via:
-
-- `RELEASE_INTEGRITY_SIGNING_KEY`
-- `RELEASE_INTEGRITY_PUBLISH_TOKEN`
-
-Signing workflow behavior is:
-
-- Disabled or unset `RELEASE_INTEGRITY_SIGNING_ENABLED`: warn and skip signing
-  and publication.
-- Enabled with all required command and URL configuration: sign and publish.
-- Enabled with missing required configuration: fail fast and name the missing
-  variables. This surfaces a deployment misconfiguration instead of silently
-  publishing an unsigned manifest that an operator expected to be signed.
-
-No default release origin, CDN, signing key, or rotation policy is assumed.
-
-## Maintainer Runbook TBD
-
-- [ ] TBD, owner Infra: signing key custody and storage.
-- [ ] TBD, owner Security: signing key rotation and authority policy.
-- [ ] TBD, owner Infra: independent release origin DNS, CDN, and TLS
-  ownership.
-- [ ] TBD, owner Security: final signature scheme and verification procedure.
-- [ ] TBD, owner Release-eng: manifest signing and publish process.
-- [ ] TBD, owner Release-eng: manifest validity, expiry, and stale-manifest
-  handling.
+There is no `RELEASE_INTEGRITY_SIGNING_ENABLED` switch or arbitrary signing/publish
+command. The protected `official-release` environment must provide the exact
+policy acknowledgement described in [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+That runbook specifies administrator custody, permissions, failure behavior,
+verification, and independently hosting the verified credential manifest.
+The nonpublishing PR/weekly OIDC path and its distinct identity are documented
+in [RELEASE_REHEARSAL.md](RELEASE_REHEARSAL.md).

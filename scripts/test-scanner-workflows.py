@@ -75,9 +75,17 @@ def require(data):
     publish = required_step(steps, 'scripts/publish-scanned-image.py')
     if scan >= publish or steps[publish].get('id') != 'publish':
         raise ValueError('publication requires the passing exact staged subject')
-    attest = next(step for step in steps if step.get('name') == 'Attest published image digest')
-    if attest['with']['subject-digest'] != '${{ steps.publish.outputs.digest }}':
-        raise ValueError('attestation must name the scanned publication digest')
+    prepare = required_step(steps, 'scripts/check-official-release.py prepare --scope platform')
+    verify = required_step(steps, 'scripts/check-official-release.py verify --scope platform')
+    attest = next(step for step in steps if step.get('id') == 'official-signature')
+    # The complete checksum list is derived from the same exact scanned stage,
+    # and its signed bundle is checked before the first registry copy. This
+    # replaces the former post-upload attestation of just one image digest.
+    if not scan < prepare < steps.index(attest) < verify < publish or \
+            '--stage "$RUNNER_TEMP/scanned-image"' not in steps[prepare]['run'] or \
+            '--stage "$RUNNER_TEMP/scanned-image"' not in steps[verify]['run'] or \
+            attest['with'] != {'subject-checksums': '${{ runner.temp }}/official-release/subjects.sha256', 'push-to-registry': False}:
+        raise ValueError('attestation must name and verify the scanned publication subject set')
     release = data['release']['jobs']
     if release['security-gate']['uses'] != './.github/workflows/security-scans.yml' or \
             'security-gate' not in release['host']['needs'] or "needs.security-gate.result == 'success'" not in release['host']['if']:
@@ -122,7 +130,7 @@ class ScannerWorkflows(unittest.TestCase):
             elif mutation == 'copy-first': steps.remove(publish); steps.insert(0, publish)
             elif mutation == 'no-source-gate': data['publish-images']['jobs']['build'].pop('needs')
             else:
-                next(step for step in steps if step.get('name') == 'Attest published image digest')['with']['subject-digest'] = '${{ steps.build.outputs.digest }}'
+                next(step for step in steps if step.get('id') == 'official-signature')['with'] = {'subject-digest': '${{ steps.build.outputs.digest }}'}
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): require(data)
 
     def test_each_final_image_scan_is_unconditional(self):
