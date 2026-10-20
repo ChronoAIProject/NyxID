@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::hash_token;
 use crate::errors::{AppError, AppResult};
-use crate::models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage};
+use crate::models::audit_outbox::{AuditDetail, AuditOwner, AuditPrincipal, AuditStage};
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetadata, NodeStatus};
 use crate::models::node_pending_credential::{
     COLLECTION_NAME as NODE_PENDING_CREDENTIALS, NodePendingCredential,
@@ -115,6 +115,19 @@ impl NodeMutationAudit {
         target: &str,
         tier: AuditTier,
     ) -> AppResult<()> {
+        self.record_with_detail(db, session, owner, (action, target, tier), None)
+            .await
+    }
+
+    async fn record_with_detail(
+        &self,
+        db: &mongodb::Database,
+        session: &mut mongodb::ClientSession,
+        owner: AuditOwner,
+        mutation: (&'static str, &str, AuditTier),
+        detail: Option<AuditDetail>,
+    ) -> AppResult<()> {
+        let (action, target, tier) = mutation;
         let event = AuditEvent {
             operation_id: self.operation_id.to_string(),
             stage: AuditStage::Committed,
@@ -123,15 +136,27 @@ impl NodeMutationAudit {
             action,
             target_id: Some(target.to_owned()),
         };
-        audit_outbox_service::enqueue_admitted_in_session(
-            db,
-            session,
-            &self.runtime,
-            tier,
-            &self.event_id,
-            &event,
-        )
-        .await?;
+        if let Some(detail) = detail {
+            audit_outbox_service::enqueue_admitted_in_session(
+                db,
+                session,
+                &self.runtime,
+                tier,
+                &self.event_id,
+                &event.with_detail(detail),
+            )
+            .await?;
+        } else {
+            audit_outbox_service::enqueue_admitted_in_session(
+                db,
+                session,
+                &self.runtime,
+                tier,
+                &self.event_id,
+                &event,
+            )
+            .await?;
+        }
         if self.disconnect {
             if self
                 .disconnect_owner
@@ -594,6 +619,7 @@ impl HumanNodeChange {
         ) {
             guard_human_node_in_session(db, session, &node).await?;
         }
+        let mut detail = None;
         let (action, target, tier) = match self {
             HumanNodeChange::Rotation {
                 auth_hash,
@@ -637,10 +663,28 @@ impl HumanNodeChange {
                 priority,
                 ..
             } => {
-                let updated = db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS).update_one(doc! {"_id": binding_id, "node_id": node_id, "user_id": owner, "is_active": true}, doc! {"$set": {"priority": priority, "updated_at": now}}).session(&mut *session).await?;
-                if updated.matched_count != 1 {
-                    return Err(AppError::NotFound("Binding not found".into()));
-                }
+                let bindings = db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS);
+                let filter = doc! {"_id": binding_id, "node_id": node_id, "user_id": owner, "is_active": true};
+                let before = bindings
+                    .find_one(filter.clone())
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Binding not found".into()))?;
+                let after = bindings
+                    .find_one_and_update(
+                        filter,
+                        doc! {"$set": {"priority": priority, "updated_at": now}},
+                    )
+                    .return_document(mongodb::options::ReturnDocument::After)
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Binding not found".into()))?;
+                // Both values come from this attempt's transaction snapshot,
+                // including the database-returned result of the update.
+                detail = Some(AuditDetail::NodeBindingPriorityChange {
+                    old: before.priority,
+                    new: after.priority,
+                });
                 (
                     "node_binding_updated",
                     binding_id.as_str(),
@@ -675,7 +719,7 @@ impl HumanNodeChange {
             HumanNodeChange::Registration { .. } => unreachable!(),
         };
         audit
-            .record(db, session, audit_owner, action, target, tier)
+            .record_with_detail(db, session, audit_owner, (action, target, tier), detail)
             .await
     }
 
@@ -3556,6 +3600,13 @@ mod tests {
                 admitted += 1;
                 let row = node_audit_events(&db).await.pop().unwrap();
                 assert_eq!(
+                    row.event.detail,
+                    Some(AuditDetail::NodeBindingPriorityChange {
+                        old: f.binding.priority,
+                        new: 42,
+                    })
+                );
+                assert_eq!(
                     row.event.principal,
                     AuditPrincipal::Person {
                         id: f.actor_id.clone()
@@ -3603,6 +3654,143 @@ mod tests {
             }
         }
         assert_eq!(node_audit_events(&db).await.len(), admitted);
+    }
+
+    #[tokio::test]
+    async fn w8_node_binding_priority_detail_preserves_snapshot_extremes_and_equal_updates() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_priority_detail").await;
+        let runtime = node_audit_runtime(false);
+        for case in [AccessCase::Direct, AccessCase::AsOrgAdmin] {
+            let f = seed_acl_fixture(&db, case).await;
+            let prepared = NodeMutationAudit::new(&runtime, &f.actor_id);
+            // Change storage after the request context is prepared. The event
+            // must describe the transaction's actual binding, not fixture state.
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .update_one(
+                    doc! {"_id": &f.binding.id},
+                    doc! {"$set": {"priority": i32::MIN}},
+                )
+                .await
+                .unwrap();
+            let mut old = i32::MIN;
+            for (index, new) in [i32::MAX, i32::MAX, i32::MIN].into_iter().enumerate() {
+                let audit = if index == 0 {
+                    prepared.clone()
+                } else {
+                    NodeMutationAudit::new(&runtime, &f.actor_id)
+                };
+                audit
+                    .update_binding_priority(&db, &f.node.id, &f.binding.id, new)
+                    .await
+                    .unwrap();
+                let row = node_audit_events(&db).await.pop().unwrap();
+                assert_eq!(row.event.action, "node_binding_updated");
+                assert_eq!(row.event.target_id.as_deref(), Some(f.binding.id.as_str()));
+                assert_eq!(
+                    row.event.detail,
+                    Some(AuditDetail::NodeBindingPriorityChange { old, new })
+                );
+                assert_eq!(
+                    db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                        .find_one(doc! {"_id": &f.binding.id})
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .priority,
+                    new
+                );
+                old = new;
+            }
+        }
+        let pending = node_audit_events(&db).await;
+        assert_eq!(pending.len(), 6);
+        let key = crate::services::audit_service::audit_chain_hmac_key().unwrap();
+        for expected in pending {
+            assert!(
+                audit_outbox_service::materialize_one(&db, key)
+                    .await
+                    .unwrap()
+            );
+            let row = db
+                .collection::<crate::models::audit_log::AuditLog>(
+                    crate::models::audit_log::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id": &expected.id})
+                .await
+                .unwrap()
+                .unwrap();
+            let stored: crate::models::audit_outbox::SafeAuditEvent =
+                serde_json::from_value(row.event_data.unwrap()).unwrap();
+            assert_eq!(stored, expected.event);
+        }
+        assert!(
+            !audit_outbox_service::materialize_one(&db, key)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_node_binding_priority_detail_rolls_back_and_retries_current_snapshot() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("w8_node_priority_rollback").await;
+        let runtime = node_audit_runtime(true);
+        let f = seed_acl_fixture(&db, AccessCase::Direct).await;
+        let audit = NodeMutationAudit::new(&runtime, &f.actor_id);
+        node_audit_backlog(&db, 100_000, 1).await;
+        assert!(matches!(
+            audit
+                .update_binding_priority(&db, &f.node.id, &f.binding.id, i32::MAX)
+                .await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        assert_eq!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .priority,
+            f.binding.priority
+        );
+        assert!(node_audit_events(&db).await.is_empty());
+        db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .update_one(
+                doc! {"_id": &f.binding.id},
+                doc! {"$set": {"priority": i32::MIN}},
+            )
+            .await
+            .unwrap();
+        node_audit_backlog(&db, 0, 0).await;
+        audit
+            .update_binding_priority(&db, &f.node.id, &f.binding.id, i32::MAX)
+            .await
+            .unwrap();
+        assert!(matches!(
+            audit
+                .update_binding_priority(&db, &f.node.id, &f.binding.id, 5)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        let rows = node_audit_events(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].event.detail,
+            Some(AuditDetail::NodeBindingPriorityChange {
+                old: i32::MIN,
+                new: i32::MAX
+            })
+        );
+        assert_eq!(
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .find_one(doc! {"_id": &f.binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .priority,
+            i32::MAX
+        );
     }
 
     #[tokio::test]
