@@ -29,7 +29,7 @@ pub mod delivery {
         errors::{AppError, AppResult},
         models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage, SafeAuditEvent},
         services::{
-            audit_outbox_service,
+            audit_outbox_service::{self, AuditEvent, AuditEventSource},
             audit_runtime::{
                 AuditRuntime,
                 intent::{DispatchPermit, EffectReservation},
@@ -113,24 +113,25 @@ pub mod delivery {
         pub channel: Channel,
     }
 
-    pub struct DeliveryRequest {
+    pub struct DeliveryRequest<E: AuditEventSource = AuditEvent> {
         record: QueuedDelivery,
-        effect: EffectReservation,
+        effect: EffectReservation<E>,
     }
 
-    impl DeliveryRequest {
+    impl<E: AuditEventSource> DeliveryRequest<E> {
         pub fn new(
             key: DeliveryKey,
             payload: PayloadRef,
-            effect: EffectReservation,
+            effect: EffectReservation<E>,
         ) -> AppResult<Self> {
             require_v4(key.operation_id)?;
             require_v4(key.product_event_id)?;
             require_v4(key.destination_id)?;
             require_v4(effect.event_id)?;
             require_v4(effect.terminal_event_id)?;
-            if effect.event.operation_id != key.operation_id.to_string()
-                || effect.event.stage != AuditStage::Intent
+            let event = effect.event.project();
+            if event.operation_id != key.operation_id.to_string()
+                || event.stage != AuditStage::Intent
                 || effect.event_id == effect.terminal_event_id
             {
                 return Err(AppError::AuditIntegrityConflict);
@@ -141,7 +142,7 @@ pub mod delivery {
                 destination_id: key.destination_id.to_string(),
                 channel: key.channel,
                 payload,
-                event: effect.event.safe_projection(),
+                event,
             };
             record.validate()?;
             Ok(Self { record, effect })
@@ -284,12 +285,12 @@ pub mod delivery {
 
     /// Joins the owning mutation and payload-version write. Never commits, retries,
     /// spawns or sends. Both core slots and the product record roll back together.
-    pub async fn enqueue_in_session(
+    pub async fn enqueue_in_session<E: AuditEventSource>(
         db: &Database,
         session: &mut ClientSession,
         runtime: &AuditRuntime,
         tier: AuditTier,
-        request: &DeliveryRequest,
+        request: &DeliveryRequest<E>,
     ) -> AppResult<QueuedDelivery> {
         if matches!(tier, AuditTier::Effect) {
             return Err(AppError::AuditIntegrityConflict);

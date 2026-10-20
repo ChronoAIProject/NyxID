@@ -4,12 +4,13 @@ use crate::{
     models::{
         audit_effect_intent::{AuditEffectIntent, COLLECTION_NAME as INTENTS},
         audit_outbox::{
-            AuditOwner, AuditPrincipal, AuditStage, PENDING_COLLECTION_NAME as PENDING,
-            PendingAuditEvent, SystemAuditActor,
+            AuditApprovalMode, AuditDetail, AuditOwner, AuditPrincipal, AuditStage,
+            PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent, ResourceSetKind,
+            SystemAuditActor,
         },
     },
     services::{
-        audit_outbox_service::{self, AuditEvent},
+        audit_outbox_service::{self, AuditEvent, AuditEventSource},
         audit_runtime::{
             AuditRuntime,
             intent::EffectReservation,
@@ -84,10 +85,10 @@ fn request(key: DeliveryKey, payload: PayloadRef) -> DeliveryRequest {
     .unwrap()
 }
 
-async fn enqueue(
+async fn enqueue<E: AuditEventSource>(
     db: &Database,
     runtime: &AuditRuntime,
-    request: &DeliveryRequest,
+    request: &DeliveryRequest<E>,
     tier: AuditTier,
 ) -> AppResult<QueuedDelivery> {
     transaction::run(
@@ -230,6 +231,171 @@ fn w8_coreb_delivery_validates_the_core_event_and_reservation_identity() {
             _ => effect.event.action = "not an action identifier",
         }
         assert!(DeliveryRequest::new(key, payload(), effect).is_err());
+    }
+    let effect = effect(
+        key,
+        AuditPrincipal::System {
+            actor: SystemAuditActor::Delivery,
+        },
+        AuditOwner::Platform,
+    );
+    assert!(
+        DeliveryRequest::new(
+            key,
+            payload(),
+            EffectReservation {
+                event: effect.event.with_detail(AuditDetail::ResourceSetChange {
+                    kind: ResourceSetKind::Services,
+                    added: vec!["not-a-domain-uuid".into()],
+                    removed: vec![],
+                    truncated: false,
+                }),
+                event_id: effect.event_id,
+                terminal_event_id: effect.terminal_event_id,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn w8_coreb_delivery_preserves_owned_and_borrowed_typed_detail_through_completion() {
+    let (db, runtime) = fixture().await;
+    let key = key();
+    let reference = payload();
+    let effect = effect(
+        key,
+        AuditPrincipal::System {
+            actor: SystemAuditActor::Delivery,
+        },
+        AuditOwner::Platform,
+    );
+    let detail = AuditDetail::ApprovalModeChange {
+        old: AuditApprovalMode::WritesOnly,
+        new: AuditApprovalMode::All,
+    };
+    let detailed = effect.event.clone().with_detail(detail.clone());
+    let owned = DeliveryRequest::new(
+        key,
+        reference.clone(),
+        EffectReservation {
+            event: detailed.clone(),
+            event_id: effect.event_id,
+            terminal_event_id: effect.terminal_event_id,
+        },
+    )
+    .unwrap();
+    let queued = enqueue(&db, &runtime, &owned, AuditTier::Standard)
+        .await
+        .unwrap();
+    let borrowed = DeliveryRequest::new(
+        key,
+        reference.clone(),
+        EffectReservation {
+            event: &detailed,
+            event_id: effect.event_id,
+            terminal_event_id: effect.terminal_event_id,
+        },
+    )
+    .unwrap();
+    assert!(
+        enqueue(&db, &runtime, &borrowed, AuditTier::Standard)
+            .await
+            .unwrap()
+            == queued
+    );
+    for changed_detail in [
+        None,
+        Some(AuditDetail::ApprovalModeChange {
+            old: AuditApprovalMode::WritesOnly,
+            new: AuditApprovalMode::Off,
+        }),
+    ] {
+        let result = if let Some(detail) = changed_detail {
+            let changed = DeliveryRequest::new(
+                key,
+                reference.clone(),
+                EffectReservation {
+                    event: effect.event.clone().with_detail(detail),
+                    event_id: effect.event_id,
+                    terminal_event_id: effect.terminal_event_id,
+                },
+            )
+            .unwrap();
+            enqueue(&db, &runtime, &changed, AuditTier::Standard).await
+        } else {
+            let changed = DeliveryRequest::new(
+                key,
+                reference.clone(),
+                EffectReservation {
+                    event: effect.event.clone(),
+                    event_id: effect.event_id,
+                    terminal_event_id: effect.terminal_event_id,
+                },
+            )
+            .unwrap();
+            enqueue(&db, &runtime, &changed, AuditTier::Standard).await
+        };
+        assert!(matches!(result, Err(AppError::AuditIntegrityConflict)));
+    }
+    assert_eq!(
+        audit_state_service::load(&db).await.unwrap().pending_count,
+        2
+    );
+    assert_eq!(
+        intent(&db, key.operation_id).await.event.detail,
+        Some(detail.clone())
+    );
+    assert!(
+        audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+    );
+    queued
+        .authorize(&db, &runtime)
+        .await
+        .unwrap()
+        .run(|_| async {})
+        .await
+        .unwrap();
+    finish(&db, &runtime, key.operation_id, DeliveryOutcome::Succeeded)
+        .await
+        .unwrap();
+    assert!(
+        audit_outbox_service::materialize_one(&db, &[2; 32])
+            .await
+            .unwrap()
+    );
+    for id in [effect.event_id, effect.terminal_event_id] {
+        let pending = db
+            .collection::<PendingAuditEvent>(PENDING)
+            .find_one(doc! {"_id": id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.event.detail, Some(detail.clone()));
+        let audit = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": id.to_string()})
+            .await
+            .unwrap()
+            .unwrap();
+        let projected: crate::models::audit_outbox::SafeAuditEvent =
+            serde_json::from_value(audit.event_data.clone().unwrap()).unwrap();
+        assert_eq!(projected.detail, Some(detail.clone()));
+        assert_eq!(
+            audit.entry_hash.as_deref(),
+            Some(
+                crate::services::audit_chain_service::compute_entry_hash(&audit, &[2; 32])
+                    .unwrap()
+                    .as_str(),
+            )
+        );
+        let evidence = serde_json::to_string(&pending).unwrap();
+        assert!(!evidence.contains(reference.record_id()));
+        assert!(!evidence.contains(reference.revision_id()));
     }
 }
 

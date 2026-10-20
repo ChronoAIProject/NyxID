@@ -53,7 +53,9 @@ or process memory. `PayloadRef` accepts no arbitrary JSON or extra fields.
 
 The immutable `notification_deliveries_v1` product queue record contains this
 reference, the delivery identities and a safe event projection. The core receives
-only the caller's typed `AuditEvent` through `EffectReservation`. It never receives
+only the caller's sealed `AuditEventSource` projection through
+`EffectReservation<E>`. Both plain `AuditEvent` and `DetailedAuditEvent` (owned or
+borrowed) are accepted. It never receives
 the payload reference, destination address, body or template arguments. Product
 references are not copied into `audit_pending_events`, audit intents, chained
 rows or witness-delivery evidence. There is no automatic queue TTL or deletion
@@ -72,7 +74,7 @@ The existing core validator checks these identities and safe event fields.
 | API | Contract |
 | --- | --- |
 | `ensure_indexes(db)` | Startup DDL before producers are enabled, outside business transactions. Creates the required unique product/destination/channel index. B owns startup registration; request that hook through PM. Enqueue requires the named index and fails if it is absent. |
-| `DeliveryRequest::new(key, payload_ref, effect_reservation)` | Prepare outside retries. Validates UUIDs, safe event, Intent stage, matching operation and distinct intent/terminal event IDs. Uses the core's `EffectReservation` directly. |
+| `DeliveryRequest<E = AuditEvent>::new(key, payload_ref, effect_reservation)` | Accepts `E: AuditEventSource` through the core's `EffectReservation<E>`, including `DetailedAuditEvent` and borrowed event producers. Validates UUIDs, the complete safe projection including detail, Intent stage, matching operation and distinct intent/terminal event IDs. |
 | `enqueue_in_session(db, session, runtime, owning_db_tier, &request)` | Join the producer's complete business transaction. Persist the immutable product envelope and call `begin_effect_in_session` for its two slots. Return a `QueuedDelivery`; neither commit nor dispatch occurs here. |
 | `load(db, operation_id)` | Recover an immutable product reference. This returns data, with no dispatch authority or authorization decision. |
 | `queued.authorize(db, runtime)` | After confirmed commit and live domain checks, delegate to `authorize_effect`. Returns a private `DeliveryPermit` containing the core permit and the exact queued context. |
@@ -86,6 +88,12 @@ tier, fixed by service policy. Effect is refused as an enqueue tier; dispatch ha
 its own Effect admission. Preserve local revocation even when its remote notice
 or provider revoke must defer.
 
+Prepare stable delivery/event IDs and immutable payload inputs before retries.
+When detail contains before/after policy, construct the detailed event and
+`DeliveryRequest` inside each transaction attempt from that attempt's loaded
+before/after snapshot; reuse the prepared IDs. Never capture a pre-read policy
+value or derive security decision detail from the request patch alone.
+
 The producer's transaction callback includes all live authority/revision checks,
 the mutation, the immutable payload write/fence and enqueue. Use
 `audit_runtime::transaction::run`, or the approved complete service-history owner.
@@ -96,7 +104,7 @@ receipt using the original identities before obtaining a permit.
 
 For example, the integration order is:
 
-1. Prepare stable product/delivery/event IDs, payload version and typed actor/owner.
+1. Prepare stable product/delivery/event IDs, payload version and verified actor/owner.
 2. Commit mutation + payload + `enqueue_in_session` in one retryable DB transaction.
 3. After definite commit, validate the current product/destination authority and
    obtain `queued.authorize(db, runtime)` outside that transaction.
@@ -117,11 +125,31 @@ is Uncertain. Cancelled is valid only before any claim, as the core enforces.
 No provider error text, response body or raw receipt enters the audit event.
 Preserve existing non-secret forensic assertions during sink conversion. Use
 the core contract's `detail: Option<AuditDetail>` with a CORE-reviewed closed
-variant whenever legacy evidence carried an enumerable security decision value.
+variant through `event.with_detail(detail)` whenever legacy evidence carried an
+enumerable security decision value. The adapter preserves detail in its immutable
+product envelope and passes the same sealed producer to core reservation. The
+core preserves it through materialization and terminal completion; changing or
+removing detail on replay conflicts. Absent detail retains today's event bytes.
 Omit detail for identifiers/content; this interface adds no free-form field.
 Request needed variant names, fields, types, bounds and example sites through
 PM. Mark conversions `detail-pending` until the reviewed variants are available,
 then backfill them without dropping the corresponding legacy assertions.
+
+The following CORE variant requests are `detail-pending` for workflow 42,
+not additional local variants or prerequisites for publishing this interface:
+
+| Requested variant | Fields, types and bounds | Existing example site |
+| --- | --- | --- |
+| `NotificationSettingsChange` | `old/new: NotificationSettingsDecision`, each with `telegram_enabled`, `push_enabled`, `approval_suspended` and `approval_delivery_configured` booleans; `global_approval_mode: AuditApprovalMode`; `approval_timeout_secs: u32` in 10–300; `grant_expiry_days: u32` in 1–365. Preserve the legacy `approval_required` tri-state through the existing WritesOnly/All/Off mapping. Values come from the authorized transaction snapshot, not request input. | `handlers/notifications.rs::update_settings` currently records settings, effective approval mode and delivery readiness. |
+| `WebhookDeliveryFailure` | `event: WebhookEventKind`, `reason: WebhookFailureKind`, `attempts: u8` in 0–3 and `last_http_status: Option<u16>` in 100–599. Event kinds: ConnectionExpired, ConnectLinkCompleted, ConnectLinkCancelled, ConnectLinkExpired. Failure kinds: TenantIdentityMissing, ConfigurationLoadFailed, RateLimitUnavailable, AppRateLimited, KeyIdLoadFailed, KeyIdStoreFailed, SecretDecryptFailed, SerializationFailed, BodyTooLarge, DestinationUnavailable, SendFailed, NonSuccessStatus. No provider text or identity/content fields. | `services/developer_webhook_service.rs::record_final_failure_for_app` and its existing failure-audit assertions. |
+
+The webhook request requires CORE's reviewed terminal-detail API because the
+failure class is known after the effect; today's terminal helper preserves the
+intent's existing detail. The 0–3 bound preserves the legacy bounded attempt
+counter and grants no authority to retry a consumed delivery permit. The
+terminal stage already supplies Succeeded/Failed/Cancelled/Uncertain; do not
+invent another outcome state machine. CORE reviews the requested variants and
+their validation centrally before the conversion uses them.
 
 Core completion is authoritative. The product queue is immutable and deliberately
 does not maintain a competing claim/lease/outcome state machine. A product receipt
