@@ -1250,6 +1250,9 @@ async fn apply_client_update(
                 doc! { "$set": set_doc.clone(), "$inc": { "machine_external_security_revision": 1_i64 } })
                 .session(&mut *session).await?;
             if result.matched_count != 0 {
+                if set_doc.get_bool("is_active") == Ok(false) {
+                    cascade_client_deactivation(db, session, &client_id).await?;
+                }
                 super::machine_external_grant_service::invalidate_client_in_session(
                     db, &client_id, "oauth_client_security_changed", 100, session).await?;
             }
@@ -1443,9 +1446,7 @@ pub async fn admin_update_client(
         || update.allowed_scopes.is_some()
         || update.broker_capability_enabled.is_some();
 
-    if update.is_active == Some(false) {
-        cascade_client_deactivation(db, client_id).await?;
-    } else if clears_pending_auth_codes {
+    if update.is_active != Some(false) && clears_pending_auth_codes {
         delete_unused_authorization_codes(db, client_id).await?;
     }
 
@@ -1469,8 +1470,6 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
     if result.matched_count == 0 {
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
-
-    cascade_client_deactivation(db, client_id).await?;
 
     Ok(())
 }
@@ -1496,21 +1495,28 @@ pub async fn delete_client_for_creator(
         return Err(AppError::NotFound("OAuth client not found".to_string()));
     }
 
-    cascade_client_deactivation(db, client_id).await?;
-
     Ok(())
 }
 
 // Mirrors org-delete cascade in org_service.rs so stale consents/refresh tokens
 // do not linger after a single client is deactivated (issue #498).
-async fn cascade_client_deactivation(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
+async fn cascade_client_deactivation(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    client_id: &str,
+) -> AppResult<()> {
     db.collection::<bson::Document>(CONSENTS)
         .delete_many(doc! { "client_id": client_id })
+        .session(&mut *session)
         .await?;
     db.collection::<bson::Document>(REFRESH_TOKENS)
         .delete_many(doc! { "client_id": client_id })
+        .session(&mut *session)
         .await?;
-    delete_unused_authorization_codes(db, client_id).await?;
+    db.collection::<bson::Document>(AUTH_CODES)
+        .delete_many(doc! { "client_id": client_id, "used": false })
+        .session(session)
+        .await?;
     Ok(())
 }
 
@@ -3213,6 +3219,7 @@ mod tests {
                     expires_at: now + chrono::Duration::days(1),
                     revoked: false,
                     replaced_by: None,
+                    last_replayed_at: None,
                     revoked_at: None,
                     resource_uris: Vec::new(),
                     allowed_service_ids: Vec::new(),
@@ -3288,6 +3295,62 @@ mod tests {
             assert!(!client.is_active, "client should be soft-deleted");
             assert_eq!(count_consents(db, client_id).await, 0);
             assert_eq!(count_refresh_tokens(db, client_id).await, 0);
+        }
+
+        #[tokio::test]
+        async fn w8_id_client_deactivation_cascade_aborts_with_flip_on_every_entry() {
+            for entry in ["admin_update", "admin_delete", "creator_delete"] {
+                let base = crate::test_utils::connect_transaction_test_database(&format!(
+                    "w8_id_client_cascade_abort_{entry}"
+                ))
+                .await;
+                let client_id = Uuid::new_v4().to_string();
+                insert_client_with_consent_and_refresh_token(&base, &client_id, "owner").await;
+                insert_authorization_code(&base, &client_id, "unused", false).await;
+                insert_authorization_code(&base, &client_id, "used", true).await;
+                let mut guard = crate::test_utils::fail_command::Guard::acquire(&base, None).await;
+                guard
+                    .arm(
+                        doc! {"times": 1},
+                        doc! {
+                            "failCommands": ["delete"], "errorCode": 2, "errorLabels": [],
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let db = guard.database();
+                let result = match entry {
+                    "admin_update" => admin_update_client(
+                        db,
+                        &client_id,
+                        AdminUpdateClient {
+                            is_active: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map(|_| ()),
+                    "admin_delete" => delete_client(db, &client_id).await,
+                    _ => delete_client_for_creator(db, &client_id, "owner").await,
+                };
+                guard.disarm().await.unwrap();
+                assert!(
+                    matches!(result, Err(AppError::DatabaseError(_))),
+                    "{entry}: {result:?}"
+                );
+                assert!(
+                    get_client(&base, &client_id).await.unwrap().is_active,
+                    "{entry}: aborted cascade must roll back its preceding client flip"
+                );
+                assert_eq!(count_consents(&base, &client_id).await, 1);
+                assert_eq!(count_refresh_tokens(&base, &client_id).await, 1);
+                assert_eq!(count_authorization_codes(&base, &client_id, false).await, 1);
+                assert_eq!(count_authorization_codes(&base, &client_id, true).await, 1);
+                delete_client(&base, &client_id).await.unwrap();
+                assert_client_deactivated_and_cascaded(&base, &client_id).await;
+                assert_eq!(count_authorization_codes(&base, &client_id, false).await, 0);
+                assert_eq!(count_authorization_codes(&base, &client_id, true).await, 1);
+            }
         }
 
         #[tokio::test]

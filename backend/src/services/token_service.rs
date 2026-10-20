@@ -461,6 +461,7 @@ pub async fn prepare_session_tokens(
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
+        last_replayed_at: None,
         revoked_at: None,
         resource_uris: Vec::new(),
         allowed_service_ids: Vec::new(),
@@ -568,16 +569,6 @@ async fn validate_refresh_client_in_session(
         }
         return Ok(false);
     }
-    if stored.client_id != Uuid::nil().to_string() {
-        // Share the client's write fence with deactivation/deletion.
-        db.collection::<OauthClient>(OAUTH_CLIENTS)
-            .update_one(
-                doc! {"_id": &stored.client_id, "is_active": true},
-                doc! {"$set": {"updated_at": bson::DateTime::now()}},
-            )
-            .session(session)
-            .await?;
-    }
     Ok(true)
 }
 
@@ -627,23 +618,12 @@ pub async fn refresh_tokens(
             "refresh_client_revoked",
             &grant.id,
         );
-        let context = (db, runtime, &owner, &claims.jti, &rejection);
-        let active = transaction::run(
-            db,
-            &context,
-            |session, (db, runtime, owner, jti, rejection)| {
-                Box::pin(async move {
-                    let stored = db
-                        .collection::<RefreshToken>(REFRESH_TOKENS)
-                        .find_one(doc! {"jti": *jti, "user_id": *owner})
-                        .session(&mut *session)
-                        .await?
-                        .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
-                    validate_refresh_client_in_session(db, runtime, session, &stored, rejection)
-                        .await
-                })
-            },
-        )
+        let context = (db, runtime, &grant, &rejection);
+        let active = transaction::run(db, &context, |session, (db, runtime, grant, rejection)| {
+            Box::pin(async move {
+                validate_refresh_client_in_session(db, runtime, session, grant, rejection).await
+            })
+        })
         .await?;
         if !active {
             if let Some(mcp) = mcp_sessions {
@@ -690,15 +670,17 @@ pub async fn refresh_tokens(
         &context,
         |session, (db, runtime, owner, jti, new_id, new_jti, config, audit, grant)| {
             Box::pin(async move {
+                // Deactivation atomically deletes every client grant. On a retry,
+                // report invalid_client even if that cascade has removed T1.
+                if !validate_refresh_client_in_session(db, runtime, session, grant, audit).await? {
+                    return Ok(Err(inactive_refresh_client()));
+                }
                 let stored = db
                     .collection::<RefreshToken>(REFRESH_TOKENS)
                     .find_one(doc! {"jti": *jti, "user_id": *owner})
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::Unauthorized("Refresh token not found".into()))?;
-                if !validate_refresh_client_in_session(db, runtime, session, &stored, audit).await? {
-                    return Ok(Err(inactive_refresh_client()));
-                }
                 if stored.expires_at <= Utc::now() {
                     return Err(AppError::Unauthorized("Refresh token expired".into()));
                 }
@@ -775,6 +757,18 @@ pub async fn refresh_tokens(
                 )
                 .await?;
                 if reused {
+                    // Fence only this replacement against deactivation's atomic
+                    // cascade; refresh traffic never writes the shared client row.
+                    if !validate_refresh_client_in_session(db, runtime, session, grant, audit).await? {
+                        return Ok(Err(inactive_refresh_client()));
+                    }
+                    let changed = db.collection::<RefreshToken>(REFRESH_TOKENS)
+                        .update_one(doc! {"_id": &active.id, "revoked": false},
+                            doc! {"$set": {"last_replayed_at": bson::DateTime::now()}})
+                        .session(&mut *session).await?;
+                    if changed.matched_count != 1 {
+                        return Err(AppError::Unauthorized("Refresh token has been revoked".into()));
+                    }
                     return Ok(Ok((active, true)));
                 }
                 let now = Utc::now();
@@ -790,6 +784,7 @@ pub async fn refresh_tokens(
                     jti: (*new_jti).clone(),
                     expires_at: now + Duration::seconds(config.jwt_refresh_ttl_secs),
                     revoked: false,
+                    last_replayed_at: None,
                     revoked_at: None,
                     replaced_by: None,
                     created_at: now,
@@ -1453,6 +1448,7 @@ mod tests {
                 protected_consent: None,
                 expires_at: now + Duration::days(7),
                 revoked: false,
+                last_replayed_at: None,
                 revoked_at: None,
                 replaced_by: None,
                 resource_uris: Vec::new(),
@@ -1461,6 +1457,362 @@ mod tests {
                 created_at: now,
             },
         )
+    }
+
+    async fn w8_id_seed_refresh_client(
+        db: &mongodb::Database,
+        state: &crate::AppState,
+    ) -> (String, RefreshToken, OauthClient) {
+        let (token, mut grant) = w8_id_client_refresh(state);
+        seed_user(db, &grant.user_id).await;
+        let (client, _) = super::super::oauth_client_service::create_client(
+            db,
+            "W8 refresh client",
+            &[],
+            "public",
+            "dynamic_registration",
+            "",
+            "openid proxy",
+            crate::models::oauth_client::ScopeProvenance::Defaulted,
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        grant.client_id.clone_from(&client.id);
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        let client = super::super::oauth_client_service::get_client(db, &client.id)
+            .await
+            .unwrap();
+        (token, grant, client)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn w8_id_rotation_and_grace_replay_conflict_with_atomic_client_deactivation() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        for replay in [false, true] {
+            let base = connect_transaction_test_database("w8_id_refresh_deactivation_race").await;
+            let reached = Arc::new(tokio::sync::Notify::new());
+            let (release, receive) = std::sync::mpsc::channel();
+            let receive = Mutex::new(receive);
+            let paused = Arc::new(AtomicBool::new(false));
+            let conflicts = Arc::new(AtomicUsize::new(0));
+            let client_writes = Arc::new(AtomicUsize::new(0));
+            let guard = {
+                let reached = reached.clone();
+                let paused = paused.clone();
+                let conflicts = conflicts.clone();
+                let client_writes = client_writes.clone();
+                crate::test_utils::fail_command::Guard::acquire(
+                    &base,
+                    Some(EventHandler::callback(move |event| match event {
+                        CommandEvent::Started(event) => {
+                            if event.command.get_str("update") == Ok(OAUTH_CLIENTS) {
+                                client_writes.fetch_add(1, Ordering::SeqCst);
+                            }
+                            if event.command.get_str("update") == Ok(REFRESH_TOKENS)
+                                && !paused.swap(true, Ordering::SeqCst)
+                            {
+                                reached.notify_one();
+                                receive
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(std::time::Duration::from_secs(15))
+                                    .expect("resume T1 write after committed client deactivation");
+                            }
+                        }
+                        CommandEvent::Failed(event)
+                            if event.failure.contains_label("TransientTransactionError") =>
+                        {
+                            conflicts.fetch_add(1, Ordering::SeqCst);
+                        }
+                        _ => {}
+                    })),
+                )
+                .await
+            };
+            let state = test_app_state(base.clone());
+            let (token, grant, _) = w8_id_seed_refresh_client(&base, &state).await;
+            if replay {
+                refresh_tokens(
+                    &base,
+                    &state.audit_runtime,
+                    &state.config,
+                    &state.jwt_keys,
+                    &token,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            let task = {
+                let db = guard.database().clone();
+                tokio::spawn(async move {
+                    refresh_tokens(
+                        &db,
+                        &state.audit_runtime,
+                        &state.config,
+                        &state.jwt_keys,
+                        &token,
+                        None,
+                        None,
+                    )
+                    .await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+                .await
+                .unwrap();
+            let deactivated =
+                super::super::oauth_client_service::delete_client(&base, &grant.client_id).await;
+            release.send(()).unwrap();
+            deactivated.unwrap();
+            let error = task
+                .await
+                .unwrap()
+                .err()
+                .expect("deactivated client refuses refresh");
+            assert!(
+                matches!(error, AppError::AuthenticationFailed(_)),
+                "{error:?}"
+            );
+            assert!(
+                conflicts.load(Ordering::SeqCst) >= 1,
+                "T1 must force a full transaction retry"
+            );
+            assert_eq!(
+                client_writes.load(Ordering::SeqCst),
+                0,
+                "refresh never writes the client document"
+            );
+            assert_eq!(
+                base.collection::<RefreshToken>(REFRESH_TOKENS)
+                    .count_documents(doc! {"client_id": &grant.client_id, "revoked": false})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                base.collection::<RefreshToken>(REFRESH_TOKENS)
+                    .count_documents(doc! {"client_id": &grant.client_id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                base.collection::<Session>(SESSIONS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                base.collection::<bson::Document>(
+                    crate::models::audit_outbox::PENDING_COLLECTION_NAME
+                )
+                .count_documents(doc! {"event.action": "session_refreshed"})
+                .await
+                .unwrap(),
+                u64::from(replay)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn w8_id_refresh_preserves_client_timestamp_and_default_scope_migration_cas() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        let base = connect_transaction_test_database("w8_id_refresh_migration_cas").await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let (release, receive) = std::sync::mpsc::channel();
+        let receive = Mutex::new(receive);
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = {
+            let reached = reached.clone();
+            crate::test_utils::fail_command::Guard::acquire(
+                &base,
+                Some(EventHandler::callback(move |event| {
+                    if let CommandEvent::Started(event) = event
+                        && event.command.get_str("update") == Ok(OAUTH_CLIENTS)
+                        && !paused.swap(true, Ordering::SeqCst)
+                    {
+                        reached.notify_one();
+                        receive
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(15))
+                            .expect("resume default scope CAS after refresh traffic");
+                    }
+                })),
+            )
+            .await
+        };
+        let state = test_app_state(base.clone());
+        let (mut token, grant, client) = w8_id_seed_refresh_client(&base, &state).await;
+        let migration = {
+            let db = guard.database().clone();
+            tokio::spawn(async move {
+                super::super::oauth_client_service::migrate_dynamic_clients_grant_default_mcp_scopes(&db).await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+            .await
+            .unwrap();
+        let traffic = async {
+            for _ in 0..3 {
+                let issued = refresh_tokens(
+                    &base,
+                    &state.audit_runtime,
+                    &state.config,
+                    &state.jwt_keys,
+                    &token,
+                    None,
+                    None,
+                )
+                .await?;
+                token = issued.refresh_token;
+                let live =
+                    super::super::oauth_client_service::get_client(&base, &client.id).await?;
+                assert_eq!(
+                    live.updated_at, client.updated_at,
+                    "refresh must preserve the client's CAS timestamp"
+                );
+            }
+            AppResult::Ok(())
+        }
+        .await;
+        release.send(()).unwrap();
+        traffic.unwrap();
+        migration.await.unwrap().unwrap();
+        let migrated = super::super::oauth_client_service::get_client(&base, &grant.client_id)
+            .await
+            .unwrap();
+        for scope in
+            super::super::oauth_client_service::DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace()
+        {
+            assert!(
+                migrated
+                    .allowed_scopes
+                    .split_whitespace()
+                    .any(|value| value == scope),
+                "the original CAS snapshot still admits missing default scope {scope}"
+            );
+        }
+        assert_eq!(
+            base.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"client_id": &grant.client_id, "revoked": false})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_id_grace_replay_preserves_response_and_refuses_revoked_replacement() {
+        let db = connect_transaction_test_database("w8_id_grace_replay_fence").await;
+        let state = test_app_state(db.clone());
+        let (original, grant, client) = w8_id_seed_refresh_client(&db, &state).await;
+        let rotated = refresh_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &original,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let replayed = refresh_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &original,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed.refresh_token, rotated.refresh_token);
+        let claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &replayed.refresh_token).unwrap();
+        let replacement = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! {"jti": &claims.jti})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replacement.last_replayed_at.is_some());
+        assert_eq!(
+            super::super::oauth_client_service::get_client(&db, &client.id)
+                .await
+                .unwrap()
+                .updated_at,
+            client.updated_at,
+            "grace replay preserves the client timestamp too"
+        );
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! {"_id": &replacement.id},
+                doc! {"$set": {"revoked": true, "revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        let error = refresh_tokens(
+            &db,
+            &state.audit_runtime,
+            &state.config,
+            &state.jwt_keys,
+            &original,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .expect("revoked replacement refuses replay");
+        assert!(matches!(error, AppError::Unauthorized(_)), "{error:?}");
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"client_id": &grant.client_id})
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .count_documents(doc! {"client_id": &grant.client_id, "revoked": false})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::audit_outbox::PENDING_COLLECTION_NAME)
+                .count_documents(doc! {"event.action": "session_refreshed"})
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1976,6 +2328,7 @@ mod tests {
                 expires_at: now + Duration::days(7),
                 revoked: false,
                 replaced_by: None,
+                last_replayed_at: None,
                 revoked_at: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: allowed_service_ids.clone(),
@@ -2176,6 +2529,7 @@ mod tests {
                 expires_at: now + Duration::days(7),
                 revoked: false,
                 replaced_by: None,
+                last_replayed_at: None,
                 revoked_at: None,
                 resource_uris: Vec::new(),
                 allowed_service_ids: vec![service_a_id.clone()],

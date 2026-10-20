@@ -22,6 +22,10 @@ pub struct RefreshToken {
     pub replaced_by: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub revoked_at: Option<DateTime<Utc>>,
+    /// Per-token write fence for grace replay versus revocation/deactivation.
+    /// Observational only: never used by a CAS or to extend token validity.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_replayed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub resource_uris: Vec<String>,
     #[serde(default)]
@@ -59,6 +63,7 @@ mod tests {
             revoked: false,
             replaced_by: None,
             revoked_at: None,
+            last_replayed_at: None,
             resource_uris: vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()],
             allowed_service_ids: vec!["svc-1".to_string()],
             allow_all_services: false,
@@ -90,6 +95,7 @@ mod tests {
             "created_at": bson::DateTime::from_chrono(now),
         };
         let restored: RefreshToken = bson::from_document(doc).expect("deserialize");
+        assert!(restored.last_replayed_at.is_none());
         assert!(restored.scope.is_none());
         assert!(restored.resource_uris.is_empty());
         assert!(restored.allowed_service_ids.is_empty());
