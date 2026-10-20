@@ -49,6 +49,8 @@ it("F02 keeps ordered string query values with the real public Router", async ()
       fireEvent.click(link);
     });
     await waitFor(() => expect(router.state.location.pathname).toBe(path));
+    if (path === "/security")
+      await screen.findByRole("heading", { level: 1, name: /Your passwords/ });
     expect(
       Array.from(new URLSearchParams(router.state.location.searchStr)),
     ).toEqual(entries);

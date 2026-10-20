@@ -12,7 +12,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.PUBLIC_TEST_ORIGIN || "http://127.0.0.1:4188",
     ...devices["Desktop Chrome"],
-    reducedMotion: "reduce",
+    contextOptions: { reducedMotion: "reduce" },
     trace: "retain-on-failure",
   },
 });

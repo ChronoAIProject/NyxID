@@ -26,6 +26,11 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
     if (m.type() === "error") errors.push(m.text());
   });
   await page.goto("/?code=INV&return_to=%2Fkeys&utm_source=test");
+  expect(
+    await page.evaluate(
+      () => matchMedia("(prefers-reduced-motion: reduce)").matches,
+    ),
+  ).toBe(true);
   await expect(page.locator("nav")).toBeVisible();
   await page.waitForFunction(() =>
     document.querySelector('nav a[href^="/security"]'),
@@ -119,7 +124,7 @@ test("records a bounded lab resource sample", async ({ page }) => {
     return {
       kind: "lab",
       path: "/security",
-      reducedMotion: true,
+      reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
       fieldCwvStatus: "not-measured",
       resources: resources.length,
       transferBytes: resources.reduce((sum, r) => sum + r.transferSize, 0),
@@ -168,6 +173,7 @@ test("F01 contact remains inert without entry JavaScript and never submits perso
   for (const mode of ["disabled", "failed", "delayed"] as const) {
     const context = await browser.newContext({
       javaScriptEnabled: mode !== "disabled",
+      reducedMotion: "reduce",
     });
     const target = await context.newPage();
     let release = () => {};
@@ -192,7 +198,10 @@ test("F01 contact remains inert without entry JavaScript and never submits perso
       await target.goto("http://127.0.0.1:4188/contact", {
         waitUntil: "commit",
       });
-      await expect(target.locator("#cForm fieldset")).toBeDisabled();
+      await expect(target.locator("#cForm fieldset")).toHaveAttribute(
+        "disabled",
+        "",
+      );
       await expect(
         target.locator('#cForm button[type="submit"]'),
       ).toBeDisabled();
@@ -315,7 +324,7 @@ test("F03 retries a failed Docs fetch and recovers a failed route import by expl
       await route.fulfill({ status: 503, body: "Temporarily unavailable" });
     else await route.continue();
   });
-  await page.goto("/docs");
+  await page.goto("/docs/ai/getting-started/what-is-ai-access");
   await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
   await page
     .locator('a[href="/docs/ai/guides/agent-isolation"]')
@@ -328,7 +337,9 @@ test("F03 retries a failed Docs fetch and recovers a failed route import by expl
   const before = reads;
   recovered = true;
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(page.locator("h1")).toContainText("Agent");
+  await expect(page.locator("h1")).toHaveText(
+    "Isolate agents with scoped keys",
+  );
   expect(reads).toBe(before + 1);
   let imports = 0,
     allow = false;
