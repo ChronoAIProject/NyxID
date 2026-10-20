@@ -22,11 +22,21 @@ pub async fn get_scope(
     org_user_id: &str,
     role: OrgRole,
 ) -> AppResult<Option<OrgRoleScope>> {
-    let scope = db
-        .collection::<OrgRoleScope>(COLLECTION_NAME)
-        .find_one(doc! { "org_user_id": org_user_id, "role": role.as_str() })
-        .await?;
-    Ok(scope)
+    get_scope_with_session(db, None, org_user_id, role).await
+}
+
+async fn get_scope_with_session(
+    db: &mongodb::Database,
+    session: Option<&mut mongodb::ClientSession>,
+    org_user_id: &str,
+    role: OrgRole,
+) -> AppResult<Option<OrgRoleScope>> {
+    let scopes = db.collection::<OrgRoleScope>(COLLECTION_NAME);
+    let query = scopes.find_one(doc! { "org_user_id": org_user_id, "role": role.as_str() });
+    Ok(match session {
+        Some(session) => query.session(session).await?,
+        None => query.await?,
+    })
 }
 
 /// Return one effective row per org role.
@@ -139,11 +149,40 @@ pub async fn effective_scope_for_membership(
     db: &mongodb::Database,
     membership: &OrgMembership,
 ) -> AppResult<Option<Vec<String>>> {
+    effective_scope_with_session(db, None, membership).await
+}
+
+/// Read inherited role scope in the caller's transaction snapshot.
+pub(super) async fn effective_scope_for_membership_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    membership: &OrgMembership,
+) -> AppResult<Option<Vec<String>>> {
+    effective_scope_with_session(db, Some(session), membership).await
+}
+
+async fn effective_scope_with_session(
+    db: &mongodb::Database,
+    session: Option<&mut mongodb::ClientSession>,
+    membership: &OrgMembership,
+) -> AppResult<Option<Vec<String>>> {
     match membership.scope_source {
         MemberScopeSource::Override => Ok(membership.allowed_service_ids.clone()),
-        MemberScopeSource::Inherit => Ok(get_scope(db, &membership.org_user_id, membership.role)
-            .await?
-            .and_then(|scope| scope.allowed_service_ids)),
+        MemberScopeSource::Inherit => {
+            let scope = match session {
+                Some(session) => {
+                    get_scope_with_session(
+                        db,
+                        Some(session),
+                        &membership.org_user_id,
+                        membership.role,
+                    )
+                    .await?
+                }
+                None => get_scope(db, &membership.org_user_id, membership.role).await?,
+            };
+            Ok(scope.and_then(|scope| scope.allowed_service_ids))
+        }
     }
 }
 

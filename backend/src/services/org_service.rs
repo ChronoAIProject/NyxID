@@ -1387,39 +1387,76 @@ pub async fn resolve_owner_access(
     actor_user_id: &str,
     target_owner_id: &str,
 ) -> AppResult<OwnerAccess> {
+    resolve_owner_access_with_session(db, None, actor_user_id, target_owner_id).await
+}
+
+/// Resolve owner access using only reads in the caller's transaction snapshot.
+/// This does not own/retry the transaction or replace the caller's authority
+/// write fences; propagate Mongo errors to the complete transaction owner.
+pub async fn resolve_owner_access_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    actor_user_id: &str,
+    target_owner_id: &str,
+) -> AppResult<OwnerAccess> {
+    resolve_owner_access_with_session(db, Some(session), actor_user_id, target_owner_id).await
+}
+
+async fn resolve_owner_access_with_session(
+    db: &mongodb::Database,
+    mut session: Option<&mut mongodb::ClientSession>,
+    actor_user_id: &str,
+    target_owner_id: &str,
+) -> AppResult<OwnerAccess> {
     if actor_user_id == target_owner_id {
         return Ok(OwnerAccess::Direct);
     }
-
-    // Check whether target_owner_id is an org. If it's a person we don't own
-    // (and it's not us), it's just forbidden.
-    let owner = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": target_owner_id })
-        .await?;
+    let owners = db.collection::<User>(USERS);
+    let query = owners.find_one(doc! { "_id": target_owner_id });
+    let owner = match session.as_deref_mut() {
+        Some(session) => query.session(session).await?,
+        None => query.await?,
+    };
     let owner = match owner {
-        Some(u) if u.user_type.is_org() => u,
+        Some(owner) if owner.user_type.is_org() => owner,
         _ => return Ok(OwnerAccess::Forbidden),
     };
-
-    let membership = get_active_membership(db, &owner.id, actor_user_id).await?;
-    let Some(m) = membership else {
+    let memberships = db.collection::<OrgMembership>(ORG_MEMBERSHIPS);
+    let query = memberships.find_one(doc! {
+        "org_user_id": &owner.id,
+        "member_user_id": actor_user_id,
+        "revoked_at": bson::Bson::Null,
+    });
+    let membership = match session.as_deref_mut() {
+        Some(session) => query.session(session).await?,
+        None => query.await?,
+    };
+    let Some(membership) = membership else {
         return Ok(OwnerAccess::Forbidden);
     };
-    let effective_scope =
-        crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
-    let membership_id = m.id.clone();
-
-    Ok(match m.role {
+    let effective_scope = match session {
+        Some(session) => {
+            super::org_role_scope_service::effective_scope_for_membership_in_session(
+                db,
+                session,
+                &membership,
+            )
+            .await?
+        }
+        None => {
+            super::org_role_scope_service::effective_scope_for_membership(db, &membership).await?
+        }
+    };
+    Ok(match membership.role {
         OrgRole::Admin => OwnerAccess::AsOrgAdmin {
             org_user_id: owner.id,
-            membership_id,
+            membership_id: membership.id,
             allowed_service_ids: effective_scope,
         },
         OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
             org_user_id: owner.id,
-            membership_id,
-            role: m.role,
+            membership_id: membership.id,
+            role: membership.role,
             allowed_service_ids: effective_scope,
         },
     })
@@ -1440,6 +1477,229 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn w8_id_owner_access_session_parity() {
+        use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
+        let db = connect_transaction_test_database("w8_id_owner_parity").await;
+        let actor = Uuid::new_v4().to_string();
+        let other = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        for (id, kind) in [
+            (&actor, UserType::Person),
+            (&other, UserType::Person),
+            (&org, UserType::Org),
+        ] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, kind))
+                .await
+                .unwrap();
+        }
+        for owner in [&actor, &other, &org] {
+            let expected = resolve_owner_access(&db, &actor, owner).await.unwrap();
+            let context = (&db, &actor, owner);
+            let actual = super::super::audit_runtime::transaction::run(
+                &db,
+                &context,
+                |session, (db, actor, owner)| {
+                    Box::pin(resolve_owner_access_in_session(db, session, actor, owner))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.can_write(), owner == &actor);
+        }
+        let mut membership = test_membership(&org, &actor, OrgRole::Admin, None);
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let service = Uuid::new_v4().to_string();
+        let denied_service = Uuid::new_v4().to_string();
+        for role in OrgRole::ALL {
+            for source in [MemberScopeSource::Inherit, MemberScopeSource::Override] {
+                for scope in [None, Some(vec![]), Some(vec![service.clone()])] {
+                    membership.role = role;
+                    membership.scope_source = source;
+                    membership.allowed_service_ids = scope.clone();
+                    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                        .replace_one(doc! {"_id": &membership.id}, &membership)
+                        .await
+                        .unwrap();
+                    super::super::org_role_scope_service::set_scope(
+                        &db,
+                        &org,
+                        role,
+                        scope.clone(),
+                        &actor,
+                    )
+                    .await
+                    .unwrap();
+                    let expected = resolve_owner_access(&db, &actor, &org).await.unwrap();
+                    let context = (&db, &actor, &org);
+                    let actual = super::super::audit_runtime::transaction::run(
+                        &db,
+                        &context,
+                        |session, (db, actor, owner)| {
+                            Box::pin(resolve_owner_access_in_session(db, session, actor, owner))
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(actual, expected);
+                    assert!(actual.can_read());
+                    assert_eq!(actual.can_write(), role == OrgRole::Admin);
+                    assert_eq!(role.can_proxy(), role != OrgRole::Viewer);
+                    assert_eq!(
+                        actual.allows_resource(&service),
+                        scope.as_ref().is_none_or(|ids| ids.contains(&service))
+                    );
+                    assert_eq!(actual.allows_resource(&denied_service), scope.is_none());
+                }
+            }
+        }
+        // Open security finding: inactive orgs currently retain membership access.
+        // This parity hook deliberately pins that behavior; deny it separately in both paths.
+        db.collection::<User>(USERS)
+            .update_one(doc! {"_id": &org}, doc! {"$set": {"is_active": false}})
+            .await
+            .unwrap();
+        let expected = resolve_owner_access(&db, &actor, &org).await.unwrap();
+        assert!(
+            expected.can_read(),
+            "pin current inactive-org behavior pending the separate finding"
+        );
+        assert_eq!(
+            resolve_owner_access(&db, &org, &org).await.unwrap(),
+            OwnerAccess::Direct
+        );
+        let mut session = db.client().start_session().await.unwrap();
+        session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .await
+            .unwrap();
+        assert_eq!(
+            resolve_owner_access_in_session(&db, &mut session, &actor, &org)
+                .await
+                .unwrap(),
+            expected
+        );
+        session.abort_transaction().await.unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! {"_id": &membership.id},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        let context = (&db, &actor, &org);
+        let actual = super::super::audit_runtime::transaction::run(
+            &db,
+            &context,
+            |session, (db, actor, owner)| {
+                Box::pin(resolve_owner_access_in_session(db, session, actor, owner))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual, OwnerAccess::Forbidden);
+        assert_eq!(
+            actual,
+            resolve_owner_access(&db, &actor, &org).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn w8_id_owner_access_snapshot_and_membership_conflict_retry() {
+        use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let db = connect_transaction_test_database("w8_id_owner_retry").await;
+        let actor = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        let membership = test_membership(&org, &actor, OrgRole::Admin, None);
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let writer_db = db.clone();
+        let writer_barrier = barrier.clone();
+        let membership_id = membership.id.clone();
+        let writer = tokio::spawn(async move {
+            writer_barrier.wait().await;
+            writer_db
+                .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                .update_one(
+                    doc! {"_id": membership_id},
+                    doc! {"$set": {"role": "viewer"}},
+                )
+                .await
+                .unwrap();
+            writer_barrier.wait().await;
+        });
+        let attempts = AtomicUsize::new(0);
+        let context = (&db, &actor, &org, &membership.id, &barrier, &attempts);
+        let result: AppResult<()> = super::super::audit_runtime::transaction::run(
+            &db,
+            &context,
+            |session, (db, actor, owner, membership_id, barrier, attempts)| {
+                Box::pin(async move {
+                    let access = resolve_owner_access_in_session(db, session, actor, owner).await?;
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    if attempt == 0 {
+                        assert!(access.can_write());
+                        barrier.wait().await;
+                        barrier.wait().await;
+                        // Both membership reads remain in the original snapshot.
+                        assert_eq!(
+                            resolve_owner_access_in_session(db, session, actor, owner).await?,
+                            access
+                        );
+                    }
+                    if !access.can_write() {
+                        return Err(AppError::Forbidden("membership changed".into()));
+                    }
+                    // The caller's live write fence turns a mid-transaction membership
+                    // change into WriteConflict and retries the complete operation.
+                    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                        .update_one(
+                            doc! {"_id": *membership_id},
+                            doc! {"$set": {"updated_at": bson::DateTime::now()}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<bson::Document>("w8_id_owner_business")
+                        .insert_one(doc! {"owner": *owner})
+                        .session(session)
+                        .await?;
+                    Ok(())
+                })
+            },
+        )
+        .await;
+        writer.await.unwrap();
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            db.collection::<bson::Document>("w8_id_owner_business")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let access = resolve_owner_access(&db, &actor, &org).await.unwrap();
+        assert!(access.can_read());
+        assert!(!access.can_write());
+    }
 
     #[tokio::test]
     async fn org_client_cascade_fences_existing_machine_grants_and_sweeps_overflow() {
