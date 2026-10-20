@@ -3118,7 +3118,7 @@ pub enum NodeDockerCommands {
         )]
         separation: Option<crate::node::machine::setup::Separation>,
     },
-    /// Stop and remove the node agent container
+    /// Stop the node container (machine containers are retained for start)
     Stop {
         #[command(flatten)]
         args: NodeDockerArgs,

@@ -1033,8 +1033,12 @@ fn machine_container_probe_args(security: &str) -> Vec<String> {
     args
 }
 
-fn machine_container_selection_args(selection: Separation) -> [String; 2] {
+fn machine_container_selection_args(selection: Separation) -> [String; 4] {
     [
+        // This user-owned CLI flow uses ordinary self-hosted registration.
+        // Managed provider bootstrap retains the image's separate default.
+        "-e".into(),
+        "NYXID_MACHINE_MANAGED=0".into(),
         "-e".into(),
         format!("NYXID_MACHINE_SEPARATION={}", selection.as_cli_str()),
     ]
@@ -1136,9 +1140,14 @@ fn docker_stop(profile: Option<&str>, machine: bool) -> Result<()> {
     let _ = std::process::Command::new("docker")
         .args(["stop", &container])
         .output();
-    let _ = std::process::Command::new("docker")
-        .args(["rm", &container])
-        .output();
+    // Retain machine containers and their recorded selection for stop/start.
+    // Recreating a container would otherwise re-run automatic selection before
+    // its existing identity volume can be opened, breaking legacy restarts.
+    if !machine {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", &container])
+            .output();
+    }
     eprintln!("Stopped.");
     Ok(())
 }
@@ -1505,6 +1514,8 @@ mod tests {
             assert_eq!(
                 machine_container_selection_args(selection),
                 [
+                    "-e".to_owned(),
+                    "NYXID_MACHINE_MANAGED=0".to_owned(),
                     "-e".to_owned(),
                     format!("NYXID_MACHINE_SEPARATION={expected}")
                 ]

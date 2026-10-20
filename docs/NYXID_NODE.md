@@ -920,6 +920,26 @@ after provisioning. Existing containers and stored assignments keep their
 recorded choice; change an existing container's intent through `node setup`
 inside it rather than passing a new choice to Docker start/restart.
 
+The Docker CLI uses self-hosted registration and sets
+`NYXID_MACHINE_MANAGED=0`, including when its image reference is locally tagged
+with the node-only image. It forwards `NYXID_NODE_URL`, `NYXID_NODE_TOKEN` and
+configured CA certificates only to the selected node container. The probe gets
+none of these variables or certificate mounts. Image-declared anonymous volumes
+may be created for the probe; Docker removes them with its `--rm` container.
+Refused selection creates no named identity or workspace volume.
+
+For a profile named `work`, the machine container is `nyxid-node-machine-work`.
+Its named volumes are `nyxid-node-machine-work-state` at
+`/var/lib/nyxid-machine` and `nyxid-node-machine-work-workspace` at `/workspace`.
+The recorded choice is `[machine].separation_choice` in
+`/var/lib/nyxid-machine/node/config.toml`; the CLI does not mount or modify the
+host's `~/.nyxid-node/profiles/work` profile. `docker stop --machine` retains the
+stopped container so a subsequent start preserves its selection and identity.
+To retire it, remove that container explicitly; its named volumes remain until
+you explicitly remove them. If you remove the container but keep its volumes,
+the next start performs fresh preflight and requires an explicit legacy choice
+on an unsupported host before it can reopen a legacy identity.
+
 For a self-hosted browserless node-only image, explicitly set
 `NYXID_MACHINE_MANAGED=0` and `NYXID_MACHINE_SEPARATION=shared-legacy` after
 reviewing the warning above. Missing selection defaults to automatic and
