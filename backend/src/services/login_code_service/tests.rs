@@ -416,7 +416,24 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
     };
     use tower::ServiceExt;
     let (state, actor) = fixture("login_code_oauth_guard").await;
-    let token = crate::crypto::jwt::generate_oauth_access_token(
+    let client = Uuid::new_v4().to_string();
+    state.db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &client, "client_name": "Authorized third-party fixture", "client_secret_hash": "",
+            "redirect_uris": ["https://example.test/callback"], "allowed_scopes": "openid profile",
+            "grant_types": "authorization_code refresh_token", "client_type": "public", "is_active": true,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        }).await.unwrap();
+    let consent = crate::services::consent_service::grant_consent(
+        &state.db,
+        &actor,
+        &client,
+        "openid profile",
+    )
+    .await
+    .unwrap();
+    let reference = crate::services::consent_service::protected_reference(&consent).unwrap();
+    let token = crate::crypto::jwt::generate_oauth_access_token_with_consent(
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(&actor).unwrap(),
@@ -426,9 +443,14 @@ async fn third_party_oauth_cannot_mint_or_approve_human_login_grants() {
         None,
         None,
         None,
-        &Uuid::new_v4().to_string(),
+        &client,
+        Some(&reference),
     )
     .unwrap();
+    let claims = crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &token).unwrap();
+    crate::services::oauth_token_authority_service::validate_claims(&state.db, &claims)
+        .await
+        .unwrap();
     let app = Router::new()
         .route("/code", post(crate::handlers::login_code::mint))
         .route("/code/options", post(crate::handlers::login_code::options))

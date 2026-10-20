@@ -124,6 +124,9 @@ pub enum AppError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    #[error("OAuth authority is temporarily unavailable; retry the request")]
+    OAuthAuthorityUnavailable,
+
     #[error("Forbidden: {0}")]
     Forbidden(String),
 
@@ -820,6 +823,7 @@ impl AppError {
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
@@ -1045,6 +1049,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
+            Self::OAuthAuthorityUnavailable => 12900,
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
@@ -1274,6 +1279,7 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::OAuthAuthorityUnavailable => "temporarily_unavailable",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
             Self::InvalidDpopProof(_) => "invalid_dpop_proof",
@@ -1294,6 +1300,7 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
@@ -1311,6 +1318,7 @@ impl AppError {
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
+            Self::OAuthAuthorityUnavailable => "oauth_authority_unavailable",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
@@ -1643,7 +1651,9 @@ impl IntoResponse for AppError {
             _ => tracing::warn!(error = %self, "Client error"),
         }
         let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
-        if self.error_key() == Self::ServiceConcurrencyLimited.error_key() {
+        if self.error_key() == Self::ServiceConcurrencyLimited.error_key()
+            || matches!(self, Self::OAuthAuthorityUnavailable)
+        {
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static("1"),
@@ -1667,6 +1677,23 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[tokio::test]
+    async fn oauth_authority_unavailability_is_retryable_in_app_and_oauth_responses() {
+        let error = AppError::OAuthAuthorityUnavailable;
+        assert_eq!(error.error_code(), 12900);
+        assert_eq!(error.error_key(), "oauth_authority_unavailable");
+        assert_eq!(error.oauth_status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.oauth_error_code(), "temporarily_unavailable");
+        assert!(!error.to_string().contains("authorize again"));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["error_code"], 12900);
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+    }
 
     #[test]
     fn assistant_missing_access_is_forbidden_class_with_contextual_details() {
@@ -2102,6 +2129,7 @@ mod tests {
             }
             .error_code(),
             AppError::Unauthorized("".into()).error_code(),
+            AppError::OAuthAuthorityUnavailable.error_code(),
             AppError::Forbidden("".into()).error_code(),
             AppError::NotFound("".into()).error_code(),
             AppError::Conflict("".into()).error_code(),

@@ -475,14 +475,12 @@ async fn server_main() {
         .expect("validated active JWT public key");
 
     let hmac_keys = load_prepared_hmac_keyset(&db, &config).await;
-    let [
-        cli_pairing,
-        auth_device,
-        audit_chain,
-        action_fingerprint,
-        billing_ledger,
-        internal_dispatch_hmac_key,
-    ] = hmac_keys.0;
+    let cli_pairing = hmac_keys.cli_pairing().clone();
+    let auth_device = hmac_keys.auth_device().clone();
+    let audit_chain = hmac_keys.audit_chain().clone();
+    let action_fingerprint = hmac_keys.assistant_action().clone();
+    let billing_ledger = hmac_keys.billing_ledger().clone();
+    let internal_dispatch_hmac_key = hmac_keys.internal_dispatch().clone();
     let cli_pairing_hmac_key = Arc::new(cli_pairing);
     let auth_device_hmac_key = Arc::new(auth_device);
     services::audit_service::init_audit_chain_hmac_key(audit_chain.clone());
@@ -1980,7 +1978,7 @@ mod tests {
                 entry_hash: None,
                 created_at: chrono::Utc::now(),
             },
-            old.0[2].as_slice(),
+            old.audit_chain().as_slice(),
         )
         .await
         .unwrap();
@@ -2009,7 +2007,7 @@ mod tests {
                 wallet_id: None,
                 created_at: chrono::Utc::now(),
             },
-            old.0[4].as_slice(),
+            old.billing_ledger().as_slice(),
         )
         .await
         .unwrap();
@@ -2027,14 +2025,14 @@ mod tests {
                 ),
                 None,
             ),
-            old.0[4].as_slice(),
+            old.billing_ledger().as_slice(),
         )
         .await
         .unwrap();
         // Store a pre-adoption fingerprint using the same keyed API as delayed
         // callbacks/instruction identity; source rotation must preserve it.
         let fingerprint = audit_service::keyed_fingerprint(
-            Some(old.0[2].as_slice()),
+            Some(old.audit_chain().as_slice()),
             b"assistant-stable-instructions-v1",
             b"pending operation immutable context",
         )
@@ -2063,8 +2061,7 @@ mod tests {
         );
         // Billing alone must also reject a bad first candidate after audit
         // verification succeeds.
-        let mut wrong_billing = old.clone();
-        wrong_billing.0[4][0] ^= 1;
+        let wrong_billing = old.with_changed_domain("billing_ledger");
         assert!(
             lifecycle::ensure_consistent(&db, &wrong_billing, Some(&wrong_billing))
                 .await
@@ -2089,26 +2086,26 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            audit::verify_chain(&db, adopted.0[2].as_slice(), None, None, None)
+            audit::verify_chain(&db, adopted.audit_chain().as_slice(), None, None, None)
                 .await
                 .unwrap()
                 .status,
             audit::AuditChainStatus::Ok
         );
         assert_eq!(
-            ledger::verify_chain(&db, adopted.0[4].as_slice(), None, None, None)
+            ledger::verify_chain(&db, adopted.billing_ledger().as_slice(), None, None, None)
                 .await
                 .unwrap()
                 .status,
             ledger::BillingLedgerStatus::Ok
         );
         assert_eq!(
-            audit::compute_entry_hash(&audit_row, adopted.0[2].as_slice()).unwrap(),
+            audit::compute_entry_hash(&audit_row, adopted.audit_chain().as_slice()).unwrap(),
             audit_row.entry_hash.unwrap()
         );
         for row in [legacy_billing, exact_billing] {
             assert_eq!(
-                ledger::compute_entry_hash(&row, adopted.0[4].as_slice()),
+                ledger::compute_entry_hash(&row, adopted.billing_ledger().as_slice()),
                 row.entry_hash
             );
         }
@@ -2121,7 +2118,7 @@ mod tests {
         assert_eq!(
             pending.get_str("fingerprint").unwrap(),
             audit_service::keyed_fingerprint(
-                Some(adopted.0[2].as_slice()),
+                Some(adopted.audit_chain().as_slice()),
                 b"assistant-stable-instructions-v1",
                 b"pending operation immutable context"
             )

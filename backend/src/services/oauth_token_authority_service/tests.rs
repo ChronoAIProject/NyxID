@@ -553,3 +553,570 @@ async fn actual_exchange_and_refresh_cannot_acquire_regranted_consent() {
     );
     fixture.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn revocation_and_client_soft_deletion_fail_tokens_on_another_app_state() {
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let old = fixture.oauth_token(&fixture.client, &reference);
+    let other_db = mongodb::Client::with_uri_str(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap()
+        .database(fixture.state.db.name());
+    let replica = Fixture {
+        state: test_utils::test_app_state(other_db),
+        user: fixture.user,
+        client: fixture.client.clone(),
+    };
+    assert_eq!(replica.userinfo(&old).await, StatusCode::OK);
+    assert!(replica.introspection(&old, &fixture.client).await);
+    consent_service::revoke_consent(
+        &fixture.state.db,
+        &fixture.user.to_string(),
+        &fixture.client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replica.userinfo(&old).await, StatusCode::UNAUTHORIZED);
+    let reference = fixture.grant().await;
+    let current = fixture.oauth_token(&fixture.client, &reference);
+    assert_eq!(replica.userinfo(&old).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(replica.userinfo(&current).await, StatusCode::OK);
+    let refresh = super::super::oauth_service::issue_oauth_refresh_token(
+        &fixture.state.db,
+        &fixture.state.config,
+        &fixture.state.jwt_keys,
+        &fixture.client,
+        &fixture.user.to_string(),
+        "openid profile proxy",
+        &[],
+        &[],
+        false,
+        Some(&reference),
+    )
+    .await
+    .unwrap();
+    // Exercise the public lifecycle service: deletion is normally a soft delete.
+    super::super::oauth_client_service::delete_client(&fixture.state.db, &fixture.client)
+        .await
+        .unwrap();
+    assert_eq!(replica.userinfo(&current).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        replica.mcp_initialize(&current).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        super::super::token_service::refresh_tokens(
+            &replica.state.db,
+            &replica.state.config,
+            &replica.state.jwt_keys,
+            &refresh.refresh_token,
+            None,
+            None
+        )
+        .await
+        .is_err()
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_oauth_revocation_does_not_replace_relay_parent_key_authority() {
+    let fixture = Fixture::new().await;
+    fixture.grant().await;
+    let key = super::super::key_service::create_api_key(
+        &fixture.state.db,
+        &fixture.user.to_string(),
+        "Relay parent",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let relay = jwt::generate_relay_access_token(
+        &fixture.state.jwt_keys,
+        &fixture.state.config,
+        &fixture.user,
+        "proxy",
+        None,
+        &jwt::RelayAgentScope {
+            api_key_id: key.id.clone(),
+            api_key_name: key.name,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
+        },
+    )
+    .unwrap();
+    let claims = fixture.claims(&relay);
+    validate_claims(&fixture.state.db, &claims).await.unwrap();
+    crate::mw::auth::ensure_relay_agent_key_active(&fixture.state.db, &claims)
+        .await
+        .unwrap();
+    consent_service::revoke_consent(
+        &fixture.state.db,
+        &fixture.user.to_string(),
+        &fixture.client,
+    )
+    .await
+    .unwrap();
+    super::super::oauth_client_service::delete_client(&fixture.state.db, &fixture.client)
+        .await
+        .unwrap();
+    validate_claims(&fixture.state.db, &claims).await.unwrap();
+    crate::mw::auth::ensure_relay_agent_key_active(&fixture.state.db, &claims)
+        .await
+        .unwrap();
+    fixture
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .update_one(doc! {"_id":&key.id}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    assert!(
+        crate::mw::auth::ensure_relay_agent_key_active(&fixture.state.db, &claims)
+            .await
+            .is_err()
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn authorization_code_issuance_held_across_revocation_never_returns_authority() {
+    use super::super::oauth_service as oauth;
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let code = oauth::create_authorization_code_with_consent(
+        &fixture.state.db,
+        &fixture.client,
+        &fixture.user.to_string(),
+        "https://example.test/callback",
+        "openid profile proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        false,
+        None,
+        Some(&reference),
+    )
+    .await
+    .unwrap();
+    let pause = std::sync::Arc::new(oauth::IssuancePause::default());
+    let issuance = oauth::ISSUANCE_PAUSE.scope(
+        pause.clone(),
+        oauth::exchange_authorization_code(
+            &fixture.state.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            false,
+            &code,
+            &fixture.client,
+            "https://example.test/callback",
+            None,
+            Some("fixture-client-secret"),
+            None,
+            None,
+            None,
+            None,
+        ),
+    );
+    let revocation = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.notified())
+            .await
+            .unwrap();
+        consent_service::revoke_consent(
+            &fixture.state.db,
+            &fixture.user.to_string(),
+            &fixture.client,
+        )
+        .await
+        .unwrap();
+        // A regrant while issuance is held cannot lend the old request its revision.
+        fixture.grant().await;
+        pause.release.notify_one();
+    };
+    let (result, ()) = tokio::join!(issuance, revocation);
+    assert!(matches!(result, Err(AppError::Conflict(_))));
+    let collection = fixture
+        .state
+        .db
+        .collection::<crate::models::refresh_token::RefreshToken>(
+            crate::models::refresh_token::COLLECTION_NAME,
+        );
+    assert_eq!(
+        collection
+            .count_documents(doc! {"user_id":fixture.user.to_string()})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        collection
+            .count_documents(doc! {"user_id":fixture.user.to_string(),"revoked":false})
+            .await
+            .unwrap(),
+        0
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+async fn seed_existing_session(fixture: &Fixture) {
+    let now = Utc::now();
+    fixture
+        .state
+        .db
+        .collection::<Session>(crate::models::session::COLLECTION_NAME)
+        .insert_one(Session {
+            id: Uuid::new_v4().to_string(),
+            user_id: fixture.user.to_string(),
+            purpose: Some(crate::models::session::SessionPurpose::Authenticated),
+            token_hash: crate::crypto::token::hash_token("unrelated-existing-session-fixture"),
+            ip_address: None,
+            user_agent: None,
+            expires_at: now + chrono::Duration::hours(1),
+            revoked: false,
+            created_at: now,
+            last_active_at: now,
+        })
+        .await
+        .unwrap();
+}
+
+async fn token_and_session_rows(db: &Database) -> Vec<Vec<bson::Document>> {
+    use futures::TryStreamExt;
+    let mut rows = Vec::new();
+    for collection in [
+        crate::models::refresh_token::COLLECTION_NAME,
+        crate::models::session::COLLECTION_NAME,
+        crate::models::consent::COLLECTION_NAME,
+    ] {
+        rows.push(
+            db.collection::<bson::Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id": 1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap(),
+        );
+    }
+    rows
+}
+
+async fn assert_retryable_authority_response(response: axum::response::Response, oauth: bool) {
+    use axum::body::to_bytes;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    if oauth {
+        assert_eq!(body["error"], "temporarily_unavailable");
+    } else {
+        assert_eq!(body["error"], "oauth_authority_unavailable");
+        assert_eq!(body["error_code"], 12900);
+    }
+    let description = body.to_string();
+    assert!(!description.contains("authorize again"));
+    assert!(!description.contains("invalid_grant"));
+    assert!(!description.contains("invalidAuthorityTestOperator"));
+}
+
+#[tokio::test]
+async fn unavailable_authority_reads_return_retryable_503_without_consuming_state() {
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let token = fixture.oauth_token(&fixture.client, &reference);
+    super::super::oauth_service::issue_oauth_refresh_token(
+        &fixture.state.db,
+        &fixture.state.config,
+        &fixture.state.jwt_keys,
+        &fixture.client,
+        &fixture.user.to_string(),
+        "openid profile proxy",
+        &[],
+        &[],
+        false,
+        Some(&reference),
+    )
+    .await
+    .unwrap();
+    seed_existing_session(&fixture).await;
+    let before = token_and_session_rows(&fixture.state.db).await;
+    assert_eq!(fixture.userinfo(&token).await, StatusCode::OK);
+    for collection in [
+        crate::models::user::COLLECTION_NAME,
+        crate::models::oauth_client::COLLECTION_NAME,
+        crate::models::consent::COLLECTION_NAME,
+    ] {
+        for kind in [ReadFaultKind::Timeout, ReadFaultKind::Database] {
+            let response = READ_FAULT
+                .scope(
+                    ReadFault { collection, kind },
+                    Router::new()
+                        .route("/oauth/userinfo", get(crate::handlers::oauth::userinfo))
+                        .with_state(fixture.state.clone())
+                        .oneshot(
+                            Request::builder()
+                                .uri("/oauth/userinfo")
+                                .header("authorization", format!("Bearer {token}"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        ),
+                )
+                .await
+                .unwrap();
+            assert_retryable_authority_response(response, false).await;
+            assert_eq!(before, token_and_session_rows(&fixture.state.db).await);
+        }
+    }
+    assert_eq!(fixture.userinfo(&token).await, StatusCode::OK);
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_consent_reads_preserve_refresh_and_introspection_retryability() {
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let access = fixture.oauth_token(&fixture.client, &reference);
+    let refresh = super::super::oauth_service::issue_oauth_refresh_token(
+        &fixture.state.db,
+        &fixture.state.config,
+        &fixture.state.jwt_keys,
+        &fixture.client,
+        &fixture.user.to_string(),
+        "openid profile proxy",
+        &[],
+        &[],
+        false,
+        Some(&reference),
+    )
+    .await
+    .unwrap();
+    seed_existing_session(&fixture).await;
+    let before = token_and_session_rows(&fixture.state.db).await;
+    for kind in [ReadFaultKind::Timeout, ReadFaultKind::Database] {
+        let fault = ReadFault {
+            collection: crate::models::consent::COLLECTION_NAME,
+            kind,
+        };
+        let direct = READ_FAULT
+            .scope(
+                fault,
+                consent_service::validate_protected_reference(
+                    &fixture.state.db,
+                    &fixture.user.to_string(),
+                    &fixture.client,
+                    "openid",
+                    Some(&reference),
+                ),
+            )
+            .await;
+        assert!(matches!(direct, Err(AppError::OAuthAuthorityUnavailable)));
+        let app = Router::new()
+            .route("/oauth/token", post(crate::handlers::oauth::token))
+            .route(
+                "/oauth/introspect",
+                post(crate::handlers::oauth::introspect),
+            )
+            .with_state(fixture.state.clone());
+        for (path, params, oauth) in [
+            (
+                "/oauth/token",
+                vec![
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh.refresh_token.as_str()),
+                    ("client_id", fixture.client.as_str()),
+                    ("client_secret", "fixture-client-secret"),
+                ],
+                true,
+            ),
+            (
+                "/oauth/introspect",
+                vec![
+                    ("token", access.as_str()),
+                    ("client_id", fixture.client.as_str()),
+                    ("client_secret", "fixture-client-secret"),
+                ],
+                false,
+            ),
+        ] {
+            let response = READ_FAULT
+                .scope(
+                    fault,
+                    app.clone().oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header("content-type", "application/x-www-form-urlencoded")
+                            .body(Body::from(
+                                url::form_urlencoded::Serializer::new(String::new())
+                                    .extend_pairs(params)
+                                    .finish(),
+                            ))
+                            .unwrap(),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_retryable_authority_response(response, oauth).await;
+            assert_eq!(before, token_and_session_rows(&fixture.state.db).await);
+        }
+    }
+    assert_eq!(fixture.userinfo(&access).await, StatusCode::OK);
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn definitive_missing_inactive_expired_and_mismatched_authority_still_returns_401() {
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let token = fixture.oauth_token(&fixture.client, &reference);
+    for (collection, id, cases) in [
+        (
+            crate::models::user::COLLECTION_NAME,
+            fixture.user.to_string(),
+            vec!["missing", "inactive"],
+        ),
+        (
+            crate::models::oauth_client::COLLECTION_NAME,
+            fixture.client.clone(),
+            vec!["missing", "inactive"],
+        ),
+        (
+            crate::models::consent::COLLECTION_NAME,
+            reference.consent_id.clone(),
+            vec!["missing", "revision", "expired", "scope"],
+        ),
+    ] {
+        let collection = fixture.state.db.collection::<bson::Document>(collection);
+        let original = collection
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        for case in cases {
+            assert_eq!(fixture.userinfo(&token).await, StatusCode::OK);
+            if case == "missing" {
+                collection
+                    .delete_one(doc! {"_id": &id})
+                    .write_concern(WriteConcern::majority())
+                    .await
+                    .unwrap();
+            } else {
+                let fields = match case {
+                    "inactive" => doc! {"is_active": false},
+                    "revision" => doc! {"revision": Uuid::new_v4().to_string()},
+                    "expired" => {
+                        doc! {"expires_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}
+                    }
+                    "scope" => doc! {"scopes": "openid"},
+                    _ => unreachable!(),
+                };
+                collection
+                    .update_one(doc! {"_id": &id}, doc! {"$set": fields})
+                    .write_concern(WriteConcern::majority())
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                fixture.userinfo(&token).await,
+                StatusCode::UNAUTHORIZED,
+                "{case}"
+            );
+            if case == "missing" {
+                collection.insert_one(&original).await.unwrap();
+            } else {
+                collection
+                    .replace_one(doc! {"_id": &id}, &original)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delegation_fingerprint_mismatch_is_definitive_and_positive_reads_are_operation_local() {
+    use axum::response::IntoResponse;
+    let fixture = Fixture::new().await;
+    let reference = fixture.grant().await;
+    let (token, _) = jwt::generate_delegated_access_token_for_client(
+        &fixture.state.jwt_keys,
+        &fixture.state.config,
+        &fixture.user,
+        "proxy:*",
+        &fixture.client,
+        Some(&fixture.client),
+        300,
+        None,
+    )
+    .unwrap();
+    let claims = fixture.claims(&token);
+    persist(
+        &fixture.state.db,
+        &claims,
+        vec![ConsentBinding {
+            client_id: fixture.client.clone(),
+            scopes: "openid".into(),
+            reference,
+        }],
+        None,
+    )
+    .await
+    .unwrap();
+    let mut reads = AuthorityReads::new(&fixture.state.db);
+    validate_claims_with_reads(&mut reads, &claims)
+        .await
+        .unwrap();
+    // The same receiver is also a consent client. A repeated check in this
+    // operation uses its already validated snapshot even when another read
+    // would fail. A separate validation must perform new reads and fail 503.
+    let fault = ReadFault {
+        collection: crate::models::oauth_client::COLLECTION_NAME,
+        kind: ReadFaultKind::Database,
+    };
+    READ_FAULT
+        .scope(fault, active_client(&mut reads, &fixture.client))
+        .await
+        .unwrap();
+    assert!(matches!(
+        READ_FAULT
+            .scope(fault, validate_claims(&fixture.state.db, &claims))
+            .await,
+        Err(AppError::OAuthAuthorityUnavailable)
+    ));
+    fixture
+        .state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &claims.jti},
+            doc! {"$set": {"claims_fingerprint": "mismatched-fingerprint"}},
+        )
+        .write_concern(WriteConcern::majority())
+        .await
+        .unwrap();
+    let denied = validate_claims(&fixture.state.db, &claims)
+        .await
+        .unwrap_err();
+    assert_eq!(denied.into_response().status(), StatusCode::UNAUTHORIZED);
+    fixture.state.db.drop().await.unwrap();
+}
