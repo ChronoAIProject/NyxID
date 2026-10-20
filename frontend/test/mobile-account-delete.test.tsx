@@ -136,7 +136,7 @@ describe("actual mobile account deletion confirmation", () => {
     await act(async () => alerts[0]!.buttons.find((button) => button.style === "destructive")!.onPress!());
     await waitFor(() => expect(transport).toHaveBeenCalledWith("https://mobile.example.test/api/v1/users/me", expect.objectContaining({
       method: "DELETE",
-      headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data" }),
+      headers: expect.objectContaining({ "X-NyxID-Account-Deletion-Policy": "machine-data-provider-revocation-v2" }),
     })));
     client.clear();
   });
