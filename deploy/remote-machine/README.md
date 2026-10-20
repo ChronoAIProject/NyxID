@@ -526,3 +526,17 @@ physical cloud/CSI cleanup proof. None is a claimed property of native API
 observations or a baseline MVP provider configuration prerequisite.
 
 Hosted-image/storage phase evidence: [hosted image and optional storage checks](../../docs/REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md). Earlier dated results remain stage-specific history.
+
+### Owner diagnostic visibility
+
+The owner operation API allowlists the fixed deletion observation codes above,
+including `delete_attempt_timed_out`, only for delete operations. It returns
+static guidance rather than the stored upstream error message. Unknown codes
+remain `operation_reconciling`. Resource details, upstream responses, credentials,
+writer fences and internal request/claim material are never exposed by this
+projection. This does not change retry budgets, authorization or finality.
+
+Typed List compatibility does not resolve an independent unfinished creation
+dispatch: even after Kubernetes resources are released, `creation_result_unknown`
+continues to block final deletion and slot release until the original creation
+responsibilities are terminal. Do not rewrite database state to infer success.

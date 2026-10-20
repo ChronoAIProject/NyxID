@@ -106,3 +106,17 @@ The effective control-plane deletion contract is described above and in [`deploy
 Earlier implementation snapshots recorded six backend Cargo groups with 153 passing tests, including an additional now-obsolete external-fact group, plus a sandbox updater group with 55 passing tests, healthcheck contracts with 54 passing tests, offline kustomize and diff checks. Those six backend groups differed from the preceding A5 grouping of five backend groups and one updater group. Those results belong to the earlier external-fact contract and frozen source hashes. They remain historical evidence; they do not establish that the current control-plane revision passed its tests. Earlier diagnostic stack overrides and GCE-enabled snapshots are also historical only.
 
 The observation/scope repair requires nonzero test counts for updater `sandbox` and backend `remote_machine_delete_recovery`, `remote_machine_manager` (including native tests), `remote_machine_events` and `remote_machine_delete_retry`, plus healthcheck contracts, formatting and diff checks. Database tests use the isolated replica-set helpers in `backend/src/test_utils.rs`; unavailable or skipped tests are not passing evidence. Coverage includes typed List omission and malformed data, namespace boundaries, classified/redacted errors, early-failure and revision/claim races, both overdue/error orderings and terminal operations, partial creation, initially absent original workloads with terminal NyxID work, Pending claims, identity conflicts, retained resources, original dispatch recovery, repeated accounting, final transaction gates, ten-attempt exhaustion and fair finalized-tombstone cleanup without financial or slot effects. No GCE/CSI/CRI or deletion-specific metadata-credential path is introduced. Local deterministic substitutes verify code behavior; selected-cluster controller/GC behavior and preproduction/production recovery require separate acceptance records. No such remote acceptance is claimed here. B/C admission, placement, usage and deployment architecture changes remain outside scope.
+
+### Owner diagnostic visibility
+
+The owner operation API allowlists the fixed deletion observation codes above,
+including `delete_attempt_timed_out`, only for delete operations. It returns
+static guidance rather than the stored upstream error message. Unknown codes
+remain `operation_reconciling`. Resource details, upstream responses, credentials,
+writer fences and internal request/claim material are never exposed by this
+projection. This does not change retry budgets, authorization or finality.
+
+Typed List compatibility does not resolve an independent unfinished creation
+dispatch: even after Kubernetes resources are released, `creation_result_unknown`
+continues to block final deletion and slot release until the original creation
+responsibilities are terminal. Do not rewrite database state to infer success.
