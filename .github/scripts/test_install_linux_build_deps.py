@@ -100,7 +100,7 @@ if operation == os.environ["TEST_FAIL"]:
     sys.exit(17)
 if operation == "update":
     sources = Path(options["Dir::Etc::sourcelist"]).read_text()
-    assert "https://" not in sources and "http://snapshot.ubuntu.com/" in sources
+    assert "http://" not in sources and "https://snapshot.ubuntu.com/" in sources
     assert "signed-by=" in sources and "check-valid-until=no" in sources
     lists = Path(options["Dir::State::lists"])
     catalog = Path(os.environ["TEST_ROOT"]) / "security/apt-snapshots.tsv"

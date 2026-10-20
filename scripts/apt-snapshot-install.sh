@@ -73,12 +73,10 @@ while IFS="$tab" read -r distro codename suite components url digest; do
     # Fixed snapshots deliberately outlive Release.Valid-Until. Disable that
     # freshness field only for these SHA-pinned signed roots. Signature checks
     # and APT index/package checksums remain mandatory; scans assess currency.
-    # Transport downgrade is confined to this installer. The SHA-pinned signed
-    # InRelease authenticates HTTP bytes; redirects still require verified TLS
-    # with the pinned, transport-only CA bundle above.
-    transport=$(printf '%s' "$url" | sed 's/^https:/http:/')
+    # Every caller now supplies transport trust. Use HTTPS directly: Ubuntu's
+    # HTTP->HTTPS redirect otherwise repeats for hundreds of small archives.
     printf 'deb [signed-by=%s check-valid-until=no] %s %s %s\n' \
-        "$key" "$transport" "$suite" "$(printf '%s' "$components" | tr ',' ' ')" >> "$sources"
+        "$key" "$url" "$suite" "$(printf '%s' "$components" | tr ',' ' ')" >> "$sources"
 done < "$selected"
 
 apt_snapshot() {

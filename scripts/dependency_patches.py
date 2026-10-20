@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+import dependency_subgraph
 
 POLICY = 'security/dependency-patches.json'
 REGRESSION = 'mobile/scripts/test-security-patches.cjs'
@@ -35,11 +36,17 @@ def normalized(value):
     return value
 
 
-def bound_file(root, name, digest):
+def regular_file(root, name):
     path = root / normalized(name)
     if any(parent.is_symlink() for parent in (path, *(root / p for p in path.relative_to(root).parents))) or \
-            not path.is_file() or root.resolve() not in path.resolve().parents or \
-            sha(path.read_bytes()) != digest:
+            not path.is_file() or root.resolve() not in path.resolve().parents:
+        raise ValueError('missing/changed/moved bound file: ' + name)
+    return path
+
+
+def bound_file(root, name, digest):
+    path = regular_file(root, name)
+    if sha(path.read_bytes()) != digest:
         raise ValueError('missing/changed/moved bound file: ' + name)
     return path
 
@@ -53,7 +60,7 @@ def load_policy(root, today=None):
         raise ValueError('invalid dependency patch policy')
     seen = set()
     for record in data['patches']:
-        required = {'package', 'version', 'advisories', 'lock', 'lock_sha256', 'patch', 'patch_sha256',
+        required = {'package', 'version', 'advisories', 'lock', 'lock_subgraph_sha256', 'patch', 'patch_sha256',
                     'integrity', 'source_files', 'regressions', 'regression_sha256', 'compatibility_sha256',
                     'owner', 'expires', 'rationale'}
         if set(record) != required or not all(isinstance(record[k], str) and record[k].strip()
@@ -83,22 +90,21 @@ def load_policy(root, today=None):
             if record['regressions'][advisory] not in ('uri', 'image', 'icns', 'forge'):
                 raise ValueError('unknown regression binding')
             seen.add(key)
-        for field in ('lock_sha256', 'patch_sha256', 'regression_sha256', 'compatibility_sha256'):
+        for field in ('lock_subgraph_sha256', 'patch_sha256', 'regression_sha256', 'compatibility_sha256'):
             if not re.fullmatch('[0-9a-f]{64}', record[field]): raise ValueError('invalid bound digest')
     return data['patches']
 
 
 def validate_inputs(root, records):
-    from workflow_yaml import load_unique
     if not records: return
-    lock = load_unique((root / 'mobile/pnpm-lock.yaml').read_text())
+    from workflow_yaml import load_unique
+    lock = load_unique(regular_file(root, 'mobile/pnpm-lock.yaml').read_text())
     manifest = json.loads((root / 'mobile/package.json').read_text())
     patches = manifest.get('pnpm', {}).get('patchedDependencies', {})
     expected = {r['package'] + '@' + r['version'] for r in records}
     if set(patches) != expected or set(lock.get('patchedDependencies', {})) != expected:
         raise ValueError('patch declarations differ from reviewed policy')
     for r in records:
-        bound_file(root, r['lock'], r['lock_sha256'])
         bound_file(root, r['patch'], r['patch_sha256'])
         bound_file(root, REGRESSION, r['regression_sha256'])
         bound_file(root, COMPATIBILITY, r['compatibility_sha256'])
@@ -117,6 +123,8 @@ def validate_inputs(root, records):
                 version = snapshot.get(group, {}).get(r['package'])
                 if version is not None and version != key[len(r['package']) + 1:]:
                     raise ValueError('unpatched dependency edge: ' + r['package'])
+        if dependency_subgraph.digest(dependency_subgraph.pnpm(lock, r['package'], r['version'])) != r['lock_subgraph_sha256']:
+            raise ValueError('affected package archive/consumer subgraph changed')
 
 
 def inventory(directory):
@@ -269,10 +277,11 @@ def install_and_verify(root, directory, records, pnpm, environment):
     env = {key: value for key, value in environment.items()
            if key not in ('NODE_OPTIONS', 'NODE_PATH', 'NYXID_SECURITY_PACKAGE_ROOT')}
     env['CI'] = 'true'
+    before = sha((directory / 'pnpm-lock.yaml').read_bytes())
     run_required([str(pnpm), 'install', '--frozen-lockfile', '--ignore-scripts', '--ignore-pnpmfile',
                   '--store-dir', str(directory.parent / 'patch-verification-store')],
                  cwd=directory, env=env, timeout=600)
-    if sha((directory / 'pnpm-lock.yaml').read_bytes()) != records[0]['lock_sha256']:
+    if sha((directory / 'pnpm-lock.yaml').read_bytes()) != before:
         raise ValueError('frozen installation mutated the lock')
     return verify_installed(root, directory, records, env)
 

@@ -68,9 +68,15 @@ def layout_subject(layout, digest, platform, commit):
         if not re.fullmatch(r'[0-9a-f]{64}', path.name) or not path.is_file() or sha(path) != path.name:
             raise ValueError('staged OCI blob bytes differ from their digest')
     index = json.loads((layout / 'index.json').read_text())
-    roots = [item for item in index['manifests'] if item['digest'] == digest]
+    # A containerd docker-save archive has OCI and Docker compatibility views.
+    # regctl imports both, retaining an untagged alias for the same digest. Bind
+    # the one explicit import destination, then verify its digest/config/bytes.
+    roots = [item for item in index['manifests'] if
+             item.get('annotations', {}).get('org.opencontainers.image.ref.name') == 'staged']
     if len(roots) != 1:
         raise ValueError('staged OCI subject missing or ambiguous')
+    if roots[0]['digest'] != digest:
+        raise ValueError('staged OCI tag differs from resolved subject digest')
     return inspect(roots[0], directory_reader(layout), [platform], commit)
 
 

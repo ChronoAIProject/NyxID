@@ -575,7 +575,6 @@
       "package": "rsa",
       "version": "0.9.10",
       "lock": "Cargo.lock",
-      "lock_sha256": "e2f136fee08b2e544783fe0274c43000c970e89b23cd4dedc51109c8a493595e",
       "checksum": "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d",
       "features": [
         "default",
@@ -585,9 +584,9 @@
         "u64_digit"
       ],
       "parents": [
-        "rsa@0.9.10 <- nyxid-machine@0.1.0[dev]",
-        "rsa@0.9.10 <- nyxid@0.72.0[normal]",
-        "rsa@0.9.10 <- ssh-key@0.6.7[normal] <- nyxid@0.72.0[normal]"
+        "rsa@0.9.10 <- nyxid-machine@workspace[dev]",
+        "rsa@0.9.10 <- nyxid@workspace[normal]",
+        "rsa@0.9.10 <- ssh-key@0.6.7[normal] <- nyxid@workspace[normal]"
       ],
       "uses": {
         "scope": "backend-public-operations-and-local-development-key-generation; machine-test-only-cross-provider-interop",
@@ -606,7 +605,8 @@
       },
       "owner": "NyxID security maintainers",
       "expires": "2027-01-18",
-      "rationale": "Public RSA parsing/JWKS and one-off development key generation accept no attacker-controlled private-operation input. Request-time JWT signing uses jsonwebtoken AWS-LC; backend SSH CA uses Ed25519. Machine bootstrap uses AWS-LC in production; RustCrypto remains solely for interoperability/malformed-key unit tests."
+      "rationale": "Public RSA parsing/JWKS and one-off development key generation accept no attacker-controlled private-operation input. Request-time JWT signing uses jsonwebtoken AWS-LC; backend SSH CA uses Ed25519. Machine bootstrap uses AWS-LC in production; RustCrypto remains solely for interoperability/malformed-key unit tests.",
+      "lock_subgraph_sha256": "5086076268fd769bc69a39ec1b165750841cd4792c99a70157975d4411bc979e"
     },
     {
       "kind": "reviewed-rsa-uses",
@@ -614,7 +614,6 @@
       "package": "rsa",
       "version": "0.10.0-rc.18",
       "lock": "Cargo.lock",
-      "lock_sha256": "e2f136fee08b2e544783fe0274c43000c970e89b23cd4dedc51109c8a493595e",
       "checksum": "30b2aa4ba0d89f73d1e332df05be0eeab8840351c36ca5654341dfdb57bb3caf",
       "features": [
         "default",
@@ -623,8 +622,8 @@
         "std"
       ],
       "parents": [
-        "rsa@0.10.0-rc.18 <- russh@0.63.3[normal] <- nyxid-cli@0.72.0[normal]",
-        "rsa@0.10.0-rc.18 <- ssh-key@0.7.0-rc.11[normal] <- russh@0.63.3[normal] <- nyxid-cli@0.72.0[normal]"
+        "rsa@0.10.0-rc.18 <- russh@0.63.3[normal] <- nyxid-cli@workspace[normal]",
+        "rsa@0.10.0-rc.18 <- ssh-key@0.7.0-rc.11[normal] <- russh@0.63.3[normal] <- nyxid-cli@workspace[normal]"
       ],
       "uses": {
         "scope": "pinned-owner-host-ssh-client-signing",
@@ -637,7 +636,8 @@
       },
       "owner": "NyxID security maintainers",
       "expires": "2027-01-18",
-      "rationale": "RSA client signatures are observed only by the pinned host selected by the owner; host_key_sha256 verification must precede authentication. Ed25519 is recommended. Imported RSA support remains available; no RustCrypto private decryption is authorized."
+      "rationale": "RSA client signatures are observed only by the pinned host selected by the owner; host_key_sha256 verification must precede authentication. Ed25519 is recommended. Imported RSA support remains available; no RustCrypto private decryption is authorized.",
+      "lock_subgraph_sha256": "218a380512f7582a73d29678a1df2efdfa29958d50ff75fe2b11f5ab4819d847"
     },
     {
       "kind": "build-tooling-only",
@@ -645,7 +645,6 @@
       "package": "braces",
       "version": "3.0.3",
       "lock": "mobile/pnpm-lock.yaml",
-      "lock_sha256": "cd3098a9a6db79514293e78ee9750b8816963882dd0294b1bd9c50673f910450",
       "integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
       "parents": [
         "braces@3.0.3 <- micromatch@4.0.8 <- @jest/transform@29.7.0",
@@ -657,7 +656,8 @@
       "bundle_checker_sha256": "887f662e9605675f738fba9e1445a3a1f57048e4696b9c2adfe72df048728f23",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
-      "rationale": "Only pinned Metro file-map and Jest consumers process repository-authored build glob configuration. Production iOS export and complete source-map inspection must prove braces/micromatch absent. New parents, runtime inclusion, changed lock, missing bundle evidence, expiry or a new upstream release fail the disposition."
+      "rationale": "Only pinned Metro file-map and Jest consumers process repository-authored build glob configuration. Production iOS export and complete source-map inspection must prove braces/micromatch absent. New parents, runtime inclusion, changed lock, missing bundle evidence, expiry or a new upstream release fail the disposition.",
+      "lock_subgraph_sha256": "6f791c8a370dd75c6eb66bdf9d86ef247a5ed4381ba0b2ddad76ed51d6c89248"
     }
   ]
 }

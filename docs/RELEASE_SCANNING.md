@@ -120,11 +120,21 @@ by dispositions and are retained with raw and unresolved counts.
 
 `security/dependency-patches.json` binds the four upstream findings on the three
 already patched mobile packages to exact advisory/package/version, normalized
-lock and patch paths, full lock/patch/source/regression hashes, original npm
+lock and patch paths, affected-package/consumer-subgraph and patch/source/regression hashes, original npm
 archive integrity, owner, rationale and monthly expiry. A clean frozen install,
 complete installed-source comparison, eight existing regressions and failing
 vulnerable-original probes must all pass in the same audit process. New
 advisories or unreviewed duplicate/unpatched sources remain blocking.
+
+Lock bindings hash the canonical reverse dependency subgraph rooted at each
+affected package: exact registry names, versions, archive checksums/integrities,
+and every consumer edge through the lock's roots. Workspace release versions
+and unrelated lock entries/formatting are excluded. Changing an affected archive,
+version or parent chain requires a new review; a new advisory never inherits a
+disposition. Cargo's selected feature/normal/dev chains are also checked through
+locked metadata. Full before/after lock hashes still detect mutation during
+installation, bundle export and audits, without binding an exception to unrelated
+dependency updates.
 
 `security/dependency-dispositions.json` contains the PM's separate use decisions.
 The monthly braces 3.0.3 disposition requires exact Metro/Jest parent chains,

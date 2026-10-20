@@ -145,12 +145,15 @@ The installer isolates sources, indexes and archive caches from mutable base
 configuration. Distro keyrings verify signatures; pinned metadata authenticates
 native-architecture indexes and package archives. Fixed snapshots disable only
 Release.Valid-Until freshness, retaining signature and checksum enforcement.
-Catalog URLs must use HTTPS. Only the installer derives HTTP transport URLs;
-HTTP transport is safe here only because the reviewed SHA-pinned **signed
-InRelease** authenticates those bytes, followed by its authenticated native
-indexes and package checksums. Ubuntu redirects HTTP snapshots back to HTTPS,
-so minimal images additionally need transport trust before installing CA
-packages. Every caller carries `security/apt-transport-ca.pem`, the public
+Catalog and production acquisition URLs use HTTPS directly. Every caller now
+supplies a pinned transport bundle, avoiding Ubuntu's HTTP-to-HTTPS redirect
+for each of the desktop closure's hundreds of small archives. The disposable
+tamper-test wrapper alone rewrites its isolated sources to HTTP for byte
+injection: HTTP is safe for this integrity test only because the reviewed
+SHA-pinned **signed InRelease** authenticates those bytes, followed by its
+authenticated native indexes and package checksums. Minimal images need
+transport trust before installing CA packages. Every caller carries
+`security/apt-transport-ca.pem`, the public
 Mozilla bundle extracted by curl as of 2026-09-25, obtained from
 `https://curl.se/ca/cacert.pem` and compared with its HTTPS `.sha256` publication.
 `security/apt-transport-ca.tsv` records the exact upstream bundle and checksum
@@ -163,6 +166,13 @@ peer and hostname verification, and never adds it to the image's system trust
 store. Distro `ca-certificates` packages install normally only after the
 snapshot metadata, indexes and archives have passed their independent checks.
 CI and release-host wrappers use that same checked bundle and installer.
+
+The APT layer job builds only the real Dockerfile instructions through each
+stage's last package install. A fresh job-local BuildKit builder reuses identical
+desktop/Chromium prefixes in derived test images; no external cache is imported.
+Cold package prefixes retain a 2,400-second bound (including archive downloads,
+configuration and image loading), with elapsed times and a log tail on timeout.
+The timeout has not been raised to accommodate repeated desktop downloads.
 Every selected component's
 native Packages index must exist even when older APT reports acquisition errors
 as warnings. Only amd64/arm64 without foreign architectures are admitted.

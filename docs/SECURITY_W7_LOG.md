@@ -233,3 +233,16 @@
 - Standalone workflow YAML (14 workflows/22 Rust actions), reusable permissions (8 calls), build-input/Node policy and diff checks passed; real fresh locked credential composition10 components and wizard membership passed.
 - Required PR jobs: Shipped SBOM Policy; Image SBOM Publication Closure; CLI Archive SBOM Composition; Backend Credential Packaging and Shipped Image Identity (both arches); CLI Archive Identity (all four targets).
 - Actual image/archive acceptance remains hosted PR evidence; no local Cargo/Docker build or remote publication. C-7 mandatory signing is still pending; D native acceptance workflow awaits its PM-forwarded harness contract.
+
+
+## Hosted CI repairs — C-5/C-6 integration
+- Replace whole-lock advisory bindings with canonical affected package/consumer subgraphs (exact registry versions/checksums and edges); workspace release versions and unrelated entries are excluded.
+- All six graphs match the accepted C-5 revision a0ca2a97c; no reviewed scope, advisory, expiry or source/patch proof was broadened. Full lock hashes still reject install/export/audit mutation.
+- Scanner log's synthetic npm finding and missing-tool messages were passing negative controls, not new advisories/bootstrap failures; capture expected operator-fixture diagnostics while preserving all refusals.
+- Real regctl containerd dual-view replay reproduces the image failure; select the unique staged alias, then require its digest, config, platform and every blob hash. Add PR tag/staging mutation tests.
+- Downloaded APT evidence proves timeout in archive 508 of the desktop prefix, not Rust/private builds. Use direct verified HTTPS and reuse identical desktop/Chromium prefixes in the fresh job-local builder; no external cache or timeout increase.
+- APT still tests every real package instruction and offline receipt; log elapsed times/tails within the unchanged 2400-second cold-prefix bound. Tamper proxy downgrades only its disposable wrapper's isolated sources.
+- Local: disposition14/14, patch22/22, APT23/23, real regctl staging3/3, operator19/19; image14/14, Detect Changes29/29, secrets17/17 and scanner wiring7/7 (148 total).
+- PR jobs: Security Scans / Scanner Policy, Every Dependency Root Audit; Artifact Packaging / Shipped Image Identity (all components/arches), Backend Credential Packaging; APT Policy, APT Snapshots and APT Dockerfile Layers (both arches); Detect Changes and CI Pipeline.
+- APK durable archives present remains outside apk-pass/CI required dependencies and continue-on-error on PRs; missing provisioning still fails its scheduled job.
+- No local Docker or Linux replay claimed; final image, signed snapshot/tamper and timing acceptance must come from these PR jobs. No remote mutation performed.

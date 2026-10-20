@@ -8,7 +8,6 @@
         "GHSA-vcc3-ghjq-m6fr"
       ],
       "lock": "mobile/pnpm-lock.yaml",
-      "lock_sha256": "cd3098a9a6db79514293e78ee9750b8816963882dd0294b1bd9c50673f910450",
       "patch": "mobile/patches/decode-uri-component@0.2.2.patch",
       "patch_sha256": "2c20276b124d7be1b0bc3353a5bf4e1c9f4845b8b0b25e67c8e53abc8485d7e2",
       "integrity": "sha512-FqUYQ+8o158GyGTrMFJms9qh3CqTKvAqgqsTnkLI8sKu0028orqBhxNMFkFen0zGyg6epACD32pjVk58ngIErQ==",
@@ -25,7 +24,8 @@
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
-      "rationale": "Bounded malformed decoding backport preserves the legacy CommonJS consumer API; the registry audit cannot represent this reviewed pnpm patch."
+      "rationale": "Bounded malformed decoding backport preserves the legacy CommonJS consumer API; the registry audit cannot represent this reviewed pnpm patch.",
+      "lock_subgraph_sha256": "45d124c2531b94b6bb41d2c1a6d022ac123b336982aaf7d308af51b7c52e76b6"
     },
     {
       "package": "image-size",
@@ -35,7 +35,6 @@
         "GHSA-w3rx-r6r6-pgpr"
       ],
       "lock": "mobile/pnpm-lock.yaml",
-      "lock_sha256": "cd3098a9a6db79514293e78ee9750b8816963882dd0294b1bd9c50673f910450",
       "patch": "mobile/patches/image-size@1.2.1.patch",
       "patch_sha256": "aed80e6dccee17930510649cd38ec398460c70cc050788eedd26e45a4862bb7a",
       "integrity": "sha512-rH+46sQJ2dlwfjfhCyNx5thzrv+dtmBIhPHk0zgRUukHzZ/kRueTJXoYYsclBaKcSMBWuGbOFXtioLpzTb5euw==",
@@ -105,7 +104,8 @@
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
-      "rationale": "Reviewed JXL/HEIF/ICNS progress and bounds checks are backported while preserving the Metro buffer/path/callback API."
+      "rationale": "Reviewed JXL/HEIF/ICNS progress and bounds checks are backported while preserving the Metro buffer/path/callback API.",
+      "lock_subgraph_sha256": "0042a3b03092b8164702fa3e2cf4cdcd97a17cf00aa9a95b73da0b145d371d89"
     },
     {
       "package": "node-forge",
@@ -114,7 +114,6 @@
         "GHSA-86w9-cpqp-85rv"
       ],
       "lock": "mobile/pnpm-lock.yaml",
-      "lock_sha256": "cd3098a9a6db79514293e78ee9750b8816963882dd0294b1bd9c50673f910450",
       "patch": "mobile/patches/node-forge@1.4.0.patch",
       "patch_sha256": "f30d32139499edc78f751a2a3e4e6c5146e915382de608db48ad8ae65096f6f0",
       "integrity": "sha512-LarFH0+6VfriEhqMMcLX2F7SwSXeWwnEAJEsYm5QKWchiVYVvJyV9v7UDvUv+w5HO23ZpQTXDv/GxdDdMyOuoQ==",
@@ -186,7 +185,8 @@
       "compatibility_sha256": "ad21fa1ffa151e8c86e68c614a050fc3e7341838420acd6174973c41cda23053",
       "owner": "NyxID security maintainers",
       "expires": "2026-11-19",
-      "rationale": "Reviewed DigestInfo validation backport rejects extra nested algorithm fields and invalid DER/OID/NULL/digest encodings while preserving valid signatures."
+      "rationale": "Reviewed DigestInfo validation backport rejects extra nested algorithm fields and invalid DER/OID/NULL/digest encodings while preserving valid signatures.",
+      "lock_subgraph_sha256": "ace7eae4366464b2fd88b84adf65153c54c5ca3121daf395e9049dfca0f8fc9d"
     }
   ]
 }

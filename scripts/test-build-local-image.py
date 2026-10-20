@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the operator build/check/tag contract with disposable command fixtures."""
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -102,6 +104,9 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
                 self.assertIn('--require-hashes', command); self.assertIn('--only-binary=:all:', command)
                 tool = 'sbom-pip'
             else:
+                if not kwargs.get('capture_output'):
+                    kwargs.setdefault('stdout', subprocess.PIPE)
+                    kwargs.setdefault('stderr', subprocess.PIPE)
                 return real_run(command, *args, **kwargs)
             with self.record.open('a') as output: output.write(json.dumps(dict(tool=tool, argv=command[1:])) + '\n')
             return subprocess.CompletedProcess(command, int(os.environ.get('TEST_SBOM_SETUP_EXIT', '0')))
@@ -112,7 +117,11 @@ raise SystemExit(int(os.environ.get('TEST_INSPECTOR_EXIT','0')))
         return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.exists() else []
 
     def run_build(self, **kwargs):
-        return builder.build(self.fixture.root, self.destination, self.dockerfile, 'fixture:local', **kwargs)
+        # Failure cases deliberately exercise mandatory gates. Keep expected
+        # diagnostics available for assertions without CI error annotations.
+        self.diagnostics = io.StringIO()
+        with contextlib.redirect_stdout(self.diagnostics), contextlib.redirect_stderr(self.diagnostics):
+            return builder.build(self.fixture.root, self.destination, self.dockerfile, 'fixture:local', **kwargs)
 
     def receipt(self):
         return json.loads((self.destination / 'image-build-execution.json').read_text())

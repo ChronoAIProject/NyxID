@@ -39,11 +39,29 @@ class UseDispositions(unittest.TestCase):
             with self.subTest(expiry=expiry), self.assertRaisesRegex(ValueError, 'expired/overlong'):
                 d.load_policy(self.root, today=date(2026, 10, 20))
 
-    def test_changed_lock_and_missing_uses_fail(self):
+    def test_unrelated_lock_formatting_does_not_renew_or_invalidate_review(self):
         p = self.root / 'Cargo.lock'; original = p.read_bytes(); p.write_bytes(original + b'\n')
-        with self.assertRaises(ValueError): d.load_policy(self.root, today=date(2026, 10, 20))
+        self.assertEqual(d.load_policy(self.root, today=date(2026, 10, 20)), self.policy)
         p.write_bytes(original); self.policy['dispositions'][0]['uses'].pop('call_sites'); self.save()
         with self.assertRaises(ValueError): d.load_policy(self.root, today=date(2026, 10, 20))
+
+    def test_affected_cargo_version_checksum_and_parent_changes_fail(self):
+        p = self.root / 'Cargo.lock'; original = p.read_text()
+        record = self.policy['dispositions'][0]
+        for before, after in ((record['checksum'], '0' * 64),
+                              ('name = "rsa"\nversion = "0.9.10"', 'name = "rsa"\nversion = "0.9.11"'),
+                              ('"rsa 0.9.10",', '"rsa 0.10.0-rc.18",')):
+            self.assertIn(before, original)
+            p.write_text(original.replace(before, after))
+            with self.subTest(change=before), self.assertRaises(ValueError):
+                d.load_policy(self.root, today=date(2026, 10, 20))
+        p.write_text(original)
+
+    def test_unrelated_cargo_entry_and_workspace_release_version_are_not_review_bindings(self):
+        p = self.root / 'Cargo.lock'; original = p.read_text()
+        p.write_text(original.replace('version = "0.73.0"', 'version = "0.74.0"') +
+                     '\n[[package]]\nname = "unrelated-fixture"\nversion = "1.0.0"\n')
+        self.assertEqual(d.load_policy(self.root, today=date(2026, 10, 20)), self.policy)
 
     def test_new_rsa_import_alias_or_private_operation_fails(self):
         source = self.root / 'backend/src/main.rs'; source.parent.mkdir(parents=True)
@@ -79,7 +97,9 @@ class UseDispositions(unittest.TestCase):
 
     def test_parent_chain_and_selected_features_are_observed_from_resolved_cargo_graph(self):
         metadata = self.metadata(); graph = d.rsa_graph(metadata, '0.9.10')
-        self.assertEqual(graph, dict(features=['pem', 'std'], parents=['rsa@0.9.10 <- nyxid@0.72.0[normal]']))
+        self.assertEqual(graph, dict(features=['pem', 'std'], parents=['rsa@0.9.10 <- nyxid@workspace[normal]']))
+        metadata['packages'][1]['version'] = '0.73.0'
+        self.assertEqual(graph, d.rsa_graph(metadata, '0.9.10'))
         metadata['resolve']['nodes'][0]['features'].append('new-private-mode')
         self.assertNotEqual(graph, d.rsa_graph(metadata, '0.9.10'))
         metadata['resolve']['nodes'][1]['deps'][0]['dep_kinds'][0]['kind'] = 'dev'
@@ -119,6 +139,7 @@ class UseDispositions(unittest.TestCase):
 
     def tooling_inputs(self):
         directory = self.root / 'clean-install'; directory.mkdir()
+        shutil.copyfile(self.root / 'mobile/pnpm-lock.yaml', directory / 'pnpm-lock.yaml')
         checker = self.root / 'scripts/check-mobile-bundle.cjs'
         checker.parent.mkdir(); shutil.copyfile(ROOT / checker.relative_to(self.root), checker)
         return directory, self.policy['dispositions'][-1]

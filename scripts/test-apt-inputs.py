@@ -140,6 +140,17 @@ class DockerPolicy(unittest.TestCase):
         self.assertIn('chmod 0700 /opt/nyxid-apt', text)
         self.assertIn(INSTALLER + ' ubuntu:noble -- libdbus-1-dev', text)
 
+    def test_package_prefixes_reuse_only_same_job_builder_with_a_bounded_build(self):
+        command = images.build_command(Path('/prefix.Dockerfile'), 'fixture:prefix', 'linux/amd64', ROOT)
+        self.assertNotIn('--no-cache', command)
+        self.assertNotIn('--cache-from', command)
+        self.assertNotIn('--cache-to', command)
+        self.assertIn('--progress=plain', command)
+        self.assertEqual(images.BUILD_TIMEOUT, 2400)
+        installer = (ROOT / 'scripts/apt-snapshot-install.sh').read_text()
+        self.assertIn('"$key" "$url" "$suite"', installer)
+        self.assertNotIn("sed 's/^https:/http:/'", installer)
+
     def test_derived_images_use_in_build_desktop_instead_of_engine_local_tag(self):
         cases = images.prefixes(ROOT)
         desktop = next(text for name, stage, text in cases if (name, stage) == ('cli/Dockerfile.machine', 'desktop'))

@@ -91,9 +91,18 @@ class PatchDispositions(unittest.TestCase):
                 self.policy.write_text(json.dumps(dict(schema_version=1, patches=records)))
                 with self.assertRaises(ValueError): self.validate()
 
-    def test_changed_lock_requires_explicit_review(self):
+    def test_unrelated_lock_formatting_preserves_review(self):
         p = self.root / self.records[0]['lock']; p.write_bytes(p.read_bytes() + b'\n')
-        with self.assertRaisesRegex(ValueError, 'bound file'): self.validate()
+        self.validate()
+
+    def test_unrelated_package_preserves_review_but_new_consumer_requires_review(self):
+        self.rewrite_lock(lambda lock: (lock['packages'].update({'unrelated@1.0.0': {'resolution': {'integrity': 'sha512-fixture'}}}),
+                                        lock['snapshots'].update({'unrelated@1.0.0': {}})))
+        self.validate()
+        r = self.records[0]
+        version = r['version'] + '(patch_hash=' + r['patch_sha256'] + ')'
+        self.rewrite_lock(lambda lock: lock['snapshots']['unrelated@1.0.0'].update(dependencies={r['package']: version}))
+        with self.assertRaisesRegex(ValueError, 'subgraph changed'): self.validate()
 
     def test_changed_or_missing_regression_script_fails(self):
         for name in (d.REGRESSION, d.COMPATIBILITY):
@@ -108,7 +117,6 @@ class PatchDispositions(unittest.TestCase):
         p = self.root / 'mobile/pnpm-lock.yaml'
         lock = load_unique(p.read_text()); transform(lock)
         p.write_text(yaml.safe_dump(lock, sort_keys=False))
-        for r in self.records: r['lock_sha256'] = d.sha(p.read_bytes())
         self.save()
 
     def test_unpatched_duplicate_snapshot_fails_even_with_refreshed_lock_digest(self):

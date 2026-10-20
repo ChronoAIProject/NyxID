@@ -166,6 +166,14 @@ apt-get --version | head -n 1 > /out/apt-version.txt
 mkdir /fixture-bin
 cat > /fixture-bin/apt-get <<'WRAPPER'
 #!/bin/sh
+# Test-only forwarding proxy exposes bytes for signature/hash fault injection.
+# Production installer writes HTTPS; only this disposable wrapper rewrites the
+# isolated fixture sources, without changing signature/hash enforcement.
+for option in "$@"; do
+  case "$option" in
+    Dir::Etc::sourcelist=*) sed -i 's#https://#http://#g' "${option#*=}" ;;
+  esac
+done
 if [ "$NYXID_APT_TEST_MODE" = missing-archive ]; then
   case " $* " in
     *' --no-download '*)

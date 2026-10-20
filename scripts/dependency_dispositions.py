@@ -12,7 +12,8 @@ import re
 import shutil
 import subprocess
 
-from dependency_patches import bound_file, run_required, sha
+from dependency_patches import bound_file, regular_file, run_required, sha
+import dependency_subgraph
 
 POLICY = 'security/dependency-dispositions.json'
 RSA_REFERENCE = re.compile(r'\b(?:rsa|russh|ssh_key)\s*::|\buse\s+rsa\b|\bRsa[A-Za-z0-9_]*')
@@ -29,7 +30,7 @@ def load_policy(root, today=None):
         raise ValueError('invalid dependency disposition policy')
     seen = set()
     for r in data['dispositions']:
-        common = {'kind', 'advisory', 'package', 'version', 'lock', 'lock_sha256', 'owner', 'expires', 'rationale', 'parents'}
+        common = {'kind', 'advisory', 'package', 'version', 'lock', 'lock_subgraph_sha256', 'owner', 'expires', 'rationale', 'parents'}
         extra = {'checksum', 'features', 'uses'} if r['package'] == 'rsa' else {'integrity', 'bundle_checker_sha256'}
         if set(r) != common | extra or not all(r[k] for k in common):
             raise ValueError('missing exact dependency disposition binding')
@@ -47,7 +48,15 @@ def load_policy(root, today=None):
         key = (r['lock'], r['package'], r['version'], r['advisory'])
         if key in seen: raise ValueError('duplicate dependency disposition')
         seen.add(key)
-        bound_file(root, r['lock'], r['lock_sha256'])
+        lock = regular_file(root, r['lock']).read_text()
+        if r['package'] == 'rsa':
+            import tomllib
+            graph = dependency_subgraph.cargo(tomllib.loads(lock), r['package'], r['version'])
+        else:
+            from workflow_yaml import load_unique
+            graph = dependency_subgraph.pnpm(load_unique(lock), r['package'], r['version'])
+        if dependency_subgraph.digest(graph) != r['lock_subgraph_sha256']:
+            raise ValueError('affected package archive/consumer subgraph changed')
     return data
 
 
@@ -91,7 +100,9 @@ def rsa_graph(metadata, version):
     def visit(current, trail, seen):
         for parent, kinds in reverse[current]:
             if parent in seen: raise ValueError('cycle in reviewed RSA parent graph')
-            p = packages[parent]; chain = trail + [p['name'] + '@' + p['version'] + '[' + kinds + ']']
+            p = packages[parent]
+            version = 'workspace' if parent in workspace else p['version']
+            chain = trail + [p['name'] + '@' + version + '[' + kinds + ']']
             if parent in workspace: chains.append(' <- '.join(chain))
             else: visit(parent, chain, seen | {parent})
     visit(target[0], ['rsa@' + version], {target[0]})
@@ -156,9 +167,10 @@ def verify_tooling(root, directory, record, environment):
         destination = directory / Path(name).relative_to('mobile')
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
+    before = sha((directory / 'pnpm-lock.yaml').read_bytes())
     exported = run_required(['node', str(checker), str(directory)], env=environment, timeout=650)
     print(exported.stdout.decode(), end='', flush=True)
-    if sha((directory / 'pnpm-lock.yaml').read_bytes()) != record['lock_sha256']:
+    if sha((directory / 'pnpm-lock.yaml').read_bytes()) != before:
         raise ValueError('bundle export mutated dependency lock')
     return True
 

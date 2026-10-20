@@ -11,10 +11,21 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 from apt_inputs import INSTALLER, projection, stages
 
 ROOT = Path(__file__).resolve().parents[1]
+# 40 minutes bounds a cold desktop closure (hundreds of archives), package
+# configuration and image loading. Each prefix logs elapsed time and failures.
+# Reuse only this job's fresh BuildKit builder, never imported external caches.
+BUILD_TIMEOUT = 2400
+
+
+def build_command(dockerfile, tag, platform, root):
+    return ['docker', 'buildx', 'build', '--load', '--progress=plain', '--provenance=false',
+            '--platform', platform, '--file', str(dockerfile), '--tag', tag,
+            '--build-arg', 'MACHINE_IMAGE=desktop', str(root)]
 
 
 def prefixes(root):
@@ -59,12 +70,20 @@ def run(args):
             tag = "nyxid-apt-inputs:" + str(index)
             if (name, stage) == ("cli/Dockerfile.machine", "desktop"):
                 tag = "nyxid-apt-machine:ci"
-            command = ["docker", "buildx", "build", "--load", "--no-cache", "--provenance=false",
-                       "--platform", args.platform, "--file", str(dockerfile), "--tag", tag,
-                       "--build-arg", "MACHINE_IMAGE=desktop", str(ROOT)]
+            # Derived test prefixes contain the identical desktop prefix in
+            # the same builder. Replaying it with --no-cache redownloads and
+            # configures the entire desktop/Chromium closure for each case.
+            command = build_command(dockerfile, tag, args.platform, ROOT)
             log = args.output / (label + ".log")
-            with log.open("w") as output:
-                result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=2400)
+            started = time.monotonic()
+            try:
+                with log.open("w") as output:
+                    result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=BUILD_TIMEOUT)
+            except subprocess.TimeoutExpired as error:
+                print(log.read_text()[-16000:], flush=True)
+                raise ValueError('APT package-prefix build timed out: ' + label) from error
+            finally:
+                print(f'APT prefix {label}: {time.monotonic() - started:.1f}s (bound {BUILD_TIMEOUT}s)', flush=True)
             if result.returncode:
                 print(log.read_text()[-12000:], flush=True)
                 raise ValueError("APT Dockerfile build failed: " + name + ":" + stage)

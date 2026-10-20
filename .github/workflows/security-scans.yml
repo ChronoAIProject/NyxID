@@ -31,12 +31,15 @@ jobs:
           python3 scripts/test-image-vulnerabilities.py
           python3 scripts/test-build-local-image.py
       - name: Require PR, schedule and publication scanner wiring
+        env:
+          REGCTL_BIN: ${{ runner.temp }}/scan-tools/regctl
         run: |
           python3 -m venv "$RUNNER_TEMP/scanner-policy"
           "$RUNNER_TEMP/scanner-policy/bin/pip" install --require-hashes --only-binary=:all: -r security/python-build-requirements.txt
           "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-scanner-workflows.py
           "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-dependency-patches.py
           "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-dependency-dispositions.py
+          "$RUNNER_TEMP/scanner-policy/bin/python" scripts/test-image-scan-staging.py
           node scripts/test-mobile-bundle-policy.cjs
 
   history:
