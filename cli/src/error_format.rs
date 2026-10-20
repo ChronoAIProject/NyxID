@@ -5,16 +5,28 @@ use serde_json::{Value, json};
 /// When `json` is true, return a single-line JSON object with one of:
 ///   { "error": "http_error", "status": <int>, "path": "<string>", "body": <json|string> }
 ///   { "error": "cli_error", "message": "<string>" }
+/// Grant issuance errors also include their request UUID and retry guidance.
 ///
 /// When `json` is false, fall back to the legacy `Error: {e:#}` shape so
 /// network errors add safe stage/hint details while other errors are unchanged. The caller prints the returned
 /// string with `eprintln!`, which supplies the trailing newline on stderr.
 pub fn render_error(err: &anyhow::Error, json: bool) -> String {
+    let grant_request = err.downcast_ref::<crate::commands::admin_credits::GrantRequest>();
+    let grant_guidance = grant_request.map(|request| {
+        let conflict = err
+            .downcast_ref::<crate::api::ApiError>()
+            .is_some_and(|error| error.status() == reqwest::StatusCode::CONFLICT);
+        request.guidance(conflict)
+    });
     let guidance = err
         .downcast_ref::<crate::api::ApiError>()
         .and_then(crate::credential_guidance::for_error);
     let diagnostic = crate::net_diagnostics::Diagnostic::from_anyhow(err);
-    let message = if diagnostic.is_some() {
+    let message = if grant_request.is_some()
+        && let Some(error) = err.downcast_ref::<crate::api::ApiError>()
+    {
+        error.to_string()
+    } else if diagnostic.is_some() {
         err.chain()
             .map(crate::net_diagnostics::error_text)
             .collect::<Vec<_>>()
@@ -31,6 +43,10 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
         if let Some(text) = guidance.as_ref().and_then(crate::credential_guidance::text) {
             rendered.push('\n');
             rendered.push_str(&text);
+        }
+        if let Some(guidance) = grant_guidance {
+            rendered.push('\n');
+            rendered.push_str(&guidance);
         }
         return rendered;
     }
@@ -85,6 +101,10 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
     }
     if let Some(guidance) = guidance {
         payload["guidance"] = guidance;
+    }
+    if let Some(request) = grant_request {
+        payload["request_id"] = json!(request.request_id);
+        payload["retry_guidance"] = json!(grant_guidance);
     }
     serde_json::to_string(&payload).unwrap_or_else(|_| {
         "{\"error\":\"cli_error\",\"message\":\"failed to render error\"}".to_owned()
