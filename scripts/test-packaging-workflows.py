@@ -29,6 +29,8 @@ def require_gates(data):
     filters = load_unique(next(step['with']['filters'] for step in ci['jobs']['changes']['steps']
                                if step.get('uses', '').startswith('dorny/paths-filter@')))['packaging']
     for path in ('scripts/source_artifacts.py', 'scripts/image_artifacts.py', 'scripts/credential_packaging.py',
+                 'scripts/image_runtime.py', 'scripts/elf_runtime.py', 'scripts/image-entrypoint-dispatch.sh',
+                 'scripts/image_dispositions.py', 'scripts/export-node-rootfs.py', 'security/image-dispositions.json',
                  'scripts/check-cli-archive-identity.py', 'scripts/test-packaging-workflows.py',
                  'scripts/check-built-image-csp.py', 'scripts/test-built-image-csp.py', 'frontend/Dockerfile.policy-tests',
                  'scripts/check-machine-docker-cli.py', 'scripts/machine_docker_fixture.mjs', 'scripts/test-machine-docker-fixture.mjs',

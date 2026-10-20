@@ -79,6 +79,26 @@ A CRITICAL always blocks when the vulnerable code is in a library the shipped
 binary links (DT_NEEDED), in an executable reachable from the entrypoint, or in
 code that processes network- or user-supplied input.
 
+The scanner implements only the closed `linux-uapi-package-has-no-code-v1`
+negative test. An exact record requires the actual workstation dependency chain
+`build-essential -> libc6-dev -> linux-libc-dev`, source/binary versions,
+component, architecture, full reviewed advisory content, a named affected API,
+owner, issue date and an expiry no more than 30 days later. The entire reviewed
+snapshot catalog and final package file-list/content digest are bound. The
+security archive's native Packages.xz is verified against its SHA-pinned signed
+InRelease, and its candidate/source version must match the reviewed version.
+A reported FixedVersion always rejects a record, including a renewal. Missing
+or resolved advisory identities require removing stale records.
+
+The host inspects a stopped immutable image's real dpkg file list and exported
+filesystem; no image-provided program is trusted to assert absence of code.
+Only non-executable, non-ELF header files under `/usr/include` currently pass.
+The existing two documentation files therefore prevent activating the current
+header findings until the PM clarifies that precise path allowance. All active
+records are validated for expiry even when unrelated images are being scanned.
+Publication replay checks the same policy and reruns the filesystem proof;
+missing/changed evidence cannot become an unsigned summary-based pass.
+
 There are no active image dispositions in this commit. The following inventory
 is the **prior Debian-base baseline**, retained to identify every finding that
 the minimal service images must remove. It contains 104 no-fixed-version

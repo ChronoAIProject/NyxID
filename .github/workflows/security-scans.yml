@@ -29,6 +29,7 @@ jobs:
           python3 scripts/test-secret-policy.py
           python3 scripts/test-dependency-audits.py
           python3 scripts/test-image-vulnerabilities.py
+          python3 scripts/test-image-dispositions.py
           python3 scripts/test-build-local-image.py
       - name: Require PR, schedule and publication scanner wiring
         env:

@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 
+from image_dispositions import apply as apply_dispositions
 from oci_subjects import directory_reader, inspect
 from source_artifacts import IMAGES
 
@@ -24,7 +25,7 @@ def sha(path):
     return digest.hexdigest()
 
 
-def evaluate(report, image_id, component):
+def evaluate(report, image_id, component, *, platform=None, evidence=None, download=False):
     if report.get('SchemaVersion') != 2 or report.get('ArtifactType') != 'container_image' or \
             report.get('Metadata', {}).get('ImageID') != image_id:
         raise ValueError('Trivy report does not bind the actual final image config')
@@ -56,7 +57,7 @@ def evaluate(report, image_id, component):
                            any(pkg.get('Name') == package for pkg in item.get('Packages') or [])
                            for item in report['Results']):
         raise ValueError('missing embedded dependency inventory for final application executable')
-    return findings
+    return apply_dispositions(report, findings, image_id, component, platform, evidence, download=download)
 
 
 def layout_subject(layout, digest, platform, commit):
@@ -113,7 +114,7 @@ def scan(image, component, platform, commit, trivy, regctl, stage):
                         '--timeout', '20m', '--output', str(report_path), '--input', str(archive)],
                        cwd=temporary, env=environment, check=True)
     report = json.loads(report_path.read_text())
-    findings = evaluate(report, image_id, component)
+    findings = evaluate(report, image_id, component, platform=platform, evidence=stage / 'eligibility', download=True)
     if sha(archive) != archive_hash:
         raise ValueError('scanner input changed during inspection')
     layout_subject(layout, digest, platform, commit)
@@ -137,6 +138,7 @@ def verify_stage(stage):
         raise ValueError('scanned image archive/report changed before publication')
     subject = layout_subject(stage / 'oci', receipt['subject']['digest'], receipt['platform'], receipt['source_commit'])
     if subject['subject'] != receipt['subject'] or subject['runnable'][0]['config'] != receipt['image_id'] or \
-            evaluate(json.loads((stage / 'trivy.json').read_text()), receipt['image_id'], receipt['component']):
+            evaluate(json.loads((stage / 'trivy.json').read_text()), receipt['image_id'], receipt['component'],
+                     platform=receipt['platform'], evidence=stage / 'eligibility'):
         raise ValueError('publication scan does not bind this exact staged subject')
     return receipt

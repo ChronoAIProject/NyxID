@@ -349,3 +349,12 @@
 - Disposable arm64 signed-snapshot export passed; actual Trivy rootfs scan detected exactly five OS packages and 0 HIGH/CRITICAL/UNKNOWN findings with the local DB. Full native image evidence still required in PR CI.
 - Local exporter tests 5/5 passed; no Cargo source/manifest or node entrypoint edited. Coordinated CLI entrypoint and container feature are required before wiring the reduced Dockerfile.
 - PR: Artifact Packaging Policy; eventual node image wiring must pass Shipped Image Identity (node-agent, both arches), native execution, final scan and SBOM closure.
+
+## W7 CI82 follow-up — closed residual image-CVE eligibility
+- Implement only the reviewed kernel-UAPI negative-test kind; no generic VEX/ignore input and no active image dispositions.
+- Bind CVE, source/binary package versions, component/arch, full advisory content, owner, named affected API, rationale and at most 30 days; validate every record for expiry.
+- Require the actual build-essential/libc6-dev/linux-libc-dev dependency chain, exact final package file-list/content and the unchanged signed-snapshot catalog.
+- Verify native security-index checksum/size from the pinned InRelease; fixed versions, newer candidates, changed source/content and resolved/unused records fail, including renewals.
+- Inspect the stopped final image with host-side dpkg-list/tar parsing, refusing executable/ELF/non-header payloads; publication reruns that proof.
+- No real header records activated: the strict /usr/include-only negative still rejects the two package documentation files pending the explicit PM clarification.
+- Local: eligibility 13/13; all existing image-vulnerability tests retain HIGH/CRITICAL/UNKNOWN behavior. Required Scanner Policy and Artifact Packaging Policy run the new negatives on PRs/schedules.

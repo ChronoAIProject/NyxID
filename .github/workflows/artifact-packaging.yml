@@ -21,6 +21,7 @@ jobs:
       - run: python3 scripts/test-source-artifacts.py
       - run: python3 scripts/test-elf-runtime.py
       - run: python3 scripts/test-node-rootfs.py
+      - run: python3 scripts/test-image-dispositions.py
       - run: python3 scripts/test-build-local-image.py
       - run: python3 scripts/test-built-image-csp.py
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

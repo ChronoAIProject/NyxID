@@ -98,6 +98,12 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             packaging:
+              - 'scripts/*runtime*'
+              - 'scripts/*rootfs*'
+              - 'scripts/*elf*'
+              - 'scripts/*image*entrypoint*'
+              - 'scripts/*image*disposition*'
+              - 'security/image-dispositions.json'
               - 'scripts/*official*'
               - 'scripts/*release*sign*'
               - 'scripts/*rehearsal*'

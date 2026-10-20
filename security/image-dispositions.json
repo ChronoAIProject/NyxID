@@ -1,0 +1,13 @@
+{
+  "schema": "nyxid.image-dispositions.v1",
+  "declared_runtime": {
+    "node-agent": ["libc6", "libgcc-s1", "base-files", "netbase", "tzdata"],
+    "mcp-demo": [],
+    "nyxid-machine-updater": [],
+    "nyxid-node-machine": ["build-essential", "linux-libc-dev"],
+    "machine-node-only": ["build-essential", "linux-libc-dev"],
+    "machine-hosted-desktop": ["build-essential", "linux-libc-dev"],
+    "machine-hosted": ["build-essential", "linux-libc-dev"]
+  },
+  "dispositions": []
+}
