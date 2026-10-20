@@ -27,7 +27,6 @@ jobs:
   durable-present:
     name: APK durable archives present
     if: github.event_name == 'pull_request' || github.event_name == 'schedule'
-    continue-on-error: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

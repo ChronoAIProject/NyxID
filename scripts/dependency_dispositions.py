@@ -89,24 +89,83 @@ def manifest_fingerprint(root, name):
     return sha(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode())
 
 
-def rsa_surface(root):
-    """Conservative change guard, not a claim to infer arbitrary Rust data flow.
+def rsa_surface_sources(sources):
+    """Conservative guard; test-only fixtures bind RSA lines and their counts.
 
-    Any RSA/SSH reference file needs exact source review. New private-operation
-    spellings anywhere in workspace source also need review, even if the author
-    believes they are unrelated to RSA. Counts prevent duplicate-line reuse.
+    Production RSA-reference files still bind every byte. The high-churn test
+    helper binds each RSA-referencing line; all private-operation lines remain
+    counted everywhere, including this fixture. New imports/aliases/operations
+    and duplicated uses therefore still require review.
     """
-    references, operations = {}, {}
-    # Workspace source only; independent/vendor Cargo roots get their own audit
-    # and have no risk dispositions. Include newly created files, not just Git's
-    # index, so a new private operation cannot evade local policy validation.
-    for directory in sorted(root.glob('*/src')):
-        for path in sorted(directory.rglob('*.rs')):
-            text = path.read_text(); name = path.relative_to(root).as_posix()
-            if RSA_REFERENCE.search(text): references[name] = sha(path.read_bytes())
-            counts = Counter(sha(line.strip().encode()) for line in text.splitlines() if PRIVATE_OPERATION.search(line))
-            if counts: operations[name] = dict(sorted(counts.items()))
-    return dict(reference_files=references, private_operation_lines=operations)
+    references, fixture_lines, operations = {}, {}, {}
+    for name, data in sorted(sources.items()):
+        text = data.decode('utf-8')
+        if RSA_REFERENCE.search(text):
+            if name == 'backend/src/test_utils.rs':
+                fixture_lines[name] = dict(sorted(Counter(sha(line.strip().encode())
+                    for line in text.splitlines() if RSA_REFERENCE.search(line)).items()))
+            else:
+                references[name] = sha(data)
+        counts = Counter(sha(line.strip().encode()) for line in text.splitlines() if PRIVATE_OPERATION.search(line))
+        if counts: operations[name] = dict(sorted(counts.items()))
+    return dict(reference_files=references, test_fixture_reference_lines=fixture_lines,
+                private_operation_lines=operations)
+
+
+def rsa_surface(root):
+    # Include new, untracked source locally, so it cannot evade admission.
+    sources = {path.relative_to(root).as_posix(): regular_file(root, path.relative_to(root).as_posix()).read_bytes()
+               for directory in sorted(root.glob('*/src')) for path in sorted(directory.rglob('*.rs'))}
+    return rsa_surface_sources(sources)
+
+
+def committed_rsa_surface(root):
+    """Read immutable Git objects, never shared dirty source or the index."""
+    commit = subprocess.check_output(['git', 'rev-parse', '--verify', 'HEAD^{commit}'], cwd=root, text=True).strip()
+    tree = subprocess.check_output(['git', 'ls-tree', '-r', '-z', commit], cwd=root)
+    entries = []
+    for entry in tree.split(b'\0'):
+        if not entry: continue
+        metadata, name = entry.split(b'\t', 1)
+        mode, kind, oid = metadata.split()
+        name = name.decode('utf-8')
+        if re.fullmatch(r'[^/]+/src/.+\.rs', name):
+            if mode != b'100644' or kind != b'blob': raise ValueError('nonregular committed Rust source: ' + name)
+            entries.append((name, oid))
+    batch = subprocess.check_output(['git', 'cat-file', '--batch'], cwd=root,
+                                    input=b''.join(oid + b'\n' for _, oid in entries))
+    position, sources = 0, {}
+    for name, oid in entries:
+        end = batch.index(b'\n', position)
+        observed, kind, size = batch[position:end].split()
+        if observed != oid or kind != b'blob': raise ValueError('committed source object changed')
+        position = end + 1; size = int(size)
+        sources[name] = batch[position:position + size]
+        position += size
+        if batch[position:position + 1] != b'\n': raise ValueError('invalid committed source framing')
+        position += 1
+    if position != len(batch): raise ValueError('extra committed source data')
+    return commit, rsa_surface_sources(sources)
+
+
+def refresh_rsa_guard(root, *, write=True):
+    commit, observed = committed_rsa_surface(root)
+    policy_path = regular_file(root, POLICY)
+    policy = json.loads(policy_path.read_text())
+    before = policy['rsa_guard']
+    print('RSA guard source: committed HEAD ' + commit + ' (working tree and index excluded)')
+    for section in sorted(set(before) | set(observed)):
+        old, new = before.get(section, {}), observed.get(section, {})
+        for name in sorted(set(old) | set(new)):
+            if old.get(name) != new.get(name):
+                print(section + ':' + name + '\n  before=' + json.dumps(old.get(name), sort_keys=True) +
+                      '\n  after=' + json.dumps(new.get(name), sort_keys=True))
+    if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() != commit:
+        raise ValueError('HEAD moved during RSA review; rerun against the current committed tree')
+    if write:
+        policy['rsa_guard'] = observed
+        policy_path.write_text(json.dumps(policy, indent=2) + '\n')
+    return commit, observed
 
 
 def validate_rsa_surface(root, policy):
@@ -239,3 +298,13 @@ def classify_tooling(report, lock, policy, verified):
                 reviewed.append(dict(advisory=r['advisory'], package=r['package'], versions=[r['version']],
                                      disposition='build-tooling-only-production-bundle-verified'))
     return reviewed
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Refresh only the reviewed RSA change guard from committed HEAD.')
+    parser.add_argument('command', choices=['refresh-rsa-guard'])
+    parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--dry-run', action='store_true', help='print changed file/line hashes without rewriting policy')
+    args = parser.parse_args()
+    refresh_rsa_guard(args.root.resolve(), write=not args.dry_run)

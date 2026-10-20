@@ -9,11 +9,18 @@
       "backend/src/services/assistant_service_execution_ssh_session_tests.rs": "b47cc442855ed4002a520b759558c3af74563d71dc1d4d3b7cbff02cf819399b",
       "backend/src/services/remote_machine_bootstrap_verifier.rs": "4e42819ce69bb34592b52ea15be7136092363fdada9333e6d3cb796d53e1ed8f",
       "backend/src/services/ssh_service.rs": "224f597c84cf6914bf33d3c0768f50eb3cb4ea372e39c0cb8ab364d135b2c065",
-      "backend/src/test_utils.rs": "6a99bbdd3e860eba144bdfd9eccd08c73747e7d6328d293ca375531634fa23ee",
       "cli/src/commands/update_attestation.rs": "e1d0e0f2d41c07eb2c18e60c52c634d71b252d6ee3fe861b1132846b50090c79",
       "cli/src/node/ssh_algos.rs": "1d249511944efea95d48c5065bf0b8c77d15d7fddc45b0c4628bafe4e6e285ec",
       "cli/src/node/ssh_node_exec.rs": "56fa572cdde62bf0bb6c6b4f5baeaa3a6c32374dd1a03bf42571d01326e43f79",
       "machine/src/bootstrap.rs": "8009dbf45d88df140fa7771c7c74a51536d874c489f2f36e85f45e6c24e4a443"
+    },
+    "test_fixture_reference_lines": {
+      "backend/src/test_utils.rs": {
+        "0f92fbfd09ecfe3addb277faa31dc6f3a8477fe90e7a8de5ce85e092ad1741c5": 1,
+        "2b523a5e8e4c4b9ff95df3280800bdff62236956cac5c3756fc3ae43296346ba": 1,
+        "39c7c69be09323d75337162f224ca2c6da116125215f95fe6fee2735a7fd65b5": 1,
+        "4dfdbff2516826eef5d9dad8af783e42f9551d0c21fb59713a807bcbf1a6301d": 2
+      }
     },
     "private_operation_lines": {
       "backend/src/crypto/aes.rs": {
@@ -229,12 +236,12 @@
         "94f4b88264f4fc1d2f3d25d687a221066e5fe7addd1845b44dcad1149abe6450": 1,
         "d104c41958dc34cd731a8a288dd869e369bcaebca9a84e2c69bf3e9aae919ccf": 1
       },
+      "backend/src/services/auth_agent_key_login_service.rs": {
+        "8abfb53152109db5a9881f154e67335319afc9d5a42d6a3c837a42beb22dbc3e": 1
+      },
       "backend/src/services/auth_agent_key_login_service/tests.rs": {
         "6e24968772b1cd72ef96f43f35f4df3cadd257090baf4a3e1f4e70ba9bd7e9dc": 1,
         "b90f970161a9a3534c41e6b6a9e200024809e4ec4cebbd446b46a56c176e8720": 1
-      },
-      "backend/src/services/auth_agent_key_login_service.rs": {
-        "8abfb53152109db5a9881f154e67335319afc9d5a42d6a3c837a42beb22dbc3e": 1
       },
       "backend/src/services/auth_device_service.rs": {
         "37a5a11e59fa3a401d9e6cd37c89fb02b81f578b166616290564765b1e7454d3": 1,
@@ -328,7 +335,7 @@
         "f396f07c09059a3261ace6813a61665daf7720e724e81cd1a29dd92c3b652ecb": 1
       },
       "backend/src/services/mfa_service.rs": {
-        "8c966394cf4ebc83d0b09ecce604e584d08dcda5de44573a485ae4b4afc7fb07": 2
+        "ee6ec3b6bf55ac1b4be68089ed7afa9bc2c1320c5b8928580b6702a6b560e2fa": 1
       },
       "backend/src/services/node_dispatch_tests.rs": {
         "f4d3e1bd7d2472178317c6be5964e0c1c8c8cf613f74a930489680bc39fcc590": 1
@@ -363,12 +370,12 @@
         "ad06810382d771c44d14a34f81f9dd6c29d4ee2aa6814c7dd93c3ad1220d3ded": 1,
         "e6224c5b67f9125d6b170656b555ac831769940dff035d9750fc8c5ff00ab254": 1
       },
+      "backend/src/services/platform_key_service.rs": {
+        "4acfca6910b1c99e49423e3d8c43d50b7944fe456563e944a07ce76c358e621c": 1
+      },
       "backend/src/services/platform_key_service/tests.rs": {
         "6860bca2ae578d0b7e2b590ac6b0144623fe7259d18571716db43623672e04bf": 1,
         "90e1b71e4da81517e26f0d7f08397959a269d80613aab1a0233d02ed745de266": 1
-      },
-      "backend/src/services/platform_key_service.rs": {
-        "4acfca6910b1c99e49423e3d8c43d50b7944fe456563e944a07ce76c358e621c": 1
       },
       "backend/src/services/platform_setup_service.rs": {
         "c558f4b744ee68d23644f3eb315352ef28216eb6083b883b77161c64914da4a4": 1
@@ -514,7 +521,7 @@
         "c19e6fe3c3f99956da7b3f82e6fbdfd00eca94c93555454d19741cdaa80edff3": 1
       },
       "cli/src/node/oauth/storage.rs": {
-        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1
+        "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 2
       },
       "cli/src/node/proxy_upload.rs": {
         "a30ba7f3df6efda15bddad633928bae25a79cc59cee1a5a50dcb34a5a3e0cdb5": 2
@@ -546,6 +553,10 @@
       "cloud-auth/src/aws_sigv4.rs": {
         "a47a5853c67a16d7f7650cf4452234669ddbedd3e13b3eb06787d5b52219e669": 1
       },
+      "machine-updater/src/runtime_provider.rs": {
+        "7d7c7659ec04fd657377f79f99f93b823fffdcec261e520858d5c41e77f9f87c": 1,
+        "e1412d35b40f3ce4a1b6a897de197448342bf3d05b97c271802c8ad6722373c1": 1
+      },
       "machine/src/bootstrap.rs": {
         "9ac649eb5cff8b226f8740d560ec42771e305bdc859a3cd5842da77e904a7209": 1,
         "c1cddcb006ec655860ffe2ae57fb1d667447a0461bb6f2a8d57802d7a5bd1f7b": 1
@@ -561,10 +572,6 @@
         "6ab519848b8b57158d422a32db91f24518f1b711c559fd7e852f03cc82001820": 1,
         "c9dc8b9a9bead26f7c49486dd725969f1f768f99f35ba5d30edb55b935fd02c2": 1,
         "cacfb71e60764fd100114c000c2cf8becc8340c733eff50c9d720b879ddd87b8": 1
-      },
-      "machine-updater/src/runtime_provider.rs": {
-        "7d7c7659ec04fd657377f79f99f93b823fffdcec261e520858d5c41e77f9f87c": 1,
-        "e1412d35b40f3ce4a1b6a897de197448342bf3d05b97c271802c8ad6722373c1": 1
       },
       "nyxid-crypto/src/lib.rs": {
         "3edea6504f64962413d4d3b1faa2ac2ab3c5d690083519859c852e037ad12abe": 1,

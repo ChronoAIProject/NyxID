@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from apk_archive_layers import check_layers
 from apk_archive_release import ARCHES, REQUESTS, expected_assets, stage_payload, validate_payload
-from apk_durability import check as check_durability
+from apk_durability import check as check_durability, report as report_durability
 import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,6 +211,26 @@ python3\t1-r0\t{native}\t{checksum}\t{durable}\thttps://dl-cdn.alpinelinux.org/a
                 assets[0].update(change)
             return assets
         return check_durability(self.catalogs, fetch)
+
+    def test_durability_missing_release_has_exact_operator_dispatch(self):
+        message = self.durability(missing_release=True)[0]
+        self.assertIn('gh workflow run provision-apk-archives.yml --ref main', message)
+        self.assertIn('catalog_commit=<full-40-hex-reviewed-commit-containing-current-catalogs>', message)
+        self.assertIn('build-inputs-apk-2026-10-19', message)
+
+    def test_availability_warns_on_pr_but_fails_schedule_release_and_local(self):
+        for event in ('pull_request', 'schedule', 'release', 'push', 'local'):
+            messages = []
+            with self.subTest(event=event):
+                self.assertEqual(report_durability(self.durability(missing_release=True), event, messages.append),
+                                 0 if event == 'pull_request' else 1)
+                self.assertTrue(messages[0].startswith('::warning::' if event == 'pull_request' else '::error::'))
+                self.assertEqual(report_durability([], event, messages.append), 0)
+        workflow = (ROOT / '.github/workflows/apk-inputs.yml').read_text()
+        job = workflow.split('  durable-present:', 1)[1].split('  replay:', 1)[0]
+        self.assertNotIn('continue-on-error', job)
+        ci = (ROOT / '.github/workflows/ci.yml').read_text().split('  ci-pass:', 1)[1]
+        self.assertNotIn('durable-present', ci)
 
     def test_durability_complete(self): self.assertEqual(self.durability(), [])
     def test_durability_missing_release(self): self.assertIn('release is missing', self.durability(missing_release=True)[0])

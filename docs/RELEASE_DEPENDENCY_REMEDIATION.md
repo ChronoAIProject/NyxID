@@ -31,7 +31,7 @@ image and cross-platform consumer evidence.
 ## Remaining RSA use decisions
 
 `security/dependency-dispositions.json` binds RUSTSEC-2023-0071 to both exact
-remaining rsa versions, registry checksums, the full Cargo lock hash, selected
+remaining rsa versions, registry checksums, affected package entries and reverse parent subgraphs, selected
 Linux/KMS features, resolved workspace parent chains and reviewed source hashes.
 The records expire on 2027-01-18, within 90 days of review.
 
@@ -57,6 +57,32 @@ The baseline binds committed source. In a shared checkout, another stream's
 unfinished edits cannot become part of a risk decision; verify the publication
 commit in a clean audit fixture and review any later source changes before
 refreshing the baseline.
+
+### Refreshing the RSA source review guard
+
+Run `python3 scripts/dependency_dispositions.py refresh-rsa-guard --root . --dry-run`
+from the reviewed branch. It resolves committed `HEAD`, reads its immutable Git
+blobs, and prints every changed path and before/after hash or counted line hash.
+Dirty files, staged changes and untracked files cannot enter the new baseline.
+Review the corresponding `git show HEAD:<path>` bytes and the committed diff
+before running the same command without `--dry-run`. The command rewrites only
+`rsa_guard`; it cannot renew expiry, change graph decisions or authorize another
+advisory. Commit that policy change with the reviewed source revision in the
+review report. A moving HEAD aborts the refresh.
+
+Production RSA-reference files retain full-file context hashes. The test-only
+`backend/src/test_utils.rs` instead binds every RSA-reference line and its count;
+its unrelated Mongo cleanup may change without renewing a crypto decision.
+Private-operation lines remain counted in every file, including that fixture.
+A new RSA reference, changed or duplicated private operation, changed production
+RSA context or new source file still fails admission. This remains a conservative
+change detector; reviewers must inspect types and call paths before refreshing.
+
+The October 20 refresh covers the PM-reviewed MFA AES helper consolidation and
+Mongo fixture cleanup. It also covers committed `f3d78472f`'s additional
+`cli/src/node/oauth/storage.rs` call: `decrypt_record` constructs `Aes256Gcm` and
+uses its authenticated `decrypt` with the recovery-record AAD; it introduces no
+RSA operation. Shared dirty node or audit edits were excluded from the refresh.
 
 ## Mobile YAML compatibility
 
@@ -101,7 +127,7 @@ remain complete, including these upstream-version findings.
 ## Build-only braces decision
 
 GHSA-vfj7-8cjw-p6xm has an exact monthly `build-tooling-only` record for braces
-3.0.3 in `mobile/pnpm-lock.yaml`, bound to its full lock hash, original archive
+3.0.3 in `mobile/pnpm-lock.yaml`, bound to its affected package entries and parent subgraph, original archive
 integrity and micromatch 4.0.8 parents in Metro file-map and Jest. There is no
 braces hardening patch. Repository-authored build configuration supplies the
 patterns processed by these tools.

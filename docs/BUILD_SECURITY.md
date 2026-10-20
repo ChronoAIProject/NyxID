@@ -416,3 +416,14 @@ The proc-macro-error2 2.0.1 vendor directory preserves the authenticated origina
 crate/license and documents the one-line E0365 visibility correction. The
 workspace patch covers all consumers. This is a compiler compatibility fix;
 warnings are not suppressed and its removal requires a fixed upstream release.
+
+The **APK durable archives present** PR check emits an explicit warning and the
+exact provisioning command when a release or asset is missing. This availability
+check exits successfully on PRs so unprovisioned archives do not make required
+PR CI red. API/network failures still fail. The same check fails on schedules
+(and on a direct release/tag/local invocation) until the release is complete.
+It is not a publication correctness prerequisite: every package source still
+requires its catalog checksum, Alpine signature and signed identity checks.
+After merge, dispatch `provision-apk-archives.yml` on `main` with `catalog_commit`
+set to the full reviewed commit containing the current catalogs, then rerun the
+availability check. No provisioning is performed by PR jobs.

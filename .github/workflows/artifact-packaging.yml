@@ -80,7 +80,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: clippy, rustfmt
+          components: cargo, rustc, rust-std, clippy, rustfmt
       - name: Build locked final executable inspector
         run: CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
       - name: Build actual backend runtime image
@@ -351,7 +351,7 @@ jobs:
           echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: clippy, rustfmt
+          components: cargo, rustc, rust-std, clippy, rustfmt
       - name: Build locked final executable inspector
         run: CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR="$RUNNER_TEMP/artifact-target" cargo build --locked --release --manifest-path security/artifact-tools/Cargo.toml
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -468,7 +468,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         if: ${{ !matrix.container }}
         with:
-          components: clippy, rustfmt
+          components: cargo, rustc, rust-std, clippy, rustfmt
           targets: ${{ matrix.target }}
       - name: Install checksummed packaging tools
         run: |
@@ -594,7 +594,7 @@ jobs:
           node-version-file: .node-version
       - uses: dtolnay/rust-toolchain@18f0487477426dce244608110aa2660c2893deb7 # 1.98.1
         with:
-          components: clippy, rustfmt
+          components: cargo, rustc, rust-std, clippy, rustfmt
       - run: sh scripts/setup-sbom-tools.sh "$RUNNER_TEMP/sbom-tools"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

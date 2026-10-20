@@ -47,6 +47,12 @@ def require_gates(data):
         for step in job.get('steps', []):
             if step.get('continue-on-error'):
                 raise ValueError('packaging step cannot be warning-only')
+    for name, job in jobs.items():
+        for step in job.get('steps', []):
+            if step.get('uses', '').startswith('dtolnay/rust-toolchain@'):
+                components = {value.strip() for value in step.get('with', {}).get('components', '').split(',')}
+                if not {'cargo', 'rustc', 'rust-std', 'clippy', 'rustfmt'} <= components or (name == 'credentials' and 'if' in step):
+                    raise ValueError('packaging must repair essential toolchain components even in an existing minimal install')
     text = str(jobs['credentials']['steps'])
     for required in ('backend/Dockerfile', 'frontend/Dockerfile', 'check-credential-image.py',
                      '--compare-image nyxid-credential-frontend:ci', '--source-root', '--commit', '--epoch'):
@@ -131,6 +137,16 @@ def require_gates(data):
 
 
 class PackagingWorkflows(unittest.TestCase):
+    def test_partial_existing_toolchains_must_install_essentials_explicitly(self):
+        for component in ('cargo', 'rustc', 'rust-std'):
+            data = workflows()
+            install = next(step for step in data['artifact-packaging']['jobs']['credentials']['steps']
+                           if step.get('uses', '').startswith('dtolnay/rust-toolchain@'))
+            install['with']['components'] = ', '.join(value for value in
+                ('cargo', 'rustc', 'rust-std', 'clippy', 'rustfmt') if value != component)
+            with self.subTest(component=component), self.assertRaisesRegex(ValueError, 'essential toolchain'):
+                require_gates(data)
+
     def test_current_workflows_require_actual_packaging(self):
         require_gates(workflows())
 

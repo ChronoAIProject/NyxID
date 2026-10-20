@@ -301,3 +301,13 @@
 - Audit also passed 8/8 mobile patch regressions, 5/5 compatibility cases, 119 installed files, four vulnerable-original proofs and a 3,691-module app export with zero forbidden modules.
 - Local Python 3.9 uses a temporary verified Tomli 2.3.0 compatibility alias for tomllib; hosted Python 3.12 remains authoritative. No Cargo source, manifest, lock or other stream's document edited.
 - PR jobs: Detect Changes; Workflow Permissions; Security Scans / Scanner Policy, Full History Secret Scan, Every Dependency Root Audit, Security Scans Passed; Release Build Cache / warm (aarch64-unknown-linux-gnu); CI Pipeline. Real Linux cache build remains hosted-only.
+
+## W7 CI82 follow-up — audit guard, update coverage, toolchain and durability
+- RSA refresh reads only immutable committed HEAD blobs, prints changed path/hash/count bindings, and rewrites only rsa_guard; dirty/index/untracked sources are excluded by regression.
+- Bind the high-churn test_utils fixture to counted RSA-reference lines; retain every private-operation line and production RSA context; review f3d78472f's new AES-GCM recovery decrypt alongside PM-reviewed MFA/Mongo edits.
+- Add the already-managed actionlint pin to the exact Renovate coverage expectation.
+- Artifact Packaging explicitly requests cargo/rustc/rust-std as well as Clippy/rustfmt, repairing partial existing toolchains rather than relying on profile defaults; missing-component workflow negatives added.
+- APK availability absence/incompleteness warns on PRs, fails schedules/other direct invocations, and names the exact post-merge provisioning dispatch; API/network errors and all archive verification remain fatal.
+- Local: dispositions 19/19, catalog maintenance 29/29, packaging workflows 16/16, APK archives 35/35, scanner workflows 7/7: 106 tests passed, 0 failures; build-input policy and pinned actionlint over all workflows passed.
+- Committed-source guard matches f3d78472fe13cd8a5a36a8bd6f165d0be358dc06; no dirty source used. Python3.9 local tests reuse the existing verified Tomli compatibility alias.
+- Hosted evidence: Scanner Policy, Every Dependency Root Audit, Catalog Maintenance Policy, Backend Credential Packaging (both arches), APK durable archives present, Workflow Permissions and CI Pipeline. Image vulnerability repairs follow separately.

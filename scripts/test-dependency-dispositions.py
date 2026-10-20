@@ -132,6 +132,46 @@ class UseDispositions(unittest.TestCase):
         source.write_text('use rsa::RsaPrivateKey;\n// changed context\nkey.sign(message);\n')
         with self.assertRaises(ValueError): d.validate_rsa_surface(self.root, policy)
 
+    def test_test_fixture_binds_rsa_lines_and_every_private_operation_not_mongo_cleanup(self):
+        source = self.root / 'backend/src/test_utils.rs'; source.parent.mkdir(parents=True)
+        original = 'use rsa::RsaPrivateKey;\nkey.sign(message);\nfn cleanup() {}\n'
+        source.write_text(original)
+        policy = dict(rsa_guard=d.rsa_surface(self.root))
+        source.write_text(original.replace('fn cleanup() {}', 'fn cleanup() { session.end(); }'))
+        d.validate_rsa_surface(self.root, policy)
+        for extra in ('use rsa::RsaPublicKey;\n', 'key.sign(message);\n', 'key.decrypt(input);\n'):
+            source.write_text(original + extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'surface changed'):
+                d.validate_rsa_surface(self.root, policy)
+
+    def test_refresh_reads_head_objects_not_dirty_files_or_index_and_preserves_dispositions(self):
+        def git(*args):
+            return subprocess.check_output(['git', *args], cwd=self.root, stderr=subprocess.PIPE, text=True).strip()
+        git('init', '-q'); git('config', 'user.name', 'Guard test'); git('config', 'user.email', 'guard@example.invalid')
+        source = self.root / 'backend/src/main.rs'; source.parent.mkdir(parents=True)
+        source.write_text('use rsa::RsaPublicKey;\nkey.sign(message);\n')
+        git('add', 'backend/src/main.rs'); git('commit', '-qm', 'reviewed source')
+        commit = git('rev-parse', 'HEAD'); expected = d.rsa_surface(self.root)
+        source.write_text('use rsa::RsaPrivateKey;\nkey.decrypt(unreviewed);\n')
+        git('add', 'backend/src/main.rs')
+        source.write_text('key.try_sign_digest(unreviewed);\n')
+        other = self.root / 'cli/src/new.rs'; other.parent.mkdir(parents=True); other.write_text('key.sign(new);\n')
+        before = copy.deepcopy(self.policy)
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            observed_commit, observed = d.refresh_rsa_guard(self.root)
+        self.assertEqual(observed_commit, commit); self.assertEqual(observed, expected)
+        updated = json.loads((self.root / d.POLICY).read_text())
+        self.assertEqual(updated, {**before, 'rsa_guard': expected})
+        self.assertIn(commit, output.getvalue()); self.assertIn('reference_files:backend/src/main.rs', output.getvalue())
+        self.assertIn(d.sha(b'use rsa::RsaPublicKey;\nkey.sign(message);\n'), output.getvalue())
+        self.assertIn('before=', output.getvalue()); self.assertIn('after=', output.getvalue())
+        self.assertEqual(source.read_text(), 'key.try_sign_digest(unreviewed);\n')
+        self.assertIn('unreviewed', git('show', ':backend/src/main.rs'))
+        updated['rsa_guard'] = {}; (self.root / d.POLICY).write_text(json.dumps(updated))
+        original = (self.root / d.POLICY).read_bytes()
+        with patch('sys.stdout', new_callable=io.StringIO): d.refresh_rsa_guard(self.root, write=False)
+        self.assertEqual((self.root / d.POLICY).read_bytes(), original)
+
     def metadata(self):
         return dict(packages=[dict(id='rsa', name='rsa', version='0.9.10'), dict(id='backend', name='nyxid', version='0.72.0')],
                     workspace_members=['backend'], resolve=dict(nodes=[dict(id='rsa', features=['pem', 'std'], deps=[]),

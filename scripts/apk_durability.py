@@ -31,7 +31,7 @@ def check(catalogs, fetch=get_json):
         release = fetch('/releases/tags/' + tag)
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            return [tag + ': repository archive release is missing']
+            return [tag + ': repository archive release is missing; ' + provisioning_instruction()]
         raise
     if release.get('draft') or release.get('tag_name') != tag:
         return [tag + ': archive release is not publicly available under the catalog tag']
@@ -54,3 +54,22 @@ def check(catalogs, fetch=get_json):
         elif asset.get('state') != 'uploaded' or asset.get('size', 0) <= 0 or asset.get('digest') != 'sha256:' + checksum:
             errors.append(tag + ': incomplete or incorrectly bound asset ' + name)
     return errors
+
+
+def provisioning_instruction():
+    return ('After merge, a maintainer must run: gh workflow run provision-apk-archives.yml '
+            '--ref main -f catalog_commit=<full-40-hex-reviewed-commit-containing-current-catalogs>. '
+            'Then rerun APK durable archives present. Archive verification remains mandatory during fallback.')
+
+
+def report(errors, event, emit=print):
+    """PR availability is advisory; schedules and other callers fail on absence.
+
+    This mode affects only release availability, never archive verification or
+    source fallback. API/network exceptions remain fatal in the CLI.
+    """
+    for error in errors:
+        emit(('::warning::' if event == 'pull_request' else '::error::') + error)
+    if errors and not any('provision-apk-archives.yml' in error for error in errors):
+        emit(provisioning_instruction())
+    return int(bool(errors) and event != 'pull_request')
