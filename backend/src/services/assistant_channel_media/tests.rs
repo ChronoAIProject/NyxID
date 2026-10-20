@@ -2026,3 +2026,56 @@ async fn channel_media_uploads_share_browser_record_context_and_strict_base_egre
     );
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn channel_media_erasure_fence_rejects_held_event_and_upload() {
+    let (state, row, _, event) = fixture().await;
+    let mut tx = state.db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    crate::services::erasure_admission::close_in_session(&state.db, &row.user_id, &mut tx)
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .delete_many(doc! {"user_id":&row.user_id})
+        .await
+        .unwrap();
+    assert!(
+        crate::services::channel_media_events::insert_event(&state.db, &event)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        uploads::upload_channel_authorized(
+            &state.db,
+            &state.encryption_keys,
+            &row.user_id,
+            &row.id,
+            "receipt.png",
+            png(),
+            UploadSource {
+                turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
+                event_key: event.media.as_ref().unwrap().key.clone(),
+                index: 0,
+                embedded: false,
+                declared: 1,
+            }
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    for collection in [EVENTS, crate::models::assistant_upload::COLLECTION_NAME] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {"user_id":&row.user_id})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    state.db.drop().await.unwrap();
+}

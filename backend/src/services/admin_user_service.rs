@@ -1466,6 +1466,8 @@ mod tests {
         for collection in [
             crate::models::lark_base_write::COLLECTION_NAME,
             crate::models::lark_base_write_photo::COLLECTION_NAME,
+            crate::models::assistant_attachment::COLLECTION_NAME,
+            crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
         ] {
             for state in [
                 "uploading",
@@ -1493,6 +1495,8 @@ mod tests {
         for collection in [
             crate::models::lark_base_write::COLLECTION_NAME,
             crate::models::lark_base_write_photo::COLLECTION_NAME,
+            crate::models::assistant_attachment::COLLECTION_NAME,
+            crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
         ] {
             assert_eq!(
                 db.collection::<bson::Document>(collection)

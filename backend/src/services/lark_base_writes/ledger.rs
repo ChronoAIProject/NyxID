@@ -54,6 +54,7 @@ pub(super) async fn claim(
     let photos = photos.to_vec();
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<Claim> = async {
+            crate::services::erasure_admission::fence_in_session(&db, &proposed.user_id, session).await?;
             let calls = db.collection::<LarkBaseWrite>(COLLECTION);
             let existing = calls.find_one(doc! {"key":&proposed.key}).session(&mut *session).await?;
             let mut next = proposed.clone();

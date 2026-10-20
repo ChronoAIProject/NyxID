@@ -738,3 +738,29 @@ async fn lark_base_write_failure_release_races_corrected_retry_and_overlapping_b
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn lark_base_write_erasure_fence_rejects_held_claim_after_source_removal() {
+    let db = db("base_erasure_fence").await;
+    let (row, photos) = make_proposal(&["photo"]);
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    crate::services::erasure_admission::close_in_session(&db, &row.user_id, &mut tx)
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    assert!(matches!(
+        ledger::claim(&db, &row, &photos).await,
+        Err(AppError::Conflict(_))
+    ));
+    for collection in [COLLECTION, PHOTOS] {
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    db.drop().await.unwrap();
+}

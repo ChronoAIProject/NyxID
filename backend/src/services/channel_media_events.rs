@@ -232,6 +232,36 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     }))
 }
 
+/// Media acceptance contends with the durable owner-erasure fence. A held
+/// callback cannot recreate a media source after local inventory has drained.
+pub async fn insert_event(db: &Database, event: &NyxbotEvent) -> mongodb::error::Result<()> {
+    if event.media.is_none() {
+        db.collection::<NyxbotEvent>(EVENTS)
+            .insert_one(event)
+            .await?;
+        return Ok(());
+    }
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let event = event.clone();
+    session
+        .start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                super::erasure_admission::fence_in_session(&db, &event.user_id, session).await?;
+                db.collection::<NyxbotEvent>(EVENTS)
+                    .insert_one(&event)
+                    .session(session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+}
+
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     let rows = db.collection::<bson::Document>(EVENTS);

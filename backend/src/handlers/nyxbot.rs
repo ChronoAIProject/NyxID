@@ -4161,7 +4161,11 @@ async fn responses_with_producers_impl(
         expires_at: now + retention,
     };
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    if let Err(error) = events.insert_one(&admitted).await {
+    if let Err(error) = Box::pin(crate::services::channel_media_events::insert_event(
+        &state.db, &admitted,
+    ))
+    .await
+    {
         if !is_duplicate(&error) {
             return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
         }
@@ -4930,11 +4934,10 @@ pub async fn relay_callback(
         created_at: now,
         expires_at: now + retention,
     };
-    match state
-        .db
-        .collection::<NyxbotEvent>(EVENTS)
-        .insert_one(&admitted)
-        .await
+    match Box::pin(crate::services::channel_media_events::insert_event(
+        &state.db, &admitted,
+    ))
+    .await
     {
         Ok(_) => {}
         Err(error) if is_duplicate(&error) => {
