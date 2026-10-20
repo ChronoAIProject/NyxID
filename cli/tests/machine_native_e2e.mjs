@@ -85,7 +85,7 @@ const daemonLog=await fs.open(`${root}/daemon.log`,'a',0o600).then(handle=>handl
 async function stop(){
  if(child&&child.exitCode===null){const done=once(child,'exit');process.kill(-child.pid,'SIGTERM');await done;}
 }
-async function restart(){const before=receivedProfile;await stop();launch();await waitFor(()=>receivedProfile>before,'native restart profile',60000);assert(profile.separated.available);}
+async function restart(){const before=receivedProfile;await stop();launch();await waitFor(()=>receivedProfile>before,'native restart profile',60000);assert.equal(profile.separation_evidence.version,4);assert.equal(profile.separation_evidence.credential_custody,true);assert(profile.separated.available);}
 server.listen(0,'127.0.0.1');await once(server,'listening');
 const heartbeat=setInterval(()=>{if(socket?.readyState===1)socket.send(JSON.stringify({type:'heartbeat_ping'}));},3000);
 let website,browserSite;
@@ -102,10 +102,10 @@ try{
  assert.equal(setupCode,0,setupOutput.replaceAll(token,'[test-registration-token]'));
  checkpoint('fresh native --separate-users required setup and registration');
  launch();await waitFor(()=>profile,'native capability report',60000);
- assert.equal(profile.separation_choice,'require_separated');assert.equal(profile.separation_evidence.version,3);assert.equal(profile.separated.available,true,JSON.stringify(profile.separated));
+ assert.equal(profile.separation_choice,'require_separated');assert.equal(profile.separation_evidence.version,4);assert.equal(profile.separation_evidence.credential_custody,true);assert.equal(profile.separated.available,true,JSON.stringify(profile.separated));
  if(process.env.NYXID_TEST_REQUIRE_APPARMOR_USERNS==='1')assert.equal(profile.separation_evidence.apparmor_userns_restricted,true);
  console.log('EVIDENCE',JSON.stringify({separation_choice:profile.separation_choice,separation_evidence:profile.separation_evidence,separated:profile.separated}));
- checkpoint('positive v3 evidence through real managed Chromium');
+ checkpoint('positive v4 browser and credential-custody evidence');
  // A written policy is insufficient: prove the live negative control before
  // any context exists, then restore the exact protected inode in all cases.
  await stop();
@@ -117,10 +117,10 @@ try{
  try {
   const probe=run(binary,['node','setup','--probe-separation','--config',directory]);
   const unsupported=JSON.parse(probe);
-  assert.equal(unsupported.version,3);assert.equal(unsupported.managed_browser_policy,false);
+  assert.equal(unsupported.version,4);assert.equal(unsupported.managed_browser_policy,false);
   assert.notEqual(unsupported.managed_browser_sandbox,true);
  } finally {await fs.rename(policyBackup,policyFile);}
- const beforePolicyRestart=receivedProfile;launch();await waitFor(()=>receivedProfile>beforePolicyRestart,'restored effective policy',60000);assert.equal(profile.separation_evidence.managed_browser_policy,true);assert.equal(profile.separated.available,true);
+ const beforePolicyRestart=receivedProfile;launch();await waitFor(()=>receivedProfile>beforePolicyRestart,'restored effective policy',60000);assert.equal(profile.separation_evidence.version,4);assert.equal(profile.separation_evidence.credential_custody,true);assert.equal(profile.separation_evidence.managed_browser_policy,true);assert.equal(profile.separated.available,true);
  checkpoint('missing secure policy refuses separation; restored policy is effective');
  await contexts({call,callWithReconnect,profile,conversationId,turnId,origin:`https://127.0.0.1:${website.address().port}`,browserUrl:`http://127.0.0.1:${browserSite.address().port}`,certificate,frames,native:{profile:profileName,workspace,restart,browserBinary},checkpoint});
  const journal=JSON.parse(await fs.readFile(`${directory}/machine-contexts.json`,'utf8'));

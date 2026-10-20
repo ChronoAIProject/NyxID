@@ -39,8 +39,8 @@ for sample in range(args.samples):
             print(f'probe_failure sample={sample + 1} {line}', flush=True)
     assert result.returncode == 0, f'capability probe command failed (exit {result.returncode})'
     evidence = json.loads(result.stdout)
-    assert evidence.get('version') == 3 and evidence.get('os') == 'linux'
-    for field in ('separate_users', 'managed_browser_configured', 'command_seccomp', 'landlock_enforced', 'managed_browser_sandbox', 'managed_browser_policy'):
+    assert evidence.get('version') == 4 and evidence.get('os') == 'linux'
+    for field in ('separate_users', 'managed_browser_configured', 'command_seccomp', 'landlock_enforced', 'managed_browser_sandbox', 'managed_browser_policy', 'credential_custody'):
         assert evidence.get(field) is True, f'probe did not confirm {field} in sample {sample + 1}'
     assert evidence.get('landlock_abi', 0) >= 6 and not evidence.get('probe_timed_out')
     seen = set()
