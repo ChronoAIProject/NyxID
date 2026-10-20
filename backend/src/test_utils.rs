@@ -31,6 +31,7 @@ use crate::services::ssh_service::SshSessionManager;
 
 pub(crate) mod fail_command;
 mod mongo_readiness;
+pub(crate) mod replica_heartbeat;
 
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_MAX_NAME_LEN: usize = 63;
@@ -1473,6 +1474,9 @@ async fn end_test_client_sessions(client: &mongodb::Client, sessions: &[Uuid]) -
 async fn drop_test_database_with_sessions(client: &mongodb::Client, name: &str) -> bool {
     matches!(
         tokio::time::timeout(STALE_TEST_DB_DROP_TIMEOUT, async {
+            if !replica_heartbeat::stop(name).await {
+                return false;
+            }
             if !end_test_client_sessions(client, &test_db_sessions(name)).await {
                 return false;
             }
@@ -1481,6 +1485,27 @@ async fn drop_test_database_with_sessions(client: &mongodb::Client, name: &str) 
         .await,
         Ok(true)
     )
+}
+
+/// Finish all fixture work, then delete its database. Ordinary scope exit also
+/// performs this cleanup; use this API when a test needs an explicit boundary.
+/// Call only after its business workers, sessions and fault guard have ended.
+/// Never call `Database::drop()` directly on a fixture with a live heartbeat.
+pub(crate) async fn teardown_test_database(db: &mongodb::Database) {
+    assert!(
+        parse_managed_test_db_name(db.name()).is_some(),
+        "fixture teardown requires a managed test database"
+    );
+    let uri = TEST_DB_PINNED_URI.get().expect("fixture Mongo URI");
+    let client = test_db_cleanup_client(uri)
+        .await
+        .expect("fixture cleanup client");
+    let dropped = retry_test_db_lifecycle_drop(TEST_DB_LIFECYCLE_DROP_RETRY_BACKOFF, || {
+        drop_test_database_with_sessions(&client, db.name())
+    })
+    .await;
+    complete_test_db_lifecycle_drop(db.name(), dropped);
+    assert!(dropped, "fixture teardown failed before database deletion");
 }
 
 struct TestDbDropGuard {

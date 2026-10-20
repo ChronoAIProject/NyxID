@@ -470,7 +470,7 @@ async fn server_main() {
     let readiness_db = db.clone();
     let readiness_identity = replica_identity.clone();
     let readiness_config = config.security_rollout.clone();
-    tokio::spawn(async move {
+    let readiness_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
@@ -485,7 +485,7 @@ async fn server_main() {
                 tracing::error!(%error, "Security replica observation failed");
             }
         }
-    });
+    }));
     // Keep publishing this generation while an initial multi-replica cutover
     // waits for its complete compatible roster. Fresh/persisted heads do not
     // require the cutover gate, and witness contact never blocks startup.
@@ -1748,10 +1748,13 @@ async fn server_main() {
         downstream_disconnect::DisconnectAwareMakeService::new(app),
     );
     let internal_server = axum::serve(internal_listener, internal_app);
-    tokio::select! {
-        result = public_server => result.expect("Public server error"),
-        result = internal_server => result.expect("Internal replica server error"),
-    }
+    let server_result = tokio::select! {
+        result = public_server => result,
+        result = internal_server => result,
+    };
+    readiness_task.abort();
+    let _ = readiness_task.await;
+    server_result.expect("Server error");
 }
 
 /// Derive the HMAC key used to key `CliPairing.code_hash`.

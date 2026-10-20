@@ -252,3 +252,12 @@
 - Reused C's both-KMS test compiler 16831 (start 22:10:43, executable nyxid_server-483e6416bf263370 mtime 22:20:43). Direct services::platform_entry_admin_service::tests:: --nocapture --test-threads=2 on own Mongo 50012: 13 passed / 0 failed / 0 ignored, 44.33s, including the hosted rotation failure.
 - Gate: C's all-target both-KMS backend Clippy --no-deps -- -D warnings, drivers 14811/14815 at 22:05:52/53, exit 0 at 22:10:20; after these five source edits. Exact shared build env/nofile 60000; no B Cargo queued.
 - Focused rustfmt/check and git diff --check pass. Evidence: ~/Library/Caches/nyxid-w8-core/evidence/post-reboot-platform-fixtures.log. Teardown, GuardOptions, FIFO and index/performance changes remain separate slices.
+
+## W8 hosted follow-up — fixture-owned replica heartbeat teardown (2026-10-20)
+
+- Added teardown_test_database(&db): cancel and await the fixture heartbeat, let in-flight observations finish, end only owned sessions, drop within the existing three-second/three-attempt cleanup budgets, then update the registry. Final fixture-client Drop uses the same ordered cleanup; raw fixture db.drop() must migrate to this API.
+- Heartbeats use independent clients and fixture-owned cancellation/join handles; no client-lifecycle cycle or detached panic. Concurrent cleanup joins the same handle; timeout cancellation preserves it for the next attempt. Production serving owns and aborts/joins its readiness task on exit.
+- Reused C's both-KMS test compiler16831 (22:10:43, executable483e6416bf263370 mtime22:20:43). Direct audit_fixture_teardown_ --nocapture --test-threads=2 on50012: 2 passed / 0 failed / 0 ignored, 1.15s, no heartbeat failure/panic diagnostic; automatic/explicit cleanup with live clones leaves no worker or recreated database.
+- Same executable rechecks: scoped helper4/0/0, process lock1/0/0, bounded runtime retry1/0/0, service-history coordinator3/0/0. These filters overlap other gate evidence. Existing 32-body/8-commit bounds and failure assertions remain intact.
+- Gate: C's backend all-target both-KMS Clippy drivers14811/14815 at22:05:52/53 → exit0 at22:10:20, zero diagnostics, required shared env/nofile60000. Scoped rustfmt/check, whitespace and RSA committed/working-tree guards pass; no pin delta. No new Cargo queued.
+- Evidence: ~/Library/Caches/nyxid-w8-core/evidence/post-reboot-{teardown,helper,helper-lock,runtime-retry,history-retry}.log. GuardOptions and FIFO excluded; this commit compiles without either successor slice.

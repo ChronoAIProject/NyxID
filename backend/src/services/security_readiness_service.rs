@@ -364,26 +364,9 @@ pub(crate) async fn ready_test_replica(db: &Database) {
         .expect("test replica observation");
     };
     heartbeat().await;
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe(
-                &db,
-                &ReplicaIdentity {
-                    instance_name: "test-backend".into(),
-                    generation_id: "test-process".into(),
-                    internal_base_url: "http://127.0.0.1:3002".into(),
-                },
-                &RolloutConfig {
-                    expected_replicas: vec!["test-backend".into()],
-                    drained: true,
-                },
-                false,
-            )
-            .await
-            .expect("test replica heartbeat");
-        }
-    });
+    crate::test_utils::replica_heartbeat::start(&db)
+        .await
+        .expect("start fixture-owned replica heartbeat");
 }
 
 #[cfg(test)]
