@@ -3241,6 +3241,12 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::lark_base_writes::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Lark Base write maintenance deferred");
+            }
             if crate::services::assistant_channel_media::queue::sweep(&state.db)
                 .await
                 .is_err()

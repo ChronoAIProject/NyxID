@@ -714,6 +714,8 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_group::COLLECTION_NAME,
         crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
         crate::models::assistant_attachment::COLLECTION_NAME,
+        crate::models::lark_base_write::COLLECTION_NAME,
+        crate::models::lark_base_write_photo::COLLECTION_NAME,
         crate::models::assistant_resource::COLLECTION_NAME,
         crate::models::nyxbot_image_delivery::COLLECTION_NAME,
         crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
@@ -1605,6 +1607,61 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn lark_base_write_owner_purge_deletes_active_terminal_and_photo_rows_only_for_that_owner()
+     {
+        let db = crate::test_utils::connect_transaction_test_database("base_owner_purge").await;
+        let admin = Uuid::new_v4().to_string();
+        let owner = Uuid::new_v4().to_string();
+        seed_person(&db, &admin, "base-admin@example.com").await;
+        seed_person(&db, &owner, "base-owner@example.com").await;
+        for collection in [
+            crate::models::lark_base_write::COLLECTION_NAME,
+            crate::models::lark_base_write_photo::COLLECTION_NAME,
+        ] {
+            for state in [
+                "uploading",
+                "dispatching",
+                "succeeded",
+                "uncertain",
+                "failed_pre_dispatch",
+                "failed_definite",
+            ] {
+                db.collection::<bson::Document>(collection)
+                    .insert_one(
+                        doc! {"_id":Uuid::new_v4().to_string(),"user_id":&owner,"state":state},
+                    )
+                    .await
+                    .unwrap();
+            }
+            db.collection::<bson::Document>(collection)
+                .insert_one(doc! {"_id":Uuid::new_v4().to_string(),"user_id":&admin})
+                .await
+                .unwrap();
+        }
+        delete_user_cascade(&db, &admin, &owner).await.unwrap();
+        for collection in [
+            crate::models::lark_base_write::COLLECTION_NAME,
+            crate::models::lark_base_write_photo::COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {"user_id":&owner})
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                db.collection::<bson::Document>(collection)
+                    .count_documents(doc! {"user_id":&admin})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
