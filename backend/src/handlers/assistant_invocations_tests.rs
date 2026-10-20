@@ -1327,3 +1327,105 @@ async fn invocation_unresolved_orchestrator_decision_requires_review_and_remains
         );
     }
 }
+
+#[test]
+fn invocation_input_cannot_supply_media_guest_or_channel_authority() {
+    let key = Uuid::new_v4().to_string();
+    let (_, start, _) = parse(&body(&key, "text only"), "owner").unwrap();
+    assert!(start.media_event_ids.is_empty());
+    assert!(start.attachment_ids.is_empty());
+    assert!(!start.guest);
+    assert!(start.channel.is_none());
+    assert!(start.question_key.is_none());
+    for (field, value) in [
+        ("media_event_ids", json!(["source"])),
+        ("attachment_ids", json!(["upload"])),
+        ("guest", json!(true)),
+        ("question_key", json!("caller-selected")),
+        ("channel", json!({"platform":"lark"})),
+    ] {
+        let mut input = json!({"idempotency_key":key,"text":"text only"});
+        input[field] = value;
+        assert!(parse(&serde_json::to_vec(&input).unwrap(), "owner").is_err());
+    }
+}
+
+#[tokio::test]
+async fn invocation_admission_preserves_queued_channel_media_and_selection_metadata() {
+    use crate::models::assistant_conversation::{COLLECTION_NAME as CONVERSATIONS, TurnOrigin};
+    use crate::services::{assistant_team_service as team, async_service_operation as operations};
+    use mongodb::bson::{self, Document, doc};
+    let (state, owner, initial) = admitted("invocation_queued_media").await;
+    let conversation = initial.claim.unwrap().conversation.id;
+    invocations::cancel(&state, &owner, &initial.invocation.idempotency_key)
+        .await
+        .unwrap();
+    let mut media = team::event("message", "queued owner photos".into(), None);
+    media.source_event_ids = vec![Uuid::new_v4().to_string()];
+    media.media_event_ids = media.source_event_ids.clone();
+    media.media_declared = Some(2);
+    media.media_sent_at = Some(Utc::now());
+    let pending = bson::to_bson(&vec![media.clone()]).unwrap();
+    state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &conversation},
+            doc! {"$set":{"pending_events": &pending}},
+        )
+        .await
+        .unwrap();
+    let key = Uuid::new_v4().to_string();
+    let input = serde_json::to_vec(&json!({
+        "idempotency_key":key,"conversation_id":conversation,"text":"separate API work"
+    }))
+    .unwrap();
+    let (_, start, digest) = parse(&input, &owner).unwrap();
+    let admitted = Box::pin(invocations::admit(
+        &state.db,
+        &owner,
+        &key,
+        &digest,
+        &start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert!(admitted.claim.is_some());
+    let mut current = engine::get(&state.db, &owner, &conversation).await.unwrap();
+    assert_eq!(bson::to_bson(&current.pending_events).unwrap(), pending);
+    let turn = current.active_turn.as_ref().unwrap();
+    assert_eq!(
+        turn.invocation_id.as_deref(),
+        Some(admitted.invocation.id.as_str())
+    );
+    assert!(turn.events.is_empty());
+    let message = state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find_one(doc! {"conversation_id":&conversation,"turn_id":&turn.turn_id,"role":"user"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(message.media_event_ids.is_empty());
+    assert!(message.media_pending.is_none());
+    let tracked = team::event("notice", "invocation continuation".into(), None)
+        .for_invocation(Some(&admitted.invocation.id));
+    current.pending_events.insert(0, tracked.clone());
+    let selected = operations::select_events(&mut current, TurnOrigin::Event);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].id, tracked.id);
+    assert_eq!(bson::to_bson(&current.pending_events).unwrap(), pending);
+    let selected = operations::select_events(&mut current, TurnOrigin::Event);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        bson::to_bson(&selected[0]).unwrap(),
+        bson::to_bson(&media).unwrap()
+    );
+    assert!(selected[0].question_key.is_none());
+    assert!(selected[0].invocation_id.is_none());
+    assert!(current.pending_events.is_empty());
+    state.db.drop().await.unwrap();
+}
