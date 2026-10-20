@@ -403,3 +403,13 @@
 - Reuse D's nyxid_server-91bd2f1ee51e6e06 (driver 21:09 after last source edit 21:07): health tests 5/5. Reuse ID's both-KMS all-target Clippy /tmp/nyxid-w8-id-oauth-corrected-clippy.log (drivers 21:25): exit 0 at 21:32:44.
 - Local policy: rootfs 7/7, backend runner 2/2, runtime 10/10, vulnerabilities 15/15, packaging 19/19, credential 21/21, scanner 7/7, SBOM 3/3; pinned actionlint and diff whitespace pass.
 - PR: Artifact Packaging / Backend Credential Packaging amd64+arm64 must start the real final server and require the binary probe with invalid application/key env; Artifact Packaging Policy; APT Dockerfile Layers; Scanner Policy.
+
+## CORE-B hosted regression — private delivery fault scripts
+- Migrate delivery retry/unknown-commit coverage to committed test_utils::fail_command::Guard (1fe798ef4); use its private client, kernel process lock, unique appName and joined reset; remove the local-mutex dependency and direct global failpoint commands.
+- Both CI82 failures share the unscoped insert fault: unrelated fixture readiness consumes an injection and fails, leaving only one fault for the intended transaction (two body attempts instead of three); session-kill teardown is not the cause.
+- Native Mongo 8.0.17 wire reproduction confirms unscoped other-client insert fails112 and target needs two attempts; appName-scoped other-client insert succeeds and target needs three. Evidence persists in ~/Library/Caches/nyxid-coreb/gates/delivery-root-cause-reproduction.log.
+- Regression creates a separate transaction-ready fixture and a same-database other-client write while armed; preserve exactly three retry bodies, one unknown-commit body and the existing queue/intent/pending-count assertions; no retry wrapper or nextest grouping.
+- Recovered Mongo archive SHA256 matches the PM pin; owned replica set nyxid_coreb uses port50044, nofile64000, persistent data/log under ~/Library/Caches/nyxid-coreb/.
+- Reuse shared required-env both-KMS all-target Clippy (backend drivers22:05:52/53, after delivery source freeze22:01:09): exit0 at22:10:20, zero diagnostics; one test no-run exit0 at22:20:45 (driver22:10:43). Persistent logs: ~/Library/Caches/nyxid-coreb/gates/post-reboot-shared-rerun-{clippy,test-no-run}.log.
+- Actual nyxid_server-483e6416bf263370 executable (mtime22:20:43) passes all11 delivery tests with four threads, plus four concurrent separate-process invocations of the two hosted failures; no retry wrapper. Evidence: delivery-suite.log, delivery-process-{0,1,2,3}.log and delivery-results.json in the same persistent gates directory.
+- Required hosted evidence: Backend Test and Coverage (Backend); no push from this lane.

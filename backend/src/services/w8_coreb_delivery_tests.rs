@@ -909,17 +909,32 @@ async fn w8_coreb_delivery_uses_owning_db_tier_and_pre_reserved_completion() {
 
 #[tokio::test]
 async fn w8_coreb_delivery_retries_the_whole_bundle_and_never_replays_an_unknown_commit() {
-    let _guard = audit_state_service::tests::FAIL_COMMAND.lock().await;
-    let (db, runtime) = fixture().await;
-    let admin = db.client().database("admin");
+    let (base, runtime) = fixture().await;
+    let mut fault = crate::test_utils::fail_command::Guard::acquire(&base, None).await;
+    let db = fault.database().clone();
     let key = key();
     let first_request = request(key, payload());
-    admin
-        .run_command(
-            doc! {"configureFailPoint": "failCommand", "mode": {"times": 2}, "data": {
+    fault
+        .arm(
+            doc! {"times": 2},
+            doc! {
                 "failCommands": ["insert"], "errorCode": 112, "errorLabels": []
-            }},
+            },
         )
+        .await
+        .unwrap();
+    // Fixture readiness and unrelated writes must not consume either fault.
+    // The old server-global script made another test's fixture fail and left
+    // this transaction with only one injected conflict under parallel nextest.
+    let unrelated =
+        crate::test_utils::connect_transaction_test_database("w8_coreb_delivery_unrelated").await;
+    unrelated
+        .collection::<bson::Document>("business")
+        .insert_one(doc! {"_id": "fixture-ready-while-armed"})
+        .await
+        .unwrap();
+    base.collection::<bson::Document>("unrelated_writes")
+        .insert_one(doc! {"_id": "same-database-different-client"})
         .await
         .unwrap();
     let bodies = AtomicUsize::new(0);
@@ -934,19 +949,17 @@ async fn w8_coreb_delivery_retries_the_whole_bundle_and_never_replays_an_unknown
         },
     )
     .await;
-    admin
-        .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-        .await
-        .unwrap();
+    fault.disarm().await.unwrap();
     result.unwrap();
     assert_eq!(bodies.load(Ordering::SeqCst), 3);
-    admin
-        .run_command(
-            doc! {"configureFailPoint": "failCommand", "mode": {"times": 1}, "data": {
+    fault
+        .arm(
+            doc! {"times": 1},
+            doc! {
                 "failCommands": ["commitTransaction"],
                 "writeConcernError": {"code": 64, "errmsg": "injected uncertain commit"},
                 "errorLabels": ["UnknownTransactionCommitResult", "TransientTransactionError"]
-            }},
+            },
         )
         .await
         .unwrap();
@@ -970,10 +983,7 @@ async fn w8_coreb_delivery_retries_the_whole_bundle_and_never_replays_an_unknown
         },
     )
     .await;
-    admin
-        .run_command(doc! {"configureFailPoint": "failCommand", "mode": "off"})
-        .await
-        .unwrap();
+    fault.disarm().await.unwrap();
     result.unwrap();
     assert_eq!(bodies.load(Ordering::SeqCst), 1);
     assert_eq!(
