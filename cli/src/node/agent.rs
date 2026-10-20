@@ -102,6 +102,8 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
 
     let node_config = NodeConfig::load(&config_file)?;
     let backend = SecretBackend::reader(&node_config, &config_dir)?;
+    oauth::storage::recover_pending(&backend)?;
+    let (node_config, backend) = backend.current_reader()?;
 
     let auth_token = backend.load_auth_token(&node_config)?;
     let signing_secret = backend.load_signing_secret(&node_config)?;
@@ -121,10 +123,11 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     );
 
     // Spawn OAuth refresh loop (check every 60 seconds)
+    let (refresh_shutdown, refresh_stopped) = tokio::sync::oneshot::channel();
     let refresh_handle = tokio::spawn(oauth_refresh_loop(
-        config_file.clone(),
         Duration::from_secs(60),
         std::sync::Arc::clone(&backend),
+        refresh_stopped,
     ));
 
     ws_client::run_with_shutdown(
@@ -138,7 +141,12 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     )
     .await;
 
-    refresh_handle.abort();
+    // Stop further ticks without cancelling an in-flight provider request or
+    // dropping returned material that is awaiting durable storage repair.
+    let _ = refresh_shutdown.send(());
+    refresh_handle
+        .await
+        .map_err(|_| Error::Config("oauth_refresh_task_failed".into()))?;
     Ok(())
 }
 
@@ -1218,176 +1226,94 @@ pub(super) fn reload_credentials(
 
 /// Background task that refreshes OAuth tokens before they expire.
 async fn oauth_refresh_loop(
-    config_file: std::path::PathBuf,
     interval: Duration,
     backend: std::sync::Arc<SecretBackend>,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     loop {
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => return,
+            () = tokio::time::sleep(interval) => {}
+        }
+        if oauth_refresh_once(&backend).await.is_err() {
+            // Provider/transport bodies, URLs and key-service details never
+            // reach diagnostics. Recovery remains durable and blocks replay.
+            tracing::error!(
+                reason = "oauth_refresh_or_recovery_failed",
+                "Node OAuth refresh requires storage recovery or manual reauthorization"
+            );
+        }
+    }
+}
 
-        let node_config = match backend.current_reader() {
-            Ok((config, _)) => config,
-            Err(error) => {
-                tracing::error!(%error, "OAuth refresh refused invalid node custody");
-                return;
-            }
-        };
-
-        if !node_config
+pub(super) async fn oauth_refresh_once(backend: &SecretBackend) -> Result<()> {
+    use oauth::storage::{Plan, Rotation};
+    oauth::storage::recover_pending(backend)?;
+    let (config, _) = backend.current_reader()?;
+    let services: Vec<_> = config
+        .credentials
+        .iter()
+        .filter(|(_, credential)| credential.oauth_managed)
+        .map(|(service, _)| service.clone())
+        .collect();
+    for service in services {
+        // Each provider await has its own original generation and lease.
+        let (config, reader) = backend.current_reader()?;
+        let credential = config
             .credentials
-            .values()
-            .any(|credential| credential.oauth_managed)
+            .get(&service)
+            .ok_or_else(|| Error::Config("oauth_credential_changed".into()))?;
+        let Some(expires_at) = &credential.oauth_token_expires_at else {
+            continue;
+        };
+        let expires = chrono::DateTime::parse_from_rfc3339(expires_at)
+            .map_err(|_| Error::Config("oauth_expiry_invalid".into()))?;
+        if expires.with_timezone(&chrono::Utc) - chrono::Duration::minutes(5) >= chrono::Utc::now()
         {
             continue;
         }
-        // This legacy loop is replaced by returned-token recovery in the next
-        // checkpoint. Refuse unsupported formats before contacting a provider;
-        // a read-only adapter must never rotate a token it cannot persist.
-        if node_config.storage_backend == "keychain" {
-            tracing::error!(
-                "OAuth refresh requires the node token-recovery upgrade; refusing before provider contact"
-            );
-            return;
-        }
-        let backend = match SecretBackend::from_config(
-            &node_config,
-            config_file.parent().unwrap_or(Path::new(".")),
-        ) {
-            Ok(backend) => backend,
-            Err(error) => {
-                tracing::error!(%error, "OAuth refresh requires the node storage recovery integration");
-                return;
-            }
+        let required = |value: Option<Zeroizing<String>>| {
+            value.ok_or_else(|| Error::Config("oauth_refresh_configuration_incomplete".into()))
         };
-
-        let mut config_changed = false;
-        let mut updated_config = node_config.clone();
-
-        for (slug, cred) in &node_config.credentials {
-            if !cred.oauth_managed {
-                continue;
-            }
-
-            // Check if token expires within 5 minutes
-            let needs_refresh = match &cred.oauth_token_expires_at {
-                Some(expires_str) => match chrono::DateTime::parse_from_rfc3339(expires_str) {
-                    Ok(expires) => {
-                        let now = chrono::Utc::now();
-                        let buffer = chrono::Duration::minutes(5);
-                        expires.with_timezone(&chrono::Utc) - buffer < now
-                    }
-                    Err(_) => false,
-                },
-                None => false,
-            };
-
-            if !needs_refresh {
-                continue;
-            }
-
-            // Load refresh token
-            let refresh_tok = match &cred.oauth_refresh_token_encrypted {
-                Some(enc) => {
-                    match backend
-                        .load_credential_value(&format!("{slug}:oauth_refresh"), Some(enc.as_str()))
-                    {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    }
-                }
-                None => continue,
-            };
-
-            let client_id = match &cred.oauth_client_id_encrypted {
-                Some(enc) => {
-                    match backend
-                        .load_credential_value(&format!("{slug}:oauth_cid"), Some(enc.as_str()))
-                    {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    }
-                }
-                None => continue,
-            };
-
-            let client_secret = cred.oauth_client_secret_encrypted.as_ref().and_then(|enc| {
-                backend
-                    .load_credential_value(&format!("{slug}:oauth_csecret"), Some(enc.as_str()))
-                    .ok()
-            });
-
-            let token_url = match &cred.oauth_token_url {
-                Some(url) => url.as_str(),
-                None => continue,
-            };
-
-            let auth_method = cred
+        use super::secret_fields::{CredentialPart, SecretField};
+        let field = |part| SecretField::Credential {
+            slug: service.clone(),
+            part,
+        };
+        let refresh = required(reader.load_field(&config, &field(CredentialPart::OAuthRefresh))?)?;
+        let client_id =
+            required(reader.load_field(&config, &field(CredentialPart::OAuthClientId))?)?;
+        let client_secret =
+            reader.load_field(&config, &field(CredentialPart::OAuthClientSecret))?;
+        let url = credential
+            .oauth_token_url
+            .as_deref()
+            .ok_or_else(|| Error::Config("oauth_token_endpoint_missing".into()))?;
+        let mut rotation = Rotation::open(&reader, &service)?;
+        rotation.recover()?;
+        rotation.dispatch()?;
+        let token = oauth::refresh_token(
+            url,
+            &client_id,
+            client_secret.as_ref().map(|value| value.as_str()),
+            &refresh,
+            credential
                 .oauth_token_endpoint_auth_method
                 .as_deref()
-                .unwrap_or("client_secret_post");
-
-            // Attempt refresh
-            match oauth::refresh_token(
-                token_url,
-                &client_id,
-                client_secret.as_deref(),
-                &refresh_tok,
-                auth_method,
-                cred.oauth_client_id_param_name.as_deref(),
-                &cred.oauth_request_options,
-            )
-            .await
-            {
-                Ok(new_token) => {
-                    tracing::info!(service = %slug, "OAuth token refreshed");
-
-                    let header_value = format!(
-                        "{} {}",
-                        new_token.token_type.as_deref().unwrap_or("Bearer"),
-                        new_token.access_token
-                    );
-
-                    if let Some(cred_mut) = updated_config.credentials.get_mut(slug) {
-                        // Update header value
-                        cred_mut.header_value_encrypted = backend
-                            .store_credential_value(slug, &header_value)
-                            .ok()
-                            .flatten();
-
-                        // Update OAuth tokens
-                        cred_mut.oauth_access_token_encrypted = backend
-                            .store_credential_value(
-                                &format!("{slug}:oauth_access"),
-                                &new_token.access_token,
-                            )
-                            .ok()
-                            .flatten();
-
-                        if let Some(ref rt) = new_token.refresh_token {
-                            cred_mut.oauth_refresh_token_encrypted = backend
-                                .store_credential_value(&format!("{slug}:oauth_refresh"), rt)
-                                .ok()
-                                .flatten();
-                        }
-
-                        cred_mut.oauth_token_expires_at = new_token.expires_in.map(|secs| {
-                            (chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
-                                .to_rfc3339()
-                        });
-
-                        config_changed = true;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(service = %slug, error = %e, "OAuth token refresh failed");
-                }
-            }
-        }
-
-        if config_changed && let Err(e) = updated_config.save(&config_file) {
-            tracing::error!(error = %e, "Failed to save config after OAuth refresh");
-        }
+                .unwrap_or("client_secret_post"),
+            credential.oauth_client_id_param_name.as_deref(),
+            &credential.oauth_request_options,
+        )
+        .await?;
+        rotation.retain_durable(Plan::Refresh, token).await?;
+        rotation.recover()?;
+        tracing::info!(
+            reason = "oauth_refresh_published",
+            "Node OAuth token durably published"
+        );
     }
+    Ok(())
 }
 
 fn api_base_url_from_node_ws_url(ws_url: &str) -> String {
@@ -2486,8 +2412,14 @@ async fn cmd_credentials_add_oauth(
     api_url: Option<String>,
     access_token: Option<String>,
 ) -> Result<()> {
-    let mut node_config = load_node_config_for_credentials(config_file, config_dir)?;
-    let backend = SecretBackend::from_config(&node_config, config_dir)?;
+    let client_secret = client_secret.map(Zeroizing::new);
+    let node_config = load_node_config_for_credentials(config_file, config_dir)?;
+    let backend = SecretBackend::reader(&node_config, config_dir)?;
+    let mut rotation = oauth::storage::Rotation::open(&backend, service)?;
+    if rotation.recover_for_login()? {
+        println!("Retained OAuth credential recovered; no provider request repeated.");
+        return Ok(());
+    }
 
     // 1. Get OAuth config
     let oauth_config = if from_catalog {
@@ -2566,70 +2498,42 @@ async fn cmd_credentials_add_oauth(
             println!("Enter OAuth Client Secret (press Enter to skip for public clients):");
             match rpassword::prompt_password("Client Secret: ") {
                 Ok(s) if s.is_empty() => None,
-                Ok(s) => Some(s),
-                Err(_) => None,
+                Ok(s) => Some(Zeroizing::new(s)),
+                Err(_) => return Err(Error::Config("oauth_client_secret_input_failed".into())),
             }
         }
     };
 
-    // 4. Run the OAuth flow
+    let cid = Zeroizing::new(cid);
+    let plan = oauth::storage::Plan::login(
+        &oauth_config,
+        &cid,
+        csecret.as_ref().map(|value| value.as_str()),
+        &final_scopes,
+        target_url.as_deref(),
+    );
+    // Persist replay protection and independent recovery custody first.
+    rotation.dispatch()?;
     let token_response = if oauth_config.device_code_url.is_some() {
-        oauth::run_device_code_flow(&oauth_config, &cid, csecret.as_deref(), &final_scopes).await?
+        oauth::run_device_code_flow(
+            &oauth_config,
+            &cid,
+            csecret.as_ref().map(|value| value.as_str()),
+            &final_scopes,
+        )
+        .await?
     } else {
-        oauth::run_authorization_code_flow(&oauth_config, &cid, csecret.as_deref(), &final_scopes)
-            .await?
+        oauth::run_authorization_code_flow(
+            &oauth_config,
+            &cid,
+            csecret.as_ref().map(|value| value.as_str()),
+            &final_scopes,
+        )
+        .await?
     };
 
-    // 5. Store tokens locally
-    let header_value = format!(
-        "{} {}",
-        token_response.token_type.as_deref().unwrap_or("Bearer"),
-        token_response.access_token
-    );
-
-    let expires_at = token_response
-        .expires_in
-        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
-
-    // Store the header credential (for immediate use by proxy_executor)
-    node_config.add_header_credential_via(
-        service,
-        "Authorization",
-        &header_value,
-        target_url.as_deref(),
-        &backend,
-    )?;
-
-    // Store OAuth metadata for refresh
-    if let Some(cred) = node_config.credentials.get_mut(service) {
-        cred.oauth_managed = true;
-        cred.oauth_token_url = Some(oauth_config.token_url.clone());
-        cred.oauth_access_token_encrypted = backend.store_credential_value(
-            &format!("{service}:oauth_access"),
-            &token_response.access_token,
-        )?;
-        if let Some(ref rt) = token_response.refresh_token {
-            cred.oauth_refresh_token_encrypted =
-                backend.store_credential_value(&format!("{service}:oauth_refresh"), rt)?;
-        }
-        cred.oauth_token_expires_at = expires_at;
-        cred.oauth_client_id_encrypted =
-            backend.store_credential_value(&format!("{service}:oauth_cid"), &cid)?;
-        if let Some(ref cs) = csecret {
-            cred.oauth_client_secret_encrypted =
-                backend.store_credential_value(&format!("{service}:oauth_csecret"), cs)?;
-        }
-        cred.oauth_scopes = if final_scopes.is_empty() {
-            None
-        } else {
-            Some(final_scopes)
-        };
-        cred.oauth_token_endpoint_auth_method = Some(oauth_config.token_endpoint_auth_method);
-        cred.oauth_client_id_param_name = oauth_config.client_id_param_name;
-        cred.oauth_request_options = oauth_config.request_options;
-    }
-
-    node_config.save(config_file)?;
+    rotation.retain_durable(plan, token_response).await?;
+    rotation.recover()?;
     println!("OAuth credential stored for service '{service}'.");
     Ok(())
 }
@@ -2766,6 +2670,326 @@ mod tests {
             store,
             expected,
         }
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_publishes_keychain_tokens_and_does_not_repeat_provider_request() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "returned-access-SENTINEL", "refresh_token": "returned-refresh-SENTINEL", "expires_in": 3600
+            }))).expect(1).mount(&server).await;
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let mut config = fixture.config.clone();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let credential = config.credentials.get_mut("oauth").unwrap();
+        credential.oauth_refresh_token_encrypted = writer
+            .store_field(
+                SecretField::Credential {
+                    slug: "oauth".into(),
+                    part: CredentialPart::OAuthRefresh,
+                },
+                "original-refresh",
+            )
+            .unwrap();
+        credential.oauth_token_url = Some(format!("{}/token", server.uri()));
+        credential.oauth_token_expires_at = Some("2000-01-01T00:00:00Z".into());
+        writer.publish(&config, &path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(
+            &config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        oauth_refresh_once(&reader).await.unwrap();
+        oauth_refresh_once(&reader).await.unwrap();
+        let (config, reader) = reader.current_reader().unwrap();
+        for (part, expected) in [
+            (CredentialPart::OAuthAccess, "returned-access-SENTINEL"),
+            (CredentialPart::OAuthRefresh, "returned-refresh-SENTINEL"),
+        ] {
+            assert!(
+                reader
+                    .require_field(
+                        &config,
+                        &SecretField::Credential {
+                            slug: "oauth".into(),
+                            part
+                        }
+                    )
+                    .unwrap()
+                    .as_str()
+                    == expected
+            );
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn oauth_shutdown_waits_for_returned_token_durability_without_another_request() {
+        use wiremock::matchers::{method, path as match_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let mut config = fixture.config.clone();
+        let writer = SecretBackend::writer_with_keychain(
+            &mut config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let credential = config.credentials.get_mut("oauth").unwrap();
+        credential.oauth_refresh_token_encrypted = writer
+            .store_field(
+                SecretField::Credential {
+                    slug: "oauth".into(),
+                    part: CredentialPart::OAuthRefresh,
+                },
+                "original-refresh",
+            )
+            .unwrap();
+        credential.oauth_token_url = Some(format!("{}/token", server.uri()));
+        credential.oauth_token_expires_at = Some("2000-01-01T00:00:00Z".into());
+        writer.publish(&config, &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(
+            &config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let failed_record = Arc::new(std::sync::Mutex::new(None));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let response_ready = Arc::clone(&ready);
+        let response_record = Arc::clone(&failed_record);
+        let directory = fixture.directory.path().to_path_buf();
+        Mock::given(method("POST"))
+            .and(match_path("/token"))
+            .respond_with(move |_: &wiremock::Request| {
+                let record = std::fs::read_dir(&directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name().unwrap().to_str().unwrap().starts_with(".nyxid-storage-oauth-")
+                            && path.extension().is_some_and(|extension| extension == "json")
+                    })
+                    .unwrap();
+                std::fs::remove_file(&record).unwrap();
+                std::fs::create_dir(&record).unwrap();
+                *response_record.lock().unwrap() = Some(record);
+                response_ready.notify_one();
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": "returned-access-SENTINEL", "refresh_token": "returned-refresh-SENTINEL", "expires_in": 3600
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let mut refresh = tokio::spawn(oauth_refresh_loop(
+            Duration::from_millis(1),
+            Arc::new(reader),
+            stopped,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), ready.notified())
+            .await
+            .unwrap();
+        shutdown.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut refresh)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let record = failed_record.lock().unwrap().take().unwrap();
+        std::fs::remove_dir(record).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), refresh)
+            .await
+            .unwrap()
+            .unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(
+            &config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        assert!(
+            reader
+                .require_field(
+                    &config,
+                    &SecretField::Credential {
+                        slug: "oauth".into(),
+                        part: CredentialPart::OAuthRefresh
+                    }
+                )
+                .unwrap()
+                .as_str()
+                == "returned-refresh-SENTINEL"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn oauth_login_command_recovers_returned_tokens_before_any_catalog_or_provider_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let file = LocalEncryption::initialize(directory.path()).unwrap();
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        config.set_auth_token("synthetic-auth", &file).unwrap();
+        config.save(&path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader(&config, directory.path()).unwrap();
+        let mut rotation = oauth::storage::Rotation::open(&reader, "new-oauth").unwrap();
+        rotation.dispatch().unwrap();
+        let options = oauth::oauth_config_from_catalog_value(
+            &json!({"token_url": "https://provider.invalid/token"}),
+        )
+        .unwrap();
+        let plan = oauth::storage::Plan::login(
+            &options,
+            "synthetic-client",
+            Some("client-secret-SENTINEL"),
+            "read",
+            Some("https://provider.invalid"),
+        );
+        let token = serde_json::from_value(json!({"access_token": "returned-access-SENTINEL", "refresh_token": "returned-refresh-SENTINEL", "expires_in": 3600})).unwrap();
+        rotation.retain(plan, token).unwrap();
+        drop(rotation);
+        // Every input needed to start a new flow is deliberately absent. A
+        // command that recontacts catalog/provider would fail these inputs.
+        cmd_credentials_add_oauth(
+            &path,
+            directory.path(),
+            "new-oauth",
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader(&config, directory.path()).unwrap();
+        assert!(
+            reader
+                .require_field(
+                    &config,
+                    &SecretField::Credential {
+                        slug: "new-oauth".into(),
+                        part: CredentialPart::OAuthClientSecret
+                    }
+                )
+                .unwrap()
+                .as_str()
+                == "client-secret-SENTINEL"
+        );
+        assert!(
+            reader
+                .require_field(
+                    &config,
+                    &SecretField::Credential {
+                        slug: "new-oauth".into(),
+                        part: CredentialPart::Header
+                    }
+                )
+                .unwrap()
+                .as_str()
+                == "Bearer returned-access-SENTINEL"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_login_command_publishes_a_real_device_flow_and_preserves_optional_absence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": "synthetic-device", "user_code": "TEST", "expires_in": 30, "interval": 1,
+                "verification_uri": "https://provider.invalid/device"
+            }))).expect(1).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "returned-access-SENTINEL", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let file = LocalEncryption::initialize(directory.path()).unwrap();
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        config.set_auth_token("synthetic-auth", &file).unwrap();
+        config.save(&path).unwrap();
+        cmd_credentials_add_oauth(
+            &path,
+            directory.path(),
+            "new-oauth",
+            false,
+            Some("synthetic-client".into()),
+            Some("client-secret-SENTINEL".into()),
+            None,
+            Some(format!("{}/token", server.uri())),
+            Some(format!("{}/device", server.uri())),
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader(&config, directory.path()).unwrap();
+        assert!(config.credentials["new-oauth"].oauth_managed);
+        assert!(
+            reader
+                .load_field(
+                    &config,
+                    &SecretField::Credential {
+                        slug: "new-oauth".into(),
+                        part: CredentialPart::OAuthRefresh
+                    }
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reader
+                .require_field(
+                    &config,
+                    &SecretField::Credential {
+                        slug: "new-oauth".into(),
+                        part: CredentialPart::Header
+                    }
+                )
+                .unwrap()
+                .as_str()
+                == "Bearer returned-access-SENTINEL"
+        );
+        server.verify().await;
     }
 
     #[test]

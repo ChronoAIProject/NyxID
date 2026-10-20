@@ -41,6 +41,13 @@ impl std::fmt::Debug for SecretOperation {
     }
 }
 impl SecretOperation {
+    pub(crate) fn oauth_custody(&self) -> Result<(Directory, PathBuf, KeychainBackend)> {
+        Ok((
+            self.directory.try_clone()?,
+            self.path.clone(),
+            self.keychain.clone(),
+        ))
+    }
     /// Observe a new generation through the original directory and custody.
     /// Credential edits may advance; runtime identity/backend changes require
     /// a stopped daemon and explicit restart rather than cached-key fallback.
@@ -426,6 +433,15 @@ impl SecretOperation {
     }
 
     pub(crate) fn publish(&self, config: &NodeConfig, path: &Path) -> Result<()> {
+        self.publish_with_intent(config, path, |_, _| Ok(()))
+    }
+
+    pub(crate) fn publish_with_intent(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+        intent: impl FnOnce(&Directory, &[u8]) -> Result<()>,
+    ) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| invalid())?;
         if state.failed
             || state.published
@@ -439,8 +455,10 @@ impl SecretOperation {
         }
         // Every required file value must decrypt; every keychain slot must be
         // a typed reference/explicit absence. No partial staging is publishable.
-        let result =
-            config.save_with_secret_validation_in(&self.directory, path, |directory, next| {
+        let result = config.save_with_secret_intent_in(
+            &self.directory,
+            path,
+            |directory, next| {
                 match &self.file {
                     Some(file) => {
                         file.check_available()?;
@@ -464,7 +482,9 @@ impl SecretOperation {
                     }
                 }
                 Ok(())
-            });
+            },
+            intent,
+        );
         // Retain the attempt on every error, including installed/uncertain.
         // No rollback or key-service deletion follows an ambiguous publication.
         if result.is_ok() || matches!(result, Err(Error::StorageDurabilityUncertain(_))) {

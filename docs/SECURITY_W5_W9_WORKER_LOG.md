@@ -1639,7 +1639,7 @@ Startup/reload, WebSocket writers, managed registration, OAuth retention/redacti
 Artifact/keychain namespace contract unchanged. Native file/mock object-service tests only; Linux and actual OS custody unverified. Logs:/tmp/nyxid-w96-writers-{check,tests,clippy}.log. No push.
 PM hosted resolution: run39362062126/head8589cfd8 passes Coverage (Backend) and Backend Test, including writes-only invocation. capacity_wait fails only Coverage (Backend Base) on mainaaa3d772; PM closes the capacity investigation as an upstream baseline flake.
 
-## W9.6 checkpoint 3 — pinned runtime activation and WebSocket callers, 2026-10-20 (awaiting PM review)
+## W9.6 checkpoint 3 — pinned runtime activation and WebSocket callers, 2026-10-20 (PM accepted)
 
 PM accepted command-writer checkpoint3d0424027; EXECUTION/REVIEW remain local/untracked.
 Startup uses strict readers; runtime observations retain the original directory/file key/legacy anchor while following credential generations and refusing owner/server/backend/auth/signing changes.
@@ -1654,3 +1654,17 @@ Both node runs fail only D-owned browser_layout::tests::package_layouts_follow_r
 All six new runtime controls pass both runs, including actual forwarding followed by key-removal/no-forwarding shutdown, immutable pushes/RCI and pinned SSH after directory retargeting.
 Executed cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics; owned rustfmt/diff checks pass. No controls/bounds weakened.
 Managed registration, OAuth durability/redaction, resumable migration, enforced old-daemon stop/status/wait/manual cutover and W9.5 OS custody remain open; artifact/keychain namespace unchanged. Logs:/tmp/nyxid-w96-runtime-{check,tests,tests-retry,clippy}.log. No push.
+
+## W9.6 checkpoint 4 — durable OAuth responses and redacted errors, 2026-10-20 (awaiting PM review)
+
+PM accepted runtime checkpoint d552800e2; EXECUTION/REVIEW remain local/untracked. Managed registration, migration/cutover and W9.5 remain open.
+OAuth login/refresh now retain the original pinned directory/generation and per-service lease; dispatch is durable before provider contact, returned tokens before guarded publication/live use.
+Independent pre-reserved envelopes retain returned rotations despite selected-key loss, stale config or key-service outage; recovery never recontacts the provider and recognizes already-installed exact bytes.
+Storage errors propagate; failed retention holds encrypted material/lease while waiting for repair. Graceful runtime shutdown waits for that active attempt instead of aborting it.
+Provider/transport/parse failures expose fixed reasons, never provider bodies/descriptions; token/device Debug is redacted and owned token/request/callback material zeroized.
+Shared Cargo policy used exactly: /tmp/nyxid-shared-target, jobs4, incremental0, dev/test debug0; target locks honored and other streams untouched.
+Initial all-target cargo check exits101 on two new test compile mistakes (ambiguous Zeroizing as_ref and shadowed matcher), corrected. Initial OAuth test run34/14/0 omitted required fixture access token; retry46/2/0 recreated test keys with public permissions. Both fixture errors corrected without relaxing strict readers or controls.
+Final cargo test --locked -p nyxid-cli --features node-proxy-test --bin nyxid node:: -- --test-threads=2:552 passed/0 failed/3 existing ignored in45.74s, zero warnings; all48 OAuth-selected cases and four agent OAuth controls pass, including real HTTP/key-loss and child-process crash recovery.
+cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics in23.01s. Owned rustfmt/diff checks pass; no tests/bounds/denial assertions weakened.
+Artifacts: .nyxid-storage-oauth-<binding>.json/.lock and file envelope .nyxid-storage-oauth-<UUID>.key; keychain object/v1/oauth-recovery/<UUID>, within existing broad contracts. Native file/mock key-service controls only; actual OS/Linux custody remains unverified.
+Forced termination before the first durable response write leaves the dispatch barrier and requires fresh authorization; no replay or secret output. Logs:/tmp/nyxid-w96-oauth-{check,tests,tests-retry,node-tests,clippy}.log. No push.

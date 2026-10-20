@@ -9,15 +9,17 @@ use std::net::TcpListener;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
+use zeroize::Zeroizing;
 
 use super::config::{OAuthRequestEncoding, OAuthRequestOptions};
 use super::error::{Error, Result};
 
 mod endpoint;
+pub(crate) mod storage;
 use endpoint::ProviderEndpoint;
 
 /// OAuth config fetched from NyxID catalog or provided via CLI.
@@ -79,26 +81,59 @@ impl OAuthRequestOptions {
 }
 
 /// Token response from OAuth token endpoint.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
 pub struct TokenResponse {
-    pub access_token: String,
+    pub access_token: Zeroizing<String>,
     pub token_type: Option<String>,
     pub expires_in: Option<u64>,
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<Zeroizing<String>>,
     pub scope: Option<String>,
+}
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenResponse { material_and_metadata: [REDACTED] }")
+    }
 }
 
 /// Device code response (RFC 8628).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
+    device_code: Zeroizing<String>,
+    user_code: Zeroizing<String>,
     verification_uri: Option<String>,
     verification_url: Option<String>,
     expires_in: u64,
     #[serde(deserialize_with = "deserialize_interval")]
     interval: u64,
+}
+impl std::fmt::Debug for DeviceCodeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeviceCodeResponse { material_and_metadata: [REDACTED] }")
+    }
+}
+
+fn provider_failure(reason: &'static str) -> Error {
+    Error::Config(format!("OAuth provider request failed: {reason}"))
+}
+
+async fn token_response(mut response: reqwest::Response) -> Result<TokenResponse> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| provider_failure("response_transport"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err(provider_failure("response_too_large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let token: TokenResponse =
+        serde_json::from_slice(&bytes).map_err(|_| provider_failure("response_invalid"))?;
+    if token.access_token.is_empty() {
+        return Err(provider_failure("access_token_missing"));
+    }
+    Ok(token)
 }
 
 impl DeviceCodeResponse {
@@ -206,20 +241,19 @@ pub async fn fetch_catalog_oauth_config(
     let resp = req
         .send()
         .await
-        .map_err(|e| Error::Config(format!("Failed to fetch catalog: {e}")))?;
+        .map_err(|_| provider_failure("catalog_transport"))?;
 
     if !resp.status().is_success() {
         return Err(Error::Config(format!(
-            "Catalog returned {}: {}",
-            resp.status(),
-            resp.text().await.unwrap_or_default()
+            "Catalog returned {} (catalog_rejected)",
+            resp.status()
         )));
     }
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| Error::Config(format!("Failed to parse catalog response: {e}")))?;
+        .map_err(|_| provider_failure("catalog_response_invalid"))?;
 
     oauth_config_from_catalog_value(&body)
 }
@@ -245,7 +279,8 @@ pub async fn run_device_code_flow(
     let client_id_param_name = config.client_id_param_name().to_string();
 
     // Step 1: Request device code
-    let mut request_form = vec![(client_id_param_name.clone(), client_id.to_string())];
+    let mut request_form =
+        Zeroizing::new(vec![(client_id_param_name.clone(), client_id.to_string())]);
     if config.request_options.supports_oauth_scopes && !scopes.is_empty() {
         request_form.push(("scope".to_string(), scopes.to_string()));
     }
@@ -258,24 +293,20 @@ pub async fn run_device_code_flow(
         .encode(device_endpoint.post(), &request_form)?
         .send()
         .await
-        .map_err(|e| Error::Config(format!("Device code request failed: {e}")))?;
+        .map_err(|_| provider_failure("device_transport"))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(Error::Config(format!(
-            "Device code request failed {status}: {text}"
-        )));
+        return Err(provider_failure("device_rejected"));
     }
 
     let device_resp: DeviceCodeResponse = resp
         .json()
         .await
-        .map_err(|e| Error::Config(format!("Failed to parse device code response: {e}")))?;
+        .map_err(|_| provider_failure("device_response_invalid"))?;
 
     // Step 2: Display code to user
     println!();
-    println!("  Your code: {}", device_resp.user_code);
+    println!("  Your code: {}", device_resp.user_code.as_str());
     println!("  Visit: {}", device_resp.verification_uri());
     println!();
     println!("  Waiting for authorization...");
@@ -292,14 +323,17 @@ pub async fn run_device_code_flow(
             return Err(Error::Config("Device code expired".to_string()));
         }
 
-        let mut form = vec![
+        let mut form = Zeroizing::new(vec![
             (
                 "grant_type".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             ),
-            ("device_code".to_string(), device_resp.device_code.clone()),
+            (
+                "device_code".to_string(),
+                device_resp.device_code.to_string(),
+            ),
             (client_id_param_name.clone(), client_id.to_string()),
-        ];
+        ]);
         if let Some(secret) = client_secret {
             form.push(("client_secret".to_string(), secret.to_string()));
         }
@@ -312,17 +346,19 @@ pub async fn run_device_code_flow(
 
         match resp {
             Ok(r) if r.status().is_success() => {
-                let token: TokenResponse = r
-                    .json()
-                    .await
-                    .map_err(|e| Error::Config(format!("Failed to parse token: {e}")))?;
+                let token = token_response(r).await?;
                 println!("  Authorization successful.");
                 return Ok(token);
             }
             Ok(r) if r.status().as_u16() == 428 || r.status().as_u16() == 400 => {
                 // authorization_pending or slow_down
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                let error = body["error"].as_str().unwrap_or("authorization_pending");
+                let body: serde_json::Value = r
+                    .json()
+                    .await
+                    .map_err(|_| provider_failure("device_poll_invalid"))?;
+                let error = body["error"]
+                    .as_str()
+                    .ok_or_else(|| provider_failure("device_poll_invalid"))?;
                 match error {
                     "slow_down" => {
                         interval += std::time::Duration::from_secs(5);
@@ -334,19 +370,11 @@ pub async fn run_device_code_flow(
                     "access_denied" => {
                         return Err(Error::Config("Authorization denied".to_string()));
                     }
-                    other => {
-                        return Err(Error::Config(format!("OAuth error: {other}")));
-                    }
+                    _ => return Err(provider_failure("device_poll_rejected")),
                 }
             }
-            Ok(r) => {
-                let status = r.status();
-                let text = r.text().await.unwrap_or_default();
-                return Err(Error::Config(format!("Token poll error {status}: {text}")));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Token poll request failed, retrying");
-            }
+            Ok(_) => return Err(provider_failure("device_poll_rejected")),
+            Err(_) => return Err(provider_failure("device_poll_transport")),
         }
     }
 }
@@ -365,10 +393,13 @@ pub async fn run_authorization_code_flow(
         .map_err(|e| Error::Config(format!("Failed to get callback address: {e}")))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let state = generate_state();
-    let code_verifier = config.supports_pkce.then(generate_pkce_verifier);
+    let state = Zeroizing::new(generate_state());
+    let code_verifier = config
+        .supports_pkce
+        .then(|| Zeroizing::new(generate_pkce_verifier()));
     let code_challenge = code_verifier
-        .as_deref()
+        .as_ref()
+        .map(|value| value.as_str())
         .map(pkce_code_challenge)
         .transpose()?;
 
@@ -389,14 +420,14 @@ pub async fn run_authorization_code_flow(
 
     let _ = crate::browser::open_browser(&authorization_url);
 
-    let code = wait_for_authorization_code(listener, &state).await?;
+    let code = Zeroizing::new(wait_for_authorization_code(listener, &state).await?);
     exchange_authorization_code(
         config,
         client_id,
         client_secret,
         &code,
         &redirect_uri,
-        code_verifier.as_deref(),
+        code_verifier.as_ref().map(|value| value.as_str()),
     )
     .await
 }
@@ -466,21 +497,19 @@ pub async fn refresh_token(
     match auth_method {
         "client_secret_basic" => {
             req = req.basic_auth(client_id, client_secret);
-            req = request_options.encode(
-                req,
-                &[
-                    ("grant_type".into(), "refresh_token".into()),
-                    ("refresh_token".into(), refresh_tok.into()),
-                ],
-            )?;
+            let form = Zeroizing::new(vec![
+                ("grant_type".into(), "refresh_token".into()),
+                ("refresh_token".into(), refresh_tok.into()),
+            ]);
+            req = request_options.encode(req, &form)?;
         }
         _ => {
             // client_secret_post (default)
-            let mut form = vec![
+            let mut form = Zeroizing::new(vec![
                 ("grant_type".to_string(), "refresh_token".to_string()),
                 ("refresh_token".to_string(), refresh_tok.to_string()),
                 (client_id_param_name.to_string(), client_id.to_string()),
-            ];
+            ]);
             if let Some(secret) = client_secret {
                 form.push(("client_secret".to_string(), secret.to_string()));
             }
@@ -491,19 +520,13 @@ pub async fn refresh_token(
     let resp = req
         .send()
         .await
-        .map_err(|e| Error::Config(format!("Token refresh failed: {e}")))?;
+        .map_err(|_| provider_failure("refresh_transport"))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(Error::Config(format!(
-            "Token refresh error {status}: {text}"
-        )));
+        return Err(provider_failure("refresh_rejected"));
     }
 
-    resp.json()
-        .await
-        .map_err(|e| Error::Config(format!("Failed to parse refresh response: {e}")))
+    token_response(resp).await
 }
 
 fn is_reserved_oauth_param(key: &str) -> bool {
@@ -562,12 +585,12 @@ async fn wait_for_authorization_code(
             accept = listener.accept() => {
                 let (mut stream, _) = accept
                     .map_err(|e| Error::Config(format!("Failed to accept callback connection: {e}")))?;
-                let mut buf = vec![0u8; 8192];
+                let mut buf = Zeroizing::new(vec![0u8; 8192]);
                 let n = stream
                     .read(&mut buf)
                     .await
                     .map_err(|e| Error::Config(format!("Failed to read callback request: {e}")))?;
-                let request = String::from_utf8_lossy(&buf[..n]);
+                let request = Zeroizing::new(String::from_utf8_lossy(&buf[..n]).into_owned());
 
                 match parse_callback_request(&request, expected_state) {
                     CallbackResult::Success(code) => {
@@ -631,17 +654,12 @@ fn parse_callback_request(request: &str, expected_state: &str) -> CallbackResult
         return CallbackResult::Error("OAuth callback state mismatch".to_string());
     }
 
-    if let Some(error) = params
-        .get("error")
-        .and_then(|value| urlencoding::decode(value).ok())
-        .map(|value| value.into_owned())
-    {
-        let description = params
-            .get("error_description")
-            .and_then(|value| urlencoding::decode(value).ok())
-            .map(|value| value.into_owned())
-            .unwrap_or(error.clone());
-        return CallbackResult::Error(format!("OAuth authorization failed: {description}"));
+    if let Some(error) = params.get("error") {
+        let reason = match urlencoding::decode(error).as_deref() {
+            Ok("access_denied") => "authorization_denied",
+            _ => "authorization_rejected",
+        };
+        return CallbackResult::Error(format!("OAuth authorization failed: {reason}"));
     }
 
     let Some(code) = params
@@ -673,11 +691,11 @@ async fn exchange_authorization_code(
     match config.token_endpoint_auth_method.as_str() {
         "client_secret_basic" => {
             req = req.basic_auth(client_id, client_secret);
-            let mut form = vec![
+            let mut form = Zeroizing::new(vec![
                 ("grant_type".to_string(), "authorization_code".to_string()),
                 ("code".to_string(), code.to_string()),
                 ("redirect_uri".to_string(), redirect_uri.to_string()),
-            ];
+            ]);
             if client_secret.is_none() {
                 form.push((client_id_param_name, client_id.to_string()));
             }
@@ -687,12 +705,12 @@ async fn exchange_authorization_code(
             req = config.request_options.encode(req, &form)?;
         }
         _ => {
-            let mut form = vec![
+            let mut form = Zeroizing::new(vec![
                 ("grant_type".to_string(), "authorization_code".to_string()),
                 ("code".to_string(), code.to_string()),
                 ("redirect_uri".to_string(), redirect_uri.to_string()),
                 (client_id_param_name, client_id.to_string()),
-            ];
+            ]);
             if let Some(secret) = client_secret {
                 form.push(("client_secret".to_string(), secret.to_string()));
             }
@@ -706,19 +724,13 @@ async fn exchange_authorization_code(
     let resp = req
         .send()
         .await
-        .map_err(|e| Error::Config(format!("Token exchange failed: {e}")))?;
+        .map_err(|_| provider_failure("exchange_transport"))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(Error::Config(format!(
-            "Token exchange error {status}: {text}"
-        )));
+        return Err(provider_failure("exchange_rejected"));
     }
 
-    resp.json()
-        .await
-        .map_err(|e| Error::Config(format!("Failed to parse token response: {e}")))
+    token_response(resp).await
 }
 
 fn callback_success_html() -> &'static str {
@@ -756,6 +768,105 @@ mod tests {
     };
     use wiremock::matchers::{body_string, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn provider_failures_expose_only_fixed_reason_codes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "provider-secret-SENTINEL", "error_description": "refresh-token-SENTINEL"
+            })))
+            .mount(&server)
+            .await;
+        let config = oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": format!("{}/token", server.uri()),
+            "device_code_url": format!("{}/device", server.uri())
+        }))
+        .unwrap();
+        let errors = [
+            refresh_token(
+                &config.token_url,
+                "id",
+                Some("secret"),
+                "old",
+                "client_secret_post",
+                None,
+                &Default::default(),
+            )
+            .await
+            .unwrap_err(),
+            exchange_authorization_code(
+                &config,
+                "id",
+                Some("secret"),
+                "code",
+                "http://localhost/callback",
+                None,
+            )
+            .await
+            .unwrap_err(),
+            super::run_device_code_flow(&config, "id", Some("secret"), "")
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains("SENTINEL"));
+            assert!(rendered.contains("rejected"));
+        }
+        let callback = "GET /callback?state=s&error=provider-secret-SENTINEL&error_description=refresh-token-SENTINEL HTTP/1.1\r\n";
+        match parse_callback_request(callback, "s") {
+            CallbackResult::Error(error) => {
+                assert!(error.contains("authorization_rejected"));
+                assert!(!error.contains("SENTINEL"));
+            }
+            _ => panic!("provider denial must stay denied"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_success_and_transport_errors_do_not_echo_provider_material() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "access-SENTINEL", "expires_in": "provider-secret-SENTINEL"
+            })))
+            .mount(&server)
+            .await;
+        let error = refresh_token(
+            &format!("{}/token?secret=query-SENTINEL", server.uri()),
+            "id",
+            None,
+            "refresh",
+            "client_secret_post",
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("response_invalid"));
+        assert!(!format!("{error:?} {error}").contains("SENTINEL"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = refresh_token(
+            &format!("http://{address}/token?secret=query-SENTINEL"),
+            "id",
+            None,
+            "refresh",
+            "client_secret_post",
+            None,
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("refresh_transport"));
+        assert!(!format!("{error:?} {error}").contains("SENTINEL"));
+        let token: super::TokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "access-SENTINEL", "refresh_token": "refresh-SENTINEL", "scope": "scope-SENTINEL"
+        })).unwrap();
+        assert!(!format!("{token:?}").contains("SENTINEL"));
+    }
 
     #[test]
     fn parses_catalog_oauth_config_with_provider_specific_fields() {
@@ -977,15 +1088,22 @@ mod tests {
             &config.token_url,
             "client-1",
             Some("secret-1"),
-            token.refresh_token.as_deref().unwrap(),
+            token
+                .refresh_token
+                .as_ref()
+                .map(|value| value.as_str())
+                .unwrap(),
             &config.token_endpoint_auth_method,
             None,
             &restored.oauth_request_options,
         )
         .await
         .unwrap();
-        assert_eq!(refreshed.access_token, "access-2");
-        assert_eq!(refreshed.refresh_token.as_deref(), Some("ref-2"));
+        assert_eq!(refreshed.access_token.as_str(), "access-2");
+        assert_eq!(
+            refreshed.refresh_token.as_ref().map(|value| value.as_str()),
+            Some("ref-2")
+        );
         server.verify().await;
     }
 
@@ -1112,7 +1230,7 @@ mod tests {
         let response = super::run_device_code_flow(&config, "test-client", Some("test-secret"), "")
             .await
             .unwrap();
-        assert_eq!(response.access_token, "test-access");
+        assert_eq!(response.access_token.as_str(), "test-access");
         server.verify().await;
     }
 
@@ -1236,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_decodes_url_encoded_code_and_description() {
+    fn callback_decodes_code_and_redacts_provider_description() {
         let request =
             "GET /callback?code=auth%2Fcode%2B1&state=state%201 HTTP/1.1\r\nHost: 127.0.0.1\r\n";
         match parse_callback_request(request, "state 1") {
@@ -1247,7 +1365,8 @@ mod tests {
         let denied = "GET /callback?error=access_denied&error_description=needs%20approval&state=s HTTP/1.1\r\n";
         match parse_callback_request(denied, "s") {
             CallbackResult::Error(message) => {
-                assert!(message.contains("needs approval"), "{message}");
+                assert!(message.contains("authorization_denied"), "{message}");
+                assert!(!message.contains("needs approval"));
             }
             other => panic!("expected error, got {}", callback_result_name(&other)),
         }
@@ -1328,8 +1447,11 @@ mod tests {
         .await
         .expect("refresh token");
 
-        assert_eq!(token.access_token, "access-2");
-        assert_eq!(token.refresh_token.as_deref(), Some("ref-2"));
+        assert_eq!(token.access_token.as_str(), "access-2");
+        assert_eq!(
+            token.refresh_token.as_ref().map(|value| value.as_str()),
+            Some("ref-2")
+        );
         assert_eq!(token.expires_in, Some(3600));
         assert_eq!(token.token_type.as_deref(), Some("Bearer"));
         assert_eq!(token.scope.as_deref(), Some("read write"));
@@ -1361,7 +1483,7 @@ mod tests {
         .await
         .expect("refresh token");
 
-        assert_eq!(token.access_token, "access-2");
+        assert_eq!(token.access_token.as_str(), "access-2");
         assert!(token.refresh_token.is_none());
     }
 
@@ -1408,7 +1530,10 @@ mod tests {
         .await
         .expect("token exchange");
 
-        assert_eq!(token.access_token, "access-3");
-        assert_eq!(token.refresh_token.as_deref(), Some("ref-3"));
+        assert_eq!(token.access_token.as_str(), "access-3");
+        assert_eq!(
+            token.refresh_token.as_ref().map(|value| value.as_str()),
+            Some("ref-3")
+        );
     }
 }

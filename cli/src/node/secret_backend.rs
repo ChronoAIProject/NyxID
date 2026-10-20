@@ -133,6 +133,35 @@ impl SecretBackend {
         }
     }
 
+    pub(crate) fn oauth_custody(
+        &self,
+    ) -> Result<(
+        super::storage::Directory,
+        std::path::PathBuf,
+        KeychainBackend,
+        NodeConfig,
+    )> {
+        match self {
+            Self::Observed(reader) => {
+                let (directory, path, keychain) = reader.operation.oauth_custody()?;
+                Ok((directory, path, keychain, reader.baseline.clone()))
+            }
+            _ => Err(guarded_write_required()),
+        }
+    }
+
+    pub(crate) fn publish_with_intent(
+        &self,
+        config: &NodeConfig,
+        path: &Path,
+        intent: impl FnOnce(&super::storage::Directory, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        match self {
+            Self::Writer(writer) => writer.operation.publish_with_intent(config, path, intent),
+            _ => Err(guarded_write_required()),
+        }
+    }
+
     pub(crate) fn store_field(&self, field: SecretField, value: &str) -> Result<Option<String>> {
         match self {
             Self::Writer(writer) => writer.operation.store(field, value).map(Some),

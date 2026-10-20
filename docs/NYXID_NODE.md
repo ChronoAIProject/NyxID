@@ -568,6 +568,46 @@ MIGRATE OPTIONS:
 
 ---
 
+## Local OAuth recovery
+
+Node OAuth login and background refresh reserve recovery storage and write a
+dispatch barrier before contacting the provider. Returned tokens are encrypted
+and synced before config publication or use. A per-service lease prevents two
+current binaries from rotating the same refresh token concurrently. This lease
+does not establish that an older daemon has stopped.
+
+Startup, background refresh and a repeated `credentials add-oauth` command resume
+a retained response without another provider request. Recovery requires the exact
+original config generation and healthy selected storage. A concurrent config,
+identity or storage change causes a refusal; returned tokens remain in recovery
+storage. Restore the original config and custody before retrying. An installation
+that completed before a process exit is recognized without republishing tokens.
+
+If a provider request has an unknown outcome and no response was durably retained,
+automatic refresh stops rather than reuse a possibly invalidated refresh token.
+Run `nyxid node credentials add-oauth --service <slug>` with the original OAuth
+options and the same `--profile`/`--config` to obtain a fresh authorization grant.
+This explicit login cannot discard a retained returned response or interrupt an
+active attempt. Provider failures expose fixed reason codes, never response bodies
+or arbitrary provider error descriptions.
+
+If storage becomes unwritable after a response, the process logs
+`oauth_recovery_write_failed`, keeps the encrypted response and lease in memory,
+and waits for storage repair. Restore storage without stopping that process.
+Graceful node shutdown stops further refresh ticks and waits for the active
+attempt to retain returned material; it does not abort the refresh task.
+Forced termination before any durable response write leaves only the dispatch
+barrier and requires fresh authorization; no implementation can recover response
+bytes that never reached durable storage.
+
+Keep `.nyxid-storage-oauth-*.json`, `.nyxid-storage-oauth-*.lock`, and (for file
+storage) `.nyxid-storage-oauth-*.key` private with the node directory. File mode
+needs no OS key service. Keychain mode reserves envelope keys under
+`object/v1/oauth-recovery/*`. These recovery keys do not replace the selected node
+key and never authorize reads or publication after custody loss. Do not delete
+recovery artifacts to bypass a refusal. Legacy keychain nodes still require the
+explicit stopped-daemon migration before their writers can run.
+
 ## Troubleshooting
 
 ### "Config error: Failed to read config"

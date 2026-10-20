@@ -564,6 +564,16 @@ impl NodeConfig {
         path: &Path,
         validate: impl FnOnce(&super::storage::Directory, &NodeConfig) -> Result<()>,
     ) -> Result<()> {
+        self.save_with_secret_intent_in(directory, path, validate, |_, _| Ok(()))
+    }
+
+    pub(crate) fn save_with_secret_intent_in(
+        &self,
+        directory: &super::storage::Directory,
+        path: &Path,
+        validate: impl FnOnce(&super::storage::Directory, &NodeConfig) -> Result<()>,
+        intent: impl FnOnce(&super::storage::Directory, &[u8]) -> Result<()>,
+    ) -> Result<()> {
         let mut next = self.clone();
         next.storage_generation = Some(uuid::Uuid::new_v4());
         let content = toml::to_string_pretty(&next)?;
@@ -576,7 +586,8 @@ impl NodeConfig {
             content.as_bytes(),
             |directory, current| {
                 super::secret_transaction::validate_publication(directory, name, current, &next)?;
-                validate(directory, &next)
+                validate(directory, &next)?;
+                intent(directory, content.as_bytes())
             },
         )
     }
