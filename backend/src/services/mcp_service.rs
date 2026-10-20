@@ -5875,7 +5875,7 @@ async fn execute_tool_resolved_inner(
                 if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
                 else {admission.receipt(db,chat,assistant_auto).await;}
             }
-            return Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())));
+            Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())))
             }).await;
         }
 
