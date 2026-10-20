@@ -438,7 +438,7 @@ async fn server_main() {
     );
     services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
     let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
-    services::audit_state_service::initialize(
+    let audit_state = services::audit_state_service::initialize(
         &db,
         audit_chain_hmac_key.as_ref().as_ref(),
         &audit_config,
@@ -447,10 +447,32 @@ async fn server_main() {
     .expect("Durable audit initialization failed; inspect audit cutover diagnostics");
     let audit_runtime = Arc::new(services::audit_runtime::AuditRuntime::new(
         audit_config.admission.clone(),
-        false,
+        audit_config.witness.is_some(),
     ));
+    audit_runtime
+        .restore_incident(&db, &audit_state.id)
+        .await
+        .expect("Failed to load durable audit incident state");
     tracing::info!(limits = ?audit_config.admission, "Effective audit admission limits");
-    tracing::warn!("Audit witness is not configured; durable local audit is unwitnessed");
+    let audit_relay = if let Some(witness) = audit_config.witness {
+        let relay = Arc::new(services::audit_runtime::WitnessRelay::new(
+            db.clone(),
+            audit_runtime.clone(),
+            witness,
+            audit_chain_hmac_key.clone(),
+        ));
+        relay.clone().spawn();
+        tracing::info!("Audit witness configured; fresh authenticated observation pending");
+        Some(relay)
+    } else if audit_state.witness_enrolled {
+        tracing::error!(
+            "Previously enrolled audit witness configuration is missing; stale admission remains active"
+        );
+        None
+    } else {
+        tracing::warn!("Audit witness is not configured; durable local audit is unwitnessed");
+        None
+    };
     // Index setup also contains compatibility data migrations. None may run
     // before the common audit allocator and process key are available.
     db::ensure_indexes(&db)
@@ -769,6 +791,14 @@ async fn server_main() {
         config.instance_name.clone(),
         config.internal_advertise_url.clone(),
     ));
+    audit_runtime
+        .bind_effects(
+            uuid::Uuid::parse_str(&replica_identity.generation_id)
+                .expect("process generation UUID"),
+            audit_chain_hmac_key.clone(),
+            audit_relay.as_ref(),
+        )
+        .expect("Failed to initialize effect process custody");
     // Register before serving. Reuse the process generation, not node socket
     // heartbeats: a replica can enforce policy without owning any node sockets.
     services::security_readiness_service::ensure_indexes(&db)
