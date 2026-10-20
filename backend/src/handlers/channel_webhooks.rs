@@ -1940,8 +1940,16 @@ mod tests {
         .await
         .unwrap();
 
-        // No sender identity, OAuth binding, notification link, or user row exists.
-        for collection in ["users", "oauth_broker_bindings", "notification_channels"] {
+        // No sender identity, OAuth binding, notification link, or user row
+        // exists; the only accounts are the two live bot owners.
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
+                .count_documents(doc! {"_id":{"$nin":[&user_id,&foreign_key.user_id]}})
+                .await
+                .unwrap(),
+            0
+        );
+        for collection in ["oauth_broker_bindings", "notification_channels"] {
             assert_eq!(
                 db.collection::<mongodb::bson::Document>(collection)
                     .count_documents(doc! {})

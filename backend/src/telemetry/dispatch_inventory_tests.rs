@@ -42,11 +42,6 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
     visit(&root, &root, &mut found);
     let expected: Inventory = [
         (
-            "handlers/admin.rs",
-            "analytics_delivery_repair_requires_operator_and_current_scope",
-            1,
-        ),
-        (
             "services/telemetry_erasure_service.rs",
             "held_capture_across_deletion_settles_before_vendor_delete",
             1,

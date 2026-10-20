@@ -924,7 +924,7 @@ mod result_storage_tests {
             "contract":{"status_operation":"status","result_operation":"result","id_field":"/id",
                 "id_parameter":"id","status_field":"/status","success_states":["done"],"failure_states":["failed"]},
             "delivery":{"origin":"user"},"state":"waiting","attempts":0,"lease_id":"captured-lease",
-            "created_at":now,"deadline":now,"poll_at":now,"expires_at":now,
+            "lease_until":null,"created_at":now,"deadline":now,"poll_at":now,"expires_at":now,
         }).unwrap()
     }
 
