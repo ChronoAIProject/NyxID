@@ -844,10 +844,15 @@ browser users. A configured username or kernel version alone is insufficient.
 The browser probe uses a fresh profile and the actual executable, including its
 AppArmor attachment; Ubuntu's user-namespace restriction stays enabled.
 
-Evidence v3 observes live renderer identities, executable, NNP, additional
+Evidence v4 observes live renderer identities, executable, NNP, additional
 seccomp filters and user/PID/network namespaces without DevTools. It also
 positively verifies the secure policy's refusal of remote debugging and absence
-of a listener. v1/v2 and unknown reports cannot authorize new automatic/required
+of a listener, and requires `credential_custody: true` from actual dropped-identity
+access checks against protected credential storage. Missing or failed custody
+returns `node_custody_unverified`; repair protected storage and rerun setup or
+the probe. Container preflight uses disposable public sentinels without creating
+node keys; registered native probes check actual node and sibling-profile
+custody. v1/v2/v3 and unknown reports cannot authorize new automatic/required
 assignments; existing stored assignments retain their mode.
 
 Linux setup detects the resolved browser and its package metadata before
