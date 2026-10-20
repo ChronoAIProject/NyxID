@@ -3035,6 +3035,7 @@ fn supported_evidence() -> nyxid_machine::context::Evidence {
         os: "linux".into(),
         landlock_abi: Some(6),
         separate_users: Some(true),
+        credential_custody: Some(true),
         managed_browser_configured: Some(true),
         command_seccomp: Some(true),
         landlock_enforced: Some(true),

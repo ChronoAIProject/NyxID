@@ -23,6 +23,8 @@ pub struct Evidence {
     pub os: String,
     pub landlock_abi: Option<u32>,
     pub separate_users: Option<bool>,
+    /// Real node/sibling file and selected key-service denial under every role.
+    pub credential_custody: Option<bool>,
     pub managed_browser_configured: Option<bool>,
     pub command_seccomp: Option<bool>,
     pub landlock_enforced: Option<bool>,
@@ -39,7 +41,8 @@ pub struct Evidence {
 
 // v1 inferred pre-exec namespaces; v2 used DevTools-backed DOM diagnostics
 // incompatible with secure policy. v3 observes live OS sandbox and policy effects.
-pub const EVIDENCE_VERSION: u32 = 3;
+// v4 additionally requires observed credential custody under every worker identity.
+pub const EVIDENCE_VERSION: u32 = 4;
 pub const MIN_LANDLOCK_ABI: u32 = 6;
 
 impl Evidence {
@@ -82,6 +85,9 @@ impl Evidence {
                 None => return Some("separated_probe_evidence_incomplete"),
             }
         }
+        if self.credential_custody != Some(true) {
+            return Some("node_custody_unverified");
+        }
         None
     }
 
@@ -122,6 +128,9 @@ pub const SHARED_LEGACY_WARNING: &str = "Shared legacy access gives agent comman
 /// include probe output, browser contents or a node-supplied diagnostic here.
 pub fn unavailable_message(reason: &str) -> &'static str {
     match reason {
+        "node_custody_unverified" => {
+            "Node credential custody could not be verified under every command and browser identity. Protect node tokens, signing secrets and stored credentials with a separate supervisor identity and private storage, then restart the node to repeat the probes. Shared legacy mode retains the owner's OS access."
+        }
         "separated_probe_timeout" => {
             "A separation capability probe exceeded its five-second bound. A cold Chromium start can cause this; rerun setup when the host is less busy. Separation remains unavailable until every probe succeeds."
         }
@@ -381,6 +390,7 @@ mod tests {
             os: "linux".into(),
             landlock_abi: Some(MIN_LANDLOCK_ABI),
             separate_users: Some(true),
+            credential_custody: Some(true),
             managed_browser_configured: Some(true),
             command_seccomp: Some(true),
             landlock_enforced: Some(true),
@@ -410,7 +420,7 @@ mod tests {
                 Ok(Mode::SharedLegacy)
             );
         }
-        for version in [0, 1, 2, EVIDENCE_VERSION + 1] {
+        for version in [0, 1, 2, 3, EVIDENCE_VERSION + 1] {
             let old = Evidence {
                 version,
                 ..confirmed()
@@ -452,6 +462,39 @@ mod tests {
         for warning in ["node tokens", "signing secrets", "stored credentials"] {
             assert!(SHARED_LEGACY_WARNING.contains(warning));
         }
+    }
+
+    #[test]
+    fn v4_custody_is_required_and_old_evidence_never_recovers_support() {
+        for credential_custody in [None, Some(false)] {
+            let report = Evidence {
+                credential_custody,
+                ..confirmed()
+            };
+            assert_eq!(report.unavailable_reason(), Some("node_custody_unverified"));
+            assert_eq!(
+                select_new(Choice::Automatic, Some(&report)),
+                Err("node_custody_unverified")
+            );
+            assert_eq!(
+                select_new(Choice::RequireSeparated, Some(&report)),
+                Err("node_custody_unverified")
+            );
+            assert_eq!(
+                select_new(Choice::SharedLegacy, Some(&report)),
+                Ok(Mode::SharedLegacy)
+            );
+        }
+        let mut v3 = serde_json::to_value(confirmed()).unwrap();
+        v3["version"] = serde_json::json!(3);
+        v3.as_object_mut().unwrap().remove("credential_custody");
+        let report: Evidence = serde_json::from_value(v3).unwrap();
+        assert_eq!(report.credential_custody, None);
+        assert_eq!(
+            report.unavailable_reason(),
+            Some("separated_probe_version_unsupported")
+        );
+        assert!(unavailable_message("node_custody_unverified").contains("stored credentials"));
     }
 
     #[test]

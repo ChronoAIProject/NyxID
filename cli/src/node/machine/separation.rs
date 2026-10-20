@@ -237,6 +237,7 @@ mod tests {
             os: "linux".into(),
             landlock_abi: Some(6),
             separate_users: Some(true),
+            credential_custody: Some(true),
             managed_browser_configured: Some(true),
             ..Default::default()
         }

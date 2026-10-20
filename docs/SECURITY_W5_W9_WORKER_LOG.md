@@ -1722,3 +1722,12 @@ Rebuilt after C zbus031c0bf96: cargo test --locked -p nyxid-cli --features node-
 Same rebuilt binary: migration25/0/0 in49.77s; keychain5/0/0; storage13/0/1 existing ignore; command2/0/0; startup-lease1/0/0. Ordinary discovery's native helper is inert; explicitly invoked real macOS file→keychain→file1/0/0 in9.95s validates complete typed values and retired legacy custody.
 Owned rustfmt/diff checks pass; all owned jobs finished. No observed macOS keychain behavior difference from zbus manifest switch; Linux Secret Service evidence belongs to C, not this run.
 PRE-08 remains open pending PM verdict and supported Linux/separate-identity validation; W9.5 code not started. EXECUTION/REVIEW stay local/untracked. No push, guest use or real installed service stop; native probe used a fresh absent service label.
+
+## W9.5 checkpoint 1 — custody evidence v4, 2026-10-20 (review pending)
+
+PM accepted8216ce309; this checkpoint adds optional credential_custody and requires Some(true) in otherwise supported evidence, with fixed node_custody_unverified guidance.
+Evidence version4 rejects v3/unknown reports; explicit shared_legacy selection remains usable. Positive fixtures report actual expected custody explicitly; no production true default.
+Shared-policy cargo test --locked -p nyxid-machine context:::15 passed/0 failed/0 ignored (combined working tree includes D's one pending container-diagnostic test); log ~/.cache/nyxid-stream-a-evidence/w95-protocol-tests.log.
+Only custody/v4 protocol and three fixture hunks are staged; D's browser diagnostic field/reason/tests and all runtime/probe WIP remain uncommitted. Owned rustfmt/diff checks pass.
+W9.5 remains open: runtime/native denial and final Clippy gates pending; Linux production CLI built, but guest test compile was SIGKILLed before tests and the VM remains stopped under PM memory/benchmark hold.
+Approved backend existing-assignment guards/necessary discovery consumers follow after C's announced edit window; stored modes/capabilities must not change. EXECUTION/REVIEW remain local/untracked. No push.
