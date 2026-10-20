@@ -87,3 +87,15 @@
 - `cargo clippy --locked -p nyxid-cli --bin nyxid --tests -- -D warnings`: exit 101, 7 A-owned unused-code diagnostics in secret_snapshot/secret_transaction/storage; no D diagnostic or suppression.
 - Pinned shared-target CLI test executable, built after unchanged D CLI inputs: commands::node::tests::docker_ --test-threads=1 passes 9/0/0. D's duplicate Cargo test was stopped only while waiting for the lock, before compilation.
 - Full review patch and explicit commit pathset were checked. Actual Docker image/TLS/volume cleanup remains C's hosted job; D-4/D-5 have not started. Awaiting PM D-3 verdict.
+
+## D-4 — setup review, support display and rollout docs
+
+- Implementation: `05cd07136`; exactly 12 approved frontend/doc paths, explicit commit pathspec; no registry or other-stream hunks.
+- Setup review preserves automatic/required/legacy intent across native and Docker commands; a Radix empty reset event no longer erases a prefilled choice. Legacy review requires fresh acknowledgement and changing mode clears consent.
+- Raw profiles require complete v2 evidence plus authority v2 for confirmed support; old booleans, absent/partial evidence and unknown versions show unknown. Failed prerequisites and five-second probe timeout have distinct actionable messages.
+- Machine-level sharing is labelled per agent; existing legacy modes remain visible even with confirmed support. Pending selection stays blocked and contradictory support/reason reports do not enable the separated action.
+- Three machine docs cover actual Chromium/AppArmor probes, macOS/browserless limits, explicit intent/config values, immutable cutover snapshot, replica rollout, external legacy consent and shared-kernel residuals; no VM-boundary claim.
+- `npm test -- --maxWorkers=2` with machine-setup, machines schema, machine-isolation, machine-settings, machine-activity and machine-capabilities files: 100 passed / 0 failed / 0 ignored across six files.
+- Initial targeted run: 95 passed / 1 failed; the new legacy-prefill regression exposed the empty-select reset bug, fixed before the final run. No test removal, ignore, timeout change or lint suppression.
+- `npx tsc -b --pretty false`, scoped `npx eslint` on all nine changed frontend files, and `git diff --check`: pass. No Rust changes or Cargo invocation in this batch.
+- D-5 read-only reconnaissance: Lima nyxid-security-validation is running, Ubuntu 24.04.5/aarch64, AppArmor userns restriction=1; earlier D checkouts/harness remain. No guest mutation/build. Real context acceptance and hosted amd64 remain D-5 gates; await PM D-4 verdict.
