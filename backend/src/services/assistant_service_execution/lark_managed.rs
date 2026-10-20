@@ -86,11 +86,7 @@ impl<'a> LarkManagedGuard<'a> {
                 epoch: identity.credential_epoch,
             });
         }
-        let credential_override: Option<String> = None;
-        let id = credential_override
-            .as_ref()
-            .or(row.api_key_id.as_ref())
-            .ok_or_else(attachment::refused)?;
+        let id = row.api_key_id.as_ref().ok_or_else(attachment::refused)?;
         let credential = self
             .db
             .collection::<UserApiKey>("user_api_keys")
@@ -103,7 +99,7 @@ impl<'a> LarkManagedGuard<'a> {
             user_service_id: row.id,
             credential_id: credential.id,
             epoch: credential.credential_epoch,
-            credential_override,
+            credential_override: None,
         })
     }
     pub(crate) fn revalidate(&self) -> futures::future::BoxFuture<'_, AppResult<()>> {
