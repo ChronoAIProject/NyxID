@@ -9,10 +9,7 @@ use crate::{
     models::lark_base_write::{LarkBaseWrite, UploadedFile, WritePrincipal, WriteState},
 };
 use chrono::Utc;
-use mongodb::{
-    Database,
-    bson::{self, doc},
-};
+use mongodb::{Database, bson::doc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};

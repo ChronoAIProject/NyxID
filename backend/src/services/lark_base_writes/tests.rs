@@ -1,4 +1,5 @@
 use super::*;
+use mongodb::bson;
 use crate::{
     models::lark_base_write_photo::{COLLECTION_NAME as PHOTOS, LarkBaseWritePhoto},
     test_utils::connect_transaction_test_database,
