@@ -102,6 +102,7 @@ jobs:
               - 'scripts/install-release-dependencies.sh'
               - '.github/scripts/install-linux-build-deps.sh'
               - 'security/apt-snapshots.tsv'
+              - 'security/apt-transport-ca.pem'
               - 'security/build-input-pins.json'
               - '.dockerignore'
             apk:

@@ -29,9 +29,19 @@ def prefixes(root):
     return result
 
 
+def minimal_ubuntu(root):
+    # Exercise real server HTTP->HTTPS redirects without the host proxy or an
+    # inherited CA package. Transport trust must remain outside the system store.
+    base = next(s.base for s in stages((root / 'cli/Dockerfile.machine').read_text()) if s.name == 'desktop')
+    from apt_inputs import INPUTS
+    return 'FROM ' + base + ' AS runtime\nCOPY ' + ' '.join(INPUTS) + ' /opt/nyxid-apt/\n' + \
+        'RUN test ! -s /etc/ssl/certs/ca-certificates.crt && ' + INSTALLER + \
+        ' ubuntu:noble -- libdbus-1-dev && test ! -s /etc/ssl/certs/ca-certificates.crt\n'
+
+
 def run(args):
     args.output.mkdir(parents=True, exist_ok=False)
-    cases = prefixes(ROOT)
+    cases = [("minimal-ubuntu-transport", "runtime", minimal_ubuntu(ROOT))] + prefixes(ROOT)
     if not cases:
         raise ValueError("no Dockerfile APT stages found")
     with tempfile.TemporaryDirectory(prefix="nyxid-apt-dockerfiles-") as temporary:

@@ -17,7 +17,7 @@ architecture=$(apk --print-arch)
 # Validate the entire catalog before creating output or making network requests.
 rows=$(awk -v base="$base" -v architecture="$architecture" -f "$script_dir/apk-catalog.awk" "$catalog") || fail 'invalid APK catalog'
 field() { awk -v key="$1" '$1=="#" && $2==key {print $3}' "$catalog"; }
-inventory() { awk -f "$script_dir/apk-inventory.awk" /lib/apk/db/installed | LC_ALL=C sort; }
+inventory() { awk -f "$script_dir/apk-inventory.awk" "${1:-/lib/apk/db/installed}" | LC_ALL=C sort; }
 before=$(inventory | sha256sum | cut -d ' ' -f 1)
 [ "$before" = "$(field before-sha256)" ] || fail 'APK base inventory mismatch'
 if [ "$mode" = --download ]; then
@@ -52,7 +52,19 @@ work=$(mktemp -d /tmp/nyxid-apk-install.XXXXXXXX)
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 # Ignore inherited indexes/cache/repositories: the complete closure consists
 # only of the pinned base plus these explicit, signature-checked archives.
-apk --no-network --no-cache --repositories-file /dev/null add --simulate "$@" || fail 'APK closure preflight failed'
+# A successful --simulate is insufficient: an installed virtual provider may
+# satisfy a missing archive while producing a different final inventory. Replay
+# the actual transaction into an isolated copy of the package database first.
+# It has no mutable repositories/cache and executes no scripts or triggers.
+# This root contains only package state/keyrings, never the live filesystem.
+mkdir -p "$work/root/lib" "$work/root/etc"
+cp -R /lib/apk "$work/root/lib/apk"
+cp -R /etc/apk "$work/root/etc/apk"
+apk --root "$work/root" --no-network --no-cache --repositories-file /dev/null \
+    --no-scripts add "$@" || fail 'APK closure preflight failed'
+inventory "$work/root/lib/apk/db/installed" > "$work/preflight.tsv"
+preflight=$(sha256sum "$work/preflight.tsv" | cut -d ' ' -f 1)
+[ "$preflight" = "$(field after-sha256)" ] || fail 'APK closure preflight inventory mismatch'
 inventory > "$work/base-installed.tsv"
 apk --no-network --no-cache --repositories-file /dev/null add "$@"
 inventory > "$work/installed.tsv"

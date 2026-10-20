@@ -50,6 +50,10 @@ def invoke(base, arch, folder, mode, expected, log, phase):
     shell = r'''
 set -eu
 cp /lib/apk/db/installed /case/before.db
+if [ -x /case/mocks/apk ]; then
+  NYXID_REAL_APK=$(command -v apk)
+  export NYXID_REAL_APK PATH=/case/mocks:$PATH
+fi
 set +e
 sh /input/apk-input-install.sh "$1" /case/catalog.tsv "$2" /case/archives
 status=$?
@@ -119,7 +123,7 @@ def run(args):
         target = next(row for row in rows if row[0] == ('nodejs' if label == 'updater-e2e' else 'python3'))
         cases = ['success', 'wrong-base', 'wrong-arch', 'duplicate-header', 'unsafe-url', 'wrong-before',
                  'wrong-checksum', 'corrupt-archive', 'bad-signature', 'missing-signature',
-                 'missing-archive', 'incomplete-closure', 'signed-identity', 'wrong-after',
+                 'missing-archive', 'incomplete-closure', 'signed-identity', 'wrong-after', 'post-install-drift',
                  'fallback-success', 'fallback-bad-signature', 'fallback-signed-identity']
         for case in cases:
             folder = stage / case
@@ -158,6 +162,19 @@ def run(args):
             if case == 'success':
                 # Unreviewed files must never be globbed into installation.
                 (folder / 'archives/unreviewed.apk').write_bytes(b'not a package')
+            if case == 'post-install-drift':
+                mocks = folder / 'mocks'
+                mocks.mkdir()
+                wrapper = mocks / 'apk'
+                wrapper.write_text('''#!/bin/sh
+set -eu
+"$NYXID_REAL_APK" "$@"
+case " $* " in
+  *' --root '*) : ;;
+  *' add '*) printf '\\nP:nyxid-post-install-drift\\nV:1-r0\\nA:noarch\\n\\n' >> /lib/apk/db/installed ;;
+esac
+''')
+                wrapper.chmod(0o755)
             if case.startswith('fallback-'):
                 (folder / 'archives').rename(folder / 'source-archives')
                 mocks = folder / 'mocks'
@@ -167,7 +184,7 @@ def run(args):
                 wget.chmod(0o755)
             (folder / 'catalog.tsv').write_text(candidate)
             invoke(base, args.arch, folder, '--download' if metadata or case.startswith('fallback-') else '--install',
-                   'success' if case == 'success' else ('download-success' if case == 'fallback-success' else ('changed-failure' if case == 'wrong-after' else 'failure')), stage / (case + '.log'), 'offline')
+                   'success' if case == 'success' else ('download-success' if case == 'fallback-success' else ('changed-failure' if case == 'post-install-drift' else 'failure')), stage / (case + '.log'), 'offline')
             reasons = {
                 'wrong-base': 'base image mismatch', 'wrong-arch': 'architecture mismatch',
                 'duplicate-header': 'duplicate header', 'unsafe-url': 'invalid archive URL',
@@ -175,8 +192,9 @@ def run(args):
                 'corrupt-archive': 'archive checksum mismatch',
                 'bad-signature': 'archive signature verification failed',
                 'missing-signature': 'archive signature verification failed',
-                'missing-archive': 'archive missing', 'incomplete-closure': 'closure preflight failed',
-                'signed-identity': 'signed identity mismatch', 'wrong-after': 'final inventory mismatch',
+                'missing-archive': 'archive missing', 'incomplete-closure': 'closure preflight',
+                'signed-identity': 'signed identity mismatch', 'wrong-after': 'closure preflight inventory mismatch',
+                'post-install-drift': 'final inventory mismatch',
             }
             if variant in reasons and reasons[variant] not in (stage / (case + '.log')).read_text():
                 raise ValueError('case did not reach intended boundary: ' + case)

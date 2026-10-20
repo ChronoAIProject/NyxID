@@ -64,8 +64,23 @@ The installer isolates sources, indexes and archive caches from mutable base
 configuration. Distro keyrings verify signatures; pinned metadata authenticates
 native-architecture indexes and package archives. Fixed snapshots disable only
 Release.Valid-Until freshness, retaining signature and checksum enforcement.
-HTTP bootstraps minimal images without CA packages; distro signatures and the
-independent catalog hash authenticate those bytes. Every selected component's
+Catalog URLs must use HTTPS. Only the installer derives HTTP transport URLs;
+HTTP transport is safe here only because the reviewed SHA-pinned **signed
+InRelease** authenticates those bytes, followed by its authenticated native
+indexes and package checksums. Ubuntu redirects HTTP snapshots back to HTTPS,
+so minimal images additionally need transport trust before installing CA
+packages. Every caller carries `security/apt-transport-ca.pem`, the public
+Mozilla bundle extracted by curl as of 2026-09-25, obtained from
+`https://curl.se/ca/cacert.pem` and compared with its HTTPS `.sha256` publication.
+Its exact SHA-256 is
+`a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505`.
+The installer rejects missing, symlinked or changed bundle bytes before any
+APT request. It supplies this file only via `Acquire::https::CaInfo`, requires
+peer and hostname verification, and never adds it to the image's system trust
+store. Distro `ca-certificates` packages install normally only after the
+snapshot metadata, indexes and archives have passed their independent checks.
+CI and release-host wrappers use that same checked bundle and installer.
+Every selected component's
 native Packages index must exist even when older APT reports acquisition errors
 as warnings. Only amd64/arm64 without foreign architectures are admitted.
 
@@ -88,7 +103,9 @@ missing/corrupted indexes, corrupted packages and a removed downloaded archive.
 Failure cases require unchanged dpkg state; metadata rejection must precede all
 package downloads. Success also verifies repeat/install-only calls preserve
 earlier package records. Two `APT Dockerfile Layers (arch)` jobs build all twelve
-actual package-stage prefixes without cache, then inspect records in containers
+actual package-stage prefixes without cache, plus a direct minimal-Ubuntu
+regression with no system CA bundle before or after installation, then inspect
+records in containers
 with no network. These projections preserve package instructions and source
 inputs but stop before application compilation; they are not evidence of final
 application image behavior. Logs, exact prefixes and inventories are retained
@@ -111,8 +128,13 @@ A separate digest-pinned download **stage** checks every catalog archive's
 checksum, distro signature and signed `.PKGINFO` identity. Each installing
 stage starts from the same pinned base and uses `RUN --network=none` with a
 read-only BuildKit bind mount from its download stage. It rechecks the inputs,
-preflights the complete local closure, and installs with APK networking,
-repository files and cache disabled. Inventories and receipts are written
+replays the complete local transaction into a temporary root containing a
+copy of the base APK database and keyring, with scripts/triggers, networking,
+repositories and cache disabled. That root's final inventory must match the
+catalog before the live image's package database can change; `--simulate`
+alone does not prove this. The live install also disables networking,
+repository files and cache and independently checks its final inventory.
+Inventories and receipts are written
 outside that mount. Download layers are neither inherited nor copied into
 shipped images; deleting archives in a later layer would still ship their
 bytes and is rejected by policy. Unlisted files cannot enter the transaction.
@@ -141,8 +163,10 @@ wrong base/architecture, duplicate header, unsafe origin, wrong base inventory,
 wrong checksum, corrupt archive, bad/missing signatures with updated catalog
 checksums, missing archive/dependency, signed identity mismatch and wrong final
 inventory. Pre-install rejections require unchanged installed database bytes;
-a wrong final inventory must reject the completed transaction without issuing
-a success record. Two `APK Dockerfile Layers (arch)` jobs build the three real
+a wrong catalog final inventory must also reject before changing the live
+database. An injected drift after the live install must reject the completed
+transaction without issuing a success record. Two `APK Dockerfile Layers (arch)`
+jobs build the three real
 package-stage prefixes with their physical offline install boundary and inspect
 retained inventories. They also inspect **every layer** from `docker save` and
 reject archive payloads, including archives deleted in a later layer. Native

@@ -43,6 +43,15 @@ snapshot_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 awk -v selectors="$selectors" -f "$snapshot_script_dir/apt-snapshot-select.awk" "$catalog" > "$selected" \
     || fail 'invalid or incomplete snapshot metadata selection'
 
+# This public Mozilla bundle is transport-only, never installed into the image's
+# trust store. Ubuntu redirects even HTTP snapshots to HTTPS on minimal bases.
+# Verify reviewed bytes before any APT request; distro signatures plus the exact
+# InRelease hash remain mandatory independently of TLS.
+transport_ca=$(CDPATH= cd -- "$(dirname -- "$catalog")" && pwd)/apt-transport-ca.pem
+[ -f "$transport_ca" ] && [ ! -L "$transport_ca" ] || fail 'APT transport CA bundle missing or symlinked'
+printf '%s  %s\n' a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505 "$transport_ca" | sha256sum -c - >/dev/null \
+    || fail 'APT transport CA bundle checksum mismatch'
+
 mkdir "$work/lists" "$work/lists/partial" "$work/archives" "$work/archives/partial"
 sources=$work/sources.list
 : > "$sources"
@@ -53,8 +62,9 @@ while IFS="$tab" read -r distro codename suite components url digest; do
     # Fixed snapshots deliberately outlive Release.Valid-Until. Disable that
     # freshness field only for these SHA-pinned signed roots. Signature checks
     # and APT index/package checksums remain mandatory; scans assess currency.
-    # HTTP is safe for minimal bases without CA packages: both the catalog's
-    # SHA256 and the distro signature authenticate metadata before any install.
+    # Transport downgrade is confined to this installer. The SHA-pinned signed
+    # InRelease authenticates HTTP bytes; redirects still require verified TLS
+    # with the pinned, transport-only CA bundle above.
     transport=$(printf '%s' "$url" | sed 's/^https:/http:/')
     printf 'deb [signed-by=%s check-valid-until=no] %s %s %s\n' \
         "$key" "$transport" "$suite" "$(printf '%s' "$components" | tr ',' ' ')" >> "$sources"
@@ -65,6 +75,8 @@ apt_snapshot() {
         -o "Dir::State::lists=$work/lists" -o "Dir::Cache::archives=$work/archives" \
         -o APT::Update::Error-Mode=any -o APT::Get::AllowUnauthenticated=false \
         -o Acquire::AllowInsecureRepositories=false -o Acquire::AllowDowngradeToInsecureRepositories=false \
+        -o "Acquire::https::CaInfo=$transport_ca" \
+        -o Acquire::https::Verify-Peer=true -o Acquire::https::Verify-Host=true \
         -o Acquire::Languages=none -o Acquire::Retries=2 \
         -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
 }

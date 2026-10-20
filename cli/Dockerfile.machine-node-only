@@ -13,7 +13,7 @@ FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288
 
 FROM toolchain AS builder
 
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv /opt/nyxid-apt/
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv debian:bookworm -- pkg-config libdbus-1-dev
 
 WORKDIR /build
@@ -56,7 +56,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # does; no existing workspace or host account is involved in this build step.
 RUN userdel -r ubuntu 2>/dev/null || true
 
-COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv /opt/nyxid-apt/
+COPY scripts/apt-snapshot-install.sh scripts/apt-snapshot-select.awk security/apt-snapshots.tsv security/apt-transport-ca.pem /opt/nyxid-apt/
 RUN sh /opt/nyxid-apt/apt-snapshot-install.sh /opt/nyxid-apt/apt-snapshots.tsv ubuntu:noble -- \
         ca-certificates curl git python3 nodejs npm ripgrep build-essential \
         pkg-config tini procps libdbus-1-3 \

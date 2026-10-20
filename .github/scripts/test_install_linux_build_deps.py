@@ -36,6 +36,7 @@ class BuildDependencyTests(unittest.TestCase):
             installer = installer.replace(before, after)
         (self.root / "scripts/apt-snapshot-install.sh").write_text(installer)
         shutil.copyfile(ROOT / "scripts/apt-snapshot-select.awk", self.root / "scripts/apt-snapshot-select.awk")
+        shutil.copyfile(ROOT / "security/apt-transport-ca.pem", self.root / "security/apt-transport-ca.pem")
         metadata = b"fixture signed metadata\n"
         digest = hashlib.sha256(metadata).hexdigest()
         catalog = (ROOT / "security/apt-snapshots.tsv").read_text().splitlines()
@@ -76,6 +77,9 @@ args = sys.argv[1:]
 options = dict(args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == "-o")
 assert options["APT::Get::AllowUnauthenticated"] == "false"
 assert options["Acquire::AllowInsecureRepositories"] == "false"
+assert options["Acquire::https::Verify-Peer"] == "true"
+assert options["Acquire::https::Verify-Host"] == "true"
+assert options["Acquire::https::CaInfo"] == str(Path(os.environ["TEST_ROOT"]) / "security/apt-transport-ca.pem")
 operation = "update" if "update" in args else ("download" if "--download-only" in args else "install")
 if operation != "update":
     assert "install" in args and "--no-install-recommends" in args
@@ -87,6 +91,9 @@ with open(os.environ["TEST_CALLS"], "a") as output:
 if operation == os.environ["TEST_FAIL"]:
     sys.exit(17)
 if operation == "update":
+    sources = Path(options["Dir::Etc::sourcelist"]).read_text()
+    assert "https://" not in sources and "http://snapshot.ubuntu.com/" in sources
+    assert "signed-by=" in sources and "check-valid-until=no" in sources
     lists = Path(options["Dir::State::lists"])
     catalog = Path(os.environ["TEST_ROOT"]) / "security/apt-snapshots.tsv"
     for line in catalog.read_text().splitlines():
@@ -136,6 +143,20 @@ if operation == "update":
         result = self.invoke("install")
         self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["update", "download", "install"])
+
+    def test_corrupt_transport_ca_stops_before_update(self):
+        (self.root / "security/apt-transport-ca.pem").write_text("corrupt transport trust")
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("transport CA bundle checksum mismatch", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_missing_transport_ca_stops_before_update(self):
+        (self.root / "security/apt-transport-ca.pem").unlink()
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("transport CA bundle missing", result.stderr)
+        self.assertFalse(self.calls.exists())
 
     def test_download_failure_stops_before_offline_install(self):
         result = self.invoke("download")

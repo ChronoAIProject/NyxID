@@ -65,6 +65,13 @@ class Catalog(unittest.TestCase):
             with self.subTest(digest=digest):
                 self.reject(self.original.replace(row, '\t'.join(row.split('\t')[:-1] + [digest])))
 
+    def test_https_is_required_for_every_catalog_root(self):
+        for root in ROOTS:
+            distro, codename = root.split(':')
+            row = next(line for line in self.original.splitlines() if line.startswith(distro + '\t' + codename + '\t'))
+            with self.subTest(root=root):
+                self.reject(self.original.replace(row, row.replace('https://', 'http://')))
+
     def test_origin_suffix_and_security_archive_rejected(self):
         for old, new in (('snapshot.debian.org/', 'snapshot.debian.org.evil.invalid/'),
                          ('archive/debian-security/', 'archive/debian/'),
@@ -125,6 +132,13 @@ class DockerPolicy(unittest.TestCase):
                 self.assertNotIn('cargo auditable build', text)
                 self.assertNotIn('from=cma', text)
 
+    def test_minimal_ubuntu_fixture_requires_absent_system_ca_before_and_after(self):
+        text = images.minimal_ubuntu(ROOT)
+        self.assertEqual(text.count('test ! -s /etc/ssl/certs/ca-certificates.crt'), 2)
+        self.assertIn('ubuntu:24.04@sha256:', text)
+        self.assertIn('security/apt-transport-ca.pem', text)
+        self.assertIn(INSTALLER + ' ubuntu:noble -- libdbus-1-dev', text)
+
     def test_raw_apt_variants_rejected(self):
         for command in ('apt-get install curl', 'apt -y install curl', '/usr/bin/apt-get -o Foo=bar update'):
             self.dockerfile.write_text(self.valid + 'RUN ' + command + '\n')
@@ -132,7 +146,7 @@ class DockerPolicy(unittest.TestCase):
                 self.assertTrue(any('raw APT' in error for error in check_apt_inputs(self.root, ['Dockerfile'])))
 
     def test_missing_stage_inputs_and_unknown_selector_rejected(self):
-        for text in (self.valid.replace(INPUTS[1], ''), self.valid.replace('debian:bookworm --', 'debian:sid --'),
+        for text in (self.valid.replace(INPUTS[3], ''), self.valid.replace(INPUTS[1], ''), self.valid.replace('debian:bookworm --', 'debian:sid --'),
                      self.valid.replace('sh /opt/nyxid-apt/apt-snapshot-install.sh ',
                                         'sh /opt/nyxid-apt/apt-snapshot-install.sh --install-only ')):
             self.dockerfile.write_text(text)

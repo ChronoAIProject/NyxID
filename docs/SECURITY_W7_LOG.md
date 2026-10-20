@@ -50,3 +50,14 @@
 - Local tests: Detect Changes 22/0, build pins 20/0, APT 19/0, APK inputs 43/0, archive/durability 33/0, workflow YAML 6/0 (143/0 total).
 - Input, shell syntax, workflow YAML and reusable-permission checks pass; native fallback execution remains pending PR CI.
 - Provisioning is documented as a post-merge durability step; no push, remote workflow or local image build was performed.
+
+## C-1/C-2 hosted follow-up — transport trust and preflight completeness
+- Hosted root causes: Ubuntu HTTP snapshots redirect to HTTPS without base CA trust; APK simulation accepts some incomplete closures.
+- Vendor the exact public Mozilla/curl bundle, SHA-check it before APT, and require CaInfo plus TLS peer/host verification for every caller.
+- All APT Dockerfile stages copy the bundle; CI/release wrappers use the same installer. System trust stores are not modified by bootstrap.
+- APT Dockerfile Layers adds direct minimal-Ubuntu coverage without a system CA bundle before/after installation, on both native arches.
+- APK preflight replays into an isolated database/keyring root without scripts/network/repositories/cache and requires the catalog inventory before live mutation.
+- Native replay requires unchanged DB bytes for incomplete closures/wrong final catalogs; separate post-install drift still exercises the final guard.
+- Local tests: Detect Changes 24/0, build pins 20/0, APT 21/0, APK inputs 43/0, scratch preflight 5/0, archive/durability 33/0, YAML 6/0 (152/0 total).
+- Input, shell syntax, YAML/permission checks pass. Native replay is 18 cases × 3 closures × 2 arches; PR acceptance pending.
+- No local image build, remote workflow or push; R2b already committed at 9514f3827 for the same next push.

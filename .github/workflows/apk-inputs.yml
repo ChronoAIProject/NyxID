@@ -21,6 +21,7 @@ jobs:
         run: |
           python3 scripts/check-apk-inputs.py
           python3 scripts/test-apk-inputs.py
+          python3 scripts/test-apk-preflight.py
           python3 scripts/test-apk-archives.py
 
   durable-present:
