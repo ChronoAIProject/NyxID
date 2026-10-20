@@ -1,0 +1,8 @@
+dependency,owner_role,confirmed_owner,minimum_access,preferred_fallback,status,evidence
+GSC,Search property owner,,Read-only performance/index exports,Owner supplies filtered CSV,unassigned/unknown,
+Bing,Webmaster property owner,,Read-only reports/export,Owner supplies filtered CSV,unassigned/unknown,
+DNS,Domain owner,,No agent write access,Owner performs verification change,unassigned/unknown,
+CDN/logs,Infrastructure owner,,Redacted route aggregates for 7–14 days,Owner exports verified crawler aggregate,unassigned/unknown,
+analytics,Analytics owner,,Read-only consented aggregate reports,Owner supplies filtered CSV,unassigned/unknown,
+inquiries,Sales/support owner,,De-identified deduplicated source counts,Owner voluntarily labels source,unassigned/unknown,
+content/history,Product/content owner,,Published URL history and page approvals,Owner supplies signed decision record,unassigned/unknown,

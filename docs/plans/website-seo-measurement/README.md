@@ -23,3 +23,25 @@ Engineering events reuse default-off consent telemetry and contain only bounded 
 性能：CI 单浏览器、reduced-motion 下的 HTTP/交互结果只属于 lab 证据。正式现场数据需按页面/语言/设备采集 LCP、INP、CLS 的足量分布；样本不足必须标记。比较新旧产物压缩 JS/CSS、请求数、长任务和低速网络行为；不以一次 HTTP 200、SSR 字符数或测试通过代替 CWV。
 
 CI HTTP/browser checks are lab evidence. Field LCP, INP and CLS need sufficient page/locale/device samples, with insufficient samples marked explicitly. Compare compressed assets, requests, long tasks and slow-network behavior. HTTP 200, SSR length and passing tests do not establish Core Web Vitals.
+
+## D02 可执行采样契约 / Executable sampling contract
+
+v2 固定 20 题，每题 EN/ZH 两个实际 prompt，共 40 prompts；Q01–Q10 为品牌组，Q11–Q20 为非品牌组，各有 `intent`、`brand_group`。此前无采样数据，v2 替换后半组问题以建立非品牌对照。不能把全部题都提及 NyxID 的旧问题集称为非品牌基线。
+
+Version 2 contains 20 questions and 40 localized prompts: ten brand and ten non-brand questions, with explicit intent and group fields. No prior trials exist; the latter half was revised before sampling to establish an unbranded comparison.
+
+采样前在 `access-register.csv` 填写实际 owner 与证据；目前所有 owner 均未确认。只申请表中最小权限，优先由 owner 导出；不创建账号、不购买平台、不改 DNS。缺权限标记 blocked，并继续有授权的数据源。GSC/Bing 的 D0 各保留最近完整 28 天及此前 28 天；D28 比较等长窗口，D7/D14 只观察。按品牌组、locale、方案、设备、国家分层，缺失值为 unknown，不能填零。
+
+Complete the access register with confirmed owners and evidence first. Owners are currently unconfirmed. Prefer scoped read-only exports; no accounts, purchases or DNS changes are authorized. Preserve the most recent complete 28 days plus the preceding 28 days for both search tools. Use equal-window comparisons and retain the listed segment dimensions; unknown is not zero.
+
+平台 A 必须是可查看来源的搜索型答案平台；平台 B 必须是可查看来源的对话型 AI 平台。选用当时实际可访问的不同平台，记录实际名称、可见模型/版本；不可见写 unknown，不猜测后端配置。每题、每语言、每平台独立新会话重复三次 (`repeat_id=1..3`)，固定登录/地区/搜索与记忆设置。先用 Q01/Q05/Q09/Q12/Q19 的双语版本试采，验证证据可保存再扩展全量；pilot 若条件一致可计入全量，否则单列。完整 discovery 为 20×2×2×3=240 次回答。direct-URL reading 另开会话、另记 mode，绝不合并分母。
+
+Select two actually accessible, source-visible platform categories: a search answer platform and a conversational AI platform. Record actual names and visible versions, using unknown when unavailable. Repeat each localized question three times per platform in new sessions with recorded conditions. Pilot the five named bilingual questions before expanding. A comparable pilot may count toward the 240 discovery trials; otherwise report it separately. Direct-URL reading has a separate mode and denominator.
+
+`ai-trials.csv` 一行一个实际回答，保留原 prompt、时间、版本、条件、回答证据及来源 URL；引用、品牌提及、推荐各记独立 0/1，四项正确性评分各记 0/1，未知记空。引用须有指向目标站点的可追溯来源；仅出现产品名称不是引用，推荐须有明确选择建议。重复来源 URL 不增加样本数。`ai-aggregates.csv` 按品牌组、语言、平台、版本、mode 分层；n 只包括条件完整且完成的回答，k 为该字段为 1 的回答数。各指标使用独立的 `{metric}_n`，只包含该字段已知为 0/1 的回答；空评分退出该指标分母并报告 unknown 数量 (`completed_n - metric_n`)，不得用 completed_n 将未知当作零。blocked/not-run 单列、不进入 n；分母为零时报告 unknown，不能报告 0% 或排名/搜索量提升。
+
+Store one completed answer per trial with original prompt, conditions, response evidence and source URLs. Citation, mention and recommendation are separate binary outcomes. Four accuracy dimensions are separately scored; unknown remains blank. A citation requires a traceable target-site source, while a mention alone does not. Aggregate k/n by group, locale, platform, version and mode. Each metric uses its own scored denominator (`metric_n`); blank scores are excluded and unknown counts equal `completed_n - metric_n`. Never divide a partially scored metric by all completed trials. Incomplete, blocked and unrun trials do not enter n; duplicate source links do not create extra trials. A zero denominator is unknown, not 0%.
+
+`crawler-baseline.csv` 收集授权的连续 7–14 天 route 聚合。优先用官方 IP 范围或正反向 DNS 验证并记录证据；仅 UA 匹配归入 unverified，不能混入 verified。保存规范路径/语言、请求/bytes、延迟样本数与 p50/p95、challenge/429/5xx、release_id 与 request_id 是否可用；无权获取则 blocked。不导出 query、bearer、表单正文或原始 referrer。
+
+Collect authorized crawler route aggregates for 7–14 consecutive days. Verify identities with official IP ranges or forward/reverse DNS evidence; UA-only matches remain unverified. Retain route, locale, counts, bytes, latency sample size and percentiles, challenges, 429/5xx and available release/request identifiers. Do not export sensitive request context.

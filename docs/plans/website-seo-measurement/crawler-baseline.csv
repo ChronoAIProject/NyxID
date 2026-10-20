@@ -1,0 +1,1 @@
+window_start_utc,window_end_utc,timezone,canonical_path,locale,crawler,identity_class,verification_method,verification_evidence,requests,response_bytes,latency_samples,latency_p50_ms,latency_p95_ms,challenge_count,http_429_count,http_5xx_count,release_id,request_id_available,status,evidence
