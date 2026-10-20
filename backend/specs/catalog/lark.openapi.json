@@ -913,6 +913,87 @@
           }
         }
       }
+    },
+    "/drive/v1/medias/upload_all": {
+      "post": {
+        "operationId": "bitable_media_upload",
+        "summary": "Upload a conversation attachment to Lark Base",
+        "description": "Upload one live-chat attachment and return its file_token. Creates no Base record. Requires docs:document.media:upload and access to the destination Base.",
+        "x-aevatar-tool": {
+          "name": "bitable_media_upload",
+          "description": "Upload a conversation attachment to a Base; returns a file_token without creating a record.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "x-nyxid-attachment-input": {
+          "field": "file",
+          "size_field": "size",
+          "filename_field": "file_name",
+          "version": 1
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file_name",
+                  "parent_type",
+                  "parent_node",
+                  "size",
+                  "extra",
+                  "file"
+                ],
+                "properties": {
+                  "file_name": {
+                    "type": "string",
+                    "description": "Filename; defaults to the sanitized attachment label."
+                  },
+                  "parent_type": {
+                    "type": "string",
+                    "enum": [
+                      "bitable_image",
+                      "bitable_file"
+                    ]
+                  },
+                  "parent_node": {
+                    "type": "string",
+                    "description": "Destination Base app token."
+                  },
+                  "size": {
+                    "type": "integer",
+                    "description": "Byte length, derived by NyxID; a supplied value must match."
+                  },
+                  "extra": {
+                    "type": "string",
+                    "description": "JSON string containing drive_route_token equal to parent_node; derived by NyxID."
+                  },
+                  "file": {
+                    "type": "string",
+                    "description": "Materialized by NyxID from attachment_id in a live owner chat."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "code 0 and data.file_token on success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -491,12 +491,11 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
 }
 
 /// Tool pixels belong only to the producing live turn, including a guest turn.
-async fn tool_image_bytes(
+async fn tool_image_for_chat(
     db: &Database,
-    keys: &EncryptionKeys,
     chat: &ChatAuthority,
     id: &str,
-) -> AppResult<Option<(String, Vec<u8>)>> {
+) -> AppResult<Option<crate::models::assistant_attachment::AssistantAttachment>> {
     if chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
@@ -536,11 +535,22 @@ async fn tool_image_bytes(
     if !row.content_type.starts_with("image/") {
         return Err(missing());
     }
+    Ok(Some(row))
+}
+
+async fn tool_image_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<Option<(String, Vec<u8>)>> {
+    let Some(row) = tool_image_for_chat(db, chat, id).await? else {
+        return Ok(None);
+    };
     let bytes = keys.decrypt(&row.data_encrypted).await?;
-    Box::pin(super::assistant_upload_retention::require_available(
-        db, filter,
-    ))
-    .await?;
+    tool_image_for_chat(db, chat, id)
+        .await?
+        .ok_or_else(missing)?;
     Ok(Some((row.content_type, bytes)))
 }
 
@@ -2805,4 +2815,100 @@ mod integration_tests {
         bad["protocol"] = "unknown".into();
         assert!(tool_image_plan(&[item], &bad, "https://test").0.is_empty());
     }
+}
+
+/// An authorized origin selected before any egress decryption. Never retry a
+/// failed origin lookup against the other attachment model.
+pub enum EgressAttachment {
+    User(AssistantUpload),
+    Tool(crate::models::assistant_attachment::AssistantAttachment),
+}
+impl EgressAttachment {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::User(row) => &row.id,
+            Self::Tool(row) => &row.id,
+        }
+    }
+    pub fn size(&self) -> i64 {
+        match self {
+            Self::User(row) => row.size,
+            Self::Tool(row) => row.size,
+        }
+    }
+    pub fn label(&self) -> &str {
+        match self {
+            Self::User(row) => &row.label,
+            Self::Tool(_) => "tool-image.png",
+        }
+    }
+    pub fn content_type(&self) -> &str {
+        match self {
+            Self::User(row) => &row.content_type,
+            Self::Tool(row) => &row.content_type,
+        }
+    }
+}
+
+pub async fn for_egress(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+) -> AppResult<EgressAttachment> {
+    if chat.guest || Uuid::parse_str(id).is_err() {
+        return Err(missing());
+    }
+    super::assistant_resource_service::require_live(db, chat).await?;
+    let key = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&chat.api_key_id,"user_id":&chat.user_id,"is_active":true})
+        .await?
+        .ok_or_else(missing)?;
+    if key.expires_at.is_some_and(|at| at <= Utc::now()) {
+        return Err(missing());
+    }
+    if db.collection::<bson::Document>("assistant_agent_credentials")
+        .find_one(doc! {"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id})
+        .projection(doc! {"_id":1}).await?.is_none() { return Err(missing()); }
+    let row = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":id})
+        .projection(doc! {"origin":1})
+        .await?
+        .ok_or_else(missing)?;
+    match row.get_str("origin").ok() {
+        Some("user_upload") => Ok(EgressAttachment::User(for_chat(db, chat, id).await?)),
+        Some("tool") | None => Ok(EgressAttachment::Tool(
+            tool_image_for_chat(db, chat, id)
+                .await?
+                .ok_or_else(missing)?,
+        )),
+        _ => Err(missing()),
+    }
+}
+
+/// The caller already holds a reservation for exactly this authorized size.
+pub async fn egress_bytes(
+    db: &Database,
+    keys: &EncryptionKeys,
+    chat: &ChatAuthority,
+    attachment: &EgressAttachment,
+) -> AppResult<Vec<u8>> {
+    let current = for_egress(db, chat, attachment.id()).await?;
+    if current.size() != attachment.size()
+        || current.label() != attachment.label()
+        || current.content_type() != attachment.content_type()
+        || std::mem::discriminant(&current) != std::mem::discriminant(attachment)
+    {
+        return Err(missing());
+    }
+    let bytes = match current {
+        EgressAttachment::User(row) => payload(db, keys, &row).await?.1,
+        EgressAttachment::Tool(row) => keys.decrypt(&row.data_encrypted).await?,
+    };
+    if bytes.len() as i64 != attachment.size() {
+        return Err(missing());
+    }
+    for_egress(db, chat, attachment.id()).await?;
+    Ok(bytes)
 }

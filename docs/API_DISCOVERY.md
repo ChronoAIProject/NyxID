@@ -158,6 +158,30 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
+The Lark/Feishu `bitable_media_upload` operation has a separate live-chat
+capability. It appears in MCP `tools/list`, search and `nyx__call_tool` only for
+owner chat keys with `assistant:attachment-writes` enabled (default off). Both
+direct tool calls and meta dispatch accept an `attachment_id` from that live
+conversation, `parent_type` (`bitable_image` or `bitable_file`) and the destination
+Base's `parent_node`. NyxID derives the byte length, defaults `file_name` to the
+sanitized attachment label, and supplies the mandatory JSON-string `extra` with
+`drive_route_token` equal to `parent_node`. A supplied size or route token must
+match. Success requires HTTP 2xx, `code: 0` and a nonempty `data.file_token`;
+the upload does not create a Base record.
+
+Attachment access is granted only by the compiled overlay's trusted projection
+on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
+`api-feishu` and `api-feishu-bot`. Custom services, edited contracts and mounted
+specifications, including a mounted copy of the hosted overlay, cannot grant
+this capability. User uploads retain their live conversation/key/retention checks;
+tool images retain their producing-live-turn fence. Consent binds the exact
+canonical multipart bytes and boundary content type. Body-constrained operation
+scopes still require JSON and therefore refuse this multipart upload: they cannot
+constrain its Base through `parent_node`. The upload is excluded from
+`/mcp/config`, exact-operation views and descriptors, and refuses non-chat,
+feature-off, exact, durable and async execution before provider effects. Existing
+`bitable_record_create` discovery and JSON execution remain unchanged.
+
 Path parameters normally encode their entire value, including `/`. An explicit
 `allowReserved: true` on a path parameter opts it into multiple segments. NyxID
 hosted overlays and stored endpoint rows may also use

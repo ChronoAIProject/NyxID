@@ -114,6 +114,7 @@ pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
+pub mod lark_attachment_tool;
 pub mod lark_permission;
 pub mod llm_gateway_service;
 pub mod llm_usage_service;
