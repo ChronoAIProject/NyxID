@@ -43,8 +43,8 @@ def check_apk_inputs(root, dockerfiles):
                             if any(value not in before for value in INPUTS) or "ARG TARGETARCH" not in before:
                                 errors.append(name + ": APK stage omits installer/parser/catalog/architecture")
                             if mode == "--download":
-                                if not source or "ARG APK_INPUT_SOURCE=durable\n" not in before or "scripts/apk-input-fetch.sh" not in before:
-                                    errors.append(name + ": APK download must default to durable source")
+                                if source or "APK_INPUT_SOURCE" in before or "scripts/apk-input-fetch.sh" not in before:
+                                    errors.append(name + ": APK download must use the default durable-first source")
                             else:
                                 mount = "--mount=type=bind,from=" + label + "-apk-download,source=" + ARCHIVES + ",target=" + ARCHIVES
                                 if not raw.startswith("RUN --network=none "):

@@ -40,3 +40,13 @@
 - Local suites: Detect Changes 22/0, build inputs 20/0, APT 19/0, APK callers/catalogs 43/0, archive/source/publisher/layers 27/0, workflow YAML 6/0 (137/0 total).
 - Input, shell syntax, strict workflow YAML and reusable-permission checks pass; native replay/image-layer execution remains pending PR CI.
 - Initial durable provisioning is an explicit maintainer prerequisite for strict schedules/publication; no remote operation or local image build was run.
+
+## C-2 R2b — keep verified builds available before provisioning
+- All builds prefer durable archives and permit only HTTP-404 fallback to recorded upstream bytes, with a release-tagged ::warning::.
+- Checksums, Alpine signatures and signed identities remain mandatory; corrupt durable bytes, non-404 errors and foreign redirects reject without fallback.
+- GitHub's HTTPS release-asset CDN is explicitly admitted; HTTP, credentials and hostname lookalikes reject before acceptance/fallback.
+- Separate APK durable archives present job checks release/catalog/archive completeness and SHA-256 metadata: non-blocking on PRs, failing on schedule.
+- Native replay adds fallback success, bad-signature and wrong-signed-identity cases for each stage/arch (102 total hosted cases).
+- Local tests: Detect Changes 22/0, build pins 20/0, APT 19/0, APK inputs 43/0, archive/durability 33/0, workflow YAML 6/0 (143/0 total).
+- Input, shell syntax, workflow YAML and reusable-permission checks pass; native fallback execution remains pending PR CI.
+- Provisioning is documented as a post-merge durability step; no push, remote workflow or local image build was performed.

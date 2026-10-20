@@ -2,11 +2,6 @@ name: APK Inputs
 
 on:
   workflow_call:
-    inputs:
-      pr-upstream-if-missing:
-        description: Explicit PR-only bootstrap rehearsal before archive release provisioning
-        type: boolean
-        default: false
   schedule:
     - cron: '37 3 * * 1'
 
@@ -28,6 +23,21 @@ jobs:
           python3 scripts/test-apk-inputs.py
           python3 scripts/test-apk-archives.py
 
+  durable-present:
+    name: APK durable archives present
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require every current catalog archive in the repository release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-apk-durability.py
+
   replay:
     name: APK Closures (${{ matrix.arch }})
     needs: policy
@@ -46,13 +56,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Replay actual signed archives with network disabled and reject tampering
-        env:
-          APK_PR_FALLBACK: ${{ inputs.pr-upstream-if-missing && github.event_name == 'pull_request' }}
-        run: |
-          flags=()
-          if [ "$APK_PR_FALLBACK" = true ]; then flags+=(--pr-upstream-if-missing); fi
-          python3 scripts/test-apk-replay.py --arch '${{ matrix.arch }}' \
-            --output "$RUNNER_TEMP/apk-replay" "${flags[@]}"
+        run: >-
+          python3 scripts/test-apk-replay.py --arch '${{ matrix.arch }}'
+          --output "$RUNNER_TEMP/apk-replay"
       - name: Retain replay logs and installed package records
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -83,13 +89,9 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build every actual APK stage prefix without publishing
-        env:
-          APK_PR_FALLBACK: ${{ inputs.pr-upstream-if-missing && github.event_name == 'pull_request' }}
-        run: |
-          flags=()
-          if [ "$APK_PR_FALLBACK" = true ]; then flags+=(--pr-upstream-if-missing); fi
-          python3 scripts/test-apk-image-inputs.py --platform 'linux/${{ matrix.arch }}' \
-            --output "$RUNNER_TEMP/apk-image-layers" "${flags[@]}"
+        run: >-
+          python3 scripts/test-apk-image-inputs.py --platform 'linux/${{ matrix.arch }}'
+          --output "$RUNNER_TEMP/apk-image-layers"
       - name: Retain exact package prefixes, logs and inventories
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

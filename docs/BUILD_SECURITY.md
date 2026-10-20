@@ -154,51 +154,48 @@ OIDC, registry login or publication. Final application images, SBOMs and browser
 behavior require the later packaging jobs; package prefixes do not prove those.
 
 Alpine's public repository removes superseded packages. Catalog schema v2
-therefore consumes release assets owned by this repository, under
+therefore prefers release assets owned by this repository, under
 `build-inputs-apk-<refreshed-on>`, with SHA-256/architecture/name/version asset
-names. The upstream URL is retained for review and candidate preparation.
-Normal image builds and weekly replay use **only** the durable URL; neither
-fetches package bytes from `dl-cdn.alpinelinux.org`. Changing or corrupting a
-release asset still fails its catalog checksum, distro signature or signed
-identity. Retain these archive releases for every supported catalog; do not
-delete or replace their assets.
+names. Every build (PR, main, release and schedule) tries the durable asset
+first. **Only HTTP 404** permits fallback to the catalog's original Alpine
+HTTPS URL. A prominent `::warning::` names the missing archive release and
+upstream URL. Both sources must pass the same catalog checksum, Alpine
+signature and signed `.PKGINFO` identity checks before offline installation.
+A durable checksum mismatch, 5xx, timeout, TLS failure or unexpected redirect
+fails closed without fallback. GitHub's HTTPS release-asset CDN is the sole
+external redirect origin admitted; HTTP, credentials and host lookalikes are
+rejected. Download headers are checked before accepting bytes or permitting
+fallback. A present durable asset never contacts Alpine.
 
-A repository maintainer must provision the initial durable release **before
-normal image publication or the strict scheduled APK jobs can succeed**. The
-workflow is intentionally not invoked by this change. Once this workflow has
-landed on main, use GitHub Actions → **Provision APK Archives** → Run workflow
-on **main**, supplying the full reviewed catalog commit SHA in `catalog_commit`.
-The workflow accepts only a full 40-character SHA and runs only from main. Its
-two native read-only preparation jobs execute the trusted workflow revision's
-installer against the candidate catalogs, verifying each upstream archive's
-checksum, Alpine signature and signed identity before staging assets. One
-separate `contents: write` job validates all six catalogs and archive digests
-again using trusted code and the reviewed commit's catalog bytes, then uploads
-to a prerelease marked non-latest. It never clobbers assets: an existing asset
-must match the expected bytes. No new secret, OIDC identity, application tag,
-image push or signing operation is needed. The admin must allow the job's
-`GITHUB_TOKEN` to create repository releases and upload assets. The workflow
-creates only the catalog's `build-inputs-apk-YYYY-MM-DD` archive tag/release.
+The **APK durable archives present** job separately requires the release and
+every current catalog/archive asset, including matching SHA-256 asset metadata
+and completed upload state. It runs on PRs with a visible, non-blocking failure
+and on the weekly schedule with a failing workflow result. Publication does
+not depend on this availability check. Missing archives are loud while fully
+verified upstream bytes can keep builds working.
 
-Before that maintainer step, PR evidence remains possible through the explicit
-`pr-upstream-if-missing` rehearsal input. CI supplies it **only for
-pull_request**; the reusable workflow checks the event again. Every missing
-durable asset must return HTTP 404 before the fetcher logs
-`APK PR FALLBACK (durable asset HTTP 404)` and tries the catalog's provenance
-URL. No fallback occurs on timeout, TLS/auth/rate-limit/server errors, bad
-checksums, signatures or signed identities. All checks remain mandatory and
-archives install with no network from read-only mounts. Logs identify the
-actual source for every archive. This PR evidence proves input integrity and
-packaging while durable-release provisioning remains an explicit outstanding
-prerequisite. Production builds, publication CI and schedules do not pass this
-input, so absence of durable assets blocks them. The existing Machine Container
-E2E job receives explicitly built test/production updater images from its
-verified source export, with the same event-scoped PR fallback; its production
-publication caller uses durable mode. The separate
-`provision-upstream` mode is solely for maintainer payload preparation and
-logs each upstream source. After provisioning, both PR and strict jobs consume
-the durable release. Weekly candidate refresh automation (C-3) must produce
-new reviewed catalogs **and** the corresponding durable release payloads.
+Provisioning is a **post-merge maintainer step that restores durability**;
+it is not required for correctness. Once the workflow has landed on main,
+use GitHub Actions → **Provision APK Archives** → Run workflow on **main**,
+supplying the full reviewed catalog commit SHA in `catalog_commit`. Its two
+native read-only preparation jobs execute the trusted workflow revision's
+installer against the candidate catalogs, verifying every upstream checksum,
+Alpine signature and signed identity. One separate `contents: write` publisher
+validates all six catalogs and archive hashes again against the reviewed
+commit, then stores a non-latest prerelease. Existing assets must match;
+they are never clobbered. No new secret or OIDC identity is needed. The admin
+must allow the job's `GITHUB_TOKEN` to create repository releases and upload
+assets. The only tag/release it creates is
+`build-inputs-apk-YYYY-MM-DD`. Retain these releases for supported catalogs.
+
+The workflow is not invoked by this change. Native PR closure jobs rehearse
+payload staging and successful HTTP-404 fallback with real Alpine signature
+and signed-identity verification, including tampered signature/identity
+rejections. The explicit `provision-upstream` mode is confined to maintainer
+payload preparation and logs each upstream source. Weekly candidate refresh
+(C-3) must produce new reviewed catalogs and the corresponding release
+payloads. Provision them promptly to preserve availability after Alpine
+removes superseded packages.
 
 The reproducibility contract fixes source revision, language tools, dependency
 locks, Actions, base image indices, downloaded tool checksums, APT snapshots and

@@ -100,7 +100,7 @@ class Callers(unittest.TestCase):
         path = self.root / 'security/apk/frontend-runtime-amd64.tsv'
         path.write_text(path.read_text().replace('# packages python3', '# packages perl'))
         self.assertTrue(any('requested packages differ' in e for e in check_apk_inputs(self.root, self.names)))
-    def test_mutable_durable_default(self): self.mutate('ARG APK_INPUT_SOURCE=durable', 'ARG APK_INPUT_SOURCE=pr-upstream-if-missing', 'default to durable')
+    def test_override_durable_default(self): self.mutate('ARG TARGETARCH', 'ARG TARGETARCH\nARG APK_INPUT_SOURCE=provision-upstream', 'default durable-first')
     def test_writable_mount(self): self.mutate('target=/opt/nyxid-apk/archives sh', 'target=/opt/nyxid-apk/archives,rw sh', 'read-only')
     def test_copy_download_archives(self):
         path = self.root / 'frontend/Dockerfile'

@@ -4,8 +4,7 @@ USER root
 COPY scripts/apk-input-install.sh scripts/apk-input-fetch.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
 COPY security/apk/ /opt/nyxid-apk/catalogs/
 ARG TARGETARCH
-ARG APK_INPUT_SOURCE=durable
-RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/updater-builder-${TARGETARCH}.tsv rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f /opt/nyxid-apk/archives "${APK_INPUT_SOURCE}"
+RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/updater-builder-${TARGETARCH}.tsv rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f /opt/nyxid-apk/archives
 
 FROM rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f AS builder
 COPY scripts/apk-input-install.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
@@ -51,8 +50,7 @@ USER root
 COPY scripts/apk-input-install.sh scripts/apk-input-fetch.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/
 COPY security/apk/ /opt/nyxid-apk/catalogs/
 ARG TARGETARCH
-ARG APK_INPUT_SOURCE=durable
-RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/updater-e2e-${TARGETARCH}.tsv alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8 /opt/nyxid-apk/archives "${APK_INPUT_SOURCE}"
+RUN sh /opt/nyxid-apk/apk-input-install.sh --download /opt/nyxid-apk/catalogs/updater-e2e-${TARGETARCH}.tsv alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8 /opt/nyxid-apk/archives
 
 FROM alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8 AS e2e
 COPY scripts/apk-input-install.sh scripts/apk-catalog.awk scripts/apk-inventory.awk /opt/nyxid-apk/

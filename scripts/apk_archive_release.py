@@ -43,7 +43,7 @@ def stage_payload(catalog_path, arch, archives, output):
             shutil.copyfile(source, destination)
 
 
-def validate_payload(catalogs, payload, arches):
+def expected_assets(catalogs, arches):
     expected, dates = {}, set()
     for label in REQUESTS:
         for arch in arches:
@@ -59,6 +59,11 @@ def validate_payload(catalogs, payload, arches):
                 expected[asset] = checksum
     if len(dates) != 1:
         raise ValueError('release payload requires one catalog refresh date')
+    return dates.pop(), expected
+
+
+def validate_payload(catalogs, payload, arches):
+    tag, expected = expected_assets(catalogs, arches)
     actual = {p.name for p in payload.iterdir()}
     if actual != set(expected):
         raise ValueError('release payload has missing or unexpected files')
@@ -66,7 +71,7 @@ def validate_payload(catalogs, payload, arches):
         path = payload / name
         if path.is_symlink() or not path.is_file() or sha(path) != checksum:
             raise ValueError('release payload checksum mismatch: ' + name)
-    return dates.pop(), sorted(expected)
+    return tag, sorted(expected)
 
 
 def prepare(root, arch, output):

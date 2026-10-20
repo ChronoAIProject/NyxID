@@ -284,8 +284,6 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/apk-inputs.yml
-    with:
-      pr-upstream-if-missing: ${{ github.event_name == 'pull_request' }}
 
   # ---------------------------------------------------------------------------
   # Reusable workflow permissions: a ci.yml job requesting a scope that the
@@ -718,7 +716,7 @@ jobs:
           tags: nyxid-node-machine:ci
           cache-from: type=gha,scope=machine-pr
           cache-to: type=gha,mode=max,scope=machine-pr
-      - name: Build updater E2E image with explicit PR archive rehearsal
+      - name: Build updater E2E image with verified APK inputs
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: ${{ runner.temp }}/image-source/source
@@ -727,12 +725,11 @@ jobs:
           build-args: |
             NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
-            APK_INPUT_SOURCE=${{ github.event_name == 'pull_request' && 'pr-upstream-if-missing' || 'durable' }}
           load: true
           tags: nyxid-machine-updater-e2e:local
           cache-from: type=gha,scope=updater-pr
           cache-to: type=gha,mode=max,scope=updater-pr
-      - name: Build production updater image with explicit PR archive rehearsal
+      - name: Build production updater image with verified APK inputs
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: ${{ runner.temp }}/image-source/source
@@ -741,7 +738,6 @@ jobs:
           build-args: |
             NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
-            APK_INPUT_SOURCE=${{ github.event_name == 'pull_request' && 'pr-upstream-if-missing' || 'durable' }}
           load: true
           tags: nyxid-machine-updater:production-test
           cache-from: type=gha,scope=updater-pr

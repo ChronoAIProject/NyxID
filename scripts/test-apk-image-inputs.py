@@ -37,14 +37,15 @@ def run(args):
             command = ["docker", "buildx", "build", "--load", "--no-cache", "--provenance=false",
                        "--platform", args.platform, "--file", str(dockerfile), "--tag", tag,
                        str(ROOT)]
-            if args.pr_upstream_if_missing:
-                command[-1:-1] = ['--build-arg', 'APK_INPUT_SOURCE=pr-upstream-if-missing']
             log = args.output / (label + ".log")
             with log.open("w") as output:
                 result = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, timeout=2400)
             if result.returncode:
                 print(log.read_text()[-12000:], flush=True)
                 raise ValueError("APK Dockerfile build failed: " + name + ":" + stage)
+            for line in log.read_text().splitlines():
+                if '::warning::APK' in line:
+                    print(line[line.index('::warning::'):], flush=True)
             saved = Path(temporary) / 'image.tar'
             subprocess.run(['docker', 'save', '--output', str(saved), tag], check=True, timeout=180)
             layer_count = check_layers(saved)
@@ -82,6 +83,5 @@ done
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
-    parser.add_argument("--pr-upstream-if-missing", action="store_true", help="PR rehearsal only: log and allow upstream on durable HTTP 404")
     parser.add_argument("--output", type=Path, required=True)
     run(parser.parse_args())

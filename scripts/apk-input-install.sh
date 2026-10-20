@@ -5,8 +5,8 @@ export LC_ALL=C
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 [ "$#" -ge 4 ] && [ "$#" -le 5 ] && [ "$(id -u)" = 0 ] || fail 'usage: apk-input-install.sh --download|--install CATALOG BASE-IMAGE ARCHIVE-DIRECTORY [SOURCE-MODE] (root)'
 mode=$1 catalog=$2 base=$3 archives=$4
-source_mode=${5:-durable}
-case "$source_mode" in durable|pr-upstream-if-missing|provision-upstream) ;; *) fail 'invalid APK source mode' ;; esac
+source_mode=${5:-prefer-durable}
+case "$source_mode" in prefer-durable|provision-upstream) ;; *) fail 'invalid APK source mode' ;; esac
 [ "$mode" = --download ] || [ "$#" = 4 ] || fail 'source mode is download-only'
 case "${archives}" in /*/archives) ;; *) fail 'APK archive path must be an absolute archives directory' ;; esac
 [ ! -L "${archives}" ] || fail 'APK archive directory must not be symlinked'

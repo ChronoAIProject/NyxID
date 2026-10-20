@@ -14,7 +14,9 @@ import unittest
 from unittest.mock import patch
 
 from apk_archive_layers import check_layers
-from apk_archive_release import ARCHES, REQUESTS, stage_payload, validate_payload
+from apk_archive_release import ARCHES, REQUESTS, expected_assets, stage_payload, validate_payload
+from apk_durability import check as check_durability
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('provision', ROOT / 'scripts/provision-apk-archives.py')
@@ -40,6 +42,7 @@ done
 printf '%s\\n' "$1" >> "$CALLS"
 case "$1" in
   https://durable/*)
+    if [ -n "$REDIRECT" ]; then printf "  Location: %s\\n" "$REDIRECT" >&2; fi
     if [ "$STATUS" != 200 ]; then
       if [ "$STATUS" != timeout ]; then printf '  HTTP/1.1 %s Error\\n' "$STATUS" >&2; fi
       exit 8
@@ -52,12 +55,12 @@ esac
 ''')
         wget.chmod(0o755)
 
-    def fetch(self, mode='durable', status='200', corrupt='no'):
+    def fetch(self, mode='prefer-durable', status='200', corrupt='no', redirect=''):
         result = subprocess.run(['sh', str(ROOT / 'scripts/apk-input-fetch.sh'),
-                                 'https://durable/pkg.apk', 'https://upstream/pkg.apk',
+                                 'https://durable/releases/download/build-inputs-apk-2026-10-19/pkg.apk', 'https://upstream/pkg.apk',
                                  str(self.root / 'pkg.apk'), mode, digest(b'archive')],
                                 env={**os.environ, 'PATH': str(self.root) + os.pathsep + os.environ['PATH'],
-                                     'CALLS': str(self.calls), 'STATUS': status, 'CORRUPT': corrupt},
+                                     'CALLS': str(self.calls), 'STATUS': status, 'CORRUPT': corrupt, 'REDIRECT': redirect},
                                 capture_output=True, text=True)
         calls = self.calls.read_text().splitlines() if self.calls.exists() else []
         return result, calls
@@ -65,45 +68,56 @@ esac
     def test_durable_success(self):
         result, calls = self.fetch()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, ['https://durable/pkg.apk'])
+        self.assertEqual(calls, ['https://durable/releases/download/build-inputs-apk-2026-10-19/pkg.apk'])
         self.assertNotIn('FALLBACK', result.stderr)
 
-    def test_strict_missing_asset_fails(self):
-        result, calls = self.fetch(status='404')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(calls), 1)
-
-    def test_explicit_pr_missing_asset_fallback_logged(self):
-        result, calls = self.fetch('pr-upstream-if-missing', '404')
+    def test_missing_asset_fallback_warns_with_release_tag(self):
+        result, calls = self.fetch('prefer-durable', '404')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, ['https://durable/pkg.apk', 'https://upstream/pkg.apk'])
-        self.assertIn('APK PR FALLBACK (durable asset HTTP 404)', result.stderr)
+        self.assertEqual(calls, ['https://durable/releases/download/build-inputs-apk-2026-10-19/pkg.apk', 'https://upstream/pkg.apk'])
+        self.assertIn('::warning::APK durable archives missing from build-inputs-apk-2026-10-19 (HTTP 404)', result.stderr)
 
-    def test_pr_uses_present_durable_asset(self):
-        result, calls = self.fetch('pr-upstream-if-missing')
+    def test_present_durable_asset_never_contacts_upstream(self):
+        result, calls = self.fetch('prefer-durable')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, ['https://durable/pkg.apk'])
+        self.assertEqual(calls, ['https://durable/releases/download/build-inputs-apk-2026-10-19/pkg.apk'])
 
     def test_other_http_failures_never_fallback(self):
         for status in ['401', '403', '429', '500', '503', 'timeout']:
             with self.subTest(status=status):
                 self.calls.unlink(missing_ok=True)
-                result, calls = self.fetch('pr-upstream-if-missing', status)
+                result, calls = self.fetch('prefer-durable', status)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(calls), 1)
                 self.assertNotIn('FALLBACK', result.stderr)
 
     def test_corrupt_durable_asset_never_fallback(self):
-        result, calls = self.fetch('pr-upstream-if-missing', corrupt='yes')
+        result, calls = self.fetch('prefer-durable', corrupt='yes')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(calls), 1)
         self.assertIn('checksum mismatch', result.stderr)
 
-    def test_corrupt_pr_upstream_bytes_fail(self):
-        result, calls = self.fetch('pr-upstream-if-missing', '404', corrupt='upstream')
+    def test_corrupt_upstream_bytes_fail(self):
+        result, calls = self.fetch('prefer-durable', '404', corrupt='upstream')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(calls), 2)
         self.assertIn('checksum mismatch', result.stderr)
+
+    def test_off_origin_redirect_fails_even_with_404(self):
+        for url in ['https://evil.example/pkg.apk', 'http://github.com/pkg.apk', '//evil.example/pkg.apk',
+                    'https://github.com.evil/pkg.apk', 'https://github.com@evil.example/pkg.apk']:
+            with self.subTest(url=url):
+                self.calls.unlink(missing_ok=True)
+                result, calls = self.fetch(status='404', redirect=url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertIn('redirect off-origin', result.stderr)
+                self.assertNotIn('::warning::', result.stderr)
+
+    def test_expected_github_asset_cdn_redirect_accepted(self):
+        result, calls = self.fetch(redirect='https://release-assets.githubusercontent.com/github-production-release-asset/id/pkg.apk?signature=public-fixture')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 1)
 
     def test_provision_is_explicit_and_logged(self):
         result, calls = self.fetch('provision-upstream')
@@ -183,6 +197,32 @@ python3\t1-r0\t{native}\t{checksum}\t{durable}\thttps://dl-cdn.alpinelinux.org/a
                 path = self.catalogs / (label + '-' + arch + '.tsv')
                 path.write_text(text)
                 stage_payload(path, arch, self.archives, self.payload)
+
+    def durability(self, missing_release=False, remove=None, change=None):
+        tag, expected = expected_assets(self.catalogs, ARCHES)
+        def fetch(path):
+            if path.startswith('/releases/tags/'):
+                if missing_release:
+                    raise urllib.error.HTTPError('https://api.github.com', 404, 'missing', {}, None)
+                return {'id': 42, 'draft': False, 'tag_name': tag}
+            assets = [{'name': name, 'digest': 'sha256:' + checksum, 'size': 42, 'state': 'uploaded'}
+                      for name, checksum in expected.items() if name != remove]
+            if change:
+                assets[0].update(change)
+            return assets
+        return check_durability(self.catalogs, fetch)
+
+    def test_durability_complete(self): self.assertEqual(self.durability(), [])
+    def test_durability_missing_release(self): self.assertIn('release is missing', self.durability(missing_release=True)[0])
+    def test_durability_missing_archive(self):
+        name = next(self.payload.glob('*.apk')).name
+        self.assertIn('missing asset ' + name, self.durability(remove=name)[0])
+    def test_durability_missing_catalog(self):
+        name = next(self.payload.glob('*.tsv')).name
+        self.assertIn('missing asset ' + name, self.durability(remove=name)[0])
+    def test_durability_incomplete_or_corrupt(self):
+        for change in [{'state': 'new'}, {'size': 0}, {'digest': None}, {'digest': 'sha256:' + '0' * 64}]:
+            with self.subTest(change=change): self.assertTrue(self.durability(change=change))
 
     def test_complete_payload_and_deduplication(self):
         tag, files = validate_payload(self.catalogs, self.payload, ARCHES)
