@@ -116,6 +116,10 @@ async fn assistant_pool_approval_pins_member_across_requests_and_balance_ticks()
     let f = assistant("assistant_pool_durable_pin", "round_robin").await;
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.auth.user_id.to_string(),
+        },
         &f.auth.user_id.to_string(),
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
@@ -183,6 +187,10 @@ async fn assistant_pool_approved_predispatch_outage_proposes_and_pins_new_member
     let f = assistant("assistant_pool_reconsent", "priority").await;
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.auth.user_id.to_string(),
+        },
         &f.auth.user_id.to_string(),
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),

@@ -496,6 +496,10 @@ async fn org_resource_journey(
     }
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             access_mode: Some(mode),
@@ -631,6 +635,10 @@ async fn org_resource_journey(
     if switch_to_full {
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
@@ -836,6 +844,10 @@ async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
         }
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(AccessMode::Autopilot),
@@ -864,6 +876,10 @@ async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
             .unwrap();
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(mode),
@@ -887,6 +903,10 @@ async fn resource_explicit_org_card_remains_authority_bound_in_full_access() {
             .unwrap();
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(AccessMode::Autopilot),

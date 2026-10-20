@@ -15,6 +15,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 async fn set_mode(f: &Fixture, mode: AccessMode) {
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(mode),

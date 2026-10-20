@@ -820,6 +820,10 @@ async fn full_access_set_agent_skills_attaches_with_receipt_while_auto_asks() {
         let f = orchestrator_fixture("mode_skills_widen").await;
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(mode),
@@ -883,6 +887,10 @@ async fn full_access_failed_skill_attach_writes_no_receipt() {
     let f = orchestrator_fixture("mode_skills_failure").await;
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),

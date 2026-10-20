@@ -29,6 +29,7 @@ fn parse<T: serde::de::DeserializeOwned>(v: &Value) -> AppResult<T> {
 pub(crate) async fn dispatch(
     state: &AppState,
     owner: &str,
+    principal: &crate::models::audit_outbox::AuditPrincipal,
     name: &str,
     args: &Value,
 ) -> AppResult<Value> {
@@ -36,9 +37,10 @@ pub(crate) async fn dispatch(
     if name == "create_schedule"
         && let Some(zone) = args["owner_timezone"].as_str()
     {
-        let before = settings.clone();
         settings = crate::services::assistant_settings_service::update(
             &state.db,
+            &state.audit_runtime,
+            principal,
             owner,
             crate::services::assistant_settings_service::Update {
                 timezone: Some(zone.into()),
@@ -46,8 +48,6 @@ pub(crate) async fn dispatch(
             },
         )
         .await?;
-        crate::services::assistant_settings_service::audit(&state.db, owner, &before, &settings)
-            .await;
     }
     let zone = settings.timezone.as_deref().unwrap_or("UTC");
     if name == "list_schedules" {

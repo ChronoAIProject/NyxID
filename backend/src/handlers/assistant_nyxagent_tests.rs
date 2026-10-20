@@ -2728,6 +2728,10 @@ async fn continuation_limit_and_no_progress_preserve_context_and_a_diagnostic_co
             setup_script(None, Duration::ZERO, vec!["tool_budget_exhausted"; 4]).await;
         crate::services::assistant_settings_service::update(
             &state.db,
+            &state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: OWNER.to_owned(),
+            },
             OWNER,
             crate::services::assistant_settings_service::Update {
                 max_auto_continuations: Some(limit),

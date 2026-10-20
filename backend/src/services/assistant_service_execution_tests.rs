@@ -32,6 +32,10 @@ mod invocations;
 async fn mode(f: &Fixture, mode: AccessMode) {
     super::super::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         super::super::assistant_settings_service::Update {
             access_mode: Some(mode),

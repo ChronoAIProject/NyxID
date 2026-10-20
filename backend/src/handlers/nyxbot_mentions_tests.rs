@@ -1201,6 +1201,10 @@ async fn external_bot_budget_is_atomic_across_clients_and_never_refunds_or_reset
     );
     settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         settings::Update {
             max_group_handoffs_per_hour: Some(7),
@@ -1249,6 +1253,10 @@ async fn external_bot_budget_is_atomic_across_clients_and_never_refunds_or_reset
     );
     settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         settings::Update {
             max_group_handoffs: Some(0),

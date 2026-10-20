@@ -1205,6 +1205,10 @@ async fn native_inventory(full: bool) {
     if full {
         super::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             super::assistant_settings_service::Update {
                 skip_destructive_confirmation: Some(true),
@@ -2025,6 +2029,10 @@ async fn specialist_account_card_request_denied_audited_and_routed() {
     assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -2068,6 +2076,10 @@ async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
     .unwrap();
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -2094,6 +2106,10 @@ async fn specialist_operation_scope_card_request_denied_audited_and_routed() {
     assert!(f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"operations"}).await.unwrap().is_some());
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -2127,6 +2143,10 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     let f = fixture("strict_skill_card").await;
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -2174,6 +2194,10 @@ async fn specialist_skill_card_request_denied_audited_and_routed() {
     );
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),

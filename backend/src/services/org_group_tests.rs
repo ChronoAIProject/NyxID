@@ -891,6 +891,10 @@ async fn org_group_http_tools_and_demoted_or_inactive_members_are_refused() {
     // Auto keeps the floor: the destructive leave must raise a card.
     super::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
         &f.member,
         super::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),

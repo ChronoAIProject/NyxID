@@ -616,6 +616,10 @@ mod tests {
             let f = orchestrator_fixture("mode_machine_update").await;
             crate::services::assistant_settings_service::update(
                 &f.state.db,
+                &f.state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: f.owner.clone(),
+                },
                 &f.owner,
                 crate::services::assistant_settings_service::Update {
                     access_mode: Some(mode),

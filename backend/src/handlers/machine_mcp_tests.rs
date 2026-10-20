@@ -589,6 +589,10 @@ async fn ask_every_time_cards_machine_changes_once() {
         .unwrap();
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(AccessMode::AskEveryTime),
@@ -656,6 +660,10 @@ async fn full_access_machine_policy_executes_with_receipt_while_auto_asks() {
             .unwrap();
         crate::services::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(mode),
@@ -754,6 +762,10 @@ async fn full_access_saved_login_policy_fills_with_receipt_while_auto_asks() {
         .unwrap();
         crate::services::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(mode),

@@ -1882,6 +1882,10 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
         let target = uuid::Uuid::new_v4().to_string();
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -1932,6 +1936,10 @@ async fn specialist_machine_login_request_is_denied_audited_and_routed_when_allo
         );
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -2015,6 +2023,10 @@ async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_al
     assert_eq!(data.get_str("decision").unwrap(), "denied");
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -2035,6 +2047,10 @@ async fn specialist_machine_capability_card_is_denied_audited_and_routed_when_al
     assert!(routed["acknowledgement_id"].is_string());
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
@@ -2087,6 +2103,10 @@ async fn full_access_machine_capabilities_widens_with_receipt_while_auto_asks() 
         let n = v2(&f).await;
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(mode),
@@ -2155,6 +2175,10 @@ async fn full_access_machine_pairing_completes_with_receipt_while_auto_asks() {
         let f = orchestrator_fixture("mode_machine_pairing").await;
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(mode),
@@ -2234,6 +2258,10 @@ async fn direct_specialist_machine_capability_request_gets_missing_access_withou
     ] {
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 specialist_access_requests: Some(policy),

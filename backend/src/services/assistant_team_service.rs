@@ -1326,7 +1326,7 @@ pub async fn update_agent(
 
 /// An agent's model for new threads and its access-mode override. `None`
 /// leaves a field unchanged; `Some(None)` clears the override so the agent
-/// follows the owner's workspace mode again.
+/// follows the acting person's workspace mode again.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AgentPolicy<'a> {
     pub model: Option<&'a str>,
@@ -1339,23 +1339,111 @@ pub struct AgentPolicy<'a> {
 /// list. Each real change is audited with the acting person.
 pub async fn set_agent_policy(
     db: &Database,
+    runtime: &super::audit_runtime::AuditRuntime,
     actor: &audit_service::AuditActor,
     id: &str,
     policy: AgentPolicy<'_>,
 ) -> AppResult<AssistantAgent> {
-    let current = maintained_agent(db, &actor.user_id, id).await?;
+    if Uuid::parse_str(id).is_err() {
+        return Err(not_found());
+    }
+    if policy
+        .model
+        .is_some_and(|model| !super::assistant_nyxagent::valid_model(model))
+    {
+        return Err(AppError::AssistantModelUnavailable);
+    }
+    let change = AgentPolicyChange {
+        db,
+        runtime,
+        actor,
+        id,
+        policy,
+        at: Utc::now(),
+        events: std::array::from_fn(|_| Uuid::new_v4()),
+        operations: std::array::from_fn(|_| Uuid::new_v4()),
+    };
+    let (current, updated) =
+        super::audit_runtime::transaction::run(db, &change, |session, change| {
+            Box::pin(set_agent_policy_in_session(session, change))
+        })
+        .await?;
+    if current.access_mode_override != updated.access_mode_override {
+        super::assistant_acknowledgement_service::retire_full_access_confirmations(
+            db,
+            None,
+            Some(&updated.id),
+        )
+        .await?;
+    }
+    Ok(updated)
+}
+
+struct AgentPolicyChange<'a> {
+    db: &'a Database,
+    runtime: &'a super::audit_runtime::AuditRuntime,
+    actor: &'a audit_service::AuditActor,
+    id: &'a str,
+    policy: AgentPolicy<'a>,
+    at: DateTime<Utc>,
+    events: [Uuid; 3],
+    operations: [Uuid; 3],
+}
+
+async fn set_agent_policy_in_session(
+    session: &mut ClientSession,
+    change: &AgentPolicyChange<'_>,
+) -> AppResult<(AssistantAgent, AssistantAgent)> {
+    use super::{
+        audit_outbox_service::{self, AuditEvent},
+        audit_runtime::policy::AuditTier,
+    };
+    use crate::models::{
+        assistant_settings::AccessMode,
+        audit_outbox::{AccessModeScope, AuditDetail, AuditOwner, AuditPrincipal, AuditStage},
+        user::{COLLECTION_NAME as USERS, User},
+    };
+    let db = change.db;
+    let actor = change.actor;
+    let current = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"_id": change.id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": &current.user_id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    let access = super::org_service::resolve_owner_access_in_session(
+        db,
+        session,
+        &actor.user_id,
+        &current.user_id,
+    )
+    .await?;
+    if !access.can_read()
+        || (actor.user_id != current.user_id
+            && (!owner.is_active || !owner.user_type.is_org() || current.is_nyxbot()))
+    {
+        return Err(not_found());
+    }
+    if !super::org_agent_service::can_maintain(&access) {
+        return Err(AppError::Forbidden(
+            "Only organization Admins and Members may maintain this agent".into(),
+        ));
+    }
     if current.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
-    let mut set = doc! {"updated_at": bson::DateTime::now()};
+    let mut set = doc! {"updated_at": bson::DateTime::from_chrono(change.at)};
     let mut unset = doc! {};
-    if let Some(model) = policy.model {
-        if !super::assistant_nyxagent::valid_model(model) {
-            return Err(AppError::AssistantModelUnavailable);
-        }
+    if let Some(model) = change.policy.model {
         set.insert("model", model);
     }
-    match policy.access_mode_override {
+    match change.policy.access_mode_override {
         Some(Some(mode)) => {
             set.insert(
                 "access_mode_override",
@@ -1368,48 +1456,105 @@ pub async fn set_agent_policy(
         }
         None => {}
     }
-    let mut update = doc! {"$set": set};
+    let mut patch = doc! {"$set": set};
     if !unset.is_empty() {
-        update.insert("$unset", unset);
+        patch.insert("$unset", unset);
     }
-    let updated = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find_one_and_update(
-            doc! {"_id": &current.id, "user_id": &current.user_id,
-            "destroyed_at": bson::Bson::Null},
-            update,
+    let updated = db.collection::<AssistantAgent>(AGENTS).find_one_and_update(
+        doc! {"_id": &current.id, "user_id": &current.user_id, "destroyed_at": bson::Bson::Null}, patch,
+    ).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(not_found)?;
+    let model_changed = current.model != updated.model;
+    let mode_changed = current.access_mode_override != updated.access_mode_override;
+    let mode_narrows = if owner.user_type.is_org() {
+        // An org agent inherits each acting person's workspace mode. Only
+        // changes that cannot widen access for any member are Narrowing.
+        match (current.access_mode_override, updated.access_mode_override) {
+            (Some(before), Some(after)) => {
+                assistant_settings_service::access_mode_narrows(before, after)
+            }
+            (None, Some(AccessMode::AskEveryTime)) | (Some(AccessMode::Autopilot), None) => true,
+            _ => false,
+        }
+    } else {
+        let workspace =
+            assistant_settings_service::get_in_session(db, session, &current.user_id).await?;
+        assistant_settings_service::access_mode_narrows(
+            current
+                .access_mode_override
+                .unwrap_or(workspace.access_mode),
+            updated
+                .access_mode_override
+                .unwrap_or(workspace.access_mode),
         )
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(not_found)?;
-    if updated.model != current.model {
-        let _ = audit_service::log_actor_event(
-            db.clone(),
-            actor,
-            "assistant_model_changed",
-            Some(serde_json::json!({"scope": "agent", "agent_id": updated.id,
-                "owner_id": updated.user_id, "old": current.model, "new": updated.model})),
-        )
-        .await;
+    };
+    let tier = if !model_changed && mode_narrows {
+        AuditTier::Narrowing
+    } else {
+        AuditTier::Standard
+    };
+    let principal = match &actor.api_key_id {
+        Some(id) => AuditPrincipal::ApiKey {
+            id: id.clone(),
+            owner_id: actor.user_id.clone(),
+        },
+        None => AuditPrincipal::Person {
+            id: actor.user_id.clone(),
+        },
+    };
+    let audit_owner = if owner.user_type.is_org() {
+        AuditOwner::Org { id: owner.id }
+    } else {
+        AuditOwner::Person { id: owner.id }
+    };
+    for (index, (required, action)) in [
+        (model_changed, "assistant_model_changed"),
+        (mode_changed, "assistant_access_mode_changed"),
+        (
+            actor.user_id != current.user_id,
+            "assistant_org_agent_changed",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if required {
+            let event = AuditEvent {
+                operation_id: change.operations[index].to_string(),
+                stage: AuditStage::Committed,
+                principal: principal.clone(),
+                owner: audit_owner.clone(),
+                action,
+                target_id: Some(updated.id.clone()),
+            };
+            if action == "assistant_access_mode_changed" {
+                let event = event.with_detail(AuditDetail::AccessModeChange {
+                    scope: AccessModeScope::Agent,
+                    old: current.access_mode_override,
+                    new: updated.access_mode_override,
+                });
+                audit_outbox_service::enqueue_admitted_in_session(
+                    db,
+                    session,
+                    change.runtime,
+                    tier,
+                    &change.events[index],
+                    &event,
+                )
+                .await?;
+                continue;
+            }
+            audit_outbox_service::enqueue_admitted_in_session(
+                db,
+                session,
+                change.runtime,
+                tier,
+                &change.events[index],
+                &event,
+            )
+            .await?;
+        }
     }
-    super::assistant_settings_service::audit_access_mode(
-        db,
-        actor,
-        Some(&updated.id),
-        current.access_mode_override,
-        updated.access_mode_override,
-    )
-    .await;
-    super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
-    if current.access_mode_override != updated.access_mode_override {
-        super::assistant_acknowledgement_service::retire_full_access_confirmations(
-            db,
-            None,
-            Some(&updated.id),
-        )
-        .await?;
-    }
-    Ok(updated)
+    Ok((current, updated))
 }
 
 /// A change to a specialist's grants. Merged inside the transaction against
@@ -2723,4 +2868,436 @@ async fn audit(db: &Database, owner: &str, event: &str, data: serde_json::Value)
         Some(data),
     )
     .await;
+}
+
+#[cfg(test)]
+mod w8_policy_tests {
+    use super::*;
+    use crate::{
+        models::{
+            assistant_settings::AccessMode as PolicyMode,
+            audit_outbox::{
+                AccessModeScope, AuditDetail, AuditOwner, AuditPrincipal,
+                PENDING_COLLECTION_NAME as PENDING, PendingAuditEvent,
+            },
+            org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole},
+            user::{COLLECTION_NAME as USERS, UserType},
+        },
+        services::audit_runtime::{AuditRuntime, transaction},
+        test_utils::{test_auth_user, test_membership, test_user},
+    };
+
+    async fn events(db: &Database, id: &str) -> Vec<PendingAuditEvent> {
+        db.collection(PENDING)
+            .find(doc! {"event.target_id": id})
+            .sort(doc! {"order": 1})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn w8_assist_agent_policy_abort_rechecks_membership_and_keeps_safe_org_attribution() {
+        let f = super::super::org_agent_tests::Fixture::new("w8_assist_agent_policy").await;
+        let (agent, thread) = f.create().await;
+        let actor = audit_service::AuditActor::from_auth_user(&test_auth_user(&f.member));
+        let change = AgentPolicyChange {
+            db: &f.state.db,
+            runtime: &f.state.audit_runtime,
+            actor: &actor,
+            id: &agent.id,
+            policy: AgentPolicy {
+                model: Some("nyxagent/private_model_label"),
+                access_mode_override: Some(Some(PolicyMode::AskEveryTime)),
+            },
+            at: Utc::now(),
+            events: std::array::from_fn(|_| Uuid::new_v4()),
+            operations: std::array::from_fn(|_| Uuid::new_v4()),
+        };
+        let aborted = transaction::run(&f.state.db, &change, |session, change| {
+            Box::pin(async move {
+                set_agent_policy_in_session(session, change).await?;
+                Err::<(), _>(AppError::Conflict("abort after policy audit".into()))
+            })
+        })
+        .await;
+        assert!(matches!(aborted, Err(AppError::Conflict(_))));
+        assert!(events(&f.state.db, &agent.id).await.is_empty());
+        assert_eq!(
+            maintained_agent(&f.state.db, &f.member, &agent.id)
+                .await
+                .unwrap()
+                .model,
+            agent.model
+        );
+        f.revoke(&f.member).await;
+        let retry = transaction::run(&f.state.db, &change, |session, change| {
+            Box::pin(set_agent_policy_in_session(session, change))
+        })
+        .await;
+        assert!(matches!(retry, Err(AppError::NotFound(_))));
+        assert!(events(&f.state.db, &agent.id).await.is_empty());
+        f.state
+            .db
+            .collection::<bson::Document>(MEMBERSHIPS)
+            .update_one(
+                doc! {"org_user_id": &f.org, "member_user_id": &f.member},
+                doc! {"$set": {"revoked_at": bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        transaction::run(&f.state.db, &change, |session, change| {
+            Box::pin(set_agent_policy_in_session(session, change))
+        })
+        .await
+        .unwrap();
+        let rows = events(&f.state.db, &agent.id).await;
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(
+                row.event.principal,
+                AuditPrincipal::Person {
+                    id: f.member.clone()
+                }
+            );
+            assert_eq!(row.event.owner, AuditOwner::Org { id: f.org.clone() });
+            assert_eq!(
+                row.event.detail,
+                (row.event.action == "assistant_access_mode_changed").then_some(
+                    AuditDetail::AccessModeChange {
+                        scope: AccessModeScope::Agent,
+                        old: agent.access_mode_override,
+                        new: Some(PolicyMode::AskEveryTime),
+                    }
+                )
+            );
+            let mut safe = bson::to_document(&row.event).unwrap();
+            safe.remove("detail");
+            assert_eq!(safe.len(), 6);
+        }
+        assert!(!format!("{rows:?}").contains("private_model_label"));
+        let viewer = audit_service::AuditActor::from_auth_user(&test_auth_user(&f.viewer));
+        assert!(matches!(
+            set_agent_policy(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &viewer,
+                &agent.id,
+                AgentPolicy {
+                    model: Some("nyxagent/fast"),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let key = f
+            .state
+            .db
+            .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &thread.credential_api_key_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let key_actor = audit_service::AuditActor::from_auth_user(&auth);
+        set_agent_policy(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &key_actor,
+            &agent.id,
+            AgentPolicy {
+                model: Some("nyxagent/fast"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let rows = events(&f.state.db, &agent.id).await;
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows[3].event.principal,
+            AuditPrincipal::ApiKey {
+                id: key.id,
+                owner_id: key.user_id,
+            }
+        );
+        let org2 = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(&org2, UserType::Org))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(MEMBERSHIPS)
+            .insert_one(test_membership(&org2, &f.admin, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        let mut other = agent.clone();
+        other.id = Uuid::new_v4().to_string();
+        other.user_id = org2.clone();
+        f.state
+            .db
+            .collection::<AssistantAgent>(AGENTS)
+            .insert_one(&other)
+            .await
+            .unwrap();
+        let admin = audit_service::AuditActor::from_auth_user(&test_auth_user(&f.admin));
+        set_agent_policy(
+            &f.state.db,
+            &f.state.audit_runtime,
+            &admin,
+            &other.id,
+            AgentPolicy {
+                model: Some("nyxagent/fast"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let other_rows = events(&f.state.db, &other.id).await;
+        assert_eq!(other_rows.len(), 2);
+        assert!(other_rows.iter().all(|row| row.event.owner
+            == AuditOwner::Org { id: org2.clone() }
+            && row.event.principal
+                == AuditPrincipal::Person {
+                    id: f.admin.clone()
+                }));
+        assert!(
+            set_agent_policy(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &actor,
+                &other.id,
+                AgentPolicy {
+                    model: Some("nyxagent/fast"),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        f.state
+            .db
+            .collection::<bson::Document>(USERS)
+            .update_one(doc! {"_id": &org2}, doc! {"$set": {"is_active": false}})
+            .await
+            .unwrap();
+        assert!(
+            set_agent_policy(
+                &f.state.db,
+                &f.state.audit_runtime,
+                &admin,
+                &other.id,
+                AgentPolicy {
+                    model: Some("nyxagent/fast"),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn w8_assist_agent_policy_org_inheritance_cannot_widen_any_member() {
+        let f = super::super::org_agent_tests::Fixture::new("w8_assist_org_policy_c2").await;
+        let (agent, _) = f.create().await;
+        // One member requires approval for all writes, while the other uses
+        // Full access. The org's own settings are not either person's policy.
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.admin},
+                doc! {"$set": {"access_mode": "ask_every_time"}},
+            )
+            .await
+            .unwrap();
+        let actor = audit_service::AuditActor::from_auth_user(&test_auth_user(&f.member));
+        let runtime = AuditRuntime::new(Default::default(), true);
+        let state = super::super::audit_state_service::load(&f.state.db)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME)
+            .insert_one(doc! {"_id": &state.id, "divergence": {
+                "seq": 0_i64, "local_hash": "a", "witnessed_hash": "b",
+            }})
+            .await
+            .unwrap();
+        let mut event_count = 0;
+        for (before, after, narrows) in [
+            (None, Some(PolicyMode::Nyxmode), false),
+            (Some(PolicyMode::Nyxmode), None, false),
+            (Some(PolicyMode::AskEveryTime), None, false),
+            (Some(PolicyMode::Autopilot), None, true),
+            (None, Some(PolicyMode::AskEveryTime), true),
+            (Some(PolicyMode::Autopilot), Some(PolicyMode::Nyxmode), true),
+        ] {
+            f.state
+                .db
+                .collection::<AssistantAgent>(AGENTS)
+                .update_one(
+                    doc! {"_id": &agent.id},
+                    doc! {"$set": {"access_mode_override": bson::to_bson(&before).unwrap()}},
+                )
+                .await
+                .unwrap();
+            let result = set_agent_policy(
+                &f.state.db,
+                &runtime,
+                &actor,
+                &agent.id,
+                AgentPolicy {
+                    access_mode_override: Some(after),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let expected = if narrows {
+                assert_eq!(result.unwrap().access_mode_override, after);
+                event_count += 2;
+                after
+            } else {
+                assert!(matches!(result, Err(AppError::AuditWitnessDiverged)));
+                before
+            };
+            assert_eq!(
+                maintained_agent(&f.state.db, &f.member, &agent.id)
+                    .await
+                    .unwrap()
+                    .access_mode_override,
+                expected
+            );
+            let rows = events(&f.state.db, &agent.id).await;
+            assert_eq!(rows.len(), event_count);
+            if narrows {
+                let mode = rows
+                    .iter()
+                    .rev()
+                    .find(|row| row.event.action == "assistant_access_mode_changed")
+                    .unwrap();
+                assert_eq!(
+                    mode.event.detail,
+                    Some(AuditDetail::AccessModeChange {
+                        scope: AccessModeScope::Agent,
+                        old: before,
+                        new: after,
+                    })
+                );
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn w8_assist_agent_policy_c2_inheritance_and_mixed_model_patch() {
+        let f = super::super::assistant_authority_tests::orchestrator_fixture("w8_assist_agent_c2")
+            .await;
+        let actor = audit_service::AuditActor::from_auth_user(&test_auth_user(&f.owner));
+        let runtime = AuditRuntime::new(Default::default(), true);
+        f.state
+            .db
+            .collection::<crate::models::assistant_settings::AssistantSettings>(
+                crate::models::assistant_settings::COLLECTION_NAME,
+            )
+            .replace_one(
+                doc! {"_id": &f.owner},
+                crate::models::assistant_settings::AssistantSettings::defaults(&f.owner),
+            )
+            .upsert(true)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .update_one(
+                doc! {"singleton": true},
+                doc! {"$set": {
+                    "pending_count": 100_000_i64, "next_order": 100_000_i64,
+                    "oldest_pending_at": bson::DateTime::now(),
+                }},
+            )
+            .await
+            .unwrap();
+        let policy = |mode| AgentPolicy {
+            model: None,
+            access_mode_override: Some(mode),
+        };
+        set_agent_policy(
+            &f.state.db,
+            &runtime,
+            &actor,
+            &f.chat.agent_id,
+            policy(Some(PolicyMode::AskEveryTime)),
+        )
+        .await
+        .unwrap();
+        // Clearing the override inherits the more permissive workspace mode.
+        assert!(matches!(
+            set_agent_policy(
+                &f.state.db,
+                &runtime,
+                &actor,
+                &f.chat.agent_id,
+                policy(None)
+            )
+            .await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        let current = maintained_agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+        assert_eq!(current.access_mode_override, Some(PolicyMode::AskEveryTime));
+        // Seed a more permissive override to prove a model edit keeps a mixed patch Standard.
+        f.state
+            .db
+            .collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &f.chat.agent_id},
+                doc! {"$set": {"access_mode_override": "autopilot"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            set_agent_policy(
+                &f.state.db,
+                &runtime,
+                &actor,
+                &f.chat.agent_id,
+                AgentPolicy {
+                    model: Some("nyxagent/fast"),
+                    access_mode_override: Some(Some(PolicyMode::AskEveryTime)),
+                }
+            )
+            .await,
+            Err(AppError::AuditAdmissionClosed { .. })
+        ));
+        set_agent_policy(
+            &f.state.db,
+            &runtime,
+            &actor,
+            &f.chat.agent_id,
+            policy(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            maintained_agent(&f.state.db, &f.owner, &f.chat.agent_id)
+                .await
+                .unwrap()
+                .access_mode_override,
+            None
+        );
+        f.state.db.drop().await.unwrap();
+    }
 }

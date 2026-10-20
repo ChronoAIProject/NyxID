@@ -1036,12 +1036,25 @@ async fn owners_set_hand_off_limits_and_nyxbot_follows_up_on_group_work() {
         },
     ] {
         assert!(matches!(
-            settings::update(&state.db, OWNER, update).await,
+            settings::update(
+                &state.db,
+                &state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: OWNER.to_owned()
+                },
+                OWNER,
+                update
+            )
+            .await,
             Err(AppError::ValidationError(_))
         ));
     }
     settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         settings::Update {
             max_group_handoffs: Some(2),
@@ -1072,6 +1085,10 @@ async fn owners_set_hand_off_limits_and_nyxbot_follows_up_on_group_work() {
     // 0 turns hand-offs off entirely.
     settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         settings::Update {
             max_group_handoffs: Some(0),

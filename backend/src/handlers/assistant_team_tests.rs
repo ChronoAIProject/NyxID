@@ -1050,6 +1050,10 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     assert_eq!(level().await, None);
     settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         settings::Update {
             max_live_subagents: Some(1),
@@ -1082,7 +1086,19 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
             ..Default::default()
         },
     ] {
-        assert!(settings::update(&state.db, OWNER, invalid).await.is_err());
+        assert!(
+            settings::update(
+                &state.db,
+                &state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::Person {
+                    id: OWNER.to_owned()
+                },
+                OWNER,
+                invalid
+            )
+            .await
+            .is_err()
+        );
     }
     server.abort();
 }
@@ -3160,6 +3176,10 @@ async fn skill_outbox_rechecks_revoked_org_source_and_retains_decision_until_res
 async fn set_access_mode(state: &AppState, mode: crate::models::assistant_settings::AccessMode) {
     crate::services::assistant_settings_service::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: OWNER.to_owned(),
+        },
         OWNER,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(mode),
@@ -3480,6 +3500,7 @@ async fn agent_model_and_access_mode_override_round_trip_through_patch() {
 #[tokio::test]
 async fn nyxbot_model_change_follows_the_access_mode() {
     use crate::models::assistant_settings::AccessMode;
+    use crate::models::audit_outbox::{AuditOwner, AuditPrincipal, AuditStage, SafeAuditEvent};
     let (state, _, server) = setup("team_model_tool").await;
     let (_, chat) = orchestrator(&state).await;
     spawn(
@@ -3523,22 +3544,55 @@ async fn nyxbot_model_change_follows_the_access_mode() {
     let (value, error) = execute_tool(&state, &chat, "nyxid__update_subagent", &approved).await;
     assert!(!error, "{value}");
     assert_eq!(value["model"], "nyxagent/research");
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    assert_eq!(agent.model, "nyxagent/research");
+    while crate::services::audit_outbox_service::materialize_one(&state.db, &[2; 32])
+        .await
+        .unwrap()
+    {}
     let audit = state
         .db
         .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {"event_type": "assistant_model_changed", "event_data.scope": "agent"})
+        .find_one(doc! {"event_type": "assistant_model_changed", "event_data.target_id": &agent.id})
         .await
         .unwrap()
         .expect("model audit");
     assert_eq!(audit.get_str("api_key_id").unwrap(), chat.api_key_id);
+    assert_eq!(audit.get("user_id"), Some(&bson::Bson::Null));
+    assert!(!audit.contains_key("api_key_name"));
+    let data = audit.get_document("event_data").unwrap();
+    let event: SafeAuditEvent = bson::from_document(data.clone()).unwrap();
+    assert_eq!(
+        event.principal,
+        AuditPrincipal::ApiKey {
+            id: chat.api_key_id.clone(),
+            owner_id: OWNER.into(),
+        }
+    );
+    assert_eq!(event.owner, AuditOwner::Person { id: OWNER.into() });
+    assert_eq!(event.stage, AuditStage::Committed);
+    assert_eq!(event.target_id.as_deref(), Some(agent.id.as_str()));
+    assert!(event.detail.is_none());
+    assert_eq!(data.len(), 6);
+    assert!(!format!("{data:?}").contains("nyxagent/research"));
     server.abort();
 }
 
-/// The owner's settings PUT audits a mode change with the actor and wire
-/// values, and writes nothing when the mode is unchanged.
+/// The owner's settings PUT audits a mode change with the actor and typed
+/// before/after values, and writes no mode event when the mode is unchanged.
 #[tokio::test]
 async fn owner_settings_put_audits_access_mode_changes() {
+    use crate::models::{
+        assistant_settings::AccessMode,
+        audit_outbox::{
+            AccessModeScope, AuditDetail, AuditOwner, AuditPrincipal, AuditStage, SafeAuditEvent,
+        },
+    };
     let (state, _, server) = setup("team_settings_mode_audit").await;
+    assert_eq!(
+        settings::get(&state.db, OWNER).await.unwrap().access_mode,
+        AccessMode::Autopilot
+    );
     let put = |body: Value| {
         update_settings(
             State(state.clone()),
@@ -3552,6 +3606,10 @@ async fn owner_settings_put_audits_access_mode_changes() {
         "ask_every_time"
     );
     let _ = put(json!({"timezone": "Asia/Singapore"})).await.unwrap();
+    while crate::services::audit_outbox_service::materialize_one(&state.db, &[2; 32])
+        .await
+        .unwrap()
+    {}
     let logs = state
         .db
         .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
@@ -3565,10 +3623,23 @@ async fn owner_settings_put_audits_access_mode_changes() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get_str("user_id").unwrap(), OWNER);
     let data = rows[0].get_document("event_data").unwrap();
-    assert_eq!(data.get_str("scope").unwrap(), "workspace");
-    // The team fixture starts in Full access.
-    assert_eq!(data.get_str("old").unwrap(), "autopilot");
-    assert_eq!(data.get_str("new").unwrap(), "ask_every_time");
+    let event: SafeAuditEvent = bson::from_document(data.clone()).unwrap();
+    assert_eq!(event.principal, AuditPrincipal::Person { id: OWNER.into() });
+    assert_eq!(event.owner, AuditOwner::Person { id: OWNER.into() });
+    assert_eq!(event.stage, AuditStage::Committed);
+    assert_eq!(event.target_id.as_deref(), Some(OWNER));
+    assert_eq!(
+        event.detail,
+        Some(AuditDetail::AccessModeChange {
+            scope: AccessModeScope::Workspace,
+            old: Some(AccessMode::Autopilot),
+            new: Some(AccessMode::AskEveryTime),
+        })
+    );
+    let mut safe = data.clone();
+    safe.remove("detail");
+    assert_eq!(safe.len(), 6);
+    assert!(!format!("{data:?}").contains("Asia/Singapore"));
     server.abort();
 }
 
@@ -3820,4 +3891,87 @@ async fn routed_request_notice_is_not_sent_after_stop_or_replacement() {
     .expect("NyxBot woken with the fenced request");
     idle_row(&state, &orchestrator.id).await;
     server.abort();
+}
+
+#[tokio::test]
+async fn w8_assist_settings_http_and_nyxbot_share_transactional_audit() {
+    use crate::models::{
+        audit_outbox::{AuditPrincipal, PENDING_COLLECTION_NAME, PendingAuditEvent},
+        audit_state::COLLECTION_NAME as AUDIT_STATE,
+    };
+    use futures::TryStreamExt;
+    let (state, _, server) = setup("w8_assist_settings_http").await;
+    let body: SettingsRequest = serde_json::from_value(json!({
+        "timezone": "Asia/Singapore", "access_mode": "ask_every_time",
+    }))
+    .unwrap();
+    let Json(saved) = update_settings(State(state.clone()), test_auth_user(OWNER), Json(body))
+        .await
+        .unwrap();
+    assert_eq!(saved.timezone.as_deref(), Some("Asia/Singapore"));
+    let (_, chat) = orchestrator(&state).await;
+    let (result, refused) = dispatch_settings(
+        &state,
+        &chat,
+        "update_settings",
+        &json!({"max_auto_continuations": 1}),
+    )
+    .await
+    .unwrap();
+    assert!(!refused);
+    assert_eq!(result["max_auto_continuations"], 1);
+    let rows: Vec<PendingAuditEvent> = state.db.collection(PENDING_COLLECTION_NAME)
+        .find(doc! {"event.action": {"$in": ["assistant_settings_updated", "assistant_access_mode_changed"]}})
+        .sort(doc! {"order": 1}).await.unwrap().try_collect().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0].event.principal,
+        AuditPrincipal::Person { id: OWNER.into() }
+    );
+    assert_eq!(
+        rows[1].event.principal,
+        AuditPrincipal::Person { id: OWNER.into() }
+    );
+    assert_eq!(
+        rows[2].event.principal,
+        AuditPrincipal::ApiKey {
+            id: chat.api_key_id,
+            owner_id: OWNER.into(),
+        }
+    );
+    assert!(!format!("{rows:?}").contains("Asia/Singapore"));
+    state
+        .db
+        .collection::<mongodb::bson::Document>(AUDIT_STATE)
+        .update_one(
+            doc! {"singleton": true},
+            doc! {"$set": {
+                "witness_enrolled": true, "pending_count": 100_000_i64, "next_order": 100_000_i64,
+            }},
+        )
+        .await
+        .unwrap();
+    let previous = settings::get(&state.db, OWNER).await.unwrap();
+    let denied = update_settings(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(serde_json::from_value(json!({"access_mode": "autopilot"})).unwrap()),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::AuditAdmissionClosed { .. })));
+    assert_eq!(
+        settings::get(&state.db, OWNER).await.unwrap().access_mode,
+        previous.access_mode
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(PENDING_COLLECTION_NAME)
+            .count_documents(doc! {"event.action": "assistant_settings_updated"})
+            .await
+            .unwrap(),
+        2
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
 }

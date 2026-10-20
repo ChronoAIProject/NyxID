@@ -529,6 +529,10 @@ async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
     let f = fixture("chat_mcp_account").await;
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -2227,6 +2231,10 @@ async fn webhook_native_changes_keep_owner_cards_in_auto() {
     chat.confirmation_policy = Some(ConfirmationPolicy::Changes);
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -2603,6 +2611,10 @@ async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
     .unwrap();
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -3191,6 +3203,10 @@ async fn specialist_machine_update_dispatch_auto_preserves_one_owner_card() {
         .unwrap();
         crate::services::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -3294,6 +3310,10 @@ async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
         .await;
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -4038,6 +4058,10 @@ async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
     let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":0,"all_operations":true}});
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -4086,6 +4110,10 @@ async fn specialist_request_tool_is_denied_audited_and_routed_when_allowed() {
     );
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -4130,6 +4158,10 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     .await;
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -4176,6 +4208,10 @@ async fn specialist_service_card_request_denied_audited_and_routed() {
     assert_eq!(audit_data.get_str("decision").unwrap(), "denied");
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -4214,6 +4250,10 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     .await;
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::Denied),
@@ -4242,6 +4282,10 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     assert!(f.state.db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc! {"event_type":"assistant_access_request_denied","event_data.scope":"connect_service"}).await.unwrap().is_some());
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             specialist_access_requests: Some(SpecialistAccessRequests::RoutedToNyxbot),
@@ -4383,6 +4427,10 @@ async fn s9_specialist_guest_disabled_pin_denial() {
 async fn set_access_mode(f: &Fixture, mode: crate::models::assistant_settings::AccessMode) {
     crate::services::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         crate::services::assistant_settings_service::Update {
             access_mode: Some(mode),

@@ -1228,7 +1228,17 @@ fn dispatch<'a>(
         "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
         | "run_schedule_now" => Box::pin(async move {
             Ok((
-                super::assistant_schedules::dispatch(state, &chat.user_id, name, args).await?,
+                super::assistant_schedules::dispatch(
+                    state,
+                    &chat.user_id,
+                    &crate::models::audit_outbox::AuditPrincipal::ApiKey {
+                        id: chat.api_key_id.clone(),
+                        owner_id: chat.user_id.clone(),
+                    },
+                    name,
+                    args,
+                )
+                .await?,
                 false,
             ))
         }),
@@ -1903,6 +1913,7 @@ async fn dispatch_agent_settings(
             if let Some(model) = args["model"].as_str() {
                 agent = team::set_agent_policy(
                     db,
+                    &state.audit_runtime,
                     &crate::services::audit_service::AuditActor {
                         user_id: owner.into(),
                         ip_address: None,
@@ -2333,6 +2344,11 @@ async fn dispatch_settings(
             // never relaxes its own approvals.
             let after = settings::update(
                 &state.db,
+                &state.audit_runtime,
+                &crate::models::audit_outbox::AuditPrincipal::ApiKey {
+                    id: chat.api_key_id.clone(),
+                    owner_id: chat.user_id.clone(),
+                },
                 &chat.user_id,
                 settings::Update {
                     max_auto_continuations: Some(maximum),
@@ -2340,7 +2356,6 @@ async fn dispatch_settings(
                 },
             )
             .await?;
-            settings::audit(&state.db, &chat.user_id, &before, &after).await;
             (
                 serde_json::to_value(SettingsResponse::from(after))
                     .map_err(|_| AppError::Internal("Settings response failed".into()))?,
@@ -2885,6 +2900,7 @@ pub async fn update_agent(
     if body.model.is_some() || body.access_mode_override.is_some() {
         agent = team::set_agent_policy(
             &state.db,
+            &state.audit_runtime,
             &crate::services::audit_service::AuditActor::from_auth_user(&auth),
             &agent.id,
             team::AgentPolicy {
@@ -3133,9 +3149,10 @@ pub async fn update_settings(
     if body.voice.is_some() {
         crate::services::assistant_voice::require_enabled(&state.db, &owner).await?;
     }
-    let before = settings::get(&state.db, &owner).await?;
     let after = settings::update(
         &state.db,
+        &state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: owner.clone() },
         &owner,
         settings::Update {
             voice: body.voice.map(|v| v.map(Into::into)),
@@ -3154,15 +3171,6 @@ pub async fn update_settings(
         },
     )
     .await?;
-    settings::audit(&state.db, &owner, &before, &after).await;
-    settings::audit_access_mode(
-        &state.db,
-        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
-        None,
-        Some(before.access_mode),
-        Some(after.access_mode),
-    )
-    .await;
     Ok(Json(after.into()))
 }
 

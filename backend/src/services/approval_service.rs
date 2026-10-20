@@ -3351,6 +3351,7 @@ mod tests {
         };
         crate::services::assistant_team_service::set_agent_policy(
             &f.state.db,
+            &f.state.audit_runtime,
             &actor,
             &f.chat.agent_id,
             crate::services::assistant_team_service::AgentPolicy {
@@ -3362,6 +3363,10 @@ mod tests {
         .unwrap();
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 access_mode: Some(AccessMode::Autopilot),
@@ -3471,6 +3476,7 @@ mod tests {
         );
         crate::services::assistant_team_service::set_agent_policy(
             &f.state.db,
+            &f.state.audit_runtime,
             &actor,
             &f.chat.agent_id,
             crate::services::assistant_team_service::AgentPolicy {
@@ -3511,6 +3517,10 @@ mod tests {
         .await;
         crate::services::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(AccessMode::Autopilot),
@@ -3579,6 +3589,10 @@ mod tests {
         assert_eq!(queries.iter().filter(|q| q.as_str() == GRANTS).count(), 1);
         crate::services::assistant_settings_service::update(
             &db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(AccessMode::Nyxmode),
@@ -3612,6 +3626,10 @@ mod tests {
             .unwrap();
         crate::services::assistant_settings_service::update(
             &db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             crate::services::assistant_settings_service::Update {
                 access_mode: Some(AccessMode::Autopilot),

@@ -1981,6 +1981,10 @@ async fn org_agent_nyxbot_widening_card_belongs_to_requesting_member() {
     .unwrap();
     super::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
         &f.member,
         super::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -2136,6 +2140,10 @@ async fn org_agent_skills_card_pin_read_and_live_access() {
         .unwrap();
     super::assistant_settings_service::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.member.clone(),
+        },
         &f.member,
         super::assistant_settings_service::Update {
             access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
@@ -2414,9 +2422,14 @@ async fn org_specialist_access_request_is_denied_by_default_and_routed_when_allo
     use crate::models::assistant_settings::SpecialistAccessRequests;
     let f = Fixture::new("org_specialist_strict_denial").await;
     let (agent, _) = f.create().await;
+    let principal = crate::models::audit_outbox::AuditPrincipal::Person {
+        id: f.member.clone(),
+    };
     let set = |mode: SpecialistAccessRequests| {
         super::assistant_settings_service::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &principal,
             &f.member,
             super::assistant_settings_service::Update {
                 specialist_access_requests: Some(mode),

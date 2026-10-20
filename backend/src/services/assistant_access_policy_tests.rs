@@ -498,7 +498,17 @@ async fn direct_specialist_work_gets_missing_access_without_card_or_nyxbot_notic
         0
     );
     // Denied or routed, the owner's setting changes nothing for direct work.
-    settings::update(db, &f.owner, denied_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        denied_mode(),
+    )
+    .await
+    .unwrap();
     let (value, card) = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
@@ -514,7 +524,17 @@ async fn involved_work_keeps_denied_notice_to_the_exact_assigning_thread_and_rou
     let db = &f.state.db;
     assert!(f.chat.involved());
     assert_eq!(f.chat.report_to.as_deref(), Some(f.nyxbot_thread.as_str()));
-    settings::update(db, &f.owner, denied_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        denied_mode(),
+    )
+    .await
+    .unwrap();
     let service = connected(db, &f.owner, "github", "https://api.github.com").await;
     let (value, card) = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
@@ -543,7 +563,17 @@ async fn involved_work_keeps_denied_notice_to_the_exact_assigning_thread_and_rou
     assert_eq!(denial_notices(db, &f.owner, &other.id).await, 1);
     assert_eq!(denial_notices(db, &f.owner, &f.nyxbot_thread).await, 1);
     // Routed mode: the card stores the exact routing and NyxBot may decide it.
-    settings::update(db, &f.owner, routed_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        routed_mode(),
+    )
+    .await
+    .unwrap();
     let (value, card) = acks::service_gate(db, &chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
@@ -731,7 +761,17 @@ async fn group_work_with_nyxbot_routes_to_its_home_and_rechecks_membership() {
         Some(home.as_str())
     );
     // A denied-mode notice for group work goes to NyxBot's home.
-    settings::update(db, &f.owner, denied_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        denied_mode(),
+    )
+    .await
+    .unwrap();
     let other = connected(db, &f.owner, "docs", "https://docs.example").await;
     let (value, _) = acks::service_gate(db, &chat, &other, "docs", "Docs", false)
         .await
@@ -870,7 +910,17 @@ async fn allowed_skill_shortcut_applies_only_within_the_same_routing() {
 async fn requests_and_notices_need_the_exact_live_turn_and_snapshot() {
     let f = fixture("policy_turn_fences").await;
     let db = &f.state.db;
-    settings::update(db, &f.owner, denied_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        denied_mode(),
+    )
+    .await
+    .unwrap();
     let conversations =
         db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME);
     let stale = f.chat.clone();
@@ -904,12 +954,32 @@ async fn requests_and_notices_need_the_exact_live_turn_and_snapshot() {
         ),
     ] {
         set(change).await;
-        settings::update(db, &f.owner, routed_mode()).await.unwrap();
+        settings::update(
+            db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            routed_mode(),
+        )
+        .await
+        .unwrap();
         let error = acks::request_tracked(db, &stale, service_request(&service, "service", None))
             .await
             .unwrap_err();
         assert!(matches!(error, AppError::Conflict(_)), "{name}: {error}");
-        settings::update(db, &f.owner, denied_mode()).await.unwrap();
+        settings::update(
+            db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
+            &f.owner,
+            denied_mode(),
+        )
+        .await
+        .unwrap();
         acks::audit_access_request_denied(db, &stale, Some(&service), "service").await;
         assert_eq!(
             denial_notices(db, &f.owner, &f.nyxbot_thread).await,
@@ -922,7 +992,17 @@ async fn requests_and_notices_need_the_exact_live_turn_and_snapshot() {
     set(doc! {"active_turn.report_to": &f.nyxbot_thread}).await;
     acks::audit_access_request_denied(db, &stale, Some(&service), "service").await;
     assert_eq!(denial_notices(db, &f.owner, &f.nyxbot_thread).await, 1);
-    settings::update(db, &f.owner, routed_mode()).await.unwrap();
+    settings::update(
+        db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
+        &f.owner,
+        routed_mode(),
+    )
+    .await
+    .unwrap();
     let (_, created) =
         acks::request_tracked(db, &stale, service_request(&service, "service", None))
             .await

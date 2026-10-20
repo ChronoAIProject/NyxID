@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 async fn set_mode(f: &Fixture, mode: AccessMode) {
     settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             access_mode: Some(mode),
@@ -364,6 +368,10 @@ async fn legacy_settings_row_migrates_on_any_write() {
     );
     let saved = settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             timezone: Some("Asia/Singapore".into()),
@@ -383,6 +391,10 @@ async fn legacy_settings_row_migrates_on_any_write() {
     // The legacy switch is a view of the mode: back on leaves Full access.
     let saved = settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             skip_destructive_confirmation: Some(false),
@@ -397,6 +409,10 @@ async fn legacy_settings_row_migrates_on_any_write() {
     set_mode(&f, AccessMode::AskEveryTime).await;
     let saved = settings::update(
         &f.state.db,
+        &f.state.audit_runtime,
+        &crate::models::audit_outbox::AuditPrincipal::Person {
+            id: f.owner.clone(),
+        },
         &f.owner,
         settings::Update {
             skip_destructive_confirmation: Some(false),
@@ -466,10 +482,11 @@ async fn agent_override_governs_and_resolves_for_organization_agents() {
     f.state.db.drop().await.unwrap();
 }
 
-/// Mode changes are audited for the workspace and for agent overrides,
-/// with wire values; the agent's model change is audited too.
+/// Mode changes are audited for the workspace and for agent overrides;
+/// the agent's model change is audited too.
 #[tokio::test]
 async fn access_mode_and_model_changes_are_audited() {
+    use crate::models::audit_outbox::{AccessModeScope, AuditDetail};
     let f = orchestrator_fixture("mode_audits").await;
     let actor = super::audit_service::AuditActor {
         user_id: f.owner.clone(),
@@ -478,20 +495,12 @@ async fn access_mode_and_model_changes_are_audited() {
         api_key_id: None,
         api_key_name: None,
     };
-    let before = settings::get(&f.state.db, &f.owner).await.unwrap();
     set_mode(&f, AccessMode::AskEveryTime).await;
     let after = settings::get(&f.state.db, &f.owner).await.unwrap();
-    settings::audit_access_mode(
-        &f.state.db,
-        &actor,
-        None,
-        Some(before.access_mode),
-        Some(after.access_mode),
-    )
-    .await;
-    settings::audit(&f.state.db, &f.owner, &before, &after).await;
+    assert_eq!(after.access_mode, AccessMode::AskEveryTime);
     let updated = super::assistant_team_service::set_agent_policy(
         &f.state.db,
+        &f.state.audit_runtime,
         &actor,
         &f.chat.agent_id,
         super::assistant_team_service::AgentPolicy {
@@ -505,6 +514,7 @@ async fn access_mode_and_model_changes_are_audited() {
     assert_eq!(updated.access_mode_override, Some(AccessMode::Autopilot));
     let cleared = super::assistant_team_service::set_agent_policy(
         &f.state.db,
+        &f.state.audit_runtime,
         &actor,
         &f.chat.agent_id,
         super::assistant_team_service::AgentPolicy {
@@ -515,6 +525,21 @@ async fn access_mode_and_model_changes_are_audited() {
     .await
     .unwrap();
     assert_eq!(cleared.access_mode_override, None);
+    let unchanged = super::assistant_team_service::set_agent_policy(
+        &f.state.db,
+        &f.state.audit_runtime,
+        &actor,
+        &f.chat.agent_id,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged.model, "nyxagent/fast");
+    assert_eq!(unchanged.access_mode_override, None);
+    while super::audit_outbox_service::materialize_one(&f.state.db, &[2; 32])
+        .await
+        .unwrap()
+    {}
     let logs = f
         .state
         .db
@@ -532,37 +557,100 @@ async fn access_mode_and_model_changes_are_audited() {
         }
     };
     let workspace = event(
-        doc! {"event_type": "assistant_access_mode_changed", "event_data.scope": "workspace"},
+        doc! {"event_type": "assistant_access_mode_changed", "event_data.target_id": &f.owner},
     )
     .await;
-    assert_eq!(workspace.get_str("old").unwrap(), "nyxmode");
-    assert_eq!(workspace.get_str("new").unwrap(), "ask_every_time");
-    let set = event(
-        doc! {"event_type": "assistant_access_mode_changed", "event_data.scope": "agent",
-        "event_data.new": "autopilot"},
-    )
+    assert_eq!(workspace.get_str("stage").unwrap(), "committed");
+    assert_eq!(
+        bson::from_bson::<AuditDetail>(workspace.get("detail").unwrap().clone()).unwrap(),
+        AuditDetail::AccessModeChange {
+            scope: AccessModeScope::Workspace,
+            old: Some(AccessMode::Nyxmode),
+            new: Some(AccessMode::AskEveryTime),
+        }
+    );
+    assert_eq!(
+        workspace
+            .get_document("principal")
+            .unwrap()
+            .get_str("id")
+            .unwrap(),
+        f.owner
+    );
+    assert_eq!(
+        workspace
+            .get_document("owner")
+            .unwrap()
+            .get_str("id")
+            .unwrap(),
+        f.owner
+    );
+    let agent_mode = event(
+        doc! {"event_type": "assistant_access_mode_changed", "event_data.target_id": &f.chat.agent_id,
+            "event_data.detail.old": bson::Bson::Null},
+    ).await;
+    assert_eq!(
+        agent_mode
+            .get_document("owner")
+            .unwrap()
+            .get_str("id")
+            .unwrap(),
+        f.owner
+    );
+    assert_eq!(agent_mode.get_str("stage").unwrap(), "committed");
+    let mut agent_mode = agent_mode;
+    assert_eq!(
+        bson::from_bson::<AuditDetail>(agent_mode.remove("detail").unwrap()).unwrap(),
+        AuditDetail::AccessModeChange {
+            scope: AccessModeScope::Agent,
+            old: None,
+            new: Some(AccessMode::Autopilot),
+        }
+    );
+    assert_eq!(agent_mode.len(), 6);
+    let inherited = event(doc! {
+        "event_type": "assistant_access_mode_changed",
+        "event_data.target_id": &f.chat.agent_id,
+        "event_data.detail.new": bson::Bson::Null,
+    })
     .await;
-    assert_eq!(set.get_str("agent_id").unwrap(), f.chat.agent_id);
-    assert!(matches!(set.get("old"), Some(bson::Bson::Null)));
-    let cleared = event(
-        doc! {"event_type": "assistant_access_mode_changed", "event_data.scope": "agent",
-        "event_data.old": "autopilot"},
-    )
-    .await;
-    assert!(matches!(cleared.get("new"), Some(bson::Bson::Null)));
+    assert_eq!(
+        bson::from_bson::<AuditDetail>(inherited.get("detail").unwrap().clone()).unwrap(),
+        AuditDetail::AccessModeChange {
+            scope: AccessModeScope::Agent,
+            old: Some(AccessMode::Autopilot),
+            new: None,
+        }
+    );
+    assert_eq!(
+        logs.count_documents(doc! {
+            "event_type": "assistant_access_mode_changed", "event_data.target_id": &f.chat.agent_id,
+        })
+        .await
+        .unwrap(),
+        2
+    );
     let settings_row = event(doc! {"event_type": "assistant_settings_updated"}).await;
+    assert_eq!(settings_row.get_str("target_id").unwrap(), f.owner);
+    assert_eq!(settings_row.len(), 6);
     assert_eq!(
-        settings_row.get_str("access_mode").unwrap(),
-        "ask_every_time"
+        after.specialist_access_requests,
+        crate::models::assistant_settings::SpecialistAccessRequests::Denied
     );
+    let model = event(
+        doc! {"event_type": "assistant_model_changed", "event_data.target_id": &f.chat.agent_id},
+    )
+    .await;
+    assert_eq!(model.get_str("stage").unwrap(), "committed");
     assert_eq!(
-        settings_row.get_str("specialist_access_requests").unwrap(),
-        "denied"
+        model
+            .get_document("principal")
+            .unwrap()
+            .get_str("id")
+            .unwrap(),
+        f.owner
     );
-    let model =
-        event(doc! {"event_type": "assistant_model_changed", "event_data.scope": "agent"}).await;
-    assert_eq!(model.get_str("new").unwrap(), "nyxagent/fast");
-    assert_eq!(model.get_str("agent_id").unwrap(), f.chat.agent_id);
+    assert_eq!(model.len(), 6);
     // An unchanged override writes no audit row.
     assert_eq!(
         logs.count_documents(doc! {"event_type": "assistant_access_mode_changed"})
@@ -593,6 +681,10 @@ async fn specialist_access_requests_follow_policy_for_every_turn_kind() {
     ] {
         settings::update(
             &f.state.db,
+            &f.state.audit_runtime,
+            &crate::models::audit_outbox::AuditPrincipal::Person {
+                id: f.owner.clone(),
+            },
             &f.owner,
             settings::Update {
                 specialist_access_requests: Some(policy),
@@ -952,6 +1044,7 @@ async fn full_access_transition_retires_old_owner_cards_but_preserves_auto_overr
     };
     super::assistant_team_service::set_agent_policy(
         &f.state.db,
+        &f.state.audit_runtime,
         &actor,
         &f.chat.agent_id,
         super::assistant_team_service::AgentPolicy {
@@ -969,6 +1062,7 @@ async fn full_access_transition_retires_old_owner_cards_but_preserves_auto_overr
     );
     super::assistant_team_service::set_agent_policy(
         &f.state.db,
+        &f.state.audit_runtime,
         &actor,
         &f.chat.agent_id,
         super::assistant_team_service::AgentPolicy {
