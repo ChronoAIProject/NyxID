@@ -187,7 +187,9 @@ pub struct AuditLogFilterField {
 
 #[derive(Debug, Serialize)]
 pub struct AuditLogVerifyResponse {
-    pub status: audit_chain_service::AuditChainStatus,
+    pub status: audit_chain_service::AuditEvidenceStatus,
+    pub local_status: audit_chain_service::AuditChainStatus,
+    pub external_evidence: crate::services::audit_runtime::ExternalAuditEvidence,
     pub checked_count: u64,
     pub pre_chain_count: u64,
     pub head_seq: Option<i64>,
@@ -200,7 +202,9 @@ pub struct AuditLogVerifyResponse {
 
 #[derive(Debug, Serialize)]
 pub struct BillingLedgerVerifyResponse {
-    pub status: billing_ledger::BillingLedgerStatus,
+    pub status: audit_chain_service::AuditEvidenceStatus,
+    pub local_status: billing_ledger::BillingLedgerStatus,
+    pub external_evidence: crate::services::audit_runtime::ExternalAuditEvidence,
     pub checked_count: u64,
     pub head_seq: Option<i64>,
     pub head_hash: Option<String>,
@@ -1232,8 +1236,16 @@ pub async fn verify_audit_log(
     )
     .await?;
 
+    let external_evidence =
+        crate::services::audit_runtime::external_evidence(&state.db, &state.audit_runtime).await?;
     Ok(Json(AuditLogVerifyResponse {
-        status: report.status,
+        status: if report.status == audit_chain_service::AuditChainStatus::Broken {
+            audit_chain_service::AuditEvidenceStatus::Broken
+        } else {
+            external_evidence.status.clone()
+        },
+        local_status: report.status,
+        external_evidence,
         checked_count: report.checked_count,
         pre_chain_count: report.pre_chain_count,
         head_seq: report.head_seq,
@@ -1281,8 +1293,16 @@ pub async fn verify_billing_ledger(
         (status, break_info, _) => (status, break_info),
     };
 
+    let external_evidence =
+        crate::services::audit_runtime::external_evidence(&state.db, &state.audit_runtime).await?;
     Ok(Json(BillingLedgerVerifyResponse {
-        status,
+        status: if status == billing_ledger::BillingLedgerStatus::Broken {
+            audit_chain_service::AuditEvidenceStatus::Broken
+        } else {
+            external_evidence.status.clone()
+        },
+        local_status: status,
+        external_evidence,
         checked_count: report.checked_count,
         head_seq: report.head_seq,
         head_hash: report.head_hash,
@@ -1312,6 +1332,7 @@ pub struct ChainVerifyStatusItem {
 
 #[derive(Debug, Serialize)]
 pub struct ChainVerificationResponse {
+    pub external_evidence: crate::services::audit_runtime::ExternalAuditEvidence,
     pub chains: Vec<ChainVerifyStatusItem>,
     pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
@@ -1414,6 +1435,11 @@ pub async fn get_chain_verification(
         }
     }
     Ok(Json(ChainVerificationResponse {
+        external_evidence: crate::services::audit_runtime::external_evidence(
+            &state.db,
+            &state.audit_runtime,
+        )
+        .await?,
         chains: items,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
@@ -1444,6 +1470,11 @@ pub async fn run_chain_verification(
         crate::services::billing::account_reconciliation::run_once(&state.db).await?;
     }
     Ok(Json(ChainVerificationResponse {
+        external_evidence: crate::services::audit_runtime::external_evidence(
+            &state.db,
+            &state.audit_runtime,
+        )
+        .await?,
         chains,
         accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
@@ -2886,6 +2917,96 @@ mod operator_route_tests {
             .await
             .expect("insert test user");
         id
+    }
+
+    #[tokio::test]
+    async fn audit_integrity_handlers_separate_local_success_from_external_evidence() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("audit_integrity_evidence").await;
+        let actor = insert_user(&db, true, false).await;
+        let state = test_app_state(db.clone());
+        let query = || {
+            Query(AuditLogVerifyQuery {
+                from_seq: None,
+                to_seq: None,
+                limit: None,
+            })
+        };
+        for enrolled in [false, true] {
+            db.collection::<mongodb::bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+                .update_one(
+                    doc! {"singleton": true},
+                    doc! {"$set": {"witness_enrolled": enrolled}},
+                )
+                .await
+                .unwrap();
+            let expected = if enrolled {
+                "unverified"
+            } else {
+                "unwitnessed"
+            };
+            let audit = verify_audit_log(State(state.clone()), test_auth_user(&actor), query())
+                .await
+                .unwrap()
+                .0;
+            let audit = serde_json::to_value(audit).unwrap();
+            assert_eq!(audit["status"], expected);
+            assert_eq!(audit["local_status"], "ok");
+            assert_eq!(audit["external_evidence"]["status"], expected);
+            let billing =
+                verify_billing_ledger(State(state.clone()), test_auth_user(&actor), query())
+                    .await
+                    .unwrap()
+                    .0;
+            let billing = serde_json::to_value(billing).unwrap();
+            assert_eq!(billing["status"], expected);
+            assert_eq!(billing["local_status"], "ok");
+            let integrity = get_chain_verification(State(state.clone()), test_auth_user(&actor))
+                .await
+                .unwrap()
+                .0;
+            let integrity = serde_json::to_value(integrity).unwrap();
+            assert_eq!(integrity["external_evidence"]["status"], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_integrity_missing_head_is_unavailable_even_with_empty_local_history() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("audit_integrity_missing").await;
+        let actor = insert_user(&db, true, false).await;
+        db.collection::<mongodb::bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let response = verify_audit_log(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Query(AuditLogVerifyQuery {
+                from_seq: None,
+                to_seq: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["local_status"], "ok");
+        assert_eq!(json["status"], "unavailable");
+        assert_eq!(
+            json["external_evidence"]["pending_count"],
+            serde_json::Value::Null
+        );
+        let response = get_chain_verification(State(state), test_auth_user(&actor))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["external_evidence"]["status"],
+            "unavailable"
+        );
     }
 
     #[tokio::test]

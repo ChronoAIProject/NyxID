@@ -11,6 +11,7 @@ import {
 } from "@/hooks/use-admin-chain-verification";
 import type {
   ChainVerifyStatus,
+  ExternalAuditEvidence,
   StartupDiagnostic,
 } from "@/schemas/admin-chain-verification";
 import { useAuthStore } from "@/stores/auth-store";
@@ -26,9 +27,9 @@ const CHAIN_DESCRIPTIONS: Record<ChainVerifyStatus["chain"], string> = {
   billing_accounts:
     "Exact grant and wallet balances compared with their durable ledger postings in a consistent snapshot.",
   audit_log:
-    "Hash-chained audit events. A break means a stored audit row was edited, deleted, or reordered after it was written.",
+    "Local HMAC and link continuity of audit events against the persistent head. Independent evidence is reported separately above.",
   billing_ledger:
-    "Append-only journal of money-moving billing events, with its head anchored into the audit chain so tail truncation is detectable.",
+    "Local journal of money-moving billing events, checked against audit-chain head anchors. Independent protection of retained billing evidence is reported separately from this local check.",
 };
 
 function formatTimestamp(value: string | null | undefined): string {
@@ -46,7 +47,7 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
           {broken ? (
             <ShieldAlert className="h-5 w-5 text-destructive" />
           ) : (
-            <ShieldCheck className="h-5 w-5 text-emerald-500" />
+            <ShieldCheck className="h-5 w-5 text-success" />
           )}
           <CardTitle className="text-base">
             {CHAIN_LABELS[status.chain]}
@@ -57,7 +58,9 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
             ? "Broken"
             : status.chain === "billing_accounts" && status.break_detail
               ? "Pending settlements"
-              : "Intact"}
+              : status.chain === "billing_accounts"
+                ? "Reconciled locally"
+                : "Locally intact"}
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -124,6 +127,186 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
   );
 }
 
+const EVIDENCE_LABELS: Record<ExternalAuditEvidence["status"], string> = {
+  unwitnessed: "Unwitnessed",
+  unverified: "Unverified",
+  unavailable: "Unavailable",
+  broken: "Conflicting history",
+};
+
+function ExternalEvidence({
+  evidence,
+}: {
+  readonly evidence: ExternalAuditEvidence;
+}) {
+  const broken =
+    evidence.status === "broken" ||
+    evidence.diagnostics?.witness === "diverged";
+  const diagnostics = evidence.diagnostics;
+  const duration = (seconds: number | null) =>
+    seconds === null ? "No pending deadline" : `${seconds.toLocaleString()} s`;
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-base">Audit witness</CardTitle>
+        <Badge variant={broken ? "destructive" : "warning"}>
+          {diagnostics?.witness === "diverged"
+            ? "Conflicting history"
+            : EVIDENCE_LABELS[evidence.status]}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-4 text-sm">
+        <p className="text-muted-foreground">
+          {evidence.status === "unwitnessed"
+            ? "No independent witness is enrolled. Local checks cannot detect a coordinated database rollback."
+            : evidence.status === "unverified"
+              ? "A witness is enrolled, but fresh independent evidence has not been verified by this process. A stored acknowledgment alone cannot establish current continuity."
+              : broken
+                ? "Independent evidence conflicts with stored history. Investigate before trusting the affected records."
+                : "Independent evidence is unavailable. Local verification cannot establish protection against database rollback."}
+        </p>
+        {diagnostics ? (
+          <div className="space-y-4">
+            <p className="text-muted-foreground">
+              Witness state:{" "}
+              <span
+                className={
+                  broken ? "font-medium text-destructive" : "font-medium"
+                }
+              >
+                {diagnostics.witness}
+              </span>
+              {diagnostics.last_contact_secs === null
+                ? " · Contact freshness unknown since process start"
+                : ` · Last authenticated contact ${duration(diagnostics.last_contact_secs)} ago`}
+            </p>
+            {diagnostics.last_transition ? (
+              <p className="text-muted-foreground">
+                Last transition: {diagnostics.last_transition.reason} at{" "}
+                {formatTimestamp(diagnostics.last_transition.at)}
+              </p>
+            ) : null}
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
+              <div>
+                <dt className="text-muted-foreground">Chain identity</dt>
+                <dd className="break-all font-mono text-xs">
+                  {diagnostics.chain_id ?? "unknown"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Oldest pending age</dt>
+                <dd>
+                  {diagnostics.oldest_pending_secs === null
+                    ? "unknown"
+                    : duration(diagnostics.oldest_pending_secs)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">
+                  Standard time to closure
+                </dt>
+                <dd>{duration(diagnostics.standard_closes_in_secs)}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">
+                  Availability time to closure
+                </dt>
+                <dd>{duration(diagnostics.availability_closes_in_secs)}</dd>
+              </div>
+            </dl>
+            <div
+              className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+              aria-label="Audit admission by tier"
+            >
+              {Object.entries(diagnostics.admission).map(
+                ([tier, admission]) => (
+                  <div key={tier} className="rounded-md border p-2">
+                    <p className="capitalize">{tier}</p>
+                    <Badge
+                      variant={
+                        admission === "closed"
+                          ? "destructive"
+                          : admission === "alarm"
+                            ? "warning"
+                            : "secondary"
+                      }
+                    >
+                      {admission}
+                    </Badge>
+                  </div>
+                ),
+              )}
+            </div>
+            {diagnostics.divergence ? (
+              <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-destructive">
+                <p>
+                  Independent history diverged at sequence{" "}
+                  {diagnostics.divergence.seq}.
+                </p>
+                <p className="font-mono text-xs">
+                  Local {diagnostics.divergence.local_hash_prefix} · Witness{" "}
+                  {diagnostics.divergence.witnessed_hash_prefix}
+                </p>
+              </div>
+            ) : null}
+            <details className="text-muted-foreground">
+              <summary className="cursor-pointer">
+                Effective audit limits
+              </summary>
+              <p className="mt-2">
+                Soft alarms: contact {duration(diagnostics.limits.contact_secs)}
+                , oldest pending {duration(diagnostics.limits.pending_age_secs)}
+                , {diagnostics.limits.pending_count.toLocaleString()} pending
+                events.
+              </p>
+              <p>
+                Standard ceiling:{" "}
+                {duration(diagnostics.limits.standard.pending_age_secs)} or{" "}
+                {diagnostics.limits.standard.pending_count.toLocaleString()}{" "}
+                events.
+              </p>
+              <p>
+                Availability ceiling:{" "}
+                {duration(diagnostics.limits.availability.pending_age_secs)} or{" "}
+                {diagnostics.limits.availability.pending_count.toLocaleString()}{" "}
+                events.
+              </p>
+            </details>
+          </div>
+        ) : null}
+        <a
+          className="text-primary underline"
+          href="https://github.com/ChronoAIProject/NyxID/blob/main/docs/SECURITY_AUDIT_WITNESS.md#admin-custody-replacement-and-dr-restore"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Witness recovery runbook
+        </a>
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
+          <div>
+            <dt className="text-muted-foreground">Local audit head</dt>
+            <dd>{evidence.local_head_seq ?? "unknown"}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Stored witness cursor</dt>
+            <dd>{evidence.witnessed_seq ?? "none"}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Pending evidence records</dt>
+            <dd>{evidence.pending_count ?? "unknown"}</dd>
+          </div>
+          {evidence.oldest_pending_at ? (
+            <div>
+              <dt className="text-muted-foreground">Oldest pending record</dt>
+              <dd>{formatTimestamp(evidence.oldest_pending_at)}</dd>
+            </div>
+          ) : null}
+        </dl>
+      </CardContent>
+    </Card>
+  );
+}
+
 function StartupDiagnostics({
   diagnostics,
 }: {
@@ -172,8 +355,12 @@ export function AdminIntegrityPage() {
         const broken = result.chains.filter(
           (chain) => chain.outcome === "broken",
         );
-        if (broken.length === 0) {
-          toast.success("Verification passed: both chains intact");
+        if (result.external_evidence.status === "broken") {
+          toast.error("Independent evidence conflicts with stored history");
+        } else if (broken.length === 0) {
+          toast.warning(
+            `Local check completed; independent evidence: ${EVIDENCE_LABELS[result.external_evidence.status].toLowerCase()}`,
+          );
         } else {
           toast.error(
             `Integrity break detected in ${broken
@@ -212,7 +399,10 @@ export function AdminIntegrityPage() {
       />
 
       {data ? (
-        <StartupDiagnostics diagnostics={data.startup_diagnostics} />
+        <>
+          <ExternalEvidence evidence={data.external_evidence} />
+          <StartupDiagnostics diagnostics={data.startup_diagnostics} />
+        </>
       ) : null}
 
       {error ? (

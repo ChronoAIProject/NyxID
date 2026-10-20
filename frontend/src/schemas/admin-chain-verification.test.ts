@@ -73,6 +73,35 @@ describe("admin chain verification schemas", () => {
   it("defaults diagnostics for responses served by an older replica", () => {
     const parsed = chainVerificationResponseSchema.parse({ chains: [] });
     expect(parsed.startup_diagnostics).toEqual([]);
+    expect(parsed.external_evidence.status).toBe("unavailable");
+  });
+
+  it("keeps local success separate from unwitnessed or unverified evidence", () => {
+    for (const status of [
+      "unwitnessed",
+      "unverified",
+      "unavailable",
+      "broken",
+    ]) {
+      const parsed = chainVerificationResponseSchema.parse({
+        chains: [baseStatus],
+        external_evidence: {
+          status,
+          local_head_seq: 41,
+          witnessed_seq: null,
+          pending_count: 41,
+          oldest_pending_at: "2026-08-03T10:00:00Z",
+        },
+      });
+      expect(parsed.chains[0]?.outcome).toBe("ok");
+      expect(parsed.external_evidence.status).toBe(status);
+    }
+    expect(() =>
+      chainVerificationResponseSchema.parse({
+        chains: [baseStatus],
+        external_evidence: { status: "ok" },
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown outcomes and chains", () => {
