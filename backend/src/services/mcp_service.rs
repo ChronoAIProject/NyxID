@@ -5849,17 +5849,18 @@ async fn execute_tool_resolved_inner(
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
         if let Some(base)=managed_base.as_ref() {
+            return box_mcp_forwarding(|| async move {
             let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
             let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
                 &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
             guard.revalidate().await?;
             billing.mark_forwarded(&metered).await?;
             destination_audit.dispatch();
-            let result=Box::pin(super::lark_base_writes::execute(db,encryption_keys,base,&guard,
+            let result=super::lark_base_writes::execute(db,encryption_keys,base,&guard,
                 super::lark_base_writes::transport::Transport {
                     target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
                     permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
-                })).await;
+                }).await;
             let (status,text)=match result {
                 Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
                 Err(error)=>{
@@ -5875,6 +5876,7 @@ async fn execute_tool_resolved_inner(
                 else {admission.receipt(db,chat,assistant_auto).await;}
             }
             return Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())));
+            }).await;
         }
 
         // -------------------------------------------------------------------

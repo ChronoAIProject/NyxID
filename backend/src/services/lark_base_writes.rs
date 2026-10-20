@@ -246,7 +246,18 @@ impl From<AppError> for RunError {
     }
 }
 
-pub(crate) async fn execute(
+pub(crate) fn execute<'a>(
+    db: &'a Database,
+    keys: &'a crate::crypto::aes::EncryptionKeys,
+    prepared: &'a Prepared,
+    guard: &'a LarkManagedGuard<'a>,
+    transport: Transport<'a>,
+) -> futures::future::BoxFuture<'a, AppResult<Value>> {
+    // Construct the managed future away from the shared MCP poll frame.
+    Box::pin(execute_inner(db, keys, prepared, guard, transport))
+}
+
+async fn execute_inner(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     prepared: &Prepared,
