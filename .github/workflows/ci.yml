@@ -97,6 +97,8 @@ jobs:
           filters: |
             packaging:
               - 'scripts/*csp*'
+              - 'scripts/*machine*docker*'
+              - 'cli/tests/updater-npm/**'
               - 'frontend/Dockerfile.policy-tests'
               - 'scripts/*identity*'
               - 'scripts/*artifacts*'

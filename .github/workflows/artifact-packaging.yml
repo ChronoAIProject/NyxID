@@ -25,6 +25,11 @@ jobs:
         with:
           node-version-file: .node-version
       - run: node --experimental-strip-types --test frontend/scripts/test-source-identity.mjs
+      - name: Test locked local WSS registration fixture
+        run: |
+          npm ci --ignore-scripts --prefix cli/tests/updater-npm
+          node --test scripts/test-machine-docker-fixture.mjs
+          python3 scripts/test-machine-docker-cli.py
       - name: Check required PR and publication gate wiring
         run: |
           python3 -m venv "$RUNNER_TEMP/packaging-policy"
@@ -179,6 +184,65 @@ jobs:
           path: ${{ runner.temp }}/built-image-csp/browser
           if-no-files-found: error
           retention-days: 7
+
+  docker-cli:
+    name: Machine Docker CLI E2E
+    needs: policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Export exact committed machine image inputs
+        id: source
+        run: |
+          commit=$(git rev-parse HEAD)
+          python3 scripts/export-build-source.py export --destination "$RUNNER_TEMP/image-source" --commit "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build actual machine desktop image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-docker-cli-machine:ci
+          provenance: false
+          cache-from: type=gha,scope=machine-pr
+          cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Build actual node-only machine image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: ${{ runner.temp }}/image-source/source
+          file: ${{ runner.temp }}/image-source/source/cli/Dockerfile.machine-node-only
+          platforms: linux/amd64
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.source.outputs.commit }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          load: true
+          push: false
+          tags: nyxid-docker-cli-node-only:ci
+          provenance: false
+          cache-from: type=gha,scope=identity-machine-node-only-amd64
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+      - name: Install existing locked local WSS transport without hooks
+        run: npm ci --ignore-scripts --prefix cli/tests/updater-npm
+      - name: Require actual CLI capability refusal, registration, persistence and probe cleanup
+        run: |
+          python3 scripts/check-machine-docker-cli.py --machine-image nyxid-docker-cli-machine:ci \
+            --node-only-image nyxid-docker-cli-node-only:ci
+      - name: Verify source after actual Docker engine exercises
+        if: ${{ always() && steps.source.outcome == 'success' }}
+        run: python3 scripts/export-build-source.py verify --destination "$RUNNER_TEMP/image-source" --commit '${{ steps.source.outputs.commit }}'
 
   images:
     name: Shipped Image Identity (${{ matrix.component }}, ${{ matrix.arch }})
@@ -338,7 +402,7 @@ jobs:
   packaging-pass:
     name: Artifact Packaging Passed
     if: always()
-    needs: [policy, credentials, worklet, images, archives]
+    needs: [policy, credentials, worklet, docker-cli, images, archives]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every packaging check
@@ -348,9 +412,11 @@ jobs:
           IMAGES: ${{ needs.images.result }}
           ARCHIVES: ${{ needs.archives.result }}
           WORKLET: ${{ needs.worklet.result }}
+          DOCKER_CLI: ${{ needs.docker-cli.result }}
         run: |
           test "$POLICY" = success
           test "$CREDENTIALS" = success
           test "$IMAGES" = success
           test "$ARCHIVES" = success
           test "$WORKLET" = success
+          test "$DOCKER_CLI" = success

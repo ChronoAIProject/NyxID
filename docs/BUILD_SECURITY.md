@@ -98,6 +98,23 @@ frontend lock without hooks. Its version must match locked Playwright;
 Dependabot's weekly frontend Docker/npm updates cover both inputs. Missing,
 skipped, retried or failed cases fail the required PR/weekly gate.
 
+`Machine Docker CLI E2E` is required on PRs and weekly, alongside the existing
+`Machine Container E2E` sandbox/update coverage. It builds the actual desktop
+and node-only images, extracts each real CLI, and drives `node docker start
+--machine`, restart and stop/start through the hosted Docker engine. The
+node-only image supplies deterministic unsupported capability evidence:
+omitted/automatic/require-separated choices must fail with closed stdin before
+any fixture request, registration, local config, persistent volume or container.
+Both images must register exactly once with explicit `shared-legacy`, advertise
+live capabilities/heartbeats, and preserve encrypted custody and their recorded
+choice on restart. Only a temporary local WSS fixture and generated CA are used;
+its transport comes from the existing updater-test lock. A transparent recorder
+executes the real Docker client unchanged and checks that probes receive no
+credential environments or identity mounts. Resource inventories reject leftover
+probe containers/anonymous volumes; cleanup targets only unique fixture names.
+This uses D's existing separation/environment/CA contract without production
+image-selection overrides or edits to D's CLI and entrypoint.
+
 The two machine test Dockerfiles deliberately accept `MACHINE_IMAGE` from the
 exact same CI build, rather than claiming a preexisting release digest. The
 context-spike fixture names an immutable published machine digest. Production

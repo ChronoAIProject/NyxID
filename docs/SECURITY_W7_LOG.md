@@ -130,3 +130,15 @@
 - Local: harness11, wiring12, identity16, credential21, CI helpers26, input policy20, YAML9 (115 passed/0 failed); isolated Playwright lists exactly two cases.
 - Initial listing mixed scratch/shared Playwright modules; rerunning wholly within the locked scratch tree passed without repository dependency changes.
 - Workflow YAML/permissions/input policies, syntax and diff checks pass; actual Docker/browser execution requires Built Image Worklet CSP (amd64/arm64) in PR CI.
+
+## C-4d — real machine Docker CLI paths
+- Add required read-only PR/weekly Machine Docker CLI E2E, building actual desktop/node-only images and extracting each real CLI.
+- Browserless node-only setup deterministically tests omitted/automatic/require-separated refusal before local state, any fixture request or registration; no persistent/probe resources may remain.
+- Measure desktop's real versioned Linux capability evidence without assuming the hosted kernel supports separation.
+- Both images explicitly register shared-legacy once over ephemeral verified WSS, advertise live capabilities/heartbeats, and preserve encrypted custody/choice across restart and stop/start.
+- Existing fixed official image refs, CA forwarding, unique profiles and D's self-hosted/separation contract are used; no production image override or D-owned source edit.
+- Transparent Docker argv recording execs the real client unchanged; probe credential environments/mounts and leftover anonymous volumes fail acceptance.
+- Use existing locked ws transport without hooks; fixture metadata excludes secrets, and startup failure diagnostics redact synthetic credentials/signing bytes.
+- Local: CLI harness11, WSS7, wiring13, credential21, identity16, wrapper15, CSP11, Node identity4, CI helpers26, pins20, YAML9 (153 passed/0 failed).
+- All Artifact Packaging policy commands, workflow YAML/permissions/input policies, Python/Node syntax and diff checks pass.
+- Actual engine/image execution requires Machine Docker CLI E2E on the PR; no local Docker, Rust/backend build, push, tag or remote workflow run.
