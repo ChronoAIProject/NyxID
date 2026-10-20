@@ -99,44 +99,25 @@ pub struct AuthUser {
     /// Per-agent rate limit (from ApiKey), None = use user-level defaults
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
-    /// Client IP captured at extraction time (from X-Forwarded-For, X-Real-IP, or
-    /// the TCP peer address). Used to enrich audit log entries.
+    /// Client IP captured through the strict trusted-proxy resolver. Used to
+    /// enrich audit log entries.
     pub ip_address: Option<String>,
     /// Client User-Agent header captured at extraction time. Used to enrich audit
     /// log entries.
     pub user_agent: Option<String>,
 }
 
-/// Extract the client IP from common reverse-proxy headers, falling back to the
-/// TCP peer address available via `ConnectInfo`.
-///
-/// Lookup order: `X-Forwarded-For` (first hop), `X-Real-IP`, then the peer
-/// socket address.
-fn extract_request_ip(parts: &Parts) -> Option<String> {
-    if let Some(forwarded) = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-
-    if let Some(real_ip) = parts
-        .headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(real_ip);
-    }
-
-    parts
+/// Capture strict attribution once for every AuthUser audit caller.
+fn extract_request_ip(
+    parts: &Parts,
+    trusted_proxies: &[crate::config::TrustedProxyRange],
+) -> Option<String> {
+    let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
+        .map(|ConnectInfo(peer)| *peer);
+    crate::mw::rate_limit::resolve_client_ip(&parts.headers, peer, trusted_proxies)
+        .map(|resolved| resolved.ip.to_string())
 }
 
 /// Extract the User-Agent header.
@@ -1034,7 +1015,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
             let authenticated = async {
-            let request_ip = extract_request_ip(parts);
+            let request_ip = extract_request_ip(parts, &state.config.trusted_proxy_ips);
             let request_ua = extract_request_user_agent(parts);
             // Nested routers strip their mount prefixes from `parts.uri`.
             // Route authorization must use Axum's original request target.
@@ -3425,7 +3406,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_request_ip_prefers_first_forwarded_for_hop() {
+    fn extract_request_ip_ignores_forged_forwarded_hops_without_trust() {
         let mut parts = request_parts_with_headers(&[
             ("x-forwarded-for", " 203.0.113.7, 10.0.0.1 "),
             ("x-real-ip", "198.51.100.9"),
@@ -3434,17 +3415,20 @@ mod tests {
             .extensions
             .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
 
-        assert_eq!(extract_request_ip(&parts), Some("203.0.113.7".to_string()));
+        assert_eq!(
+            extract_request_ip(&parts, &[]),
+            Some("192.0.2.55".to_string())
+        );
     }
 
     #[test]
-    fn extract_request_ip_falls_back_to_real_ip_when_forwarded_for_empty() {
+    fn extract_request_ip_does_not_recover_from_headers_without_peer() {
         let parts = request_parts_with_headers(&[
             ("x-forwarded-for", " , 10.0.0.1"),
             ("x-real-ip", " 198.51.100.9 "),
         ]);
 
-        assert_eq!(extract_request_ip(&parts), Some("198.51.100.9".to_string()));
+        assert_eq!(extract_request_ip(&parts, &[]), None);
     }
 
     #[test]
@@ -3454,14 +3438,17 @@ mod tests {
             .extensions
             .insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 55], 443))));
 
-        assert_eq!(extract_request_ip(&parts), Some("192.0.2.55".to_string()));
+        assert_eq!(
+            extract_request_ip(&parts, &[]),
+            Some("192.0.2.55".to_string())
+        );
     }
 
     #[test]
     fn extract_request_ip_returns_none_without_headers_or_peer() {
         let parts = request_parts_with_headers(&[]);
 
-        assert_eq!(extract_request_ip(&parts), None);
+        assert_eq!(extract_request_ip(&parts, &[]), None);
     }
 
     #[test]

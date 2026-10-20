@@ -30,9 +30,11 @@ async fn call(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = authenticate_mcp(state, &headers, false)
-        .await
-        .map_err(|_| denied())?;
+    // Background work has no inbound socket peer; never invent HTTP attribution.
+    let mut auth =
+        authenticate_mcp_for_method(state, &headers, false, axum::http::Method::POST, None)
+            .await
+            .map_err(|_| denied())?;
     // This watch was admitted only for an owner turn. A later guest message
     // on the same thread neither owns nor changes this background request.
     if let Some(chat) = auth.chat.as_mut() {

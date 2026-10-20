@@ -110,6 +110,7 @@ fn log_pending_completion_audit(
     headers: &HeaderMap,
     pending: &NodePendingCredential,
     node_id: &str,
+    peer: std::net::SocketAddr,
     legacy_event_type: &'static str,
     rci_kind: RciAuditEventKind,
 ) {
@@ -122,7 +123,7 @@ fn log_pending_completion_audit(
         rci_audit_service::log_rci_for_node(
             state.db.clone(),
             &pending.owner_user_id,
-            extract_ip(headers),
+            extract_ip(headers, Some(peer), &state.config.trusted_proxy_ips),
             extract_user_agent(headers),
             &subject,
             rci_kind,
@@ -138,7 +139,7 @@ fn log_pending_completion_audit(
                 "service_slug": &pending.service_slug,
                 "owner_user_id": &pending.owner_user_id,
             })),
-            extract_ip(headers),
+            extract_ip(headers, Some(peer), &state.config.trusted_proxy_ips),
             extract_user_agent(headers),
             None,
             None,
@@ -173,6 +174,7 @@ pub async fn list_pending_credentials(
 /// POST /api/v1/node-agent/pending-credentials/{pending_id}/consume
 pub async fn consume_pending_credential(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(pending_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
@@ -189,6 +191,7 @@ pub async fn consume_pending_credential(
         &headers,
         &pending,
         &node.id,
+        peer,
         "node_credential_push_consumed",
         RciAuditEventKind::Consumed,
     );
@@ -199,6 +202,7 @@ pub async fn consume_pending_credential(
 /// POST /api/v1/node-agent/pending-credentials/{pending_id}/decline
 pub async fn decline_pending_credential(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Path(pending_id): Path<String>,
     Json(body): Json<Option<DeclinePendingCredentialRequest>>,
@@ -221,6 +225,7 @@ pub async fn decline_pending_credential(
             &headers,
             &pending,
             &node.id,
+            peer,
             "node_credential_push_declined",
             RciAuditEventKind::Declined { reason_present },
         );
@@ -236,7 +241,7 @@ pub async fn decline_pending_credential(
                 "owner_user_id": &pending.owner_user_id,
                 "reason_present": reason_present,
             })),
-            extract_ip(&headers),
+            extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips),
             extract_user_agent(&headers),
             None,
             None,
@@ -560,6 +565,7 @@ mod tests {
 
         let consume_response = consume_pending_credential(
             State(state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             node_headers(raw_auth_token),
             Path(consume_pending.id.clone()),
         )
@@ -570,6 +576,7 @@ mod tests {
 
         let decline_response = decline_pending_credential(
             State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             node_headers(raw_auth_token),
             Path(decline_pending.id.clone()),
             Json(Some(DeclinePendingCredentialRequest {
@@ -591,7 +598,7 @@ mod tests {
             Some("consumed"),
             &[],
         );
-        assert_eq!(consume_entry.ip_address.as_deref(), Some("198.51.100.20"));
+        assert_eq!(consume_entry.ip_address.as_deref(), Some("127.0.0.1"));
         assert_eq!(consume_entry.user_agent.as_deref(), Some("nyxid-node-test"));
         let decline_entry = load_audit_entry(&db, decline_audit).await;
         assert_rci_audit_row(
@@ -601,7 +608,7 @@ mod tests {
             Some("declined"),
             &["reason_present"],
         );
-        assert_eq!(decline_entry.ip_address.as_deref(), Some("198.51.100.20"));
+        assert_eq!(decline_entry.ip_address.as_deref(), Some("127.0.0.1"));
         assert_eq!(decline_entry.user_agent.as_deref(), Some("nyxid-node-test"));
         assert_eq!(
             decline_entry.event_data.as_ref().unwrap()["reason_present"],
@@ -643,6 +650,7 @@ mod tests {
 
         let consume_response = consume_pending_credential(
             State(state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             node_headers(raw_auth_token),
             Path(consume_pending.id.clone()),
         )
@@ -699,6 +707,7 @@ mod tests {
 
         let decline_response = decline_pending_credential(
             State(state),
+            axum::extract::ConnectInfo("127.0.0.1:43123".parse().unwrap()),
             node_headers(raw_auth_token),
             Path(decline_pending.id.clone()),
             Json(Some(DeclinePendingCredentialRequest {

@@ -474,7 +474,7 @@ pub async fn callback(
         let _ = invite_code_service::record_usage(&state.db, iid, &user.id, &profile.email).await;
     }
 
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
     let ua = extract_user_agent(&headers);
 
     // Pre-auth path — derive telemetry surface from `redirect_target`
@@ -909,7 +909,7 @@ pub async fn apple_callback(
         let _ = invite_code_service::record_usage(&state.db, iid, &user.id, &profile.email).await;
     }
 
-    let ip = extract_ip(&headers, Some(peer));
+    let ip = extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
     let ua = extract_user_agent(&headers);
 
     // Pre-auth path — derive surface from `redirect_target` rather than
