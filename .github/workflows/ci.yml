@@ -850,6 +850,8 @@ jobs:
     # Resource samples record whether compilation approaches runner limits.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # Merge per-test coverage into four profiles per binary to bound disk use.
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -952,6 +954,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      LLVM_PROFILE_FILE_NAME: "nyxid-%4m.profraw"
     steps:
       - uses: actions/checkout@v6
       - name: Identify coverage measurement inputs
