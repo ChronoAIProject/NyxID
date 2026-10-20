@@ -127,7 +127,7 @@ impl KeychainBackend {
                 let entry = self.entry(key)?;
                 entry
                     .set_password(value)
-                    .map_err(|e| Error::Keychain(format!("Failed to store '{key}': {e}")))
+                    .map_err(|_| Error::Keychain("node_key_service_write_failed".into()))
             }
             #[cfg(test)]
             KeychainClient::Memory(store) => {
@@ -159,7 +159,7 @@ impl KeychainBackend {
                 let entry = self.entry(key)?;
                 entry
                     .get_password()
-                    .map_err(|e| Error::Keychain(format!("Failed to retrieve '{key}': {e}")))
+                    .map_err(|_| Error::Keychain("node_key_service_read_failed".into()))
             }
             #[cfg(test)]
             KeychainClient::Memory(store) => store
@@ -189,7 +189,7 @@ impl KeychainBackend {
                 match entry.get_password() {
                     Ok(v) => Ok(Some(v)),
                     Err(keyring::Error::NoEntry) => Ok(None),
-                    Err(e) => Err(Error::Keychain(format!("Failed to retrieve '{key}': {e}"))),
+                    Err(_) => Err(Error::Keychain("node_key_service_read_failed".into())),
                 }
             }
             #[cfg(test)]
@@ -225,7 +225,7 @@ impl KeychainBackend {
                 match entry.delete_credential() {
                     Ok(()) => Ok(()),
                     Err(keyring::Error::NoEntry) => Ok(()),
-                    Err(e) => Err(Error::Keychain(format!("Failed to delete '{key}': {e}"))),
+                    Err(_) => Err(Error::Keychain("node_key_service_delete_failed".into())),
                 }
             }
             #[cfg(test)]
@@ -256,7 +256,7 @@ impl KeychainBackend {
     fn entry(&self, key: &str) -> Result<keyring::Entry> {
         let user = self.user(key);
         keyring::Entry::new(SERVICE_NAME, &user)
-            .map_err(|e| Error::Keychain(format!("Failed to create keyring entry: {e}")))
+            .map_err(|_| Error::Keychain("node_key_service_entry_failed".into()))
     }
 }
 

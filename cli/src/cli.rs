@@ -2681,6 +2681,9 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Internal bounded access observation; emits no credential or provider data.
+    #[command(hide = true)]
+    CustodyProbe,
     /// Prepare the protected recipient request for managed platform attestation.
     #[command(hide = true)]
     ManagedPrepare(crate::node::managed_runtime::Prepare),

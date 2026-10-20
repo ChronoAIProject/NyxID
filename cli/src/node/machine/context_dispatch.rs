@@ -281,6 +281,7 @@ impl Runtime {
         let mut runtime =
             Runtime::new(&config, &self.node_id, &state).context(Stage("context_runtime"))?;
         let target = Arc::get_mut(&mut runtime).context("context_runtime_unavailable")?;
+        target.custody = Arc::new(self.custody.for_context());
         target.runtime_id = self.runtime_id.clone();
         target.identity = context.command;
         target.browser_identity = context.secure;
@@ -312,6 +313,8 @@ impl Runtime {
         if let Some(gateway) = self.gateway.get() {
             let _ = target.gateway.set(gateway.clone());
         }
+        target.refresh_custody().await;
+        target.require_custody()?;
         // Child runtime cannot create a nested context; only this parent routes.
         let sender = self
             .desktop

@@ -34,45 +34,7 @@ impl Identity {
     /// Probe using the same UID/GID and supplementary-group policy as commands.
     /// A configured username alone says nothing about filesystem access.
     pub async fn commands_isolated(&self, directories: &[PathBuf]) -> bool {
-        if self.uid == unsafe { libc::geteuid() } || self.uid == 0 || directories.is_empty() {
-            return false;
-        }
-        let mut paths = Vec::new();
-        for (index, directory) in directories.iter().enumerate() {
-            if !directory.is_dir() {
-                if index == 0 {
-                    return false;
-                }
-                continue;
-            }
-            use std::os::unix::ffi::OsStrExt;
-            let Ok(path) = CString::new(directory.as_os_str().as_bytes()) else {
-                return false;
-            };
-            paths.push(path);
-        }
-        let mut probe = Command::new("/bin/true");
-        if self.prepare_agent(&mut probe).is_err() {
-            return false;
-        }
-        unsafe {
-            probe.pre_exec(move || {
-                for path in &paths {
-                    for mode in [libc::R_OK, libc::X_OK] {
-                        if libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, libc::AT_EACCESS)
-                            == 0
-                        {
-                            return Err(std::io::Error::from_raw_os_error(libc::EACCES));
-                        }
-                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EACCES) {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                }
-                Ok(())
-            });
-        }
-        matches!(probe.status().await, Ok(status) if status.success())
+        crate::node::custody::files_denied(self, directories).await
     }
 
     /// Agent children inherit a namespace-denying filter. Browser/cua children

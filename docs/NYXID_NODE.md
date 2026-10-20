@@ -253,7 +253,81 @@ Keychain entries use `nyxid-node` as the service name. New configurations use
 until explicit stopped-daemon migration. Multiple nodes on the same machine
 have distinct namespaces.
 
-> **Note:** The keychain backend requires an active keychain daemon. On headless Linux servers without GNOME Keyring or KDE Wallet, use the file backend (the default).
+For an interactive desktop installation, select `--keychain` explicitly and use
+that supervisor user's native service: a macOS LaunchAgent in the Aqua login
+session or a Linux systemd user unit connected to its own `%t/bus`, ordered after
+`dbus.socket`. An unlocked desktop key service must be available to that user.
+The supervisor owns the key-service session; agent and browser jobs never inherit
+its bus address or credential environment.
+
+On headless Linux and separated root-supervisor machines, the default file backend
+works without a desktop key service. Keep the supervisor's config directory private
+and the worker identities distinct. A file-backed node does not contact Secret
+Service just to prove file custody. A locked or unavailable configured keychain
+refuses secret access; the daemon never silently switches storage, creates a new
+key, or treats a missing object as an access denial. To change an existing backend,
+use the explicit stopped-daemon migration below.
+
+Existing installed service definitions keep working. To opt into the new native
+key-service session binding, explicitly reinstall after upgrading (with the same
+`--profile` and `--config`):
+
+```bash
+nyxid node daemon install --force --profile work
+nyxid node daemon restart --profile work
+```
+
+Only install/reinstall renders the new definition. Start does not rewrite it, and
+migration accepts both the original and the new canonical definitions.
+
+### Credential custody and worker identities
+
+A per-user keychain does not isolate programs sharing its OS identity. The trusted
+credential supervisor must remain outside the command, secure-browser and developer-
+browser identities. On supported separated Linux nodes, the node makes real opens
+of its config and keyfile and the supported sibling profiles' keyfiles under each
+worker UID/GID and its selected supplementary groups. Keychain-backed nodes also
+create a public synthetic entry in the supervisor's actual OS key service, prove
+that it exists there, and attempt retrieval from every worker identity. Probe
+entries use `{node_id}/object/v1/custody/*`; they contain no node secret and are
+retired after the observation. The helper never reads actual credential values.
+
+Only an expected OS permission error establishes denial. Successful access is
+reported as accessible; missing paths/objects, unavailable services, unfamiliar
+provider errors, invalid identities and timeouts remain unknown. Diagnostics contain
+fixed reasons and per-role metadata, never provider bodies or secret identifiers.
+The cache is separate for each context's actual identities: initial/context probes
+and identity changes refresh it, and a bounded monitor repeats every 60 seconds.
+Execution reads the cache; it does not launch a probe on each request. Expired
+observations cannot authorize separated execution. Machine status includes
+`credential_custody` outcomes for command, browser and developer roles; stale
+snapshots are unknown until the next daemon profile publication. The CLI helper
+executable must also be reachable by every worker identity: a binary installed
+inside a supervisor-only home cannot establish custody. Install it at the shared,
+administrator-controlled executable location used by the separated setup.
+
+Shared legacy and non-separated machines retain their existing execution behavior
+with a downgraded custody claim and an explicit warning that agent commands or
+browsers may access node tokens, signing secrets and stored credentials. A separated
+context instead refuses unverified custody with `node_custody_unverified` (12419)
+before a worker or browser effect. Signed job cancellation, turn stops and desktop
+close remain available when custody becomes unverified, with their existing
+signature, authority and scope checks. This is OS identity separation, with the shared
+kernel, supervisor and privileged-user limits described in the machine docs; it is
+not VM isolation. Independently configured profiles outside the supported default
+or machine-profile roots remain the operator's responsibility.
+
+Custody adds a prerequisite to separation evidence v4. Upgrade both backends and
+nodes before separated mode becomes available again: old backends refuse v4 node
+evidence, and new backends refuse v3 node evidence. Missing/null/false custody never
+becomes a successful observation. Existing `shared_legacy` assignments retain their
+stored mode; a failed separated request never falls back to shared legacy.
+
+After the backend upgrade, existing separated assignments pause until their nodes
+report supported v4 evidence. Their stored mode and capabilities stay unchanged;
+discovery and settings retain them with an unavailable reason. Upgrade and drain
+every backend replica before relying on this admission gate: older replicas may
+still trust the old support advertisement for an existing separated assignment.
 
 ---
 

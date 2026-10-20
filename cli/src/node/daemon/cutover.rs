@@ -152,35 +152,7 @@ impl Native {
                 }
                 // Read the protected definition without following final links.
                 let bytes = read_definition(&path)?;
-                let arguments = match platform {
-                    Platform::Launchd => {
-                        let value = plist::Value::from_reader_xml(bytes.as_slice())
-                            .map_err(|_| refuse("service_definition_invalid"))?;
-                        let args = value
-                            .as_dictionary()
-                            .and_then(|v| v.get("ProgramArguments"))
-                            .and_then(plist::Value::as_array)
-                            .ok_or_else(|| refuse("service_definition_invalid"))?;
-                        args.iter()
-                            .map(|s| {
-                                s.as_string()
-                                    .map(str::to_owned)
-                                    .ok_or_else(|| refuse("service_definition_invalid"))
-                            })
-                            .collect::<Result<Vec<_>>>()?
-                    }
-                    Platform::Systemd => {
-                        let text = std::str::from_utf8(&bytes)
-                            .map_err(|_| refuse("service_definition_invalid"))?;
-                        super::systemd_pinned_binary(text)
-                            .map_err(|_| refuse("service_definition_invalid"))?;
-                        let line = text
-                            .lines()
-                            .find_map(|s| s.trim().strip_prefix("ExecStart="))
-                            .ok_or_else(|| refuse("service_definition_invalid"))?;
-                        shlex::split(line).ok_or_else(|| refuse("service_definition_invalid"))?
-                    }
-                };
+                let arguments = definition_arguments(platform, &bytes)?;
                 validate_arguments(directory, &arguments)?;
                 Some((path, bytes))
             }
@@ -210,6 +182,37 @@ impl Native {
     }
     fn call(&self, args: &[&str]) -> Result<Output> {
         call(&self.program, args, WAIT)
+    }
+}
+
+fn definition_arguments(platform: Platform, bytes: &[u8]) -> Result<Vec<String>> {
+    match platform {
+        Platform::Launchd => {
+            let value = plist::Value::from_reader_xml(bytes)
+                .map_err(|_| refuse("service_definition_invalid"))?;
+            let args = value
+                .as_dictionary()
+                .and_then(|v| v.get("ProgramArguments"))
+                .and_then(plist::Value::as_array)
+                .ok_or_else(|| refuse("service_definition_invalid"))?;
+            args.iter()
+                .map(|s| {
+                    s.as_string()
+                        .map(str::to_owned)
+                        .ok_or_else(|| refuse("service_definition_invalid"))
+                })
+                .collect::<Result<Vec<_>>>()
+        }
+        Platform::Systemd => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| refuse("service_definition_invalid"))?;
+            super::systemd_pinned_binary(text).map_err(|_| refuse("service_definition_invalid"))?;
+            let line = text
+                .lines()
+                .find_map(|s| s.trim().strip_prefix("ExecStart="))
+                .ok_or_else(|| refuse("service_definition_invalid"))?;
+            shlex::split(line).ok_or_else(|| refuse("service_definition_invalid"))
+        }
     }
 }
 
@@ -755,6 +758,64 @@ mod tests {
         std::fs::create_dir(a.path()).unwrap();
         assert!(directory.check_path(a.path()).is_err());
         assert!(validate_arguments(&directory, &args).is_err());
+    }
+
+    #[test]
+    fn old_and_key_service_session_definitions_bind_the_same_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = Directory::open(root.path()).unwrap();
+        for session in [false, true] {
+            let mut value = plist::Dictionary::new();
+            value.insert(
+                "ProgramArguments".into(),
+                plist::Value::Array(
+                    vec![
+                        "/opt/nyxid".into(),
+                        "node".into(),
+                        "start".into(),
+                        "--config".into(),
+                        root.path().to_str().unwrap().into(),
+                    ]
+                    .into_iter()
+                    .map(plist::Value::String)
+                    .collect(),
+                ),
+            );
+            if session {
+                value.insert(
+                    "LimitLoadToSessionType".into(),
+                    plist::Value::String("Aqua".into()),
+                );
+            }
+            let mut bytes = vec![];
+            plist::Value::Dictionary(value)
+                .to_writer_xml(&mut bytes)
+                .unwrap();
+            validate_arguments(
+                &directory,
+                &definition_arguments(Platform::Launchd, &bytes).unwrap(),
+            )
+            .unwrap();
+            let extra = if session {
+                "Requires=dbus.socket\nAfter=dbus.socket\n"
+            } else {
+                ""
+            };
+            let environment = if session {
+                "Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus\n"
+            } else {
+                ""
+            };
+            let bytes = format!(
+                "[Unit]\n{extra}[Service]\n{environment}ExecStart=\"/opt/nyxid\" node start --config \"{}\"\n",
+                root.path().display()
+            );
+            validate_arguments(
+                &directory,
+                &definition_arguments(Platform::Systemd, bytes.as_bytes()).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     // Actual executable fake: the production command runner and native parsers

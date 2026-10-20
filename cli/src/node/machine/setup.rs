@@ -256,6 +256,7 @@ fn preflight_selection(
 }
 
 async fn verify_selection(
+    directory: &Path,
     config: &nyxid_machine::config::Config,
 ) -> std::result::Result<Option<Mode>, &'static str> {
     let Some(choice) = config.separation_choice else {
@@ -273,7 +274,17 @@ async fn verify_selection(
         .effective_dev_browser_user()
         .map(|name| identity(Some(name)))
         .transpose()?;
-    let evidence = super::separation::observe(config, &command, &secure, developer.as_ref()).await;
+    let custody = crate::node::custody::Custody::new(directory);
+    custody
+        .observe(&[
+            Some(command.clone()),
+            Some(secure.clone()),
+            developer.clone(),
+        ])
+        .await;
+    let mut evidence =
+        super::separation::observe(config, &command, &secure, developer.as_ref()).await;
+    evidence.credential_custody = Some(custody.status().all_denied());
     nyxid_machine::context::select_new(choice, Some(&evidence)).map(Some)
 }
 
@@ -294,7 +305,16 @@ async fn container_evidence() -> Result<nyxid_machine::context::Evidence> {
         }),
         ..Default::default()
     };
-    Ok(super::separation::observe(&config, &command, &secure, developer.as_ref()).await)
+    let custody = crate::node::custody::preflight_files(&[
+        Some(command.clone()),
+        Some(secure.clone()),
+        developer.clone(),
+    ])
+    .await;
+    let mut evidence =
+        super::separation::observe(&config, &command, &secure, developer.as_ref()).await;
+    evidence.credential_custody = Some(custody);
+    Ok(evidence)
 }
 
 #[derive(Deserialize)]
@@ -356,7 +376,19 @@ pub async fn run(mut args: Setup) -> Result<()> {
                 .effective_dev_browser_user()
                 .map(|name| super::process::Identity::resolve(Some(name)))
                 .transpose()?;
-            super::separation::observe(&config.machine, &command, &secure, developer.as_ref()).await
+            let custody = crate::node::custody::Custody::new(&directory);
+            custody
+                .observe(&[
+                    Some(command.clone()),
+                    Some(secure.clone()),
+                    developer.clone(),
+                ])
+                .await;
+            let mut evidence =
+                super::separation::observe(&config.machine, &command, &secure, developer.as_ref())
+                    .await;
+            evidence.credential_custody = Some(custody.status().all_denied());
+            evidence
         };
         println!("{}", serde_json::to_string(&evidence)?);
         return Ok(());
@@ -587,7 +619,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
         }
     }
     let mut config = crate::node::config::NodeConfig::load(&config_path)?;
-    let mode = match verify_selection(&config.machine).await {
+    let mode = match verify_selection(&directory, &config.machine).await {
         Ok(mode) => mode,
         Err(reason) => {
             let choice = offer_shared_legacy(
@@ -1405,12 +1437,19 @@ mod tests {
     #[tokio::test]
     async fn legacy_and_unselected_existing_setup_do_not_infer_separation() {
         let mut config = nyxid_machine::config::Config::default();
-        assert_eq!(verify_selection(&config).await.unwrap(), None);
+        assert_eq!(
+            verify_selection(Path::new("/unused"), &config)
+                .await
+                .unwrap(),
+            None
+        );
         config.separation_choice = Some(Choice::SharedLegacy);
         let encoded = toml::to_string(&config).unwrap();
         let config = toml::from_str(&encoded).unwrap();
         assert_eq!(
-            verify_selection(&config).await.unwrap(),
+            verify_selection(Path::new("/unused"), &config)
+                .await
+                .unwrap(),
             Some(Mode::SharedLegacy)
         );
     }
