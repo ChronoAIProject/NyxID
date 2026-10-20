@@ -75,8 +75,8 @@ for stronger separation; containers still share their host kernel.** Never label
 #### W9.4 new-assignment selection
 
 Node setup records the owner's `automatic`, `require_separated`, or
-`shared_legacy` intent. New server assignments use current v3 capability evidence;
-the older support boolean, v1/v2 reports, missing evidence and unknown evidence
+`shared_legacy` intent. New server assignments use current v4 capability evidence;
+the older support boolean, v1/v2/v3 reports, missing evidence and unknown evidence
 versions cannot establish support. Automatic and required intent select
 `separated` only when the supported mechanisms are positively observed and
 context creation is enabled.
@@ -115,12 +115,18 @@ external legacy consent are rejected by the upgraded server with an explanation.
 
 #### Capability evidence and owner-visible support
 
-The v3 report confirms Linux, Landlock ABI 6+, a root supervisor with three
+The v4 report confirms Linux, Landlock ABI 6+, a root supervisor with three
 distinct non-root users, the command seccomp filter, actual Landlock enforcement,
 the secure browser's effective managed policy, and the configured managed
-Chromium's sandbox under both browser identities.
+Chromium's sandbox under both browser identities. It additionally requires
+`credential_custody: true` from actual dropped-identity access checks against
+the supervisor's protected credential files and configured key service. Container
+preflight uses disposable public sentinels, without generating node credentials;
+registered native probes check the actual node and sibling-profile custody.
+Missing or failed custody gives `node_custody_unverified`: repair protected
+storage and rerun the probe before requesting new separated access.
 Every mechanism needs a positive observation; absent fields, unknown versions
-and v1/v2 reports are insufficient for new automatic/required assignments. The
+and v1/v2/v3 reports are insufficient for new automatic/required assignments. The
 browser probe executes the real managed binary with a fresh private profile,
 the runtime UID/GID and no-new-privileges. It observes a live renderer descendant
 with the same executable and all four UID/GID values, NNP=1, extra seccomp filters
@@ -153,7 +159,7 @@ promise that support will remain available; execution still checks current fence
 The machine-level badge says **Sharing set per agent**. The assignment label is
 **Shared legacy**, **Separate workspace and browser**, or **Owner selection
 required**. Capability support and command-versus-node-secret separation are
-different facts: neither `commands_isolated` nor successful v3 probes change an
+different facts: neither `commands_isolated` nor successful v4 probes change an
 existing assignment. An unknown host remains usable under an existing legacy
 assignment, subject to its live ACLs and restrictions. Browserless node-only
 containers need explicit legacy consent; a separate container per agent is the
@@ -804,8 +810,8 @@ sudo env NYXID_TEST_CLI=/absolute/path/to/nyxid \
 
 The entrypoint creates a fresh native profile, synthetic loopback registration
 and HTTPS sign-in fixtures, and distinct browser/command identities. It verifies
-complete v3 evidence, removes the secure policy as a negative control and
-restores the exact inode, then exercises two contexts, reconnects, restart,
+complete v4 evidence including credential custody, removes the secure policy as
+a negative control and restores the exact inode, then exercises two contexts, reconnects, restart,
 private roots, secure/dev browsers, delayed cold starts and lost native probes,
 login binding, D-Bus/accessibility, cross-context file/native-host/display
 denials, four desktop streams, owner takeover and quarantine. After another

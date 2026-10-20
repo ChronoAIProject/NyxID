@@ -887,9 +887,12 @@ Measurements and reproduction commands are under
   enablement, promotions or broader capabilities do not enlarge it; tombstones
   and explicit restrictions win. Keep the marker and snapshot across restarts.
 - **Support and choice.** New setup intent is automatic by default, with positive
-  v3 OS evidence required for separated access. Earlier v1/v2 reports and unknown
-  versions are insufficient for new automatic/required assignments. Explicit
-  shared legacy requires the complete warning and owner consent. Missing intent or evidence surfaces
+  v4 OS evidence and positively verified `credential_custody` required for
+  separated access. Earlier v1/v2/v3 reports, missing custody and unknown
+  versions are insufficient for new automatic/required assignments.
+  `node_custody_unverified` directs the owner to repair protected storage and
+  rerun the probe. Explicit shared legacy requires the complete warning and
+  owner consent. Missing intent or evidence surfaces
   `selection_required` in the API, settings and NyxBot result/watch; it grants
   nothing and directs the owner to Assistant → Machines. Changing a feature flag
   or node intent never rewrites existing assignments. New external OAuth/API-key
