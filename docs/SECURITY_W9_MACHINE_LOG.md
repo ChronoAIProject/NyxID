@@ -99,3 +99,9 @@
 - Initial targeted run: 95 passed / 1 failed; the new legacy-prefill regression exposed the empty-select reset bug, fixed before the final run. No test removal, ignore, timeout change or lint suppression.
 - `npx tsc -b --pretty false`, scoped `npx eslint` on all nine changed frontend files, and `git diff --check`: pass. No Rust changes or Cargo invocation in this batch.
 - D-5 read-only reconnaissance: Lima nyxid-security-validation is running, Ubuntu 24.04.5/aarch64, AppArmor userns restriction=1; earlier D checkouts/harness remain. No guest mutation/build. Real context acceptance and hosted amd64 remain D-5 gates; await PM D-4 verdict.
+
+## D-5-CI-0 — explicit Docker fixture selection
+- Commit `421d01066`: granted node_docker.rs fixture explicitly accepts shared-legacy; all original CA-mount/seccomp assertions retained and choice propagation asserted.
+- Container E2E sets NYXID_MACHINE_SEPARATION=require-separated through setup’s existing environment contract; no entrypoint argument/parser or Dockerfile changes.
+- Shared-target cargo test --locked -p nyxid-cli --test node_docker -- --test-threads=1: 6 passed / 0 failed / 0 ignored; rustfmt, node --check and scoped git diff --check pass.
+- Hosted container execution and Chromium timeout calibration remain pending; this fixture commit does not establish Docker/runtime acceptance.
