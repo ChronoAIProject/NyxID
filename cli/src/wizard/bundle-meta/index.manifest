@@ -167,6 +167,7 @@ frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
+frontend/src/stores/consent-store.ts
 frontend/src/stores/credits-denial-store.ts
 frontend/src/stores/service-card-view-store.ts
 frontend/src/stores/theme-store.ts

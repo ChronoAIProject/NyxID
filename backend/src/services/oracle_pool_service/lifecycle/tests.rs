@@ -1274,3 +1274,87 @@ async fn oracle_lifecycle_delete_durably_expires_orphan_commands_but_preserves_u
         0
     );
 }
+
+#[tokio::test]
+async fn cleanup_evidence_is_majority_durable_before_an_independent_retry() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let commands = Arc::new(Mutex::new(Vec::<Document>::new()));
+    let recorded = commands.clone();
+    let db = crate::test_utils::connect_test_database_with_command_handler(
+        "oracle_cleanup_durability",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await
+    .expect("isolated MongoDB required");
+    let owner = uuid::Uuid::new_v4().to_string();
+    let pool = uuid::Uuid::new_v4().to_string();
+    let worker = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>(ORACLE_POOLS)
+        .insert_one(doc! {
+            "_id":&pool,"user_id":&owner,"deleted_at":bson::DateTime::now(),
+            "deletion_cleanup_pending":true,"worker_enrollment_epoch":0_i64,
+        })
+        .await
+        .unwrap();
+    db.collection::<Document>(WORKERS)
+        .insert_one(doc! {"_id":&worker,"pool_id":&pool})
+        .await
+        .unwrap();
+    commands.lock().unwrap().clear();
+    // Model loss of the scheduler after an effect commits: the next pass uses
+    // a new database handle and derives completion from durable lifecycle rows.
+    assert!(!personal_erasure_pass(&db, &owner, &owner).await.unwrap());
+    let next = db.client().database(db.name());
+    assert!(!personal_erasure_pass(&next, &owner, &owner).await.unwrap());
+    assert!(personal_erasure_pass(&next, &owner, &owner).await.unwrap());
+    let observed = commands.lock().unwrap().clone();
+    let commits: Vec<_> = observed
+        .iter()
+        .filter(|c| c.contains_key("commitTransaction"))
+        .collect();
+    assert_eq!(commits.len(), 2);
+    for commit in commits {
+        assert_eq!(
+            commit
+                .get_document("writeConcern")
+                .unwrap()
+                .get_str("w")
+                .unwrap(),
+            "majority"
+        );
+    }
+    for first in observed
+        .iter()
+        .filter(|c| c.get_bool("startTransaction") == Ok(true))
+    {
+        assert_eq!(
+            first
+                .get_document("readConcern")
+                .unwrap()
+                .get_str("level")
+                .unwrap(),
+            "snapshot"
+        );
+    }
+    let reads: Vec<_> = observed
+        .iter()
+        .filter(|c| c.contains_key("find") && !c.contains_key("txnNumber"))
+        .collect();
+    assert!(!reads.is_empty());
+    for read in reads {
+        assert_eq!(
+            read.get_document("readConcern")
+                .unwrap()
+                .get_str("level")
+                .unwrap(),
+            "majority"
+        );
+    }
+    drop(observed);
+    db.drop().await.unwrap();
+}

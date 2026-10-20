@@ -43,6 +43,12 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name, ttl) in [
         (WORK, doc! { "at": 1, "_id": 1 }, "trigger_work_due", false),
         (
+            WORK,
+            doc! { "trigger_id": 1, "_id": 1 },
+            "trigger_work_parent",
+            false,
+        ),
+        (
             RUNS,
             doc! { "trigger_id": 1, "scheduled_at": -1, "_id": -1 },
             "trigger_run_history",
@@ -141,6 +147,7 @@ pub async fn set_schedule_job(
         && trigger.status == TriggerStatus::Active
         && let Some(at) = trigger.schedule_state.next_due_at
     {
+        super::erasure_admission::fence_in_session(db, &trigger.user_id, session).await?;
         db.collection::<Document>(WORK)
             .replace_one(
                 doc! { "_id": &id },
@@ -148,6 +155,7 @@ pub async fn set_schedule_job(
                     "_id": &id,
                     "kind": "schedule",
                     "trigger_id": &trigger.id,
+                    "user_id": &trigger.user_id,
                     "at": date(at),
                     "fence": "",
                 },
@@ -203,6 +211,7 @@ pub(crate) async fn insert_run(
     run: &TriggerRun,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let stored = db
         .collection::<Document>(TRIGGERS)
         .find_one_and_update(
@@ -258,6 +267,7 @@ pub(crate) async fn insert_run(
             "_id": &run.id,
             "kind": "run",
             "trigger_id": &run.trigger_id,
+            "user_id": &run.user_id,
             "at": date(run.dispatch_at.unwrap_or_else(Utc::now)),
             "fence": "",
         })
@@ -496,7 +506,22 @@ pub async fn finish(
 }
 
 /// Fenced terminal decisions belong only to the current worker.
-pub async fn finish_claimed(
+pub fn finish_claimed<'a>(
+    db: &'a Database,
+    job: &'a Document,
+    run_id: &'a str,
+    outcome: RunOutcome,
+    reason: Option<&'a str>,
+    frontend: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // The scheduler settles many exit paths. Keep each transaction's state
+    // out of its polling frame while it starts a complete assistant turn.
+    Box::pin(finish_claimed_inner(
+        db, job, run_id, outcome, reason, frontend,
+    ))
+}
+
+async fn finish_claimed_inner(
     db: &Database,
     job: &Document,
     run_id: &str,
@@ -746,7 +771,20 @@ pub struct TurnClaim {
 
 /// Called ONLY for trigger turns, inside begin_turn's transaction. A committed
 /// turn and its run barrier cannot be separated by a crash or a lease expiry.
-pub async fn admit_turn(
+pub fn admit_turn<'a>(
+    db: &'a Database,
+    owner: &'a str,
+    claim: &'a TurnClaim,
+    thread: &'a str,
+    turn: &'a str,
+    session: &'a mut ClientSession,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    // Keep the schedule's transaction state out of the enclosing owner-turn
+    // admission future, which also carries the assistant's authority fences.
+    Box::pin(admit_turn_inner(db, owner, claim, thread, turn, session))
+}
+
+async fn admit_turn_inner(
     db: &Database,
     owner: &str,
     claim: &TurnClaim,
@@ -950,7 +988,21 @@ pub fn default_thread_policy(
 
 /// Choose and reserve the run thread transactionally, so competing/recovering
 /// workers never create a second dedicated or per-run thread.
-pub async fn run_thread(
+pub fn run_thread<'a>(
+    db: &'a Database,
+    keys: &'a std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    run: &'a TriggerRun,
+    trigger: &'a Trigger,
+) -> futures::future::BoxFuture<
+    'a,
+    AppResult<crate::models::assistant_conversation::AssistantConversation>,
+> {
+    // Thread creation and its authority transaction precede a full assistant
+    // turn; do not embed their state in the scheduler's polling frame.
+    Box::pin(run_thread_inner(db, keys, run, trigger))
+}
+
+async fn run_thread_inner(
     db: &Database,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     run: &TriggerRun,
@@ -1261,6 +1313,7 @@ async fn record_terminal_in_session(
     result: Option<&str>,
     frontend: &str,
 ) -> AppResult<()> {
+    super::erasure_admission::fence_in_session(db, &run.user_id, session).await?;
     let Some(run) = db
         .collection::<TriggerRun>(RUNS)
         .find_one_and_update(

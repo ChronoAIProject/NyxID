@@ -233,7 +233,29 @@ fn provider_base(default: &str) -> String {
     default.into()
 }
 
-pub(crate) async fn convert(
+pub(crate) fn convert<'a>(
+    state: &'a AppState,
+    actor: &'a str,
+    bot_id: &'a str,
+    funding: &'a str,
+    transport: NativeTransportChoice,
+    recovery: Option<&'a discord::RecoveryReview>,
+    gateway_recovery: Option<&'a super::platform_entry_gateway_service::GatewayRecoveryReview>,
+) -> futures::future::BoxFuture<'a, AppResult<NativeConversionOutcome>> {
+    // Conversion spans authority transactions and paid provider verification.
+    // Heap-allocate that state so callers do not carry the entire workflow.
+    Box::pin(convert_inner(
+        state,
+        actor,
+        bot_id,
+        funding,
+        transport,
+        recovery,
+        gateway_recovery,
+    ))
+}
+
+async fn convert_inner(
     state: &AppState,
     actor: &str,
     bot_id: &str,

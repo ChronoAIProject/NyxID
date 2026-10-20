@@ -516,6 +516,8 @@ sequenceDiagram
 
 ### Key Properties by Provider
 
+Only local, AWS KMS and GCP Cloud KMS providers are implemented. Azure diagrams below compare vendor capabilities; Azure Key Vault and BYOK are not shipped NyxID providers/features.
+
 ```mermaid
 graph LR
     subgraph "AWS KMS"
@@ -530,7 +532,7 @@ graph LR
         GCP_RING["Key rings + versions"]
     end
 
-    subgraph "Azure Key Vault"
+    subgraph "Azure Key Vault (comparison only; not implemented)"
         AZ_HSM["Managed HSM (Level 3)"]
         AZ_ROT["Auto-rotation on new version"]
         AZ_SD["Soft-delete + purge protection"]
@@ -866,7 +868,7 @@ gantt
     Grace period (7-90 days)    :crit, gcp_grace, 0, 90
     Permanent destruction       :milestone, gcp_del, after gcp_grace, 0
 
-    section Azure Key Vault
+    section Azure Key Vault (comparison only)
     Soft-delete (7-90 days)     :crit, az_grace, 0, 90
     Purge required              :milestone, az_del, after az_grace, 0
 ```

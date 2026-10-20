@@ -1318,6 +1318,46 @@ pub async fn update_user_service(
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: Option<bool>,
 ) -> AppResult<()> {
+    update_user_service_with_keys(
+        db,
+        None,
+        user_id,
+        actor_user_id,
+        service_id,
+        auth_method,
+        auth_key_name,
+        node_id,
+        node_priority,
+        is_active,
+        identity,
+        custom_user_agent,
+        default_request_headers,
+        ws_frame_injections,
+        admin_only,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_user_service_with_keys(
+    db: &mongodb::Database,
+    encryption_keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    node_priority: Option<i32>,
+    is_active: Option<bool>,
+    identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: Option<bool>,
+) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     super::ifttt_oauth_service::validate_key_route(
         db,
@@ -1531,42 +1571,41 @@ pub async fn update_user_service(
     // Validation is delegated to the shared module so admin + user paths
     // enforce the same denylist / length caps. NyxID#356.
     let mut audit_default_header_names: Option<Vec<String>> = None;
+    let mut header_source_filter = None;
     if let Some(drh) = default_request_headers {
-        match drh {
-            Some(list) => {
-                // Restore stored values for entries whose `value` was
-                // submitted as the redaction placeholder — otherwise a
-                // GET → editor → PUT round trip clobbers every
-                // sensitive value with the literal placeholder string.
-                // `current` was fetched at the top of this function.
-                let reconciled = crate::models::default_request_header::reconcile_with_stored(
-                    list.clone(),
-                    current.default_request_headers.as_deref(),
-                );
-                let normalized =
-                    crate::models::default_request_header::validate_headers(reconciled)?;
-                match normalized {
-                    Some(norm) => {
-                        audit_default_header_names =
-                            Some(norm.iter().map(|h| h.name.clone()).collect());
-                        let bson_val = bson::to_bson(&norm).map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to serialize default_request_headers: {e}"
-                            ))
-                        })?;
-                        set_doc.insert("default_request_headers", bson_val);
-                    }
-                    None => {
-                        audit_default_header_names = Some(Vec::new());
-                        set_doc.insert("default_request_headers", bson::Bson::Null);
-                    }
-                }
-            }
-            None => {
-                audit_default_header_names = Some(Vec::new());
-                set_doc.insert("default_request_headers", bson::Bson::Null);
-            }
-        }
+        header_source_filter = Some(
+            super::default_header_service::source_filter(
+                db,
+                COLLECTION_NAME,
+                service_id,
+                "user_id",
+                user_id,
+                current.default_request_headers.as_deref(),
+            )
+            .await?,
+        );
+        let prepared = super::default_header_service::prepare_update(
+            encryption_keys,
+            COLLECTION_NAME,
+            service_id,
+            user_id,
+            drh.clone().unwrap_or_default(),
+            current.default_request_headers.as_deref(),
+        )
+        .await?;
+        audit_default_header_names = Some(
+            prepared
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|header| header.name.clone())
+                .collect(),
+        );
+        set_doc.insert(
+            "default_request_headers",
+            bson::to_bson(&prepared)
+                .map_err(|_| AppError::Internal("Header storage encoding failed".into()))?,
+        );
     }
 
     if let Some(rules) = ws_frame_injections {
@@ -1578,17 +1617,24 @@ pub async fn update_user_service(
         );
     }
 
+    let update_filter =
+        header_source_filter.unwrap_or_else(|| doc! { "_id": service_id, "user_id": user_id });
     let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
-            doc! { "_id": service_id, "user_id": user_id },
+            update_filter,
             doc! {
                 "$set": set_doc,
                 "$inc": { "state_version": 1_i64 },
             },
-        )
-        .await?;
+        );
+    let result = result.await?;
 
     if result.matched_count == 0 {
+        if default_request_headers.is_some() {
+            return Err(AppError::Conflict(
+                "Default headers or owner changed; reload and retry".into(),
+            ));
+        }
         return Err(AppError::NotFound("User service not found".to_string()));
     }
 
@@ -1900,11 +1946,10 @@ pub async fn validate_update_inputs(
     // and over-length values before provisioning a credential downstream
     // of a header-only update that would otherwise fail.
     if let Some(Some(list)) = default_request_headers {
-        let reconciled = crate::models::default_request_header::reconcile_with_stored(
+        super::default_header_service::validate_edit(
             list.clone(),
             current.default_request_headers.as_deref(),
-        );
-        crate::models::default_request_header::validate_headers(reconciled)?;
+        )?;
     }
 
     // Reject injection-param AND node_id changes on services whose
@@ -2833,6 +2878,7 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -2858,6 +2904,7 @@ mod tests {
             asyncapi_spec_url: None,
             streaming_supported: false,
             ssh_config: Some(SshServiceConfig {
+                ca_context_version: None,
                 host: "10.0.0.1".to_string(),
                 port: 22,
                 ssh_auth_mode: SshAuthMode::ProxyOnly,

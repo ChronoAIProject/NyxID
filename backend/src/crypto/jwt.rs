@@ -1,3 +1,46 @@
+mod key_material;
+
+/// Shared strong-key rollout fixture for tests through real JWT consumers.
+#[cfg(test)]
+pub(crate) fn test_rotation_keys() -> (JwtKeys, JwtKeys) {
+    static KEYS: std::sync::OnceLock<(JwtKeys, JwtKeys)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        use rsa::pkcs8::EncodePublicKey;
+        fn pair(dir: &Path) -> (JwtKeys, String) {
+            let private = RsaPrivateKey::new(&mut rand::thread_rng(), 3072).unwrap();
+            let private_path = dir.join("private.pem");
+            let public_path = dir.join("public.pem");
+            fs::write(
+                &private_path,
+                private
+                    .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+            // Exercise SPKI in the loader and in public_key_jwk, using the
+            // same import path as operator-provided public keys.
+            let public = private
+                .to_public_key()
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+            fs::write(&public_path, &public).unwrap();
+            let keys = key_material::load(&private_path, &public_path).unwrap();
+            assert_eq!(
+                keys.public_jwk.as_ref().unwrap(),
+                &public_key_jwk(&public).unwrap()
+            );
+            (keys, public_path.to_str().unwrap().to_string())
+        }
+        let old_dir = tempfile::tempdir().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let (old, old_public) = pair(old_dir.path());
+        let (mut current, _) = pair(new_dir.path());
+        current.load_retained(&[old_public]).unwrap();
+        (old, current)
+    })
+    .clone()
+}
 use base64::Engine as _;
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -20,6 +63,17 @@ pub struct JwtKeys {
     pub decoding: DecodingKey,
     /// Key ID included in JWT headers for key rotation support
     pub kid: String,
+    pub(crate) retained: std::collections::BTreeMap<String, (DecodingKey, serde_json::Value)>,
+    pub(crate) public_jwk: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationOrigin {
+    /// A configured server-side service invocation, independent of OAuth grants.
+    Service,
+    /// RFC 8693 client exchange anchored in live, revision-bound authority.
+    Oauth,
 }
 
 /// Standard JWT claims for NyxID tokens.
@@ -47,6 +101,10 @@ pub struct Claims {
     /// Exact consent version approved for Machine access; never inferred by readers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected_consent: Option<crate::models::consent::ProtectedConsentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_origin: Option<DelegationOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
     /// User's roles (present when "roles" scope is requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
@@ -223,6 +281,9 @@ impl JwtKeys {
         let private_path = Path::new(&config.jwt_private_key_path);
         let public_path = Path::new(&config.jwt_public_key_path);
 
+        if private_path.exists() != public_path.exists() {
+            return Err(AppError::Internal("Incomplete RSA key pair; restore the missing file without replacing the surviving key".into()));
+        }
         if !private_path.exists() || !public_path.exists() {
             if config.is_production() {
                 return Err(AppError::Internal(format!(
@@ -241,71 +302,76 @@ impl JwtKeys {
             generate_rsa_keypair(&config.jwt_private_key_path, &config.jwt_public_key_path)?;
         }
 
-        let private_pem = fs::read_to_string(private_path)
-            .map_err(|e| AppError::Internal(format!("Failed to read private key: {e}")))?;
-        let public_pem = fs::read_to_string(public_path)
-            .map_err(|e| AppError::Internal(format!("Failed to read public key: {e}")))?;
+        let mut keys = key_material::load(private_path, public_path)?;
+        keys.load_retained(&config.jwt_retained_public_key_paths)?;
+        Ok(keys)
+    }
 
-        let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes())
-            .map_err(|e| AppError::Internal(format!("Invalid private key PEM: {e}")))?;
-        let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes())
-            .map_err(|e| AppError::Internal(format!("Invalid public key PEM: {e}")))?;
+    fn load_retained(&mut self, paths: &[String]) -> Result<(), AppError> {
+        if paths.len() > 16 {
+            return Err(AppError::Internal(
+                "At most 16 retained JWT keys are supported".into(),
+            ));
+        }
+        let mut retained = std::collections::BTreeMap::new();
+        for path in paths {
+            let pem = fs::read_to_string(path)
+                .map_err(|_| AppError::Internal("Failed to read retained JWT public key".into()))?;
+            let public = key_material::parse_public(&pem)?;
+            if public.n().bits() < 3072 {
+                return Err(AppError::Internal(
+                    "Retained JWT RSA keys require at least 3072 bits".into(),
+                ));
+            }
+            let jwk = public_key_jwk(&pem)?;
+            let kid = jwk["kid"]
+                .as_str()
+                .ok_or_else(|| AppError::Internal("Invalid retained JWT key".into()))?
+                .to_owned();
+            if kid == self.kid || retained.contains_key(&kid) {
+                return Err(AppError::Internal(
+                    "Duplicate JWT verification key identifier".into(),
+                ));
+            }
+            let key = DecodingKey::from_rsa_pem(pem.as_bytes())
+                .map_err(|_| AppError::Internal("Invalid retained JWT public key".into()))?;
+            retained.insert(kid, (key, jwk));
+        }
+        self.retained = retained;
+        Ok(())
+    }
 
-        // Compute a stable kid from the public key modulus
-        let pub_key = RsaPublicKey::from_pkcs1_pem(&public_pem)
-            .map_err(|e| AppError::Internal(format!("Failed to parse public key for kid: {e}")))?;
-        let n_bytes = pub_key.n().to_bytes_be();
-        let mut hasher = Sha256::new();
-        hasher.update(&n_bytes);
-        let kid = hex::encode(&hasher.finalize()[..8]);
+    /// Select only the key named by an RS256 token. No probing every key or
+    /// fallback from an unknown identifier, including for non-access JWTs.
+    pub fn decoding_key(&self, token: &str) -> Result<&DecodingKey, AppError> {
+        let header = jsonwebtoken::decode_header(token)
+            .map_err(|_| AppError::Unauthorized("Invalid token".into()))?;
+        if header.alg != Algorithm::RS256 {
+            return Err(AppError::Unauthorized("Invalid token algorithm".into()));
+        }
+        let kid = header
+            .kid
+            .as_deref()
+            .ok_or_else(|| AppError::Unauthorized("Missing token key identifier".into()))?;
+        if kid == self.kid {
+            return Ok(&self.decoding);
+        }
+        self.retained
+            .get(kid)
+            .map(|(key, _)| key)
+            .ok_or_else(|| AppError::Unauthorized("Unknown token key identifier".into()))
+    }
 
-        Ok(Self {
-            encoding,
-            decoding,
-            kid,
-        })
+    pub fn public_keys(&self, legacy_active: &serde_json::Value) -> Vec<serde_json::Value> {
+        std::iter::once(self.public_jwk.as_ref().unwrap_or(legacy_active).clone())
+            .chain(self.retained.values().map(|(_, jwk)| jwk.clone()))
+            .collect()
     }
 }
 
 /// Generate a 4096-bit RSA key pair and write PEM files with restrictive permissions.
 pub fn generate_rsa_keypair(private_path: &str, public_path: &str) -> Result<(), AppError> {
-    let mut rng = rand::thread_rng();
-    let private_key = RsaPrivateKey::new(&mut rng, 4096)
-        .map_err(|e| AppError::Internal(format!("RSA key generation failed: {e}")))?;
-
-    let public_key = private_key.to_public_key();
-
-    // Ensure parent directories exist
-    if let Some(parent) = Path::new(private_path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| AppError::Internal(format!("Failed to create key directory: {e}")))?;
-    }
-
-    let private_pem = private_key
-        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-        .map_err(|e| AppError::Internal(format!("Failed to encode private key: {e}")))?;
-
-    let public_pem = public_key
-        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-        .map_err(|e| AppError::Internal(format!("Failed to encode public key: {e}")))?;
-
-    fs::write(private_path, private_pem.as_bytes())
-        .map_err(|e| AppError::Internal(format!("Failed to write private key: {e}")))?;
-    fs::write(public_path, public_pem.as_bytes())
-        .map_err(|e| AppError::Internal(format!("Failed to write public key: {e}")))?;
-
-    // Set restrictive permissions on the private key (Unix only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(private_path, perms)
-            .map_err(|e| AppError::Internal(format!("Failed to set key permissions: {e}")))?;
-    }
-
-    tracing::info!("Generated 4096-bit RSA key pair at {private_path} and {public_path}");
-
-    Ok(())
+    key_material::create_pair(Path::new(private_path), Path::new(public_path))
 }
 
 /// Optional RBAC data to embed in JWT claims.
@@ -323,8 +389,55 @@ pub struct AccessTokenRestrictions<'a> {
     pub allow_all_nodes: bool,
 }
 
+pub fn authority_lineage(
+    claims: &Claims,
+) -> Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage> {
+    use crate::models::oauth_delegation_authority::{ConsentBinding, OauthAuthorityLineage};
+    // Every OAuth exchange has its own online authority row. Catalog and
+    // sessionless-source exchanges need not carry an earlier lineage, but a
+    // derived callback must still retain that row's grant/client fences.
+    if claims.delegation_origin == Some(DelegationOrigin::Oauth) {
+        let mut lineage = claims
+            .oauth_lineage
+            .clone()
+            .unwrap_or(OauthAuthorityLineage {
+                delegation_jti: None,
+                consents: Vec::new(),
+                source_session_id: None,
+            });
+        lineage.delegation_jti = Some(claims.jti.clone());
+        return Some(lineage);
+    }
+    if let Some(lineage) = &claims.oauth_lineage {
+        return Some(lineage.clone());
+    }
+    if claims.sa == Some(true) || claims.relay == Some(true) {
+        return None;
+    }
+    if let Some(client) = &claims.client_id {
+        if claims.act.is_some() {
+            return None;
+        }
+        return Some(OauthAuthorityLineage {
+            delegation_jti: None,
+            consents: vec![ConsentBinding {
+                client_id: client.clone(),
+                scopes: claims.scope.clone(),
+                reference: claims.protected_consent.clone()?,
+            }],
+            source_session_id: claims.sid.clone(),
+        });
+    }
+    claims.sid.as_ref().map(|session| OauthAuthorityLineage {
+        delegation_jti: None,
+        consents: Vec::new(),
+        source_session_id: Some(session.clone()),
+    })
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TokenRestrictionClaims {
+    pub oauth_lineage: Option<crate::models::oauth_delegation_authority::OauthAuthorityLineage>,
     pub resources: Option<Vec<String>>,
     pub allowed_service_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
@@ -335,6 +448,7 @@ pub struct TokenRestrictionClaims {
 impl TokenRestrictionClaims {
     pub fn from_claims(claims: &Claims) -> Self {
         Self {
+            oauth_lineage: authority_lineage(claims),
             resources: claims.resources.clone(),
             allowed_service_ids: claims.allowed_service_ids.clone(),
             allow_all_services: claims.allow_all_services,
@@ -344,14 +458,16 @@ impl TokenRestrictionClaims {
     }
 
     pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
-        Self::from_authenticated_scope(
+        let mut restrictions = Self::from_authenticated_scope(
             &auth_user.scope,
             auth_user.resource_uris.as_deref(),
             auth_user.allow_all_services,
             &auth_user.allowed_service_ids,
             auth_user.allow_all_nodes,
             &auth_user.allowed_node_ids,
-        )
+        );
+        restrictions.oauth_lineage = auth_user.oauth_lineage.clone();
+        restrictions
     }
 
     /// Shared projection for REST AuthUser and the manually authenticated MCP
@@ -368,6 +484,7 @@ impl TokenRestrictionClaims {
             .split_whitespace()
             .any(|scope| scope == crate::mw::auth::MCP_CATALOG_READ_SCOPE);
         Self {
+            oauth_lineage: None,
             resources: resources
                 .map(<[String]>::to_vec)
                 .or_else(|| catalog_authority.then(Vec::new)),
@@ -495,6 +612,8 @@ fn generate_access_token_for_client(
     };
 
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -581,6 +700,8 @@ pub fn generate_assistant_forward_access_token(
     let now = Utc::now().timestamp();
 
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -649,6 +770,8 @@ pub fn generate_relay_access_token(
     let now = Utc::now().timestamp();
 
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -766,6 +889,8 @@ pub fn generate_refresh_token(
     let jti = Uuid::new_v4().to_string();
 
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -822,6 +947,8 @@ pub fn reissue_refresh_token(
     expires_at: i64,
 ) -> Result<String, AppError> {
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -887,7 +1014,7 @@ pub fn generate_delegated_access_token(
     ttl_secs: i64,
     restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<String, AppError> {
-    generate_delegated_access_token_for_client(
+    generate_delegated_access_token_inner(
         keys,
         config,
         user_id,
@@ -896,6 +1023,7 @@ pub fn generate_delegated_access_token(
         None,
         ttl_secs,
         restrictions,
+        DelegationOrigin::Service,
     )
     .map(|(token, _)| token)
 }
@@ -914,10 +1042,37 @@ pub fn generate_delegated_access_token_for_client(
     ttl_secs: i64,
     restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<(String, String), AppError> {
+    generate_delegated_access_token_inner(
+        keys,
+        config,
+        user_id,
+        scope,
+        acting_client_id,
+        receiving_client_id,
+        ttl_secs,
+        restrictions,
+        DelegationOrigin::Oauth,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_delegated_access_token_inner(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    acting_client_id: &str,
+    receiving_client_id: Option<&str>,
+    ttl_secs: i64,
+    restrictions: Option<&TokenRestrictionClaims>,
+    origin: DelegationOrigin,
+) -> Result<(String, String), AppError> {
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
 
     let claims = Claims {
+        delegation_origin: Some(origin),
+        oauth_lineage: restrictions.and_then(|restrictions| restrictions.oauth_lineage.clone()),
         sub: user_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -1029,8 +1184,7 @@ pub fn generate_id_token(
 pub fn public_key_jwk(public_pem: &str) -> Result<serde_json::Value, AppError> {
     use base64::Engine as _;
 
-    let pub_key = RsaPublicKey::from_pkcs1_pem(public_pem)
-        .map_err(|e| AppError::Internal(format!("Failed to parse public key for JWK: {e}")))?;
+    let pub_key = key_material::parse_public(public_pem)?;
 
     let n_bytes = pub_key.n().to_bytes_be();
     let e_bytes = pub_key.e().to_bytes_be();
@@ -1069,6 +1223,8 @@ pub fn generate_service_account_token(
     let jti = Uuid::new_v4().to_string();
 
     let claims = Claims {
+        delegation_origin: None,
+        oauth_lineage: None,
         sub: service_account_id.to_string(),
         iss: config.jwt_issuer.clone(),
         aud: config.base_url.clone(),
@@ -1119,9 +1275,11 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
     validation.set_audience(&[&config.base_url]);
 
     let token_data =
-        decode::<Claims>(token, &keys.decoding, &validation).map_err(|e| match e.kind() {
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
-            _ => AppError::Unauthorized("Invalid token".to_string()),
+        decode::<Claims>(token, keys.decoding_key(token)?, &validation).map_err(|e| {
+            match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
+                _ => AppError::Unauthorized("Invalid token".to_string()),
+            }
         })?;
 
     // TOMBSTONE (retire after the delegation-token migration drains): the
@@ -1154,7 +1312,7 @@ pub fn validate_relay_reply_token(
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
 
-    let token_data = decode::<RelayReplyClaims>(token, &keys.decoding, &validation)
+    let token_data = decode::<RelayReplyClaims>(token, keys.decoding_key(token)?, &validation)
         .map_err(|_| AppError::Unauthorized("Invalid relay reply token".to_string()))?;
 
     let claims = token_data.claims;
@@ -1207,8 +1365,9 @@ pub fn validate_relay_callback_token(
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
 
-    let token_data = decode::<RelayCallbackClaims>(token, &keys.decoding, &validation)
-        .map_err(|_| AppError::Unauthorized("Invalid relay callback token".to_string()))?;
+    let token_data =
+        decode::<RelayCallbackClaims>(token, keys.decoding_key(token)?, &validation)
+            .map_err(|_| AppError::Unauthorized("Invalid relay callback token".to_string()))?;
 
     let claims = token_data.claims;
     let now = Utc::now().timestamp();
@@ -1314,6 +1473,8 @@ mod tests {
             encoding,
             decoding,
             kid,
+            retained: Default::default(),
+            public_jwk: None,
         };
 
         let config = AppConfig {
@@ -1326,6 +1487,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_retained_public_key_paths: Vec::new(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_relay_reply_ttl_secs: 1800,
@@ -1350,6 +1512,8 @@ mod tests {
             smtp_from_address: None,
             encryption_key: Some("ab".repeat(32)),
             encryption_key_previous: None,
+            allow_legacy_record_reads: true,
+            contextual_record_writes: true,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             platform_service_rate_limit_per_second: 2,
@@ -1359,6 +1523,7 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            hmac_keyset_path: None,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
@@ -1723,6 +1888,8 @@ mod tests {
         let now = Utc::now().timestamp();
 
         let claims = Claims {
+            delegation_origin: None,
+            oauth_lineage: None,
             sub: user_id.to_string(),
             iss: config.jwt_issuer.clone(),
             aud: config.base_url.clone(),
@@ -1843,6 +2010,8 @@ mod tests {
     #[test]
     fn claims_serde_roundtrip() {
         let claims = Claims {
+            delegation_origin: None,
+            oauth_lineage: None,
             sub: "user-123".to_string(),
             iss: "nyxid".to_string(),
             aud: "http://localhost:3001".to_string(),
@@ -1911,6 +2080,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let restrictions = TokenRestrictionClaims {
+            oauth_lineage: None,
             resources: Some(vec![
                 "http://localhost:3001/api/v1/proxy/s/openai".to_string(),
             ]),
@@ -1943,6 +2113,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let restrictions = TokenRestrictionClaims {
+            oauth_lineage: None,
             resources: Some(Vec::new()),
             allowed_service_ids: Some(Vec::new()),
             allow_all_services: Some(false),
@@ -1986,6 +2157,7 @@ mod tests {
             acting_client_id: Some("test-client-id".to_string()),
             oauth_client_id: None,
             token_jti: None,
+            oauth_lineage: None,
             approval_owner_user_id: None,
             auth_method: crate::mw::auth::AuthMethod::Delegated,
             allow_all_services: false,

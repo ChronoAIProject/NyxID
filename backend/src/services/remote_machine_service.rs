@@ -869,6 +869,7 @@ async fn create_machine_inner(
                     status: crate::models::node::NodeStatus::Offline,
                     auth_token_hash: hash_token(&reservation_secret),
                     signing_secret_encrypted: None,
+                    signing_secret_context_version: None,
                     signing_secret_hash: hash_token(&reservation_signing),
                     last_heartbeat_at: None,
                     connected_at: None,
@@ -1784,9 +1785,31 @@ pub async fn suspend_ineligible_with_billing(
     db: &Database,
     billing: Option<Arc<super::billing::BillingService>>,
 ) -> AppResult<u64> {
+    suspend_ineligible_filtered(db, billing, None).await
+}
+
+/// Same lifecycle and signed outbox as the ordinary safety sweep, restricted
+/// to one accepted personal owner; it never grants deletion authority.
+pub(crate) async fn suspend_erasing_owner(
+    db: &Database,
+    billing: Arc<super::billing::BillingService>,
+    owner: &str,
+) -> AppResult<u64> {
+    suspend_ineligible_filtered(db, Some(billing), Some(owner)).await
+}
+
+async fn suspend_ineligible_filtered(
+    db: &Database,
+    billing: Option<Arc<super::billing::BillingService>>,
+    owner: Option<&str>,
+) -> AppResult<u64> {
+    let mut filter = doc! {"resource_state": {"$ne": "deleted"}};
+    if let Some(owner) = owner {
+        filter.insert("owner_id", owner);
+    }
     let machines: Vec<ManagedMachine> = db
         .collection::<ManagedMachine>(MACHINES)
-        .find(doc! {"resource_state": {"$ne": "deleted"}})
+        .find(filter)
         .sort(doc! {"eligibility_checked_at": 1, "_id": 1})
         .limit(64)
         .await?

@@ -504,6 +504,7 @@ mod tests {
             status: NodeStatus::Online,
             auth_token_hash: "auth-token-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-secret-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: Some(Utc::now()),

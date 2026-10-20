@@ -565,9 +565,10 @@ async fn poll_preview_and_sweep_expiry_revoke_undelivered_credentials() {
         let request = start(&db).await;
         accept(&db, &actor, &key, &request).await;
         let row = expire_request(&db, &request.user_code).await;
-        let encrypted = row.delivery_credential_encrypted.as_ref().unwrap();
-        let raw = encryption.decrypt(encrypted).await.unwrap();
-        let secret = std::str::from_utf8(&raw).unwrap();
+        let raw = crate::services::agent_login_record_service::decrypt(&encryption, &row)
+            .await
+            .unwrap();
+        let secret = raw.as_str();
         match path {
             "poll" => assert!(matches!(
                 poll(&db, &encryption, HMAC_KEY, &request.device_code).await,
@@ -637,8 +638,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
         .await
         .unwrap();
     let encryption = test_encryption_keys();
-    let secret = encryption
-        .decrypt(row.delivery_credential_encrypted.as_deref().unwrap())
+    let secret = crate::services::agent_login_record_service::decrypt(&encryption, &row)
         .await
         .unwrap();
     db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
@@ -665,7 +665,7 @@ async fn failed_delivery_preparation_remains_sweepable() {
     expire_request(&db, &request.user_code).await;
     sweep_expired(&db).await.unwrap();
     assert!(
-        key_service::validate_api_key(&db, std::str::from_utf8(&secret).unwrap())
+        key_service::validate_api_key(&db, secret.as_str())
             .await
             .is_err()
     );
@@ -1173,8 +1173,17 @@ async fn refreshable_oauth_remains_eligible_and_refresh_does_not_change_permissi
 
 #[tokio::test]
 async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants_atomically() {
+    let (db, actor, key, service, credential) = consent_fixture("login_consent_drift").await;
     for existing in [true, false] {
-        let (db, actor, key, service, credential) = consent_fixture("login_consent_drift").await;
+        // Reuse the initialized database; both rejected approvals must leave
+        // the same parent and no child behind. Review the narrow state anew.
+        db.collection::<bson::Document>("user_api_keys")
+            .update_one(
+                doc! {"_id": &credential},
+                doc! {"$set": {"token_scopes": "repo:read", "credential_epoch": 1_i64}},
+            )
+            .await
+            .unwrap();
         let options = options_for_actor(&db, &actor).await.unwrap();
         let selection = if existing {
             Selection::Existing {
@@ -1226,12 +1235,13 @@ async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants
             Status::Pending
         );
     }
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
 async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials() {
+    let (db, actor, key, service, _) = consent_fixture("login_consent_approve").await;
     for existing in [true, false] {
-        let (db, actor, key, service, _) = consent_fixture("login_consent_approve").await;
         let options = options_for_actor(&db, &actor).await.unwrap();
         let selection = if existing {
             Selection::Existing {
@@ -1258,8 +1268,12 @@ async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials()
             .await
             .unwrap();
         assert!(delivery.credential.starts_with("nyxid_ag_"));
-        assert_eq!(delivery.api_key.allowed_service_ids, [service]);
+        assert_eq!(
+            delivery.api_key.allowed_service_ids.as_slice(),
+            std::slice::from_ref(&service)
+        );
     }
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

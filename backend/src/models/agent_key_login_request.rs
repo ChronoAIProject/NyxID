@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "agent_key_login_requests";
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct AgentKeyLoginRequest {
+    #[serde(default)]
+    pub delivery_context_version: Option<u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub device_code_hmac: String,

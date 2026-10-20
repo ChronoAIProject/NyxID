@@ -36,21 +36,31 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
     let token = import_api_key(&state.db, &state.encryption_keys, &user, SECRET, None)
         .await
         .unwrap();
-    let service = registered_service(&state.db, &token).await.unwrap();
-    let binding = verification_binding(&state.db, &token, &service)
+    let service = registered_service(&state.db, &state.encryption_keys, &token)
+        .await
+        .unwrap();
+    let binding = verification_binding(&state.db, &state.encryption_keys, &token, &service)
         .await
         .unwrap();
     assert_eq!(binding.credential_epoch, 1);
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(token.api_key_encrypted.as_ref().unwrap())
+        crate::services::credential_record_service::CredentialRecord::token(&token)
+            .decrypt(
+                &state.encryption_keys,
+                "api_key_encrypted",
+                token.api_key_encrypted.as_ref().unwrap()
+            )
             .await
             .unwrap()
             .as_slice(),
         SECRET.as_bytes()
     );
-    assert_eq!(connection_status(&state.db, &token).await.unwrap(), "saved");
+    assert_eq!(
+        connection_status(&state.db, &state.encryption_keys, &token)
+            .await
+            .unwrap(),
+        "saved"
+    );
     record_verification(&state.db, &user, &version(&token), &binding, "usable")
         .await
         .unwrap();
@@ -58,11 +68,13 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
         .await
         .unwrap();
     assert_eq!(
-        connection_status(&state.db, &verified).await.unwrap(),
+        connection_status(&state.db, &state.encryption_keys, &verified)
+            .await
+            .unwrap(),
         "usable"
     );
     assert_eq!(
-        verification_binding(&state.db, &token, &service)
+        verification_binding(&state.db, &state.encryption_keys, &token, &service)
             .await
             .unwrap(),
         binding
@@ -79,7 +91,7 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
     .unwrap();
     assert_eq!(replacement.state_version, token.state_version + 1);
     assert_eq!(
-        verification_binding(&state.db, &replacement, &service)
+        verification_binding(&state.db, &state.encryption_keys, &replacement, &service)
             .await
             .unwrap()
             .credential_epoch,
@@ -87,16 +99,22 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
         "same-value user replacement must advance authority"
     );
     assert_eq!(
-        connection_status(&state.db, &replacement).await.unwrap(),
+        connection_status(&state.db, &state.encryption_keys, &replacement)
+            .await
+            .unwrap(),
         "saved"
     );
-    assert!(registered_service(&state.db, &token).await.is_err());
+    assert!(
+        registered_service(&state.db, &state.encryption_keys, &token)
+            .await
+            .is_err()
+    );
     assert!(
         record_verification(&state.db, &user, &version(&token), &binding, "usable")
             .await
             .is_err()
     );
-    let binding = verification_binding(&state.db, &replacement, &service)
+    let binding = verification_binding(&state.db, &state.encryption_keys, &replacement, &service)
         .await
         .unwrap();
     record_verification(&state.db, &user, &version(&replacement), &binding, "usable")
@@ -112,11 +130,15 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
         .await
         .unwrap();
     assert_eq!(
-        connection_status(&state.db, &current).await.unwrap(),
+        connection_status(&state.db, &state.encryption_keys, &current)
+            .await
+            .unwrap(),
         "reconnect_required"
     );
     assert!(
-        registered_service(&state.db, &current).await.is_err(),
+        registered_service(&state.db, &state.encryption_keys, &current)
+            .await
+            .is_err(),
         "verification cannot recreate disabled services"
     );
     state
@@ -126,7 +148,9 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
         .await
         .unwrap();
     assert_eq!(
-        connection_status(&state.db, &current).await.unwrap(),
+        connection_status(&state.db, &state.encryption_keys, &current)
+            .await
+            .unwrap(),
         "reconnect_required"
     );
     assert_eq!(
@@ -156,11 +180,18 @@ async fn import_replacement_and_verification_bind_exact_credential_epoch_and_liv
     )
     .await
     .unwrap();
-    let new_service = registered_service(&state.db, &reconnected).await.unwrap();
-    assert_ne!(new_service, service);
-    let new_binding = verification_binding(&state.db, &reconnected, &new_service)
+    let new_service = registered_service(&state.db, &state.encryption_keys, &reconnected)
         .await
         .unwrap();
+    assert_ne!(new_service, service);
+    let new_binding = verification_binding(
+        &state.db,
+        &state.encryption_keys,
+        &reconnected,
+        &new_service,
+    )
+    .await
+    .unwrap();
     assert_ne!(new_binding.key_id, binding.key_id);
     assert_eq!(
         state
@@ -189,7 +220,9 @@ async fn reconnect_after_provider_disconnect_and_service_delete_preserves_tombst
     let token = import_api_key(&state.db, &state.encryption_keys, &user, SECRET, None)
         .await
         .unwrap();
-    let original_service = registered_service(&state.db, &token).await.unwrap();
+    let original_service = registered_service(&state.db, &state.encryption_keys, &token)
+        .await
+        .unwrap();
     user_service_service::deactivate_user_service(&state.db, &user, &user, &original_service)
         .await
         .unwrap();
@@ -216,7 +249,9 @@ async fn reconnect_after_provider_disconnect_and_service_delete_preserves_tombst
     )
     .await
     .unwrap();
-    let service = registered_service(&state.db, &reimported).await.unwrap();
+    let service = registered_service(&state.db, &state.encryption_keys, &reimported)
+        .await
+        .unwrap();
     assert_ne!(original_service, service);
     assert!(
         !state
@@ -228,7 +263,7 @@ async fn reconnect_after_provider_disconnect_and_service_delete_preserves_tombst
             .unwrap()
             .is_active
     );
-    let binding = verification_binding(&state.db, &reimported, &service)
+    let binding = verification_binding(&state.db, &state.encryption_keys, &reimported, &service)
         .await
         .unwrap();
     record_verification(&state.db, &user, &version(&reimported), &binding, "usable")
@@ -267,7 +302,9 @@ async fn reconnect_after_provider_disconnect_and_service_delete_preserves_tombst
     )
     .await
     .unwrap();
-    let newest_service = registered_service(&state.db, &reimported).await.unwrap();
+    let newest_service = registered_service(&state.db, &state.encryption_keys, &reimported)
+        .await
+        .unwrap();
     assert_ne!(newest_service, service);
     assert_ne!(newest_service, original_service);
     assert_eq!(
@@ -289,7 +326,9 @@ async fn reconnect_after_provider_disconnect_and_service_delete_preserves_tombst
         1
     );
     assert_eq!(
-        connection_status(&state.db, &reimported).await.unwrap(),
+        connection_status(&state.db, &state.encryption_keys, &reimported)
+            .await
+            .unwrap(),
         "saved"
     );
 }

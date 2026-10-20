@@ -1,15 +1,5 @@
-//! Durable queue row for the telemetry erasure worker.
-//!
-//! Account deletion enqueues one job per user before the user row is
-//! removed. The worker (see `services::telemetry_erasure_service`)
-//! drains these, calls the vendor's delete-person API, and retries on
-//! transient errors with exponential backoff. After too many failures
-//! a job moves to `failed` (dead-letter) for operator attention.
-//!
-//! Only the `user_id` is stored. PostHog's own `identify()` merges anon
-//! distinct_ids into the authenticated person, so deleting by `user_id`
-//! cascades to every aliased anon trail across FE, Mobile, and CLI
-//! (`docs/TELEMETRY.md` §4.2). No server-side alias tracking needed.
+//! Durable per-destination erasure checkpoints. API acceptance and verified
+//! asynchronous completion are distinct. Jobs retain no vendor API credential.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,8 +15,12 @@ pub enum TelemetryErasureStatus {
     /// Currently being processed. Used to prevent two workers from
     /// claiming the same row during a briefly-overlapping handover.
     InFlight,
-    /// Vendor accepted the delete; no further action.
+    /// Vendor deletion status explicitly verified asynchronous event deletion.
     Completed,
+    /// Accepted by the vendor; asynchronous deletion still requires verification.
+    Accepted,
+    /// Configuration, historical-destination or no-person evidence needs review.
+    OperatorAction,
     /// Retries exhausted. Flagged for operator attention; the user's
     /// record will remain in the vendor's store until a human resolves.
     Failed,
@@ -38,6 +32,24 @@ pub struct TelemetryErasureJob {
     pub id: String,
     pub user_id: String,
     pub status: TelemetryErasureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_uuid: Option<String>,
+    /// Provider timestamps already present BEFORE this job's first DELETE.
+    /// Equality markers prevent old completed requests from proving this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_baseline: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_token: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub retry_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub accepted_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub completion_verified_at: Option<DateTime<Utc>>,
     /// Number of delete attempts made so far. Incremented by the worker
     /// before each attempt.
     #[serde(default)]
@@ -60,6 +72,14 @@ impl TelemetryErasureJob {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.into(),
             status: TelemetryErasureStatus::Pending,
+            destination_id: None,
+            person_uuid: None,
+            status_baseline: None,
+            lease_token: None,
+            lease_expires_at: None,
+            retry_at: None,
+            accepted_at: None,
+            completion_verified_at: None,
             attempts: 0,
             last_error: None,
             created_at: now,
@@ -102,6 +122,8 @@ mod tests {
             TelemetryErasureStatus::Pending,
             TelemetryErasureStatus::InFlight,
             TelemetryErasureStatus::Completed,
+            TelemetryErasureStatus::Accepted,
+            TelemetryErasureStatus::OperatorAction,
             TelemetryErasureStatus::Failed,
         ] {
             let mut job = TelemetryErasureJob::new("u");

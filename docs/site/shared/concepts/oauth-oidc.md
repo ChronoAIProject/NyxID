@@ -54,7 +54,7 @@ When the user confirms the review, NyxID rotates the refresh grant behind the sa
 
 ## Token types
 
-All tokens are RS256-signed JWTs using a 4096-bit RSA key pair.
+Tokens use RS256 signatures. Generated RSA keys are 4096 bits; imported active pairs and retained public keys must be at least 3072 bits, and the active pair must match. One active signer and up to sixteen retained public keys support verification by known `kid` and JWKS overlap. Stage all readers before switching signers; unknown or retired keys fail verification.
 
 | Token | Default TTL | Audience | Key claims |
 |-------|-------------|----------|------------|
@@ -142,7 +142,7 @@ Per-request access-token narrowing never replaces the stored refresh grant.
 
 Resource servers can validate tokens server-side via RFC 7662 introspection (`POST /oauth/introspect`). This is useful when the resource server cannot or does not want to maintain the JWKS and verify signatures locally.
 
-Access tokens are stateless and cannot be revoked individually — they expire after their TTL. Revoking a refresh token (`POST /oauth/revoke`) prevents further access token issuance but does not invalidate access tokens already issued.
+NyxID online admission checks the active user and the applicable live authority: first-party session state, ordinary OAuth consent revision and active client, or the additional Machine/relay/delegated fences. Consent revocation invalidates ordinary OAuth tokens bound to that revision; a later regrant does not revive them. Revoking a refresh token prevents further issuance from it and is distinct from revoking consent. External relying parties that verify JWTs offline retain an expiry/cache window. Legacy authority and delegation/callback compatibility require a coordinated deployment; see the repository OAuth authority rollout runbook.
 
 ## How MCP clients use OIDC
 
@@ -187,7 +187,7 @@ The consent page shows C and D under **Allow 2 additional services**, with A and
 
 The approved authorization code stores the complete accumulated service boundary. Refresh tokens and broker bindings inherit that boundary; an optional `resource=C` only narrows the access token. Binding updates keep the existing handle and return `binding_updated: true`, without a replacement handle. Without `binding_grant_id`, the flow uses the user's client-wide consent and may issue a new binding through the ordinary broker flow. It does not update other existing bindings automatically.
 
-NyxID signs the grant snapshot, mode, IDs, scopes, app identity, and request context. The browser receives a short, user-bound review handle and loads the signed request from NyxID; the server verifies its signature, expiry, authenticated user, client, and live ownership on submission. URL display hints are not authority. All-services escalation, unknown or inaccessible new IDs, disabled new services, and mismatched external subjects fail closed. A consent revision/fingerprint and binding grant version fence stale decisions and codes. Routine broker token rotation does not change the grant version and can continue during review. Conflicts return an OAuth error callback with `state`, allowing the caller to restore its draft and retry. A later revocation cannot recreate the deleted consent. Binding replacement and the final consent fence commit atomically. Previously issued stateless access tokens retain their normal expiry semantics.
+NyxID signs the grant snapshot, mode, IDs, scopes, app identity, and request context. The browser receives a short, user-bound review handle and loads the signed request from NyxID; the server verifies its signature, expiry, authenticated user, client, and live ownership on submission. URL display hints are not authority. All-services escalation, unknown or inaccessible new IDs, disabled new services, and mismatched external subjects fail closed. A consent revision/fingerprint and binding grant version fence stale decisions and codes. Routine broker token rotation does not change the grant version and can continue during review. Conflicts return an OAuth error callback with `state`, allowing the caller to restore its draft and retry. A later revocation cannot recreate the deleted consent. Binding replacement and the final consent fence commit atomically. Previously issued OAuth access tokens retain their signed expiry, but NyxID online admission also checks their original consent revision; replacing consent does not transfer the new authority to an old token.
 
 Deploy the backend and consent UI together before enabling this mode in callers. The dedicated incremental decision endpoint rejects requests on old backend replicas instead of silently replacing the grant. Old authorization servers that do not implement the mode must not be used as a fallback.
 

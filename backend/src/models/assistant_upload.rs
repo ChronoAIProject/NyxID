@@ -10,6 +10,8 @@ pub struct AssistantUpload {
     pub source: Option<super::assistant_channel_media::UploadSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_sha256: Option<String>,
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(rename = "_id")]
     pub id: String,
     pub origin: String,

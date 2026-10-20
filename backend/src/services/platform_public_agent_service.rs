@@ -912,6 +912,7 @@ pub(crate) mod tests {
     ) -> PlatformPublicSession {
         let now = Utc::now();
         let row = PlatformPublicSession {
+            secret_context_versions: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             profile_id: "profile".into(),
             manager_bot_id: "99".into(),

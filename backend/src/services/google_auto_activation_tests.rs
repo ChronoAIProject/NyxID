@@ -422,7 +422,7 @@ async fn node_upload(
                 method: method.into(),
                 path: path.into(),
                 query: Some(query.into()),
-                headers: vec![("content-type".into(), content_type.into())],
+                headers: (vec![("content-type".into(), content_type.into())]).into(),
                 body: Some(body.to_vec()),
             },
             Some(&[0x11; 32]),

@@ -110,6 +110,8 @@ pub struct UpdateProviderRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RevocationConfigRequest {
+    #[serde(default)]
+    pub effect_scope: Option<crate::models::provider_config::RevocationEffectScope>,
     #[serde(default = "crate::models::provider_config::default_request_encoding")]
     pub request_encoding: String,
     pub style: String,
@@ -122,6 +124,7 @@ pub struct RevocationConfigRequest {
 impl From<RevocationConfigRequest> for crate::models::provider_config::RevocationConfig {
     fn from(value: RevocationConfigRequest) -> Self {
         Self {
+            effect_scope: value.effect_scope,
             request_encoding: value.request_encoding,
             style: value.style,
             url: value.url,
@@ -209,6 +212,7 @@ pub struct ProviderResponse {
 
 #[derive(Debug, Serialize)]
 pub struct RevocationConfigResponse {
+    pub effect_scope: Option<crate::models::provider_config::RevocationEffectScope>,
     pub request_encoding: String,
     pub style: String,
     pub url: String,
@@ -237,6 +241,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         description: p.description,
         provider_type: p.provider_type,
         revocation: revocation.map(|revocation| RevocationConfigResponse {
+            effect_scope: revocation.effect_scope,
             request_encoding: revocation.request_encoding,
             style: revocation.style,
             url: revocation.url,
@@ -383,6 +388,7 @@ pub async fn create_provider(
         body.revocation_url
             .as_ref()
             .map(|url| crate::models::provider_config::RevocationConfig {
+                effect_scope: None,
                 request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
@@ -931,6 +937,7 @@ mod tests {
 
     fn make_provider(provider_type: &str) -> ProviderConfig {
         ProviderConfig {
+            secret_context_versions: Default::default(),
             id: "provider-1".to_string(),
             slug: "provider-1".to_string(),
             name: "Provider".to_string(),
@@ -1170,6 +1177,7 @@ mod tests {
     fn provider_response_exposes_dedicated_revocation_shape() {
         let mut provider = make_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            effect_scope: None,
             request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
@@ -1186,6 +1194,7 @@ mod tests {
                 "style": "github",
                 "url": "https://api.github.com/applications",
                 "auth": "inherit",
+                "effect_scope": null,
                 "revokes_grant": true
             }))
         );
@@ -1205,6 +1214,7 @@ mod tests {
                 "style": "rfc7009",
                 "url": "https://example.com/revoke",
                 "auth": "inherit",
+                "effect_scope": null,
                 "revokes_grant": false
             }))
         );

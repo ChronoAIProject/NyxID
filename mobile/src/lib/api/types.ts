@@ -118,6 +118,8 @@ export type AccountProfile = {
 };
 
 export type DeleteAccountResponse = {
-  status: "DELETED";
-  deleted_at: string;
+  status: "accepted" | "pending" | "operator_action" | "complete";
+  accepted_at: string;
+  completed_at: string | null;
+  domains: Array<{domain: string; status: "pending" | "operator_action" | "complete"; reason: string | null; completed_at: string | null}>;
 };

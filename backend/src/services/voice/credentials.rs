@@ -172,7 +172,7 @@ pub(crate) async fn resolve_audio(
             )
         }
     };
-    let key = Zeroizing::new(std::mem::take(&mut target.credential));
+    let key = std::mem::take(&mut target.credential);
     if target.auth_method != "bearer" || key.is_empty() {
         return Err(AppError::VoiceProviderUnavailable);
     }

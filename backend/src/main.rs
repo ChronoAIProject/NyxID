@@ -26,6 +26,7 @@ mod routes;
 mod services;
 mod ssh_cli;
 mod telemetry;
+mod telemetry_erasure_cli;
 
 #[cfg(test)]
 mod test_utils;
@@ -325,6 +326,57 @@ enum Commands {
     /// Scan for and hard-delete orphaned user_endpoints and user_api_keys left
     /// over by pre-fix revoke flows. Prints a preview and prompts before deleting.
     CleanupOrphans(cleanup_cli::CleanupArgs),
+    /// Inspect and reconcile durable analytics-erasure operator dependencies.
+    TelemetryErasure(telemetry_erasure_cli::ErasureArgs),
+    /// Export existing final HMAC keys without changing history; never prints secrets.
+    ExportHmacKeyset {
+        /// New local file, created exclusively with restricted permissions.
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
+}
+
+async fn load_prepared_hmac_keyset(
+    db: &mongodb::Database,
+    config: &AppConfig,
+) -> crypto::hmac_lifecycle::HmacKeyset {
+    // Existing final domain values are pinned independently from mutable RSA
+    // and encryption sources. A file is authoritative: never fall back on a
+    // parse/read failure, and do not read the active RSA PEM for HMAC then.
+    let hmac_keys = if let Some(path) = config.hmac_keyset_path.as_deref() {
+        crypto::hmac_lifecycle::HmacKeyset::load(std::path::Path::new(path))
+            .expect("Failed to load pinned HMAC keyset")
+    } else {
+        let pem = zeroize::Zeroizing::new(
+            std::fs::read(&config.jwt_private_key_path)
+                .expect("Failed to read legacy JWT HMAC source"),
+        );
+        tracing::warn!(
+            "Legacy HMAC sources remain coupled; export and deploy a pinned HMAC keyset before rotating JWT or encryption keys"
+        );
+        legacy_hmac_keyset(config, &pem)
+    };
+    let legacy_for_adoption = if services::hmac_lifecycle_service::is_prepared(db)
+        .await
+        .expect("Failed to read HMAC preparation state")
+    {
+        None
+    } else {
+        let pem = zeroize::Zeroizing::new(
+            std::fs::read(&config.jwt_private_key_path)
+                .expect("Failed to read legacy HMAC preparation source"),
+        );
+        Some(legacy_hmac_keyset(config, &pem))
+    };
+    services::hmac_lifecycle_service::ensure_consistent(
+        db,
+        &hmac_keys,
+        legacy_for_adoption.as_ref(),
+    )
+    .await
+    .expect("HMAC lifecycle consistency check failed");
+    drop(legacy_for_adoption);
+    hmac_keys
 }
 
 fn main() {
@@ -394,6 +446,16 @@ async fn server_main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    // Preparation reads the unchanged legacy bytes and bounded chain evidence.
+    // It neither loads a signer nor starts normal server writers, so an older
+    // weak signer can be exported before the strict JWT cutover.
+    if let Some(Commands::ExportHmacKeyset { path }) = post_db_command.as_ref() {
+        let keys = load_prepared_hmac_keyset(&db, &config).await;
+        keys.export_new(path)
+            .expect("Failed to export existing HMAC keyset");
+        tracing::info!("Existing HMAC domain keys exported to a restricted file");
+        return;
+    }
     services::assistant_nyxagent::warn_at_startup(&db).await;
     services::assistant_access_policy::ensure_cutover(&db)
         .await
@@ -403,62 +465,34 @@ async fn server_main() {
     // before the server state is built, and the audit-chain key can fall back
     // to the JWT private key in KMS deployments.
     let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
-    tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
+    tracing::info!("JWT signing and verification keys loaded");
 
-    // Compute JWK from the public key for the JWKS endpoint.
-    let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
-        .expect("Failed to read public key for JWK");
-    let jwk_json =
-        crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
+    // Publish the exact validated startup snapshot; do not reread a PEM that
+    // could have changed independently of the active signer after validation.
+    let jwk_json = jwt_keys
+        .public_jwk
+        .clone()
+        .expect("validated active JWT public key");
 
-    // Derive HMAC keys kept in process memory only. The JWT private key file
-    // contents are the universal fallback so KMS deployments without
-    // `ENCRYPTION_KEY` still start.
-    let jwt_private_key_pem = std::fs::read(&config.jwt_private_key_path)
-        .expect("Failed to read JWT private key for HMAC seed");
-    let cli_pairing_hmac_key = Arc::new(derive_cli_pairing_hmac_key(
-        config.cli_pairing_hmac_key.as_deref(),
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    ));
-    let auth_device_hmac_key = Arc::new(derive_auth_device_hmac_key(
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    ));
-    let audit_chain_hmac_key = services::audit_chain_service::derive_audit_chain_hmac_key(
-        config.audit_chain_hmac_key.as_deref(),
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    );
-    services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
-    let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
-    // Keys the receipt fingerprints that cover caller-supplied material.
-    // Receipts are stored, so an unkeyed digest of a low-entropy value would
-    // be an offline oracle against a database snapshot.
-    services::assistant_action_receipts::init_action_fingerprint_hmac_key(
-        crypto::hmac_keys::derive_hmac_key(
-            "assistant-action-fingerprint",
-            config.encryption_key.as_deref().map(str::as_bytes),
-            &jwt_private_key_pem,
-        ),
-    );
-    let billing_ledger_hmac_key = services::billing::ledger::derive_billing_ledger_hmac_key(
-        config.billing_ledger_hmac_key.as_deref(),
-        config.encryption_key.as_deref(),
-        Some(&jwt_private_key_pem),
-    );
-    services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
+    let hmac_keys = load_prepared_hmac_keyset(&db, &config).await;
+    let cli_pairing = hmac_keys.cli_pairing().clone();
+    let auth_device = hmac_keys.auth_device().clone();
+    let audit_chain = hmac_keys.audit_chain().clone();
+    let action_fingerprint = hmac_keys.assistant_action().clone();
+    let billing_ledger = hmac_keys.billing_ledger().clone();
+    let internal_dispatch_hmac_key = hmac_keys.internal_dispatch().clone();
+    let cli_pairing_hmac_key = Arc::new(cli_pairing);
+    let auth_device_hmac_key = Arc::new(auth_device);
+    services::audit_service::init_audit_chain_hmac_key(audit_chain.clone());
+    let audit_chain_hmac_key = Arc::new(audit_chain);
+    services::assistant_action_receipts::init_action_fingerprint_hmac_key(action_fingerprint);
+    services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger.clone());
+    let billing_ledger_hmac_key = Arc::new(billing_ledger);
     services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
     services::billing::account_reconciliation::spawn(
         db.clone(),
         config.billing_enabled,
         config.chain_verify_interval_secs,
-    );
-    let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
-    let internal_dispatch_hmac_key = services::internal_auth::derive_key(
-        config.internal_dispatch_hmac_key.as_deref(),
-        config.encryption_key.as_deref().map(str::as_bytes),
-        &jwt_private_key_pem,
     );
     services::chain_verify_service::spawn_chain_verify_worker(
         db.clone(),
@@ -466,9 +500,6 @@ async fn server_main() {
         billing_ledger_hmac_key.clone(),
         config.chain_verify_interval_secs,
     );
-    // JWT private key bytes carry no secret beyond what's already in JwtKeys;
-    // drop them immediately after derivation.
-    drop(jwt_private_key_pem);
 
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
@@ -479,6 +510,13 @@ async fn server_main() {
             .await
             .expect("Failed to backfill platform role memberships");
         run_promote_admin(&db, &email).await;
+        return;
+    }
+    if let Some(Commands::TelemetryErasure(args)) = post_db_command {
+        if let Err(error) = telemetry_erasure_cli::run(&db, args).await {
+            eprintln!("Erasure reconciliation failed: {error}");
+            std::process::exit(1);
+        }
         return;
     }
     if let Some(Commands::CleanupOrphans(args)) = post_db_command {
@@ -542,6 +580,8 @@ async fn server_main() {
 
     let encryption_keys = Arc::new({
         let mut ek = EncryptionKeys::with_provider_and_fallback(provider, fallback_provider);
+        ek.set_allow_legacy_record_reads(config.allow_legacy_record_reads);
+        ek.set_contextual_record_writes(config.contextual_record_writes);
         if let Some(l) = legacy {
             ek.set_legacy(l);
         }
@@ -641,7 +681,7 @@ async fn server_main() {
     );
 
     // Run unified collection migration (idempotent, non-fatal)
-    if let Err(e) = db::migrate_to_unified_collections(&db).await {
+    if let Err(e) = db::migrate_to_unified_collections(&db, &encryption_keys).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");
     }
 
@@ -852,6 +892,14 @@ async fn server_main() {
             Some(developer_webhook_dispatcher.clone()),
         ),
     );
+    // Erasure is independent of current capture settings and uses authenticated
+    // vendor APIs. Historical destinations remain in the durable registry.
+    let erasure_clients = telemetry::erasure::ErasureClients::from_env()
+        .expect("Invalid telemetry erasure configuration");
+    services::telemetry_erasure_service::register_destinations(&db, &erasure_clients)
+        .await
+        .expect("Telemetry erasure destination registration failed");
+
     let state = AppState {
         #[cfg(test)]
         local_machine_platform: None,
@@ -1013,14 +1061,16 @@ async fn server_main() {
             ),
         ),
         billing,
-        telemetry: telemetry::TelemetryClient::from_config(&config),
+        telemetry: telemetry::TelemetryClient::from_config(&config, Some(db.clone())),
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
     };
 
-    // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
-    // is `None` (hard-off mode); the function logs + returns.
-    services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
+    services::personal_erasure_service::ensure_indexes(&state.db)
+        .await
+        .expect("Personal erasure indexes");
+    let _personal_erasure_worker = services::personal_erasure_service::spawn_worker(state.clone());
+    services::telemetry_erasure_service::spawn_worker(state.db.clone(), erasure_clients);
     let _usage_rollup_worker =
         services::billing::usage_rollup::spawn_worker(state.db.clone(), Arc::new(config.clone()));
     let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
@@ -1494,36 +1544,7 @@ async fn server_main() {
         "CORS allowed origins"
     );
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |origin, _| {
-            allowed_origins.contains(origin)
-        }))
-        .allow_methods(AllowMethods::list([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::DELETE,
-            axum::http::Method::PATCH,
-            axum::http::Method::OPTIONS,
-        ]))
-        .allow_headers(AllowHeaders::list([
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::ACCEPT,
-            axum::http::header::ORIGIN,
-            axum::http::header::COOKIE,
-            "DPoP".parse().unwrap(),
-            "X-User-Email".parse().unwrap(),
-            "X-User-Display-Name".parse().unwrap(),
-            "X-API-Key".parse().unwrap(),
-            "X-NyxID-Client".parse().unwrap(),
-            "X-NyxID-Client-Version".parse().unwrap(),
-            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
-        ]))
-        .expose_headers([axum::http::HeaderName::from_static(
-            mw::assistant_trace::TRACE_HEADER,
-        )])
-        .allow_credentials(true);
+    let cors = private_cors(allowed_origins);
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
@@ -1616,6 +1637,39 @@ async fn server_main() {
         result = public_server => result.expect("Public server error"),
         result = internal_server => result.expect("Internal replica server error"),
     }
+}
+
+/// Preserve each legacy domain, including its historical source-byte convention.
+fn legacy_hmac_keyset(config: &AppConfig, pem: &[u8]) -> crypto::hmac_lifecycle::HmacKeyset {
+    crypto::hmac_lifecycle::HmacKeyset([
+        derive_cli_pairing_hmac_key(
+            config.cli_pairing_hmac_key.as_deref(),
+            config.encryption_key.as_deref(),
+            Some(pem),
+        ),
+        derive_auth_device_hmac_key(config.encryption_key.as_deref(), Some(pem)),
+        services::audit_chain_service::derive_audit_chain_hmac_key(
+            config.audit_chain_hmac_key.as_deref(),
+            config.encryption_key.as_deref(),
+            Some(pem),
+        ),
+        // These two legacy callers use hex STRING bytes; do not normalize.
+        crypto::hmac_keys::derive_hmac_key(
+            "assistant-action-fingerprint",
+            config.encryption_key.as_deref().map(str::as_bytes),
+            pem,
+        ),
+        services::billing::ledger::derive_billing_ledger_hmac_key(
+            config.billing_ledger_hmac_key.as_deref(),
+            config.encryption_key.as_deref(),
+            Some(pem),
+        ),
+        services::internal_auth::derive_key(
+            config.internal_dispatch_hmac_key.as_deref(),
+            config.encryption_key.as_deref().map(str::as_bytes),
+            pem,
+        ),
+    ])
 }
 
 /// Derive the HMAC key used to key `CliPairing.code_hash`.
@@ -1790,6 +1844,42 @@ async fn run_promote_admin(db: &mongodb::Database, email: &str) {
     }
 }
 
+fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderValue>) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            allowed_origins.contains(origin)
+        }))
+        .allow_methods(AllowMethods::list([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::PATCH,
+            axum::http::Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+            axum::http::header::ORIGIN,
+            axum::http::header::COOKIE,
+            "DPoP".parse().unwrap(),
+            "X-User-Email".parse().unwrap(),
+            "X-User-Display-Name".parse().unwrap(),
+            "X-API-Key".parse().unwrap(),
+            "X-NyxID-Client".parse().unwrap(),
+            "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Analytics".parse().unwrap(),
+            "X-NyxID-Analytics-Account".parse().unwrap(),
+            "DNT".parse().unwrap(),
+            "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
+        ]))
+        .expose_headers([axum::http::HeaderName::from_static(
+            mw::assistant_trace::TRACE_HEADER,
+        )])
+        .allow_credentials(true)
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests for startup-time helpers that sit in `main.rs`.
@@ -1803,6 +1893,296 @@ mod tests {
     //! time.
 
     use super::*;
+
+    #[tokio::test]
+    async fn hmac_preparation_exports_legacy_2048_pem_without_loading_a_signer() {
+        use rsa::{
+            RsaPrivateKey, RsaPublicKey,
+            pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+        };
+        let db = test_utils::connect_test_database("hmac_weak_signer_export")
+            .await
+            .expect("isolated MongoDB required");
+        let dir = tempfile::tempdir().unwrap();
+        let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
+        let pem = private.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let private_path = dir.path().join("legacy-private.pem");
+        let public_path = dir.path().join("legacy-public.pem");
+        std::fs::write(&private_path, pem.as_bytes()).unwrap();
+        std::fs::write(
+            &public_path,
+            RsaPublicKey::from(&private)
+                .to_public_key_pem(LineEnding::LF)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut config = test_utils::test_app_config();
+        config.encryption_key = None;
+        config.hmac_keyset_path = None;
+        config.jwt_private_key_path = private_path.to_str().unwrap().into();
+        config.jwt_public_key_path = public_path.to_str().unwrap().into();
+        assert!(
+            JwtKeys::from_config(&config).is_err(),
+            "normal signing must remain strict"
+        );
+        let expected = legacy_hmac_keyset(&config, pem.as_bytes());
+        let prepared = load_prepared_hmac_keyset(&db, &config).await;
+        let exported = dir.path().join("hmac.json");
+        prepared.export_new(&exported).unwrap();
+        let loaded = crypto::hmac_lifecycle::HmacKeyset::load(&exported).unwrap();
+        assert_eq!(loaded.commitments(), expected.commitments());
+        for (actual, expected) in loaded.0.iter().zip(expected.0.iter()) {
+            assert_eq!(actual.as_slice(), expected.as_slice());
+        }
+        assert_eq!(
+            std::fs::read(&private_path).unwrap(),
+            pem.as_bytes(),
+            "preparation must never replace old PEM bytes"
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hmac_adoption_rejects_wrong_first_keys_and_preserves_history_after_source_rotation() {
+        use models::{
+            audit_log::AuditLog,
+            billing_ledger::{BillingLedgerEntry, BillingLedgerEventType},
+        };
+        use services::{
+            audit_chain_service as audit, audit_service, billing::ledger,
+            hmac_lifecycle_service as lifecycle,
+        };
+        let db = test_utils::connect_test_database("hmac_adoption_history")
+            .await
+            .expect("isolated MongoDB required");
+        let mut config = test_utils::test_app_config();
+        config.encryption_key = Some("1a".repeat(32));
+        config.cli_pairing_hmac_key = None;
+        config.audit_chain_hmac_key = None;
+        config.billing_ledger_hmac_key = None;
+        config.internal_dispatch_hmac_key = None;
+        let old = legacy_hmac_keyset(&config, b"legacy-pem-for-hmac-fixture");
+        let audit_row = audit::append_chained_entry(
+            &db,
+            AuditLog {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: Some("retained-owner".into()),
+                event_type: "hmac_history_fixture".into(),
+                event_data: Some(serde_json::json!({"retained":"immutable"})),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+                seq: None,
+                prev_hash: None,
+                entry_hash: None,
+                created_at: chrono::Utc::now(),
+            },
+            old.audit_chain().as_slice(),
+        )
+        .await
+        .unwrap();
+        let legacy_billing = ledger::append_chained_entry(
+            &db,
+            BillingLedgerEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                seq: 0,
+                prev_hash: String::new(),
+                entry_hash: String::new(),
+                event_type: BillingLedgerEventType::UsageSettled,
+                movement: None,
+                postings: Vec::new(),
+                owner_id: "retained-owner".into(),
+                reference_id: "old-billing".into(),
+                transaction_id: None,
+                layer: None,
+                metric: None,
+                service_slug: None,
+                model: None,
+                quantity: Some(1),
+                amount_credits: Some(5),
+                amount_micros: None,
+                balance_credits: None,
+                dedupe_key: None,
+                wallet_id: None,
+                created_at: chrono::Utc::now(),
+            },
+            old.billing_ledger().as_slice(),
+        )
+        .await
+        .unwrap();
+        let exact_billing = ledger::append_chained_entry(
+            &db,
+            ledger::exact_entry(
+                "retained-owner",
+                "exact-billing",
+                "hmac_fixture",
+                "hmac-exact".into(),
+                ledger::transfer(
+                    "owner:retained".into(),
+                    "platform:retained".into(),
+                    models::credits::Credits::from_whole(1),
+                ),
+                None,
+            ),
+            old.billing_ledger().as_slice(),
+        )
+        .await
+        .unwrap();
+        // Store a pre-adoption fingerprint using the same keyed API as delayed
+        // callbacks/instruction identity; source rotation must preserve it.
+        let fingerprint = audit_service::keyed_fingerprint(
+            Some(old.audit_chain().as_slice()),
+            b"assistant-stable-instructions-v1",
+            b"pending operation immutable context",
+        )
+        .unwrap();
+        db.collection::<bson::Document>("hmac_pending_fixture")
+            .insert_one(bson::doc! {"_id":"pending","fingerprint":&fingerprint})
+            .await
+            .unwrap();
+        let mut changed_config = config.clone();
+        changed_config.encryption_key = Some("2b".repeat(32));
+        let wrong = legacy_hmac_keyset(&changed_config, b"rotated-pem-for-hmac-fixture");
+        // Simulate mistakenly changed sources, even with the same wrong
+        // candidate presented as legacy preparation: real history rejects it.
+        assert!(
+            lifecycle::ensure_consistent(&db, &wrong, Some(&wrong))
+                .await
+                .is_err()
+        );
+        assert!(!lifecycle::is_prepared(&db).await.unwrap());
+        assert_eq!(
+            db.collection::<bson::Document>(models::hmac_keyset::COLLECTION_NAME)
+                .count_documents(bson::doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        // Billing alone must also reject a bad first candidate after audit
+        // verification succeeds.
+        let wrong_billing = old.with_changed_domain("billing_ledger");
+        assert!(
+            lifecycle::ensure_consistent(&db, &wrong_billing, Some(&wrong_billing))
+                .await
+                .is_err()
+        );
+        assert!(!lifecycle::is_prepared(&db).await.unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hmac.json");
+        old.export_new(&path).unwrap();
+        let adopted = crypto::hmac_lifecycle::HmacKeyset::load(&path).unwrap();
+        lifecycle::ensure_consistent(&db, &adopted, Some(&old))
+            .await
+            .unwrap();
+        // Source keys can now change; configured adoption does not derive from
+        // them and the durable pin rejects accidental replacement.
+        lifecycle::ensure_consistent(&db, &adopted, None)
+            .await
+            .unwrap();
+        assert!(
+            lifecycle::ensure_consistent(&db, &wrong, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            audit::verify_chain(&db, adopted.audit_chain().as_slice(), None, None, None)
+                .await
+                .unwrap()
+                .status,
+            audit::AuditChainStatus::Ok
+        );
+        assert_eq!(
+            ledger::verify_chain(&db, adopted.billing_ledger().as_slice(), None, None, None)
+                .await
+                .unwrap()
+                .status,
+            ledger::BillingLedgerStatus::Ok
+        );
+        assert_eq!(
+            audit::compute_entry_hash(&audit_row, adopted.audit_chain().as_slice()).unwrap(),
+            audit_row.entry_hash.unwrap()
+        );
+        for row in [legacy_billing, exact_billing] {
+            assert_eq!(
+                ledger::compute_entry_hash(&row, adopted.billing_ledger().as_slice()),
+                row.entry_hash
+            );
+        }
+        let pending = db
+            .collection::<bson::Document>("hmac_pending_fixture")
+            .find_one(bson::doc! {"_id":"pending"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.get_str("fingerprint").unwrap(),
+            audit_service::keyed_fingerprint(
+                Some(adopted.audit_chain().as_slice()),
+                b"assistant-stable-instructions-v1",
+                b"pending operation immutable context"
+            )
+            .unwrap()
+        );
+        assert_eq!(old.commitments(), adopted.commitments());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_cors_allows_analytics_narrowing_header_only_for_trusted_origin() {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/users/me/preferences/analytics",
+                axum::routing::put(|| async {}),
+            )
+            .layer(private_cors(std::collections::HashSet::from([
+                "https://app.example".parse().unwrap(),
+            ])));
+        for origin in ["https://app.example", "https://untrusted.example"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("OPTIONS")
+                        .uri("/api/v1/users/me/preferences/analytics")
+                        .header("Origin", origin)
+                        .header("Access-Control-Request-Method", "PUT")
+                        .header(
+                            "Access-Control-Request-Headers",
+                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt",
+                        )
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if origin == "https://app.example" {
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("access-control-allow-origin")
+                        .unwrap(),
+                    origin
+                );
+                let allowed = response
+                    .headers()
+                    .get("access-control-allow-headers")
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert!(allowed.contains("x-nyxid-analytics"));
+                assert!(allowed.contains("x-nyxid-analytics-account"));
+                assert!(allowed.contains("dnt"));
+            } else {
+                assert!(
+                    !response
+                        .headers()
+                        .contains_key("access-control-allow-origin")
+                );
+            }
+        }
+    }
 
     fn enc_hex(byte: u8) -> String {
         hex::encode([byte; 32])

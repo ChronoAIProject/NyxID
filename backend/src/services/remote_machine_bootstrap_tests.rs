@@ -104,6 +104,7 @@ pub(crate) async fn fixture() -> (
         status: crate::models::node::NodeStatus::Offline,
         auth_token_hash: "reserved-auth".into(),
         signing_secret_encrypted: None,
+        signing_secret_context_version: None,
         signing_secret_hash: "reserved-signing".into(),
         last_heartbeat_at: None,
         connected_at: None,
@@ -247,11 +248,11 @@ async fn lost_response_replays_one_sealed_delivery_and_stable_node_credentials()
     assert_eq!(node.id, binding.node_id);
     assert_eq!(node.signing_secret_hash, hash_token(signing));
     assert_eq!(
-        &keys
-            .decrypt(node.signing_secret_encrypted.as_ref().unwrap())
+        node_service::signing_secret_from_node(&keys, &node)
             .await
-            .unwrap(),
-        signing.as_bytes()
+            .unwrap()
+            .as_slice(),
+        hex::decode(signing).unwrap().as_slice()
     );
     assert_eq!(
         db.collection::<bson::Document>(NODES)

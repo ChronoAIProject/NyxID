@@ -83,7 +83,7 @@ pub struct PushPendingCredentialFanOutRequest {
     pub remote_crypto: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PendingCredentialCiphertextRequest {
     pub version: String,
     pub admin_pubkey: String,
@@ -93,7 +93,7 @@ pub struct PendingCredentialCiphertextRequest {
     pub integrity_verification: Option<PendingCredentialIntegrityVerificationRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct PendingCredentialFanOutCiphertextItemRequest {
     pub node_id: String,
     pub generation: i64,
@@ -129,7 +129,7 @@ enum PendingCiphertextValidation {
 
 // --- Response types ---
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CreateRegistrationTokenResponse {
     pub token_id: String,
     pub token: String,
@@ -203,7 +203,7 @@ pub struct NodeAuthorizationEvidenceResponse {
     pub registration_expires_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct RotateTokenResponse {
     pub auth_token: String,
     pub signing_secret: String,
@@ -1013,8 +1013,9 @@ pub async fn create_registration_token(
     }
 
     let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) =
-        node_service::create_registration_token(
+        node_service::create_registration_token_for_actor(
             &state.db,
+            &user_id_str,
             owner_user_id,
             &body.name,
             state.config.node_max_per_user,
@@ -1214,7 +1215,8 @@ pub async fn delete_node(
             // per-node granularity without leaking the UUID.
             node_id: hash_short_id(&node_id),
         },
-    );
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1299,6 +1301,7 @@ pub async fn transfer_node(
 
     let result = node_service::transfer_node_owner(
         &state.db,
+        &state.encryption_keys,
         &user_id_str,
         &node_id,
         &body.new_owner_user_id,
@@ -2151,6 +2154,7 @@ mod tests {
             status: NodeStatus::Offline,
             auth_token_hash: "auth-hash".to_string(),
             signing_secret_encrypted: None,
+            signing_secret_context_version: None,
             signing_secret_hash: "signing-hash".to_string(),
             last_heartbeat_at: None,
             connected_at: None,
@@ -6383,3 +6387,21 @@ pub async fn machine_settings(
     );
     Ok(StatusCode::NO_CONTENT)
 }
+
+impl std::fmt::Debug for CreateRegistrationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateRegistrationTokenResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RotateTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotateTokenResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+crate::errors::redacted_debug!(PendingCredentialCiphertextRequest);
+
+crate::errors::redacted_debug!(PendingCredentialFanOutCiphertextItemRequest);

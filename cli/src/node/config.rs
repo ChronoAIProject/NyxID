@@ -9,7 +9,7 @@ use super::error::{Error, Result};
 use super::secret_backend::SecretBackend;
 
 /// Top-level configuration structure, serialized as TOML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub server: ServerConfig,
     pub node: NodeSection,
@@ -59,14 +59,14 @@ pub struct ServerConfig {
     pub proxy_max_body_size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSection {
     pub id: String,
     /// AES-GCM encrypted auth token (base64)
     pub auth_token_encrypted: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SigningConfig {
     /// AES-GCM encrypted HMAC shared secret (base64)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,7 +111,7 @@ fn default_ssh_io_timeout_secs() -> u64 {
     3600
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialConfig {
     /// "header" or "query_param"
     pub injection_method: String,
@@ -210,7 +210,7 @@ impl std::fmt::Debug for OAuthRequestOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SshKeyConfig {
     pub service_slug: String,
     pub principal: String,
@@ -785,6 +785,36 @@ fn validate_node_profile_name(name: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NodeConfig([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for NodeSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NodeSection([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for SigningConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SigningConfig([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for CredentialConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialConfig([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for SshKeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SshKeyConfig([REDACTED])")
+    }
 }
 
 #[cfg(test)]

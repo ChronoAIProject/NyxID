@@ -5,6 +5,10 @@ use mongodb::bson::doc;
 use serde_json::{Value, json};
 
 async fn exercise(keep: bool, mfa: bool, app: bool) {
+    exercise_with_recovery(keep, mfa, app, false).await;
+}
+
+async fn exercise_with_recovery(keep: bool, mfa: bool, app: bool, recovery: bool) {
     let Some(db) = connect_test_database("request_only_identity").await else {
         return;
     };
@@ -21,12 +25,13 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
         .insert_one(actor)
         .await
         .unwrap();
+    let mut recovery_code = None;
     let totp = if mfa {
         let setup = mfa_service::setup_totp(&db, &state.encryption_keys, &actor_id, &email)
             .await
             .unwrap();
         let totp = totp_rs::TOTP::from_url(setup.qr_code_url).unwrap();
-        mfa_service::verify_totp_setup(
+        let codes = mfa_service::verify_totp_setup(
             &db,
             &state.encryption_keys,
             &setup.factor_id,
@@ -35,6 +40,7 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
         )
         .await
         .unwrap();
+        recovery_code = codes.first().cloned();
         db.collection::<User>(crate::models::user::COLLECTION_NAME)
             .update_one(
                 doc! {"_id": &actor_id},
@@ -281,7 +287,7 @@ async fn exercise(keep: bool, mfa: bool, app: bool) {
             .post(format!("{approval}/mfa"))
             .header("Origin", &origin)
             .header("Cookie", &cookie)
-            .json(&json!({"code":totp.generate_current().unwrap()}))
+            .json(&json!({"code": if recovery { recovery_code.clone().unwrap() } else { totp.generate((chrono::Utc::now().timestamp() as u64 / 30 + 1) * 30) }}))
             .send()
             .await
             .unwrap();
@@ -497,4 +503,13 @@ async fn social_completion_is_request_bound_and_cannot_replay_or_revive_cancelle
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn recovery_continues_request_only_browser_approval() {
+    exercise_with_recovery(false, true, false, true).await;
+}
+#[tokio::test]
+async fn recovery_continues_persistent_browser_approval() {
+    exercise_with_recovery(true, true, false, true).await;
 }

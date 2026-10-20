@@ -522,8 +522,9 @@ pub(crate) fn admission(
             Admission::Refuse
         };
     }
-    if !addressed
-        && !(chat.kind.as_deref() == Some("private") || chat.reply_mode.as_deref() == Some("all"))
+    if !(addressed
+        || chat.kind.as_deref() == Some("private")
+        || chat.reply_mode.as_deref() == Some("all"))
     {
         Admission::Silent
     } else if owner {

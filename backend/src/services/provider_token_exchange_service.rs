@@ -42,10 +42,17 @@
 //! ## Lifetime
 //!
 //! In-memory only. Backend restart pays one exchange latency per distinct
-//! credential on the next request. No background sweeper; stale entries
-//! are recomputed lazily on read.
+//! credential on the next request. A bounded cache evicts expired values every
+//! 30 seconds, including credentials never requested again. In-flight slots
+//! remain stable until their last fetcher/waiter releases them.
+//! The supported cache lifetime is 60 seconds through 30 days. Larger
+//! provider/configured lifetimes are rejected rather than overflowing dates.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Weak};
+use zeroize::Zeroizing;
+
+const MAX_TOKEN_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
@@ -57,31 +64,163 @@ use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig
 use crate::services::mcp_service;
 
 /// A single cached access token with its computed expiry time.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CachedToken {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for CachedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedToken")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Per-key slot combining the stored value and the fetch serializer.
 #[derive(Default)]
 struct TokenSlot {
-    cached: RwLock<Option<CachedToken>>,
+    cached: RwLock<Option<StoredToken>>,
     fetch_lock: Mutex<()>,
+    generation: AtomicU64,
 }
+
+struct StoredToken {
+    value: CachedToken,
+    retained_until: std::time::Instant,
+}
+
+type CacheEntries = DashMap<String, Arc<TokenSlot>>;
+// Weak references keep no credentials or caches alive. Dead registrations are
+// pruned on construction and retirement; production uses one shared cache.
+static PROCESS_CACHES: LazyLock<std::sync::Mutex<Vec<Weak<CacheEntries>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Drop locally cached exchange results for exactly this source material.
+/// This is memory cleanup, not the cross-replica authorization boundary: live
+/// credential/owner admission remains mandatory on every execution.
+pub(crate) async fn retire_credential(credential: &[u8]) {
+    let prefix = format!("{:x}:", Sha256::digest(credential));
+    let caches = {
+        let mut registry = PROCESS_CACHES.lock().unwrap_or_else(|e| e.into_inner());
+        registry.retain(|entry| entry.strong_count() > 0);
+        registry
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>()
+    };
+    for entries in caches {
+        let slots = entries
+            .iter()
+            .filter(|entry| entry.key().starts_with(&prefix))
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        for slot in slots {
+            let mut cached = slot.cached.write().await;
+            slot.generation.fetch_add(1, AtomicOrdering::AcqRel);
+            *cached = None;
+        }
+        TokenExchangeCache::prune_entries(&entries);
+    }
+}
+
+const MAX_CACHE_ENTRIES: usize = 4096;
+const MAX_TOKEN_RESIDENCY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Process-wide cache of exchanged tokens keyed by the base URL, canonical
 /// execution-config fingerprint, and credential hash.
 ///
 /// Clone is cheap -- all state lives behind `Arc`/`DashMap`.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct TokenExchangeCache {
     entries: Arc<DashMap<String, Arc<TokenSlot>>>,
+    admission: Arc<std::sync::Mutex<()>>,
+}
+
+impl Default for TokenExchangeCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TokenExchangeCache {
     pub fn new() -> Self {
-        Self::default()
+        let cache = Self {
+            entries: Arc::new(DashMap::new()),
+            admission: Arc::new(std::sync::Mutex::new(())),
+        };
+        {
+            let mut registry = PROCESS_CACHES.lock().unwrap_or_else(|e| e.into_inner());
+            registry.retain(|entry| entry.strong_count() > 0);
+            registry.push(Arc::downgrade(&cache.entries));
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            cache.spawn_expiry_worker(std::time::Duration::from_secs(30));
+        }
+        cache
+    }
+
+    fn spawn_expiry_worker(&self, cadence: std::time::Duration) {
+        let entries = Arc::downgrade(&self.entries);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(cadence);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                timer.tick().await;
+                let Some(entries) = entries.upgrade() else {
+                    break;
+                };
+                Self::prune_entries(&entries);
+            }
+        });
+    }
+
+    fn prune_entries(entries: &DashMap<String, Arc<TokenSlot>>) {
+        let now = Utc::now();
+        let monotonic = std::time::Instant::now();
+        entries.retain(|_, slot| {
+            // Never wait for a reader/fetcher while holding a map shard.
+            let Ok(mut cached) = slot.cached.try_write() else {
+                return true;
+            };
+            if cached.as_ref().is_some_and(|entry| {
+                entry.value.expires_at <= now || entry.retained_until <= monotonic
+            }) {
+                *cached = None; // drops/zeroizes the owned token immediately
+            }
+            // Arc count is checked under the map write lock. New readers cannot
+            // acquire this slot between the check and removal; existing fetchers
+            // and queued waiters each own a reference, so cannot be split.
+            cached.is_some() || Arc::strong_count(slot) > 1
+        });
+    }
+
+    fn slot(&self, key: &str) -> AppResult<Arc<TokenSlot>> {
+        if let Some(slot) = self.entries.get(key) {
+            return Ok(slot.clone());
+        }
+        let _admission = self
+            .admission
+            .lock()
+            .map_err(|_| AppError::Internal("Token cache admission unavailable".into()))?;
+        if let Some(slot) = self.entries.get(key) {
+            return Ok(slot.clone());
+        }
+        if self.entries.len() >= MAX_CACHE_ENTRIES {
+            Self::prune_entries(&self.entries);
+            if self.entries.len() >= MAX_CACHE_ENTRIES {
+                return Err(AppError::CredentialUnavailable(
+                    "Token exchange cache is at capacity; retry later".into(),
+                ));
+            }
+        }
+        Ok(self
+            .entries
+            .entry(key.to_owned())
+            .or_insert_with(|| Arc::new(TokenSlot::default()))
+            .clone())
     }
 
     /// Get a cached token or fetch a fresh one via `fetch_fn`.
@@ -90,18 +229,14 @@ impl TokenExchangeCache {
     /// per cache key. Other waiters block on the per-key fetch lock, then
     /// observe the fresh value through the cache without calling `fetch_fn`
     /// themselves. Cache hits bypass the fetch lock entirely.
-    pub async fn get_or_fetch<F, Fut>(&self, key: &str, fetch_fn: F) -> AppResult<String>
+    pub async fn get_or_fetch<F, Fut>(&self, key: &str, fetch_fn: F) -> AppResult<Zeroizing<String>>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = AppResult<CachedToken>>,
     {
         // DashMap::entry is atomic: races between concurrent first-touches on
         // a brand-new key produce exactly one TokenSlot.
-        let slot = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(TokenSlot::default()))
-            .clone();
+        let slot = self.slot(key)?;
 
         // Fast path: the vast majority of calls land here. Concurrent readers
         // on a valid cache entry don't contend with each other.
@@ -121,19 +256,32 @@ impl TokenExchangeCache {
 
         // Perform the fetch. The fetch_lock is still held, blocking any
         // other fetcher for THIS key. Other keys are unaffected.
+        let generation = slot.generation.load(AtomicOrdering::Acquire);
         let fresh = fetch_fn().await?;
+        let mut cached = slot.cached.write().await;
+        if slot.generation.load(AtomicOrdering::Acquire) != generation {
+            return Err(AppError::CredentialUnavailable(
+                "Source credential changed during token exchange; retry with current authority"
+                    .into(),
+            ));
+        }
         let token_value = fresh.token.clone();
-        *slot.cached.write().await = Some(fresh);
+        *cached = Some(StoredToken {
+            value: fresh,
+            retained_until: std::time::Instant::now() + MAX_TOKEN_RESIDENCY,
+        });
         Ok(token_value)
     }
 
     /// Read the cached token if it exists and is still considered fresh
     /// (more than 10 minutes remaining before expiry).
-    async fn read_fresh(slot: &TokenSlot) -> Option<String> {
+    async fn read_fresh(slot: &TokenSlot) -> Option<Zeroizing<String>> {
         let guard = slot.cached.read().await;
         let cached = guard.as_ref()?;
-        if cached.expires_at > Utc::now() + Duration::minutes(10) {
-            Some(cached.token.clone())
+        if cached.value.expires_at > Utc::now() + Duration::minutes(10)
+            && cached.retained_until > std::time::Instant::now()
+        {
+            Some(cached.value.token.clone())
         } else {
             None
         }
@@ -148,7 +296,10 @@ impl TokenExchangeCache {
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(TokenSlot::default()))
             .clone();
-        *slot.cached.write().await = Some(entry);
+        *slot.cached.write().await = Some(StoredToken {
+            value: entry,
+            retained_until: std::time::Instant::now() + MAX_TOKEN_RESIDENCY,
+        });
     }
 }
 
@@ -194,7 +345,11 @@ pub fn cache_key(base_url: &str, credential_json: &str, config: &TokenExchangeCo
     hasher.update(execution_config_fingerprint(config).as_bytes());
     hasher.update(b"::");
     hasher.update(credential_json.as_bytes());
-    format!("{:x}", hasher.finalize())
+    format!(
+        "{:x}:{:x}",
+        Sha256::digest(credential_json.as_bytes()),
+        hasher.finalize()
+    )
 }
 
 /// Expand `{base_url}` placeholders in an endpoint template.
@@ -317,10 +472,22 @@ pub fn apply_injection(
     injection: &str,
     token: &str,
 ) -> AppResult<reqwest::RequestBuilder> {
+    fn secret_header(value: &str) -> AppResult<reqwest::header::HeaderValue> {
+        let mut value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| AppError::Internal("Invalid exchanged authentication header".into()))?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
     match injection {
         "bearer" => Ok(request.bearer_auth(token)),
-        "bot_bearer" => Ok(request.header("Authorization", format!("Bot {token}"))),
-        "token" => Ok(request.header("Authorization", format!("token {token}"))),
+        "bot_bearer" => {
+            let value = Zeroizing::new(format!("Bot {token}"));
+            Ok(request.header("Authorization", secret_header(&value)?))
+        }
+        "token" => {
+            let value = Zeroizing::new(format!("token {token}"));
+            Ok(request.header("Authorization", secret_header(&value)?))
+        }
         other => {
             if let Some(header_name) = other.strip_prefix("header:") {
                 let trimmed = header_name.trim();
@@ -330,7 +497,7 @@ pub fn apply_injection(
                             .to_string(),
                     ));
                 }
-                Ok(request.header(trimmed, token))
+                Ok(request.header(trimmed, secret_header(token)?))
             } else {
                 Err(AppError::Internal(format!(
                     "Unknown token_exchange injection format: {other}"
@@ -377,31 +544,29 @@ pub async fn fetch_exchange_token(
         }
     };
 
-    let response: serde_json::Value = request
+    let response = request
         .send()
         .await
-        .map_err(|e| AppError::ChannelPlatformError(format!("token_exchange request failed: {e}")))?
-        .json()
-        .await
-        .map_err(|e| {
-            AppError::ChannelPlatformError(format!(
-                "token_exchange response parse failed (expected JSON): {e}"
-            ))
-        })?;
+        .map_err(|_| AppError::ChannelPlatformError("token_exchange transport failed".into()))?;
+    let status = response.status();
+    let response: serde_json::Value = response.json().await.map_err(|_| {
+        AppError::ChannelPlatformError("Invalid token_exchange JSON response".into())
+    })?;
 
-    // Error check (provider-specific field like Lark's `code`).
-    if let Some(error_path) = config.error_code_path.as_deref()
-        && let Some(error_value) = extract_json_path(&response, error_path)
-        && !is_success_value(error_value)
-    {
-        let msg = config
-            .error_message_path
-            .as_deref()
-            .and_then(|p| extract_json_path(&response, p))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
+    // Detection remains configurable; only finite known provider categories
+    // cross the error boundary. Neither the configured code value nor message
+    // path is an authority to disclose provider response text.
+    let configured_rejection = config
+        .error_code_path
+        .as_deref()
+        .and_then(|path| extract_json_path(&response, path))
+        .is_some_and(|value| !is_success_value(value));
+    if !status.is_success() || configured_rejection {
+        let code = super::provider_diagnostics::rejection(&response)
+            .map_or("provider_rejected", |error| error.code);
         return Err(AppError::ChannelPlatformError(format!(
-            "token_exchange failed (code={error_value}, msg={msg})"
+            "token_exchange rejected (HTTP {}, {code})",
+            status.as_u16()
         )));
     }
 
@@ -424,10 +589,22 @@ pub async fn fetch_exchange_token(
         .and_then(json_value_to_i64)
         .unwrap_or(config.default_ttl_secs)
         .max(60);
+    if ttl_secs > MAX_TOKEN_TTL_SECS {
+        return Err(AppError::ChannelPlatformError(
+            "token_exchange returned an unsupported token lifetime".into(),
+        ));
+    }
+    let expires_at = Duration::try_seconds(ttl_secs)
+        .and_then(|ttl| Utc::now().checked_add_signed(ttl))
+        .ok_or_else(|| {
+            AppError::ChannelPlatformError(
+                "token_exchange returned an unsupported token lifetime".into(),
+            )
+        })?;
 
     Ok(CachedToken {
-        token,
-        expires_at: Utc::now() + Duration::seconds(ttl_secs),
+        token: Zeroizing::new(token),
+        expires_at,
     })
 }
 
@@ -441,7 +618,7 @@ pub async fn get_cached_exchange_token(
     credential_json: &str,
     config: &TokenExchangeConfig,
     credential: &serde_json::Map<String, serde_json::Value>,
-) -> AppResult<String> {
+) -> AppResult<Zeroizing<String>> {
     let key = cache_key(base_url, credential_json, config);
     cache
         .get_or_fetch(&key, || async {
@@ -482,6 +659,138 @@ fn json_value_to_i64(value: &serde_json::Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_exchange_rejection_and_malformed_success_have_safe_http_diagnostics() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let secret = "distinctive-configurable-exchange-secret-f149";
+        let server = MockServer::start().await;
+        let mut config = exchange_config();
+        config.error_code_path = Some("result.code".into());
+        config.error_message_path = Some("result.msg".into());
+        let credential = parse_credential(
+            r#"{"app_id":"fixture","app_secret":"fixture"}"#,
+            &lark_field_specs(),
+        )
+        .unwrap();
+        for (status, body, category) in [
+            (
+                200,
+                serde_json::json!({"result":{"code":secret,"msg":secret},"token_a":"must-not-be-accepted"}),
+                "provider_rejected",
+            ),
+            (
+                200,
+                serde_json::json!({"code":99991663,"result":{"code":99991663,"msg":secret},"token_a":"must-not-be-accepted"}),
+                "lark_app_ticket_invalid",
+            ),
+            (
+                403,
+                serde_json::json!({"result":{"code":0,"msg":secret},"token_a":"must-not-be-accepted"}),
+                "provider_rejected",
+            ),
+            (
+                200,
+                serde_json::json!({"result":{"code":0},"token_a":{"secret":secret}}),
+                "missing token",
+            ),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let error =
+                fetch_exchange_token(&reqwest::Client::new(), &server.uri(), &config, &credential)
+                    .await
+                    .err()
+                    .unwrap();
+            assert!(
+                matches!(&error, AppError::ChannelPlatformError(message) if message.contains(category)),
+                "wrong rejection category"
+            );
+            assert!(!error.to_string().contains(secret));
+            let response = axum::response::IntoResponse::into_response(error);
+            assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+        }
+        server.reset().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"result":{"code":0,"msg":secret},"token_a":"valid-token"}),
+            ))
+            .mount(&server)
+            .await;
+        assert_eq!(
+            fetch_exchange_token(&reqwest::Client::new(), &server.uri(), &config, &credential)
+                .await
+                .unwrap()
+                .token
+                .as_str(),
+            "valid-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn extreme_provider_ttl_is_rejected_and_normal_lifetime_is_preserved() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let config = exchange_config();
+        let credential = parse_credential(
+            r#"{"app_id":"fixture","app_secret":"fixture"}"#,
+            &lark_field_specs(),
+        )
+        .unwrap();
+        for ttl in [
+            serde_json::json!(i64::MAX),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(MAX_TOKEN_TTL_SECS + 1),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"token_a":"distinctive-extreme-ttl-token", "expires_in":ttl}))).mount(&server).await;
+            let error =
+                fetch_exchange_token(&reqwest::Client::new(), &server.uri(), &config, &credential)
+                    .await
+                    .err()
+                    .unwrap();
+            assert!(
+                matches!(&error, AppError::ChannelPlatformError(message) if message.contains("unsupported token lifetime"))
+            );
+            assert!(!error.to_string().contains("distinctive-extreme-ttl-token"));
+        }
+        server.reset().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token_a":"valid-token", "expires_in":3600})),
+            )
+            .mount(&server)
+            .await;
+        let before = Utc::now();
+        let cached =
+            fetch_exchange_token(&reqwest::Client::new(), &server.uri(), &config, &credential)
+                .await
+                .unwrap();
+        assert_eq!(cached.token.as_str(), "valid-token");
+        assert!(cached.expires_at >= before + Duration::seconds(3600));
+        assert!(cached.expires_at <= Utc::now() + Duration::seconds(3600));
+    }
+
+    #[test]
+    fn cached_token_debug_redacts_secret() {
+        let cached = CachedToken {
+            token: Zeroizing::new("distinctive-exchanged-access-token".to_owned()),
+            expires_at: Utc::now(),
+        };
+        for output in [format!("{cached:?}"), format!("{cached:#?}")] {
+            assert!(!output.contains(cached.token.as_str()));
+            assert!(output.contains("[REDACTED]"));
+        }
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn lark_field_specs() -> Vec<CredentialFieldSpec> {
@@ -745,9 +1054,159 @@ mod tests {
 
     fn fresh_token(name: &str, ttl_secs: i64) -> CachedToken {
         CachedToken {
-            token: name.to_string(),
+            token: Zeroizing::new(name.to_string()),
             expires_at: Utc::now() + Duration::seconds(ttl_secs),
         }
+    }
+
+    #[tokio::test]
+    async fn cache_worker_evicts_idle_expired_and_residency_limited_values() {
+        let cache = TokenExchangeCache::new();
+        cache
+            .insert_for_test("expired-idle", fresh_token("expired-secret", -1))
+            .await;
+        cache
+            .insert_for_test("residency-idle", fresh_token("long-lived-secret", 86400))
+            .await;
+        {
+            let slot = cache.entries.get("residency-idle").unwrap().clone();
+            slot.cached.write().await.as_mut().unwrap().retained_until = std::time::Instant::now();
+        }
+        cache.spawn_expiry_worker(std::time::Duration::from_millis(5));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !cache.entries.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // No get_or_fetch of either retired key triggered this cleanup.
+    }
+
+    #[tokio::test]
+    async fn credential_retirement_clears_matching_caches_and_fences_held_fetch() {
+        let credential = format!("distinctive-retired-{}", uuid::Uuid::new_v4());
+        let config = exchange_config();
+        let key = cache_key("https://provider.example", &credential, &config);
+        let other_key = cache_key("https://provider.example", "unrelated-credential", &config);
+        let first = TokenExchangeCache::new();
+        let second = TokenExchangeCache::new();
+        first
+            .insert_for_test(&key, fresh_token("retired-token", 3600))
+            .await;
+        first
+            .insert_for_test(&other_key, fresh_token("unrelated-token", 3600))
+            .await;
+        let entered = tokio::sync::Semaphore::new(0);
+        let release = tokio::sync::Semaphore::new(0);
+        let fetch = second.get_or_fetch(&key, || async {
+            entered.add_permits(1);
+            release.acquire().await.unwrap().forget();
+            Ok(fresh_token("late-retired-token", 3600))
+        });
+        let retire = async {
+            entered.acquire().await.unwrap().forget();
+            retire_credential(credential.as_bytes()).await;
+            assert!(!first.entries.contains_key(&key));
+            assert!(first.entries.contains_key(&other_key));
+            release.add_permits(1);
+        };
+        let (result, _) = tokio::join!(fetch, retire);
+        assert!(matches!(result, Err(AppError::CredentialUnavailable(_))));
+        TokenExchangeCache::prune_entries(&second.entries);
+        assert!(!second.entries.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn shared_source_retirement_permits_immediate_authorized_refetch() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token_a":"shared-source-token", "expires_in":3600
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let cache = TokenExchangeCache::new();
+        let config = exchange_config();
+        let raw = format!(
+            r#"{{"app_id":"{}","app_secret":"shared"}}"#,
+            uuid::Uuid::new_v4()
+        );
+        let credential = parse_credential(&raw, &lark_field_specs()).unwrap();
+        let http = reqwest::Client::new();
+        let key = cache_key(&server.uri(), &raw, &config);
+        for _authorized_owner in ["owner-a", "owner-b"] {
+            let token =
+                get_cached_exchange_token(&cache, &http, &server.uri(), &raw, &config, &credential)
+                    .await
+                    .unwrap();
+            assert_eq!(token.as_str(), "shared-source-token");
+        }
+        // Keep a stale Arc alive: cleanup must not make owner B unavailable
+        // until that Arc drops or the next periodic sweep runs.
+        let held = cache.slot(&key).unwrap();
+        retire_credential(raw.as_bytes()).await;
+        assert!(cache.entries.contains_key(&key));
+        assert!(held.cached.read().await.is_none());
+        let token =
+            get_cached_exchange_token(&cache, &http, &server.uri(), &raw, &config, &credential)
+                .await
+                .unwrap();
+        assert_eq!(token.as_str(), "shared-source-token");
+        assert!(Arc::ptr_eq(&held, &cache.slot(&key).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn pruning_preserves_live_single_flight_and_bounds_admission() {
+        let cache = TokenExchangeCache::new();
+        let entered = tokio::sync::Semaphore::new(0);
+        let release = tokio::sync::Semaphore::new(0);
+        let calls = AtomicUsize::new(0);
+        let first = cache.get_or_fetch("held", || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            entered.add_permits(1);
+            release.acquire().await.unwrap().forget();
+            Ok(fresh_token("single-flight", 3600))
+        });
+        let waiter = async {
+            entered.acquire().await.unwrap().forget();
+            TokenExchangeCache::prune_entries(&cache.entries);
+            assert!(cache.entries.contains_key("held"));
+            let slot = cache.slot("held").unwrap();
+            let queued = cache.get_or_fetch("held", || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(fresh_token("duplicate", 3600))
+            });
+            release.add_permits(1);
+            let result = queued.await.unwrap();
+            drop(slot);
+            result
+        };
+        let (first, second) = tokio::join!(first, waiter);
+        assert_eq!(first.unwrap().as_str(), "single-flight");
+        assert_eq!(second.as_str(), "single-flight");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        for i in 1..MAX_CACHE_ENTRIES {
+            cache
+                .insert_for_test(&format!("entry-{i}"), fresh_token("bounded", 3600))
+                .await;
+        }
+        assert!(matches!(
+            cache.slot("over-capacity"),
+            Err(AppError::CredentialUnavailable(_))
+        ));
+        {
+            let slot = cache.entries.get("entry-1").unwrap().clone();
+            slot.cached.write().await.as_mut().unwrap().value.expires_at = Utc::now();
+        }
+        assert!(cache.slot("after-idle-expiry").is_ok());
+        assert_eq!(cache.entries.len(), MAX_CACHE_ENTRIES);
     }
 
     #[tokio::test]
@@ -770,7 +1229,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(token, "cached-token");
+        assert_eq!(token.as_str(), "cached-token");
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
@@ -792,7 +1251,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(token, "fresh");
+        assert_eq!(token.as_str(), "fresh");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -820,7 +1279,7 @@ mod tests {
         }
 
         for handle in handles {
-            assert_eq!(handle.await.unwrap().unwrap(), "only-fetch");
+            assert_eq!(handle.await.unwrap().unwrap().as_str(), "only-fetch");
         }
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -887,7 +1346,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(second, "recovered");
+        assert_eq!(second.as_str(), "recovered");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
@@ -965,9 +1424,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(first_a, "token-from-config-a");
+        assert_eq!(first_a.as_str(), "token-from-config-a");
         assert_eq!(second_a, first_a, "the same config must remain cached");
-        assert_eq!(first_b, "token-from-config-b");
+        assert_eq!(first_b.as_str(), "token-from-config-b");
         assert_eq!(second_b, first_b, "the second config must remain cached");
         assert_eq!(cache.entries.len(), 2, "config A and B need distinct slots");
         assert_eq!(
@@ -980,6 +1439,39 @@ mod tests {
     }
 
     // ─── apply_injection ──────────────────────────────────────────────
+
+    #[test]
+    fn injected_request_and_header_debug_do_not_expose_exchanged_token() {
+        let secret = "distinctive-exchange-request-secret";
+        for injection in ["bearer", "bot_bearer", "token", "header:X-Custom-Key"] {
+            let request = apply_injection(
+                reqwest::Client::new().get("https://provider.example"),
+                injection,
+                secret,
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let name = if injection.starts_with("header:") {
+                "x-custom-key"
+            } else {
+                "authorization"
+            };
+            let header = request.headers().get(name).unwrap();
+            assert!(header.is_sensitive());
+            assert!(
+                header.to_str().unwrap().contains(secret),
+                "wire value remains exact"
+            );
+            for diagnostic in [
+                format!("{request:?}"),
+                format!("{:?}", request.headers()),
+                format!("{header:?}"),
+            ] {
+                assert!(!diagnostic.contains(secret));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn apply_injection_supports_common_formats() {

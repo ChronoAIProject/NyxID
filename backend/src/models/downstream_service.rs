@@ -3,7 +3,7 @@ use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::default_request_header::StoredDefaultRequestHeader;
 use crate::models::service_billing::ServiceBilling;
 use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
@@ -237,7 +237,7 @@ pub enum ProxyPathConstraint {
     MultiSegment,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SshServiceConfig {
     pub host: String,
     pub port: u16,
@@ -255,6 +255,8 @@ pub struct SshServiceConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub ca_private_key_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_context_version: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_public_key: Option<String>,
 }
@@ -339,6 +341,9 @@ pub struct DownstreamService {
     /// Encrypted master credential for this service
     #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_encrypted: Vec<u8>,
+    /// Explicit versions for service-owned master credential fields.
+    #[serde(default)]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_key: Option<PlatformKeyConfig>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
@@ -498,7 +503,7 @@ pub struct DownstreamService {
     /// rejected at update time — see
     /// `crate::models::default_request_header::validate_headers`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
+    pub default_request_headers: Option<Vec<StoredDefaultRequestHeader>>,
 
     /// WebSocket frame-auth injection rules. Orthogonal to HTTP
     /// `auth_method`; existing documents default to no frame injection.
@@ -603,6 +608,7 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -719,6 +725,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -784,10 +791,11 @@ mod tests {
             default_request_headers: Some(vec![
                 crate::models::default_request_header::DefaultRequestHeader {
                     name: "x-openclaw-scopes".to_string(),
-                    value: "operator.read,operator.write".to_string(),
+                    value: "operator.read,operator.write".to_string().into(),
                     overridable: false,
                     sensitive: false,
-                },
+                }
+                .into(),
             ]),
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
@@ -818,6 +826,7 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            secret_context_versions: Default::default(),
             offering_kind: Default::default(),
             topics: Vec::new(),
             supplier: None,
@@ -917,6 +926,7 @@ mod tests {
     #[test]
     fn ssh_config_roundtrip() {
         let config = SshServiceConfig {
+            ca_context_version: None,
             host: "ssh.internal.example".to_string(),
             port: 22,
             ssh_auth_mode: SshAuthMode::Cert,
@@ -934,5 +944,11 @@ mod tests {
         assert_eq!(restored.ssh_auth_mode, SshAuthMode::Cert);
         assert!(restored.certificate_auth_enabled);
         assert_eq!(restored.allowed_principals, vec!["ubuntu".to_string()]);
+    }
+}
+
+impl std::fmt::Debug for SshServiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshServiceConfig").finish_non_exhaustive()
     }
 }

@@ -541,6 +541,7 @@ async fn gateway_legacy_personal_connection_precedes_org_without_an_org_card() {
         )
         .insert_one(
             crate::models::user_service_connection::UserServiceConnection {
+                secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: c.clone(),

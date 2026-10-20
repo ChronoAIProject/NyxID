@@ -1,4 +1,5 @@
 import { AgentSkills } from "./agent-skills";
+import { AgentConnections } from "./agent-connections";
 import { AgentLearningReview } from "./agent-learning-review";
 import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
@@ -315,6 +316,7 @@ export function AgentDetailsSheet({
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
                 </Section>
               )}
+              <AgentConnections key={agent.id} agent={agent} />
               <AgentSkills id={SKILLS_SECTION_ID} agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
                 } />
               <AgentLearningReview key={`${agent.id}:${proposalId ?? ""}`} agentId={agent.id} proposalId={proposalId} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />

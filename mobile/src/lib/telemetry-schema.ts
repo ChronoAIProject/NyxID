@@ -2,7 +2,7 @@
  * Canonical mobile event schema — discriminated union of every named
  * event the mobile app emits. Mirrors the frontend's
  * `telemetry-schema.ts` pattern so adding a new variant is a
- * compile-time gate (no runtime validation needed).
+ * compile-time gate (the server also validates fields and consent at runtime).
  *
  * Covers two buckets:
  *   - `mobile.*` — device-side events the backend can't see

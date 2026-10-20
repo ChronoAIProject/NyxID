@@ -1094,3 +1094,22 @@ keep the owner decision and defer notification retries for 60 seconds, doubling
 to a one-hour cap. Restored access is rechecked at the next due sweep (at most
 one hour plus sweep backlog). Busy threads and event-budget limits retain normal
 queued-event handling; database failures do not become authority deferrals.
+
+Personal account erasure checks publication recovery before accepting deletion.
+A dispatched or uncertain operation without verified completion, an uncertain
+update-target reservation, or a live publication lease blocks acceptance. This
+check and dispatch/claim/pin transitions contend on the same persistent owner
+barrier in majority transactions. Rejection leaves sign-in and provider
+credentials available: finish read-only reconciliation, or use the existing
+operator release procedure with its required external evidence, before retrying
+erasure. Erasure never publishes a package or assumes a timed-out request had
+no effect. A defensive worker guard also preserves unresolved proposals and
+capabilities on previously accepted intents before provider cleanup.
+
+After settlement, erasure may remove personal proposal bodies and agent
+metadata. A proven undispatched reservation can be released transactionally;
+landed target reservations and orphan reservations remain minimal external-effect
+locks. They contain operation/package identities and target metadata, retain
+the existing prohibition on reusing a landed/unknown target, and do not authorize
+new registry writes. Other owners' skills and publication records remain under
+their existing lifecycle.

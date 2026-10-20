@@ -63,6 +63,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
         acting_client_id: None,
         oauth_client_id: None,
         token_jti: None,
+        oauth_lineage: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::Session,
         allow_all_services: true,

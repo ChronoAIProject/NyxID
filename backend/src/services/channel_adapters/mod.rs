@@ -103,7 +103,7 @@ pub fn registered_interfaces(cache: &Arc<TokenExchangeCache>) -> Vec<RegisteredI
         Box::new(whatsapp::WhatsAppAdapter),
         Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
-        Box::new(aurinko::AurinkoAdapter::default()),
+        Box::new(aurinko::registered_adapter()),
     ];
     let mut entries: Vec<_> = legacy
         .into_iter()

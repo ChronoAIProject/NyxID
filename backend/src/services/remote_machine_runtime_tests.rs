@@ -519,16 +519,63 @@ async fn deleted_owner_retains_paid_liability_until_native_stop_and_local_settle
     let machine = start_ready(&f).await;
     let held = wallet(&f).await.reserved_credits;
     assert!(held > Credits::ZERO);
-    crate::services::admin_user_service::delete_current_user_cascade(
+    crate::test_utils::accept_and_process_owner_erasure(
         &f.db,
         &f.owner,
         crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION,
     )
     .await
     .unwrap();
+    assert!(
+        f.db.collection::<Document>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&f.owner})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        crate::services::erasure_admission::begin_write(&f.db, &f.owner).await,
+        Err(AppError::Conflict(_))
+    ));
     maintain_local_safety(&f.db, f.billing.clone())
         .await
         .unwrap();
+    // Source absence is not Machine completion. The durable job must continue
+    // to require native evidence and keep the already reserved paid liability.
+    let mut state = crate::test_utils::test_app_state(f.db.clone());
+    state.billing = f.billing.clone();
+    f.db.collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id":&f.owner},
+            vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+        )
+        .await
+        .unwrap();
+    crate::services::personal_erasure_service::process_one(&state)
+        .await
+        .unwrap();
+    let pending_erasure = crate::services::personal_erasure_service::status(&f.db, &f.owner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending_erasure.status,
+        crate::models::personal_erasure::ErasureStatus::Pending
+    );
+    assert!(pending_erasure.completed_at.is_none());
+    let machine_checkpoint = pending_erasure
+        .domains
+        .iter()
+        .find(|domain| domain.domain == "machine")
+        .unwrap();
+    assert_eq!(
+        machine_checkpoint.status,
+        crate::models::personal_erasure::DomainStatus::Pending
+    );
+    assert_eq!(
+        machine_checkpoint.reason.as_deref(),
+        Some("machine_lifecycle_pending")
+    );
     let deleting = current(&f, &machine.node_id).await;
     assert_eq!(deleting.resource_state, ResourceState::Deleting);
     assert_eq!(wallet(&f).await.reserved_credits, held);
@@ -566,6 +613,30 @@ async fn deleted_owner_retains_paid_liability_until_native_stop_and_local_settle
             .await
             .unwrap();
     assert_eq!(deleted.resource_state, ResourceState::Deleted);
+    f.db.collection::<Document>(crate::models::personal_erasure::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id":&f.owner},
+            vec![doc! {"$set":{"retry_at":"$$NOW"}}],
+        )
+        .await
+        .unwrap();
+    crate::services::personal_erasure_service::process_one(&state)
+        .await
+        .unwrap();
+    let settled_erasure = crate::services::personal_erasure_service::status(&f.db, &f.owner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        settled_erasure
+            .domains
+            .iter()
+            .find(|domain| domain.domain == "machine")
+            .unwrap()
+            .status,
+        crate::models::personal_erasure::DomainStatus::Complete
+    );
+    assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     f.db.drop().await.unwrap();
 }
 

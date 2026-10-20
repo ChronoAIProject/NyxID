@@ -185,15 +185,7 @@ pub(crate) async fn process_inbound_messages(
         let stored = if adapter.atomic_inbound_admission() {
             super::channel_admission_service::store(state.db, metadata).await
         } else {
-            state
-                .db
-                .collection::<crate::models::channel_message::ChannelMessage>(
-                    super::channel_activity_service::collection(&metadata),
-                )
-                .insert_one(&metadata)
-                .await
-                .map(|_| Some(metadata))
-                .map_err(crate::errors::AppError::from)
+            super::channel_admission_service::store_current_owner(state.db, metadata).await
         };
         let stored_message = match stored {
             Ok(Some(message)) => message,
@@ -230,7 +222,8 @@ pub(crate) async fn process_inbound_messages(
                     platform: bot.platform.clone(),
                     conversation_id_hash: conversation_hash,
                 },
-            );
+            )
+            .await;
         }
 
         // Look up the API key for signing and name attribution

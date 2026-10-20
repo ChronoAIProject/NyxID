@@ -60,7 +60,8 @@ pub struct CreateServiceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_scheme: Option<String>,
     pub auth_key_name: Option<String>,
-    pub credential: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub credential: Option<zeroize::Zeroizing<String>>,
     /// "provider", "connection", or "internal". Defaults to "connection".
     pub service_category: Option<String>,
     pub openapi_spec_url: Option<String>,
@@ -689,10 +690,11 @@ fn identity_update_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
     .collect()
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct OidcCredentialsResponse {
     pub client_id: String,
-    pub client_secret: String,
+    #[schema(value_type = String)]
+    pub client_secret: zeroize::Zeroizing<String>,
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
     pub delegation_scopes: String,
@@ -714,9 +716,10 @@ pub struct RedirectUrisResponse {
     pub redirect_uris: Vec<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct RegenerateSecretResponse {
-    pub client_secret: String,
+    #[schema(value_type = String)]
+    pub client_secret: zeroize::Zeroizing<String>,
     pub message: String,
 }
 
@@ -1163,13 +1166,14 @@ pub async fn create_service_request(
     tele: TelemetryContext,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<ServiceResponse>> {
+    let body = crate::crypto::secret_json::SecretJson(body);
     let tool = body.get("offering_kind").is_some_and(|v| v == "tool")
         || body.get("twin_of_service_id").is_some_and(|v| !v.is_null());
     let authority =
         super::catalog_authority::require_service_creator(&state, &auth_user, tool).await?;
     let manager = authority == super::catalog_authority::CatalogAuthority::ToolsManager;
     // Validate caller input before inserting any server-owned twin defaults.
-    let mut validation_body = body.clone();
+    let mut validation_body = crate::crypto::secret_json::SecretJson(body.0.clone());
     // A twin implies Tool identity. Normalize only the missing kind before
     // exhaustive caller preflight; privileged defaults still come afterwards.
     if body
@@ -1194,21 +1198,31 @@ pub async fn create_service_request(
         super::catalog_authority::check_tool_create(&request)?;
     }
     let caller = auth_user.user_id.to_string();
-    let prepared = if manager {
-        crate::services::tool_twin_service::prepare_create_for_actor(&state.db, body, Some(&caller))
-            .await?
-    } else {
-        crate::services::tool_twin_service::prepare_create(&state.db, body).await?
-    };
-    let body = decode_service_request(prepared)?;
+    let (prepared, inherited_headers) =
+        crate::services::tool_twin_service::prepare_create_for_actor(
+            &state.db,
+            Some(state.encryption_keys.as_ref()),
+            body,
+            if manager { Some(&caller) } else { None },
+        )
+        .await?;
+    let mut body: CreateServiceRequest = decode_service_request(prepared)?;
+    if let Some(headers) = inherited_headers {
+        body.default_request_headers = Some(headers);
+    }
     create_service(State(state), auth_user, tele, Json(body)).await
 }
 
 /// Surface only bounded field names from unknown-field failures. Other serde
 /// diagnostics can contain supplied values, including credentials or headers.
-fn decode_service_request<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> AppResult<T> {
-    serde_json::from_value(body).map_err(|error| {
-        let detail = error.to_string();
+fn decode_service_request<T: serde::de::DeserializeOwned>(
+    body: impl Into<crate::crypto::secret_json::SecretJson>,
+) -> AppResult<T> {
+    let body = body.into();
+    // Borrow the guarded tree: failed decoding must not consume and discard
+    // ordinary secret strings, including unknown fields and invalid variants.
+    T::deserialize(&body.0).map_err(|error| {
+        let detail = zeroize::Zeroizing::new(error.to_string());
         let field = detail
             .strip_prefix("unknown field `")
             .and_then(|rest| rest.split_once('`').map(|(field, _)| field))
@@ -1599,18 +1613,27 @@ async fn create_service_inner(
             ))
             .await?;
 
-            let secret_to_encrypt = raw_secret.unwrap_or_default();
-            let enc = state
-                .encryption_keys
-                .encrypt(secret_to_encrypt.as_bytes())
-                .await?;
+            let secret_to_encrypt = zeroize::Zeroizing::new(raw_secret.unwrap_or_default());
+            let enc = crate::services::catalog_credential_record_service::encrypt(
+                &state.encryption_keys,
+                &id,
+                &user_id_str,
+                secret_to_encrypt.as_bytes(),
+            )
+            .await?;
 
             (enc, Some(client.id))
         } else {
             let enc = if credential.trim().is_empty() {
                 Vec::new()
             } else {
-                state.encryption_keys.encrypt(credential.as_bytes()).await?
+                crate::services::catalog_credential_record_service::encrypt(
+                    &state.encryption_keys,
+                    &id,
+                    &user_id_str,
+                    credential.as_bytes(),
+                )
+                .await?
             };
             (enc, None)
         };
@@ -1674,7 +1697,7 @@ async fn create_service_inner(
             "none".to_string(),
             Some("ssh".to_string()),
             String::new(),
-            state.encryption_keys.encrypt(b"").await?,
+            Vec::new(),
             None,
             None,
             None,
@@ -1759,11 +1782,23 @@ async fn create_service_inner(
         validate_developer_app_ids(&state, &auth_user, app_ids).await?;
     }
 
+    crate::services::provider_service::validate_seeded_header_capacity(
+        &slug,
+        body.default_request_headers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|h| h.name.as_str()),
+    )?;
     // Validate & normalize initial default_request_headers (NyxID#356).
-    let default_request_headers = match body.default_request_headers.clone() {
-        Some(list) => crate::models::default_request_header::validate_headers(list)?,
-        None => None,
-    };
+    let default_request_headers = crate::services::default_header_service::encode(
+        Some(state.encryption_keys.as_ref()),
+        DOWNSTREAM_SERVICES,
+        &id,
+        &user_id_str,
+        body.default_request_headers.clone().unwrap_or_default(),
+    )
+    .await?;
     crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
     anonymous_endpoint_service::validate_rule_list(&body.anonymous_endpoints)?;
     let proxy_operation_policy = body
@@ -1813,6 +1848,11 @@ async fn create_service_inner(
         validate_optional_spec_url(url)?;
     }
     let new_service = DownstreamService {
+        secret_context_versions:
+            crate::services::catalog_credential_record_service::initial_versions(
+                &state.encryption_keys,
+                !encrypted_cred.is_empty(),
+            ),
         offering_kind: body.offering_kind.unwrap_or_default(),
         topics: body.topics.clone().unwrap_or_default(),
         supplier: body.supplier.clone(),
@@ -1938,8 +1978,10 @@ async fn create_service_inner(
                 &new_service,
                 &auth_user.user_id.to_string(),
                 &initial_skills,
-                &skill_request_id,
-                &create_fingerprint,
+                crate::services::catalog_skill_service::CreateIntent {
+                    request_id: &skill_request_id,
+                    fingerprint: &create_fingerprint,
+                },
                 &twin_endpoints,
             ),
         )
@@ -2009,7 +2051,8 @@ async fn create_service_inner(
         TelemetryEvent::AdminServiceCreated {
             slug: new_service.slug.clone(),
         },
-    );
+    )
+    .await;
 
     // Auto-run endpoint discovery when the new service already carries a
     // spec URL so MCP tools and workflow operations appear without a
@@ -2259,8 +2302,10 @@ pub(crate) async fn update_service_inner(
     if body.offering_kind == Some(crate::models::downstream_service::OfferingKind::Tool) {
         super::login_client_context::require_first_party_human(&auth_user)?;
     }
-    let skill_fingerprint_input = serde_json::to_value(&body)
-        .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
+    let skill_fingerprint_input = crate::crypto::secret_json::SecretJson(
+        serde_json::to_value(&body)
+            .map_err(|_| AppError::Internal("Cannot fingerprint service update".into()))?,
+    );
     let service = fetch_service(&state, &service_id).await?;
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
     let tool_authority =
@@ -2554,6 +2599,13 @@ pub(crate) async fn update_service_inner(
             ));
         }
         set_doc.insert(
+            "secret_context_versions",
+            crate::services::catalog_credential_record_service::version_update(
+                &state.encryption_keys,
+                false,
+            )?,
+        );
+        set_doc.insert(
             "credential_encrypted",
             bson::Binary {
                 subtype: bson::spec::BinarySubtype::Generic,
@@ -2626,7 +2678,20 @@ pub(crate) async fn update_service_inner(
             nyxid_service_adapters::ifttt::validate_credential(credential)
                 .map_err(|error| AppError::ValidationError(error.to_string()))?;
         }
-        let encrypted = state.encryption_keys.encrypt(credential.as_bytes()).await?;
+        let encrypted = crate::services::catalog_credential_record_service::encrypt(
+            &state.encryption_keys,
+            &service.id,
+            crate::services::catalog_credential_record_service::owner(&service)?,
+            credential.as_bytes(),
+        )
+        .await?;
+        set_doc.insert(
+            "secret_context_versions",
+            crate::services::catalog_credential_record_service::version_update(
+                &state.encryption_keys,
+                true,
+            )?,
+        );
         set_doc.insert(
             "credential_encrypted",
             bson::Binary {
@@ -3107,38 +3172,45 @@ pub(crate) async fn update_service_inner(
         Some(Some(list)) => list.iter().map(|h| h.name.clone()).collect(),
         _ => Vec::new(),
     };
+    let mut header_source_filter = None;
     if let Some(drh) = body.default_request_headers.clone() {
-        match drh {
-            Some(list) => {
-                // Before validation, restore stored values for any
-                // entries the client submitted with the
-                // `REDACTED_PLACEHOLDER`. Without this, a GET → edit →
-                // PUT round trip would overwrite every sensitive value
-                // with the literal placeholder string.
-                let reconciled = crate::models::default_request_header::reconcile_with_stored(
-                    list,
-                    service.default_request_headers.as_deref(),
-                );
-                let normalized =
-                    crate::models::default_request_header::validate_headers(reconciled)?;
-                match normalized {
-                    Some(norm) => {
-                        let bson_val = bson::to_bson(&norm).map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to serialize default_request_headers: {e}"
-                            ))
-                        })?;
-                        set_doc.insert("default_request_headers", bson_val);
-                    }
-                    None => {
-                        set_doc.insert("default_request_headers", bson::Bson::Null);
-                    }
-                }
-            }
-            None => {
-                set_doc.insert("default_request_headers", bson::Bson::Null);
-            }
-        }
+        crate::services::provider_service::validate_seeded_header_capacity(
+            &service.slug,
+            drh.as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|h| h.name.as_str()),
+        )?;
+        let owner = crate::services::ownership_transfer_service::catalog_owner(&service);
+        header_source_filter = Some(
+            crate::services::default_header_service::source_filter(
+                &state.db,
+                DOWNSTREAM_SERVICES,
+                &service.id,
+                if service.owner_user_id.is_some() {
+                    "owner_user_id"
+                } else {
+                    "created_by"
+                },
+                owner,
+                service.default_request_headers.as_deref(),
+            )
+            .await?,
+        );
+        let prepared = crate::services::default_header_service::prepare_update(
+            Some(state.encryption_keys.as_ref()),
+            DOWNSTREAM_SERVICES,
+            &service.id,
+            owner,
+            drh.unwrap_or_default(),
+            service.default_request_headers.as_deref(),
+        )
+        .await?;
+        set_doc.insert(
+            "default_request_headers",
+            bson::to_bson(&prepared)
+                .map_err(|_| AppError::Internal("Header storage encoding failed".into()))?,
+        );
     }
 
     if let Some(ref rules) = body.ws_frame_injections {
@@ -3288,6 +3360,9 @@ pub(crate) async fn update_service_inner(
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
+    if let Some(filter) = header_source_filter {
+        catalog_filter.extend(filter);
+    }
     if identity_changed {
         // Serialize identity transitions and keep an unresolved reconciliation
         // from being overwritten by a concurrent edit or retry.
@@ -3546,7 +3621,8 @@ pub(crate) async fn update_service_inner(
         TelemetryEvent::AdminServiceUpdated {
             slug: updated.slug.clone(),
         },
-    );
+    )
+    .await;
 
     // Issue #416: include the actor's own routing for response shape
     // parity with GET / list (the actor may already have a personal
@@ -3701,13 +3777,9 @@ pub async fn get_oidc_credentials(
         .clone()
         .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
-    // Decrypt the client secret from credential_encrypted
-    let decrypted_bytes = state
-        .encryption_keys
-        .decrypt(&service.credential_encrypted)
-        .await?;
-    let client_secret = String::from_utf8(decrypted_bytes)
-        .map_err(|e| AppError::Internal(format!("Failed to decode decrypted secret: {e}")))?;
+    let client_secret =
+        crate::services::catalog_credential_record_service::text(&state.encryption_keys, &service)
+            .await?;
 
     // Fetch the OAuth client for redirect URIs and scopes
     let oauth_client = oauth_client_service::get_client(&state.db, &oauth_client_id).await?;
@@ -3875,10 +3947,16 @@ pub async fn regenerate_oidc_secret(
     }
 
     // Generate a new secret
-    let new_secret = generate_random_token();
+    let new_secret = zeroize::Zeroizing::new(generate_random_token());
     let new_hash = hash_token(&new_secret);
 
-    let encrypted = state.encryption_keys.encrypt(new_secret.as_bytes()).await?;
+    let encrypted = crate::services::catalog_credential_record_service::encrypt(
+        &state.encryption_keys,
+        &service.id,
+        crate::services::catalog_credential_record_service::owner(&service)?,
+        new_secret.as_bytes(),
+    )
+    .await?;
     let now = bson::DateTime::from_chrono(Utc::now());
     crate::services::catalog_mutation_service::commit_oidc_update(
         &state.db, &service,
@@ -3889,7 +3967,7 @@ pub async fn regenerate_oidc_secret(
             admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
         },
         &doc! {"client_secret_hash":&new_hash,"updated_at":now},
-        &doc! {"credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"updated_at":now},
+        &doc! {"credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},"secret_context_versions":crate::services::catalog_credential_record_service::version_update(&state.encryption_keys,true)?,"updated_at":now},
         "oidc_secret_regenerated", state.audit_chain_hmac_key.as_ref().as_ref(),
     ).await?;
 
@@ -4328,11 +4406,12 @@ mod tests {
             })
         );
         let decrypted = zeroize::Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt(&stored_staged.credential_encrypted)
-                .await
-                .unwrap(),
+            crate::services::catalog_credential_record_service::bytes(
+                &state.encryption_keys,
+                &stored_staged,
+            )
+            .await
+            .unwrap(),
         );
         assert!(decrypted.as_slice() == staged_secret.as_bytes());
         assert_ne!(
@@ -5364,7 +5443,7 @@ mod tests {
             Some(Some(list)) => {
                 assert_eq!(list.len(), 1);
                 assert_eq!(list[0].name, "x-scope");
-                assert_eq!(list[0].value, "a");
+                assert_eq!(list[0].value.as_str(), "a");
             }
             other => panic!("expected Some(Some(_)), got {other:?}"),
         }
@@ -5918,11 +5997,12 @@ mod tests {
         let rotated = load().await;
         assert_ne!(rotated.credential_encrypted, original.credential_encrypted);
         let decrypted = zeroize::Zeroizing::new(
-            state
-                .encryption_keys
-                .decrypt(&rotated.credential_encrypted)
-                .await
-                .unwrap(),
+            crate::services::catalog_credential_record_service::bytes(
+                &state.encryption_keys,
+                &rotated,
+            )
+            .await
+            .unwrap(),
         );
         assert_eq!(decrypted.as_slice(), b"replacement-fixture");
         db.drop().await.unwrap();
@@ -5976,11 +6056,13 @@ mod tests {
                 .unwrap();
             assert_ne!(stored.credential_encrypted, previous);
             assert_eq!(
-                state
-                    .encryption_keys
-                    .decrypt(&stored.credential_encrypted)
-                    .await
-                    .unwrap(),
+                crate::services::catalog_credential_record_service::bytes(
+                    &state.encryption_keys,
+                    &stored
+                )
+                .await
+                .unwrap()
+                .as_slice(),
                 secret.as_bytes()
             );
             previous = stored.credential_encrypted;
@@ -6355,7 +6437,7 @@ mod tests {
             .await
         ));
         let mut with_credential = service_request("shared-key", &own.id);
-        with_credential.credential = Some("platform-secret".to_string());
+        with_credential.credential = Some(zeroize::Zeroizing::new("platform-secret".to_string()));
         let denied = create_service(
             State(state.clone()),
             manager(),
@@ -7237,4 +7319,18 @@ async fn validate_service_icon_url(state: &AppState, value: &str) -> AppResult<(
     }
     let id = crate::services::catalog_icon_service::asset_id(&state.config.base_url, value)?;
     crate::services::catalog_icon_service::require_asset(&state.db, id, None).await
+}
+
+impl std::fmt::Debug for OidcCredentialsResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcCredentialsResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RegenerateSecretResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegenerateSecretResponse")
+            .finish_non_exhaustive()
+    }
 }

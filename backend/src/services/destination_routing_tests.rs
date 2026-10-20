@@ -841,7 +841,7 @@ async fn workspace_node_v2_reaches_target_and_refuses_legacy_capability() {
         method: "POST".into(),
         path: "/v1/documents/doc:batchUpdate".into(),
         query: None,
-        headers: vec![],
+        headers: (vec![]).into(),
         body: Some(br#"{"requests":[]}"#.to_vec()),
     };
     let failure = manager
@@ -1188,7 +1188,7 @@ async fn workspace_node_redirect_policy_is_applied_by_the_production_client_buil
         method: "POST".into(),
         path: "/v1/documents/redirect:batchUpdate".into(),
         query: None,
-        headers: vec![],
+        headers: (vec![]).into(),
         body: Some(br#"{"requests":[]}"#.to_vec()),
     };
     let signature = sign_proxy_request(&[0x11; 32], &request);
@@ -1632,7 +1632,7 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
             base_url: catalog.base_url.clone(),
             auth_method: "bearer".into(),
             auth_key_name: "Authorization".into(),
-            credential: "platform-token".into(),
+            credential: "platform-token".to_owned().into(),
             service: service.clone(),
             catalog_default_headers: vec![],
             user_service_default_headers: vec![],
@@ -1688,7 +1688,7 @@ fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
         base_url: "https://www.googleapis.com".into(),
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),
-        credential: "user-owned-token".into(),
+        credential: "user-owned-token".to_owned().into(),
         service,
         catalog_default_headers: vec![],
         user_service_default_headers: vec![],

@@ -61,3 +61,6 @@ docs/STREAMLINE_SERVICES_PROPOSAL.md
 
 # ─── Deployment ───
 k8s/
+
+# Python bytecode from repository scripts
+__pycache__/

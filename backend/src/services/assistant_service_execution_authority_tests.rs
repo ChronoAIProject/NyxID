@@ -7,6 +7,73 @@ use axum::{
 };
 
 #[tokio::test]
+async fn captured_model_attempt_cannot_recreate_metadata_after_accepted_erasure() {
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let f = orchestrator_fixture("model_attempt_erasure_fence").await;
+    super::super::super::personal_erasure_service::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
+    let captured = f.row.clone();
+    let first = begin_model_attempt(&f.state.db, &captured).await.unwrap();
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .find_one(doc! {"_id":first})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    super::super::super::personal_erasure_service::accept(&f.state.db, &f.owner, &f.owner, None)
+        .await
+        .unwrap();
+    for _ in 0..16 {
+        f.state
+            .db
+            .collection::<Document>("personal_erasure_jobs")
+            .update_one(
+                doc! {"user_id":&f.owner},
+                doc! {"$set":{"retry_at":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        super::super::super::personal_erasure_service::process_one(&f.state)
+            .await
+            .unwrap();
+        if f.state
+            .db
+            .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id":&captured.id})
+            .await
+            .unwrap()
+            .is_none()
+        {
+            break;
+        }
+    }
+    assert!(
+        f.state
+            .db
+            .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id":&captured.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(begin_model_attempt(&f.state.db, &captured).await.is_err());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION)
+            .count_documents(doc! {"user_id":&f.owner})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn deleted_owner_selection_still_blocks_other_exact_same_catalog_calls() {
     let f = orchestrator_fixture("deleted_exact_choice").await;
     let c = catalog(&f).await;

@@ -150,7 +150,7 @@ pub async fn resolve(
     {
         return Err(unavailable());
     }
-    let key = Zeroizing::new(std::mem::take(&mut target.credential));
+    let key = std::mem::take(&mut target.credential);
     let method_ok = match profiles::provider(profile) {
         "twilio" => target.auth_method == "basic",
         "telnyx" => target.auth_method == "bearer",
