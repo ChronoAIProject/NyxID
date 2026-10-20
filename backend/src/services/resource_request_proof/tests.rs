@@ -467,6 +467,8 @@ async fn authenticated_introspection_rejects_missing_secret_and_disabled_feature
 }
 
 mod egress;
+#[cfg(unix)]
+mod joined;
 
 #[tokio::test]
 async fn exact_live_owner_read_is_signed_and_cannot_be_replayed_as_another_request() {

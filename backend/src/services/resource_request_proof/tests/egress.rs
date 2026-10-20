@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-async fn call(
+pub(super) async fn call(
     f: &Fixture,
     state: &AppState,
     conversation_key: bool,
@@ -71,6 +71,17 @@ async fn call(
 }
 
 async fn rest(f: &Fixture) -> AppResult<axum::response::Response> {
+    rest_path(f, "/api/v1/agents?limit=1").await
+}
+
+pub(super) async fn rest_path(
+    f: &Fixture,
+    path_and_query: &str,
+) -> AppResult<axum::response::Response> {
+    let (path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
+    let separator = if query.is_empty() { "" } else { "&" };
     let key = f
         .state
         .db
@@ -82,8 +93,8 @@ async fn rest(f: &Fixture) -> AppResult<axum::response::Response> {
     let mut request = axum::http::Request::builder()
         .method("GET")
         .uri(format!(
-            "/api/v1/proxy/{}/api/v1/agents?limit=1&_nyxid_via={}",
-            f.catalog, f.connection
+            "/api/v1/proxy/{}{}?{}{}_nyxid_via={}",
+            f.catalog, path, query, separator, f.connection
         ))
         .header(HEADER, "caller-spoof")
         .body(axum::body::Body::empty())
@@ -97,7 +108,7 @@ async fn rest(f: &Fixture) -> AppResult<axum::response::Response> {
         axum::extract::State(f.state.clone()),
         auth,
         Default::default(),
-        axum::extract::Path((f.catalog.clone(), "api/v1/agents".into())),
+        axum::extract::Path((f.catalog.clone(), path.trim_start_matches('/').into())),
         request,
     )
     .await
