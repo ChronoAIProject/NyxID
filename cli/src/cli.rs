@@ -18,6 +18,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Control NyxBot with the owner's first-party session (API keys are rejected)
+    Nyxbot {
+        #[command(subcommand)]
+        command: crate::commands::nyxbot::NyxbotCommands,
+    },
     /// Log in to NyxID (opens browser by default)
     Login(LoginArgs),
     /// Log out and clear stored token

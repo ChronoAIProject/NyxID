@@ -1,5 +1,5 @@
 import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useAdminPlatformTargets } from "@/hooks/use-platform-onboarding";
 import {
   useNativeEntryConversion,
@@ -27,6 +27,8 @@ export function NativePlatformEntrySetup({
   profile?: PlatformProfile;
   onPrepared?: (profile: PlatformProfile) => void;
 }) {
+  const reviewId = useId();
+  const lifecycleReviewId = useId();
   const actor = useAuthStore((s) => s.user?.id);
   const [showFunding, setShowFunding] = useState(false);
   const targets = useAdminPlatformTargets(showFunding);
@@ -279,13 +281,13 @@ export function NativePlatformEntrySetup({
             </p>
             <div className="flex items-center gap-2">
               <Checkbox
-                id={`native-update-review-${botId}`}
+                id={lifecycleReviewId}
                 checked={lifecycleConfirmed === lifecycleKey}
                 onCheckedChange={(checked) =>
                   setLifecycleConfirmed(checked ? lifecycleKey : undefined)
                 }
               />
-              <label htmlFor={`native-update-review-${botId}`}>
+              <label htmlFor={lifecycleReviewId}>
                 I reviewed this entry and its selected replacement credentials.
               </label>
             </div>
@@ -329,13 +331,13 @@ export function NativePlatformEntrySetup({
             </details>
             <div className="flex items-center gap-2">
               <Checkbox
-                id="native-setup-review"
+                id={reviewId}
                 checked={confirmed === reviewKey}
                 onCheckedChange={(checked) =>
                   setConfirmed(checked ? reviewKey : undefined)
                 }
               />
-              <label htmlFor="native-setup-review">
+              <label htmlFor={reviewId}>
                 I reviewed this exact retained setup.
               </label>
             </div>

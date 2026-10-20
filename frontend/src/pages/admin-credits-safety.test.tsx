@@ -9,6 +9,10 @@ const mock = vi.hoisted(() => ({
   replaceAllowance: vi.fn(),
   targetKind: "all_users",
   scheduleActive: true,
+  scheduleAmount: undefined as string | undefined,
+  scheduleWhole: 20,
+  capable: false,
+  overviewFailure: true,
   updateAllowance: vi.fn(),
   updateSchedule: vi.fn(),
   navigate: vi.fn(),
@@ -16,14 +20,17 @@ const mock = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
 }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@tanstack/react-router")>(),
-  useSearch: () => useSyncExternalStore(
-    (listener) => {
-      mock.listeners.add(listener);
-      return () => { mock.listeners.delete(listener); };
-    },
-    () => mock.search,
-  ),
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useSearch: () =>
+    useSyncExternalStore(
+      (listener) => {
+        mock.listeners.add(listener);
+        return () => {
+          mock.listeners.delete(listener);
+        };
+      },
+      () => mock.search,
+    ),
   useNavigate: () => (options: { search: Record<string, unknown> }) => {
     mock.navigate(options);
     mock.search = options.search;
@@ -48,6 +55,30 @@ vi.mock("@/hooks/use-services", () => ({
   }),
 }));
 vi.mock("@/hooks/use-billing-credits", () => ({
+  useAllocationOverview: () => ({
+    data: mock.capable
+      ? {
+          allocations_v1: true,
+          summary: {
+            remaining: "123.000000000001",
+            unreserved: "120",
+            held: "3.000000000001",
+            pending_activation: "0",
+            pending_reclaim: "0",
+            expired_awaiting_cleanup: "0",
+            restricted: "1",
+            generated_at: "2026-10-19T00:00:00Z",
+          },
+        }
+      : undefined,
+    isError: mock.overviewFailure,
+    refetch: vi.fn(),
+  }),
+  useAllocateCredits: () => ({
+    isPending: false,
+    mutateAsync: vi.fn(),
+    reset: vi.fn(),
+  }),
   useAdminCreditGrants: () => ({ data: { grants: [] } }),
   useAdminAllowances: () => ({
     data: {
@@ -93,7 +124,8 @@ vi.mock("@/hooks/use-billing-credits", () => ({
       schedules: [
         {
           id: "schedule-a",
-          amount_credits: 20,
+          amount_credits: mock.scheduleWhole,
+          amount: mock.scheduleAmount,
           expiry: { kind: "end_of_period" },
           recurrence: "monthly",
           target_kind: mock.targetKind,
@@ -131,18 +163,30 @@ beforeEach(() => {
   mock.extraDisabled = false;
   mock.targetKind = "all_users";
   mock.scheduleActive = true;
+  mock.scheduleAmount = undefined;
+  mock.scheduleWhole = 20;
+  mock.capable = false;
+  mock.overviewFailure = true;
   mock.search = {};
 });
 
 it("opens a linked credit subsection and writes its tab on navigation", async () => {
   mock.search = { tab: "schedules" };
   render(<AdminCreditsPage />);
-  expect(screen.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Schedules" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await userEvent.click(screen.getByRole("tab", { name: "Free allowances" }));
   expect(mock.navigate).toHaveBeenLastCalledWith({
-    to: "/admin/credits", search: { tab: "allowances" }, replace: true,
+    to: "/admin/credits",
+    search: { tab: "allowances" },
+    replace: true,
   });
-  expect(screen.getByRole("tab", { name: "Free allowances" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Free allowances" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
 });
 it("reviews allowance disabling and sends only status after confirmation", async () => {
   const user = userEvent.setup();
@@ -254,4 +298,55 @@ it("editing a fully disabled bundle loads all units and reviews their re-enablem
     { metric: "requests", quantity: 15, recurrence: "monthly" },
     { metric: "images", quantity: 20, recurrence: "daily" },
   ]);
+});
+
+it.each([undefined, "20"])(
+  "edits a whole legacy schedule via amount_credits with exact read %s and missing capability",
+  async (amount) => {
+    mock.scheduleAmount = amount;
+    mock.search = { tab: "schedules" };
+    const user = userEvent.setup();
+    render(<AdminCreditsPage />);
+    await user.click(screen.getByRole("button", { name: "Edit schedule" }));
+    const input = screen.getByLabelText("Credits per recipient");
+    expect(input).toHaveValue(20);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "21" } });
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+    await waitFor(() => expect(mock.updateSchedule).toHaveBeenCalledOnce());
+    expect(mock.updateSchedule.mock.calls[0]![0]).toEqual({
+      id: "schedule-a",
+      body: { amount_credits: 21 },
+    });
+  },
+);
+it("retains fractional schedule state during capability failure and permits reviewed sparse notes", async () => {
+  mock.scheduleAmount = "0.3";
+  mock.scheduleWhole = 0;
+  mock.search = { tab: "schedules" };
+  const user = userEvent.setup();
+  render(<AdminCreditsPage />);
+  await user.click(screen.getByRole("button", { name: "Edit schedule" }));
+  expect(screen.getByLabelText("Credits per recipient")).toHaveValue("0.3");
+  expect(screen.getByLabelText("Credits per recipient")).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Reason / note"), {
+    target: { value: "Updated note" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mock.updateSchedule).toHaveBeenCalledOnce());
+  expect(mock.updateSchedule.mock.calls[0]![0]).toEqual({
+    id: "schedule-a",
+    body: { reason: "Updated note" },
+  });
+});
+it("shows one exact summary headline with closed balance details and identifies a failed refresh", () => {
+  mock.capable = true;
+  mock.overviewFailure = true;
+  render(<AdminCreditsPage />);
+  expect(screen.getByText(/123.000000000001/)).toBeInTheDocument();
+  const details = screen.getByText("Balance details").closest("details");
+  expect(details).not.toHaveAttribute("open");
+  expect(screen.getByText(/stale/i)).toBeInTheDocument();
 });

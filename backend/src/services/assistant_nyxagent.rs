@@ -91,6 +91,17 @@ fn answer_routing_parts(
             .map_or(PrimaryDestination::App, |origin| {
                 PrimaryDestination::ChannelEvent { origin }
             })
+    } else if matches!(turn.origin, TurnOrigin::Event)
+        && turn.events.iter().any(|e| !e.source_event_ids.is_empty())
+    {
+        turn.events
+            .iter()
+            .find(|e| !e.source_event_ids.is_empty())
+            .and_then(|e| e.reply_to.first())
+            .cloned()
+            .map_or(PrimaryDestination::App, |origin| {
+                PrimaryDestination::ChannelEvent { origin }
+            })
     } else if matches!(turn.origin, TurnOrigin::Event) {
         let mut origins = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -386,6 +397,9 @@ pub fn base_prompt(
         ),
     };
     prompt.push_str(TASK_COMPLETION_PROMPT);
+    if row.role == AgentRole::Orchestrator && !row.guest_turn {
+        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
+    }
     prompt.push_str(WEB_RESEARCH_PROMPT);
     if let Some(agent) = agent {
         if !row.guest_turn {
@@ -552,6 +566,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub invocation_id: Option<String>,
     pub acknowledgement_id: Option<String>,
     pub retry_of: Option<String>,
     pub channel_event_id: Option<String>,
@@ -649,10 +664,11 @@ pub async fn also_reply_to_queued(
     let updated = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": id, "user_id": user_id, "pending_events.question_key": key},
+            doc! {"_id": id, "user_id": user_id,
+            "pending_events": {"$elemMatch": {"question_key": key, "invocation_id": null}}},
             doc! {"$addToSet": {"pending_events.$[e].reply_to": origin}},
         )
-        .array_filters(vec![doc! {"e.question_key": key}])
+        .array_filters(vec![doc! {"e.question_key": key, "e.invocation_id": null}])
         .await?;
     Ok(updated.matched_count == 1)
 }
@@ -673,6 +689,7 @@ pub async fn also_deliver(
         .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id,
+            "active_turn.invocation_id": null,
             &limit: {"$exists": false}},
             doc! {"$addToSet": {"active_turn.also_deliver": origin}},
         )
@@ -718,6 +735,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            invocation_id: None,
             acknowledgement_id: request.acknowledgement_id.clone(),
             retry_of: request.retry_of.clone(),
             channel_event_id: None,
@@ -1051,6 +1069,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"conversation_id": 1, "status": 1, "created_at": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id": 1, "conversation_id": 1, "creation_turn_id": 1},
             false,
         ),
         (
@@ -1867,6 +1890,18 @@ pub(crate) async fn begin_owner_turn_in_session(
     platform: Option<&crate::models::assistant_conversation::PlatformTurnOrigin>,
     voice_request_id: Option<&str>,
 ) -> AppResult<OwnerTurnAdmission> {
+    if let Some(ack) = &start.acknowledgement_id
+        && db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"_id":ack,"user_id":user_id,"invocation_id":{"$type":"string"}})
+            .session(&mut *session)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Invocation confirmation continuation is already queued".into(),
+        ));
+    }
     let id = ids.conversation_id.clone();
     let turn_id = ids.turn_id.clone();
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -1892,6 +1927,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            invocation_controlled: false,
+            credential_invocation_id: None,
             platform_thread: platform.map(|origin| origin.thread.clone()),
             machine_previews: false,
             platform_cleanup_pending: false,
@@ -2066,6 +2103,26 @@ pub(crate) async fn begin_owner_turn_in_session(
             .session(&mut *session)
             .await?;
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|event| event.invocation_id.is_some())
+    {
+        let before = row.pending_events.len();
+        row.pending_events = super::assistant_invocation_service::filter_events_in_session(
+            db,
+            session,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection.update_one(owner_filter(user_id,&id)?,doc!{"$set":{"pending_events":bson::to_bson(&row.pending_events).map_err(|_|AppError::Internal("Invalid events".into()))?}}).session(&mut *session).await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
@@ -2075,7 +2132,8 @@ pub(crate) async fn begin_owner_turn_in_session(
     // queued): a guest turn leaves them for the owner's next turn.
     // A chat app thread's queued messages wait for a turn that
     // answers in that chat, never one the owner starts in the app.
-    let events = if start.guest
+    let events = if start.invocation_id.is_some()
+        || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
     {
@@ -2091,7 +2149,17 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?
     };
     if start.origin == TurnOrigin::Event && events.is_empty() {
-        return Err(AppError::Conflict("No eligible pending events".into()));
+        collection
+            .update_one(
+                owner_filter(user_id, &id)?,
+                doc! {"$set": {
+                    "pending_events": bson::to_bson(&row.pending_events)
+                        .map_err(|_| AppError::Internal("Failed to encode events".into()))?
+                }},
+            )
+            .session(&mut *session)
+            .await?;
+        return Ok(OwnerTurnAdmission::Drained);
     }
     // Reduce authority before eligibility filtering; removed events cannot
     // create a new report destination for the retained events.
@@ -2203,6 +2271,37 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     };
 
+    if start.invocation_id.is_some() {
+        super::assistant_invocation_service::require_owner_conversation(&row)?;
+    }
+    let next_invocation = start
+        .invocation_id
+        .clone()
+        .or_else(|| events.first().and_then(|event| event.invocation_id.clone()));
+    // NyxAgent authenticates tools with the raw conversation key. Retire that
+    // generation at invocation boundaries so an old worker cannot authenticate
+    // against a later turn's live authority. Continuations of the same family
+    // retain their card/watch binding; ordinary untouched threads keep theirs.
+    if (row.invocation_controlled || next_invocation.is_some())
+        && row.credential_invocation_id != next_invocation
+        && !row.credential_api_key_id.is_empty()
+    {
+        super::assistant_agent_credential_service::require_invocation_boundary_clear(
+            db,
+            user_id,
+            &row.id,
+            &mut *session,
+        )
+        .await?;
+        super::api_key_mutation_service::update_one(
+            db,
+            doc! {"_id":&row.credential_api_key_id,"user_id":user_id},
+            doc! {"$set":{"is_active":false}},
+            Some(&mut *session),
+        )
+        .await?;
+    }
+    row.credential_invocation_id = next_invocation;
     let credential = Box::pin(
         super::assistant_agent_credential_service::load_or_provision_in_session(
             db,
@@ -2321,6 +2420,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             db, session, &row, &lost_turn, &message, now,
         ))
         .await?;
+        super::assistant_invocation_service::settle_in_session(
+            db, session, user_id, &lost_turn, &message,
+        )
+        .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
         db.collection::<AssistantMessage>(MESSAGES)
@@ -2393,8 +2496,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
+    if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
+        row.invocation_controlled = true;
+    }
     row.active_turn = Some(ActiveTurn {
         channel_adapter_origin: None,
+        invocation_id: start
+            .invocation_id
+            .clone()
+            .or_else(|| events.first().and_then(|e| e.invocation_id.clone())),
         resource_refs: Vec::new(),
         worker_instance: Some(super::assistant_engine_worker::instance().clone()),
         model_attempt_id: None,
@@ -2484,8 +2594,38 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
+    // Bind every accepted destination of this one question in the same turn
+    // transaction. The source records retain their independent dispatch claims.
+    if let Some(turn) = row.active_turn.as_mut() {
+        for source in turn.events.iter().flat_map(|e| &e.source_event_ids) {
+            super::channel_turn_delivery::bind_in_session(
+                db,
+                session,
+                source,
+                &row.user_id,
+                &row.id,
+                turn_id,
+            )
+            .await?;
+        }
+        if turn.channel_event_id.is_none() {
+            turn.channel_event_id = turn
+                .events
+                .iter()
+                .flat_map(|e| &e.source_event_ids)
+                .next()
+                .cloned();
+        }
+        if let Some(event) = turn.events.iter().find(|e| !e.source_event_ids.is_empty()) {
+            turn.question_key = event.question_key.clone();
+        }
+    }
     Box::pin(super::async_service_operation::bind_in_session(
         db, &mut row, session,
+    ))
+    .await?;
+    Box::pin(super::assistant_invocation_service::bind_in_session(
+        db, session, &row,
     ))
     .await?;
     // Chats whose queued messages this turn answers get its reply
@@ -2500,7 +2640,12 @@ pub(crate) async fn begin_owner_turn_in_session(
     if row.channel.is_none()
         && let Some(turn) = row.active_turn.as_mut()
     {
-        for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
+        for origin in turn
+            .events
+            .iter()
+            .filter(|e| e.source_event_ids.is_empty())
+            .flat_map(|event| event.reply_to.iter())
+        {
             if Some(origin) != answered_here.as_ref()
                 && !turn.also_deliver.contains(origin)
                 && turn.also_deliver.len() < MAX_ALSO_DELIVER
@@ -2790,8 +2935,8 @@ pub fn turn_input(row: &AssistantConversation, start: &TurnStart) -> String {
     }
 }
 
-/// Append wake-up events, bounded; the oldest are dropped first. Returns the
-/// row after the append, or `None` when the conversation is gone or destroyed.
+/// Append bounded wake-up events while preserving source work and invocation
+/// continuations. Returns the row after the append, or `None` when unavailable.
 pub async fn push_events(
     db: &Database,
     user_id: &str,
@@ -2801,22 +2946,96 @@ pub async fn push_events(
     if events.is_empty() {
         return get(db, user_id, id).await.map(Some);
     }
-    let entries = events
-        .iter()
-        .map(bson::to_bson)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| AppError::Internal("Failed to encode event".into()))?;
-    Ok(db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one_and_update(
-            doc! {"_id": id, "user_id": user_id},
-            doc! {"$push": {"pending_events": {
-                "$each": entries,
-                "$slice": -(MAX_PENDING_EVENTS as i64),
-            }}},
+    if events.iter().any(|event| event.invocation_id.is_some()) {
+        return Box::pin(super::assistant_invocation_service::push_events(
+            db, user_id, id, events,
+        ))
+        .await;
+    }
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let id = id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let work: AppResult<Option<AssistantConversation>> = async {
+                append_events_in_session(&db, &user_id, &id, &events, session).await?;
+                Ok(db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(doc! {"_id": &id, "user_id": &user_id})
+                    .session(&mut *session)
+                    .await?)
+            }
+            .await;
+            transactions::transaction_result(work)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+/// Ordinary notices can be evicted only when no invocation continuation is
+/// queued. Accepted source questions are never evicted. Capacity refusal aborts
+/// transactional producers so their work remains available for retry.
+pub async fn append_events_in_session(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    events: &[AgentEvent],
+    session: &mut mongodb::ClientSession,
+) -> AppResult<bool> {
+    let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let Some(mut row) = rows
+        .find_one(doc! {"_id": id, "user_id": user_id})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(false);
+    };
+    for event in events {
+        if !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            user_id,
+            event.invocation_id.as_deref(),
         )
-        .return_document(ReturnDocument::After)
-        .await?)
+        .await?
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        if let Some(existing) = row.pending_events.iter().find(|e| e.id == event.id) {
+            if existing.invocation_id != event.invocation_id {
+                return Err(AppError::Conflict(
+                    "Assistant event identity changed".into(),
+                ));
+            }
+            continue;
+        }
+        if row.pending_events.len() >= MAX_PENDING_EVENTS {
+            if event.invocation_id.is_some()
+                || row.pending_events.iter().any(|e| e.invocation_id.is_some())
+            {
+                return Err(AppError::Conflict("Assistant event queue is full".into()));
+            }
+            let index = row
+                .pending_events
+                .iter()
+                .position(|e| e.source_event_ids.is_empty())
+                .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
+            row.pending_events.remove(index);
+        }
+        row.pending_events.push(event.clone());
+    }
+    rows.update_one(
+        doc! {"_id": id, "user_id": user_id},
+        doc! {"$set": {
+            "pending_events": bson::to_bson(&row.pending_events)
+                .map_err(|_| AppError::Internal("Failed to encode events".into()))?,
+        }},
+    )
+    .session(session)
+    .await?;
+    Ok(true)
 }
 
 pub async fn clear_binding(
@@ -3307,6 +3526,9 @@ async fn finish_turn_inner(
                     ))
                     .await?;
                 }
+                if let Some(turn) = settled_turn.as_ref() {
+                    super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message).await?;
+                }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -3746,6 +3968,11 @@ pub(crate) async fn attach_resource_image(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(resources::missing)?;
+                if !super::assistant_invocation_service::fence_in_session(
+                    &db, session, &chat.user_id, chat.invocation_id.as_deref(),
+                ).await? {
+                    return Err(AppError::AssistantTurnRequired);
+                }
                 // This benign key write serializes acceptance with concurrent revocation/rotation.
                 let key = db
                     .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
@@ -4711,6 +4938,10 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    super::assistant_invocation_service::deleted_in_session(
+                        db, session, user_id, id,
+                    )
+                    .await?;
                     super::platform_personal_turn_service::clear_thread_in_session(
                         db, session, row,
                     )

@@ -30,22 +30,31 @@ pub async fn settle_watch(
     error: Option<&str>,
 ) -> AppResult<bool> {
     use super::api_key_mutation_service as transactions;
-    let event = bson::to_bson(&super::nyxbot_watch_service::watch_event(watch, kind, text))
-        .map_err(|_| AppError::Internal("Could not encode machine event".into()))?;
+    let event = super::nyxbot_watch_service::watch_event(watch, kind, text);
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let watch = watch.clone();
     let error = error.map(str::to_owned);
     session
         .start_transaction()
-        .and_run2(async move |session| {
+        .and_run((db, watch, error, event), |session, (db, watch, error, event)| Box::pin(async move {
             let result: AppResult<bool> = async {
+                if !super::assistant_invocation_service::fence_in_session(
+                    db,
+                    session,
+                    &watch.user_id,
+                    watch.invocation_id.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(false);
+                }
                 let update = db
                     .collection::<bson::Document>(
                         crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
                     )
                     .update_one(
-                        doc! {"_id":&watch.id,"status":"pending"},
+                        doc! {"_id":&watch.id,"user_id":&watch.user_id,"status":{"$in":["pending","claimed"]}},
                         doc! {
                             "$set":{
                                 "status":if error.is_some(){
@@ -53,7 +62,7 @@ pub async fn settle_watch(
                                 }else{
                                     "done"
                                 },
-                                "last_error":&error
+                                "last_error":&*error
                             }
                         },
                     )
@@ -62,27 +71,17 @@ pub async fn settle_watch(
                 if update.modified_count == 0 {
                     return Ok(false);
                 }
-                db.collection::<bson::Document>(
-                    crate::models::assistant_conversation::COLLECTION_NAME,
-                )
-                .update_one(
-                    doc! {"_id":&watch.conversation_id,"user_id":&watch.user_id},
-                    doc! {
-                        "$push":{
-                            "pending_events":{
-                                "$each":[event.clone()],
-                                "$slice":-(super::assistant_nyxagent::MAX_PENDING_EVENTS as i64)
-                            }
-                        }
-                    },
-                )
-                .session(&mut *session)
-                .await?;
+                if !super::assistant_nyxagent::append_events_in_session(
+                    db, &watch.user_id, &watch.conversation_id,
+                    std::slice::from_ref(event), session,
+                ).await? {
+                    return Err(AppError::Conflict("Assistant event queue is unavailable".into()));
+                }
                 Ok(true)
             }
             .await;
             transactions::transaction_result(result)
-        })
+        }))
         .await
         .map_err(transactions::map_transaction_error)
 }
@@ -612,6 +611,21 @@ async fn fence_turn_operation_in_session(
         doc! {"$addToSet":add,"$inc":{"machine_issue_generation":1_i64}},
     ).session(&mut *session).await?.ok_or(AppError::MachineTurnStopped)?;
     if super::assistant_nyxagent::live_turn(&row, Utc::now()).is_none() {
+        return Err(AppError::MachineTurnStopped);
+    }
+    let invocation = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.invocation_id.as_deref());
+    if invocation != chat.invocation_id.as_deref()
+        || !super::assistant_invocation_service::fence_in_session(
+            db,
+            session,
+            &chat.user_id,
+            invocation,
+        )
+        .await?
+    {
         return Err(AppError::MachineTurnStopped);
     }
     if let Some(origin) = row

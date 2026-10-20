@@ -696,6 +696,10 @@ pub async fn history(
         &user_id,
         &id,
         rows.first().map(|message| message.created_at),
+        &rows
+            .iter()
+            .map(|message| message.turn_id.clone())
+            .collect::<Vec<_>>(),
     )
     .await?;
     if let Some(card) = query.card {
@@ -956,6 +960,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    creation_turn_id: Option<String>,
     authored_skill: Option<Value>,
     continuation_owner: Option<&'static str>,
     continuation_receipt_id: Option<String>,
@@ -985,6 +990,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
+            creation_turn_id: row.creation_turn_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,
@@ -1050,7 +1056,7 @@ pub async fn decide_acknowledgement(
     )
     .await;
     // A user decision on a subagent's request resumes the subagent.
-    if row.decider == "orchestrator" {
+    if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;
     }
     if matches!(body.decision, Decision::Deny) {
@@ -1216,6 +1222,12 @@ pub async fn delete(
         }
     }
     let rows = engine::delete(&state.db, &user_id, &id).await?;
+    for row in &rows {
+        crate::services::assistant_invocation_service::cancel_deleted_conversation(
+            &state, &user_id, &row.id,
+        )
+        .await?;
+    }
     let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     for row in rows {
         let Some(session_id) = row.nyxagent_session_id.clone() else {
@@ -1778,7 +1790,7 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_turn(
+pub(crate) async fn run_turn(
     state: AppState,
     auth: AuthUser,
     row: AssistantConversation,

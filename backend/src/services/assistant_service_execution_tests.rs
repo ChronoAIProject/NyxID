@@ -26,6 +26,9 @@ mod receipts;
 #[path = "assistant_service_execution_ssh_session_tests.rs"]
 mod ssh_sessions;
 
+#[path = "assistant_service_execution_invocation_tests.rs"]
+mod invocations;
+
 async fn mode(f: &Fixture, mode: AccessMode) {
     super::super::assistant_settings_service::update(
         &f.state.db,

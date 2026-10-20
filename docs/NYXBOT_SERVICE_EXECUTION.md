@@ -160,7 +160,12 @@ Approved async submissions through user-managed connections persist their exact
 execution-authority digest on the existing `assistant_async_operations` watch.
 The private watch capability permits only that operation ID's declared
 status/result GETs and optional cancel POST,
-within its deadline and fenced lease. It remains usable while the conversation
+within its deadline and fenced lease. For a cancelled owner invocation, the
+capability permits only one durably recorded cancellation attempt and a declared
+status read to confirm the outcome. That status read may follow the normal watch
+deadline, but must remain within the watch expiry and live lease; result reads
+are refused. The original invocation and delivery binding are checked before
+each send. Ordinary active watches remain usable while the conversation
 is idle or running a later turn; it never supplies a synthetic live turn. Each
 send rechecks the live key, membership, service scope, connection/configuration
 and credential generation, contract and lease. Revocation stops further polling.

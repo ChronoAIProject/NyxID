@@ -583,7 +583,7 @@ pub async fn update(
     });
     let needs_probe = proposed.public_enabled
         && proposed.public_policy.is_some()
-        && (change.public_enabled == Some(true)
+        && (change.public_deployment_digest.is_some()
             || previous
                 .as_ref()
                 .is_none_or(|r| !r.public_enabled || r.public_policy != proposed.public_policy));
@@ -1212,6 +1212,68 @@ mod tests {
         );
         db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn personal_reduction_preserves_saved_ai_without_probe_but_enable_and_revalidation_probe()
+    {
+        let (db, id, actor) = admin_fixture("runtime_unchanged_public_ai").await;
+        let row = update(&db, &actor, b"audit", &id, &initialize(), &NoPublic)
+            .await
+            .unwrap();
+        let sponsor = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &sponsor,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"org_user_id":&sponsor,"member_user_id":&actor.user_id,"role":"admin","revoked_at":bson::Bson::Null}).await.unwrap();
+        let saved = PublicRuntimePolicy {
+            sponsor_owner_user_id: sponsor,
+            nyxagent_profile: "nyxagent/chat".into(),
+            total_daily_credits: "2".parse().unwrap(),
+            sender_daily_credits: "0.2".parse().unwrap(),
+        };
+        db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&row.id},
+            doc! {"$set":{"public_enabled":true,"public_policy":bson::to_bson(&saved).unwrap()}}).await.unwrap();
+        let mut patch = RuntimeChange {
+            initialize: false,
+            expected_profile_generation: None,
+            expected_manager_authority_epoch: row.manager_authority_epoch,
+            expected_personal_control_revision: row.personal_control_revision,
+            expected_public_policy_revision: row.public_policy_revision,
+            personal_enabled: Some(false),
+            public_enabled: Some(true),
+            emergency_stopped: None,
+            public_policy: None,
+            public_deployment_digest: None,
+        };
+        // NoPublic fails every probe: an unchanged public:true must not probe.
+        let reduced = update(&db, &actor, b"audit", &id, &patch, &NoPublic)
+            .await
+            .unwrap();
+        assert!(!reduced.personal_enabled && reduced.public_enabled);
+        assert_eq!(reduced.public_policy, Some(saved));
+        patch.expected_personal_control_revision = reduced.personal_control_revision;
+        patch.expected_public_policy_revision = reduced.public_policy_revision;
+        patch.public_deployment_digest = Some("ab".repeat(32));
+        assert!(
+            matches!(update(&db, &actor, b"audit", &id, &patch, &NoPublic).await,
+            Err(AppError::Conflict(message)) if message == "public proof unavailable")
+        );
+        patch.public_deployment_digest = None;
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(doc! {"_id":&row.id}, doc! {"$set":{"public_enabled":false}})
+            .await
+            .unwrap();
+        assert!(
+            matches!(update(&db, &actor, b"audit", &id, &patch, &NoPublic).await,
+            Err(AppError::Conflict(message)) if message == "public proof unavailable")
+        );
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn concurrent_initialization_has_one_winner() {
         let (db, id, actor) = admin_fixture("personal_runtime_create_race").await;

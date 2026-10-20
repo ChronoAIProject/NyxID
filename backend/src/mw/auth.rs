@@ -173,8 +173,9 @@ impl AuthUser {
     }
 
     /// Conversation-key route restrictions are part of the live-turn rollout.
-    /// Keep the flag check here so disabling the flag restores the historical
-    /// API-key route behavior immediately; ordinary keys take the no-read path.
+    /// Disabling the flag restores historical behavior for ordinary threads.
+    /// Invocation-controlled threads retain mandatory route restrictions;
+    /// unrelated ordinary keys take the no-read path.
     /// Assistant management routes (agents, grants, skills, settings,
     /// channels, groups) are refused to conversation keys regardless of the
     /// flag: an agent must never widen its own or a peer's authority through
@@ -193,12 +194,16 @@ impl AuthUser {
             return self.ensure_conversation_key_route(path);
         }
         if self.assistant_turn_fence.is_none()
-            || !crate::services::feature_flag_service::personal_flag_enabled(
-                db,
-                &self.user_id.to_string(),
-                crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
-            )
-            .await?
+            || (!self
+                .assistant_turn_fence
+                .as_ref()
+                .is_some_and(|f| f.invocation_controlled)
+                && !crate::services::feature_flag_service::personal_flag_enabled(
+                    db,
+                    &self.user_id.to_string(),
+                    crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+                )
+                .await?)
         {
             return Ok(());
         }
@@ -1031,6 +1036,12 @@ impl FromRequestParts<AppState> for AuthUser {
             let authenticated = async {
             let request_ip = extract_request_ip(parts);
             let request_ua = extract_request_user_agent(parts);
+            // Nested routers strip their mount prefixes from `parts.uri`.
+            // Route authorization must use Axum's original request target.
+            let request_path = parts
+                .extensions
+                .get::<OriginalUri>()
+                .map_or_else(|| parts.uri.path(), |uri| uri.path());
             // Try Bearer token first
             if let Some(auth_header) = parts.headers.get("authorization") {
                 let auth_str = auth_header.to_str().map_err(|_| {
@@ -1057,7 +1068,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 .await
                             {
                                 Ok((_api_user_id_str, api_key, credential_id)) => {
-                                    ensure_api_key_purpose_route(&api_key, parts.uri.path())?;
+                                    ensure_api_key_purpose_route(&api_key, request_path)?;
                                     let auth_user = api_key_auth_user(
                                         &state.db, &api_key, credential_id,
                                         request_ip.clone(), request_ua.clone(),
@@ -1065,12 +1076,12 @@ impl FromRequestParts<AppState> for AuthUser {
                                     auth_user
                                         .ensure_conversation_key_route_if_enabled(
                                             &state.db,
-                                            parts.uri.path(),
+                                            request_path,
                                         )
                                         .await?;
                                     auth_user.ensure_management_write_scope(
                                         &parts.method,
-                                        parts.uri.path(),
+                                        request_path,
                                     )?;
                                     return Ok(auth_user);
                                 }
@@ -1499,15 +1510,15 @@ impl FromRequestParts<AppState> for AuthUser {
 
                 let (_user_id_str, key, credential_id) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
-                ensure_api_key_purpose_route(&key, parts.uri.path())?;
+                ensure_api_key_purpose_route(&key, request_path)?;
 
                 let auth_user = api_key_auth_user(
                     &state.db, &key, credential_id, request_ip, request_ua,
                 ).await?;
                 auth_user
-                    .ensure_conversation_key_route_if_enabled(&state.db, parts.uri.path())
+                    .ensure_conversation_key_route_if_enabled(&state.db, request_path)
                     .await?;
-                auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
+                auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
             }
 
@@ -3570,6 +3581,8 @@ mod tests {
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),
@@ -3642,6 +3655,8 @@ mod tests {
             assistant_turn_fence: Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),
@@ -3807,6 +3822,8 @@ mod tests {
         user.assistant_turn_fence = Some(Box::new(
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                 channel_adapter_origin: None,
+                invocation_id: None,
+                invocation_controlled: false,
                 platform_thread: false,
                 platform_origin: None,
                 conversation_id: "conversation".into(),
@@ -3859,6 +3876,8 @@ mod tests {
     fn conversation_fence_requires_a_live_non_stopped_turn() {
         let base = crate::services::assistant_acknowledgement_service::AssistantTurnFence {
             channel_adapter_origin: None,
+            invocation_id: None,
+            invocation_controlled: false,
             platform_thread: false,
             platform_origin: None,
             conversation_id: "conversation".into(),
@@ -3869,10 +3888,14 @@ mod tests {
         assert!(base.require_live().is_ok());
         for fence in [
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
                 turn_live: false,
                 ..base.clone()
             },
             crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
                 turn_stopped: true,
                 ..base.clone()
             },
@@ -3884,6 +3907,8 @@ mod tests {
         }
         assert_eq!(
             (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
                 turn_id: None,
                 turn_live: false,
                 turn_stopped: true,
@@ -3894,6 +3919,8 @@ mod tests {
         );
         assert_eq!(
             (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
                 turn_live: false,
                 turn_stopped: true,
                 ..base.clone()
@@ -3903,6 +3930,8 @@ mod tests {
         );
         assert_eq!(
             (crate::services::assistant_acknowledgement_service::AssistantTurnFence {
+                invocation_id: None,
+                invocation_controlled: false,
                 turn_live: false,
                 turn_stopped: false,
                 ..base
@@ -4695,6 +4724,8 @@ mod tests {
             original.assistant_turn_fence = Some(Box::new(
                 crate::services::assistant_acknowledgement_service::AssistantTurnFence {
                     channel_adapter_origin: None,
+                    invocation_id: None,
+                    invocation_controlled: false,
                     platform_thread: false,
                     platform_origin: None,
                     conversation_id: "conversation".into(),

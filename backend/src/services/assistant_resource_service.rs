@@ -67,6 +67,7 @@ pub(crate) fn live_filter(chat: &ChatAuthority) -> AppResult<bson::Document> {
         "agent_id": &chat.agent_id, "credential_api_key_id": &chat.api_key_id,
         "guest_turn": if chat.guest { bson::Bson::Boolean(true) } else { bson::Bson::Document(doc!{"$ne":true}) },
         "active_turn.turn_id": turn, "active_turn.stop_requested": false,
+        "active_turn.invocation_id": &chat.invocation_id,
         "$or": [
             {"active_turn.lease_expires_at":{"$gt":bson::DateTime::from_chrono(now)}},
             {"active_turn.lease_expires_at":bson::Bson::Null,
@@ -83,6 +84,11 @@ pub(crate) fn live_filter(chat: &ChatAuthority) -> AppResult<bson::Document> {
 }
 
 pub async fn require_live(db: &Database, chat: &ChatAuthority) -> AppResult<()> {
+    if chat.invocation_id.is_some() {
+        // Keep the shared authority gate out of every source-resource caller's
+        // future; it also contains platform admission and audit paths.
+        Box::pin(chat.ensure_live_turn(db, None, None, "assistant.resource")).await?;
+    }
     if db
         .collection::<bson::Document>(CONVERSATIONS)
         .find_one(live_filter(chat)?)
@@ -205,6 +211,16 @@ async fn issue_many(
         .and_run2(async move |session| {
             let operation: AppResult<_> =
                 async {
+                    if !super::assistant_invocation_service::fence_in_session(
+                        &db,
+                        session,
+                        &chat.user_id,
+                        chat.invocation_id.as_deref(),
+                    )
+                    .await?
+                    {
+                        return Err(AppError::AssistantTurnRequired);
+                    }
                     let parents = db.collection::<bson::Document>(CONVERSATIONS);
                     let parent = if continuation.is_some() {
                         // Serialize adoption, including reuse, with pending intent writes and Stop.
@@ -397,6 +413,11 @@ pub async fn bind_confirmation(
     let acknowledgement_id = acknowledgement_id.to_owned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<_> = async {
+            if !super::assistant_invocation_service::fence_in_session(
+                &db, session, &chat.user_id, chat.invocation_id.as_deref(),
+            ).await? {
+                return Err(AppError::AssistantTurnRequired);
+            }
             // Taking the parent write lock serializes this intent with Stop/settlement.
             db.collection::<bson::Document>(CONVERSATIONS)
                 .find_one_and_update(live_filter(&chat)?,doc!{"$currentDate":{"updated_at":true}})
@@ -887,6 +908,162 @@ mod tests {
         );
         state.db.drop().await.unwrap();
     }
+    #[tokio::test]
+    async fn resource_invocation_root_fences_issue_read_confirmation_and_final_commit() {
+        use crate::models::assistant_invocation::COLLECTION_NAME as ROOTS;
+        use crate::services::{
+            assistant_acknowledgement_service as acks, assistant_invocation_service as invocations,
+        };
+        let (state, initial) = setup("resource_invocation_root").await;
+        invocations::ensure_indexes(&state.db).await.unwrap();
+        let request = engine::parse_turn(br#"{"text":"show a source image"}"#).unwrap();
+        let start = engine::TurnStart::from(&request);
+        let admission = Box::pin(invocations::admit(
+            &state.db,
+            &initial.user_id,
+            &Uuid::new_v4().to_string(),
+            "resource-test",
+            &start,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let conversation = admission.claim.unwrap().conversation;
+        let chat = acks::for_key(
+            &state.db,
+            &initial.user_id,
+            Some(&conversation.credential_api_key_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let read = read("2026-10-17T00:00:00Z");
+        let resource = issue(&state.db, &chat, &read, &read.candidates[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let roots = state.db.collection::<bson::Document>(ROOTS);
+        let original = roots
+            .find_one(doc! {"_id": &admission.invocation.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for change in [
+            Some(doc! {"cancel_requested":true}),
+            Some(doc! {"conversation_deleted":true}),
+            Some(doc! {"terminal_status":"completed"}),
+            None,
+        ] {
+            if let Some(change) = change {
+                roots
+                    .update_one(doc! {"_id": &admission.invocation.id}, doc! {"$set":change})
+                    .await
+                    .unwrap();
+            } else {
+                roots
+                    .delete_one(doc! {"_id": &admission.invocation.id})
+                    .await
+                    .unwrap();
+            }
+            assert!(require_live(&state.db, &chat).await.is_err());
+            assert!(
+                load(&state.db, &chat, &resource.id, Output::Attach, None)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                issue(&state.db, &chat, &read, &read.candidates[0])
+                    .await
+                    .is_err()
+            );
+            assert!(
+                bind_confirmation(&state.db, &chat, &resource, Output::Attach, "card")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                Box::pin(engine::attach_resource_image(
+                    &state.db,
+                    &state.encryption_keys,
+                    &chat,
+                    &resource,
+                    Some(&media()),
+                    Output::Attach
+                ))
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_attachment::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let retained = state
+                .db
+                .collection::<AssistantResource>(COLLECTION_NAME)
+                .find_one(doc! {"_id": &resource.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!retained.completed && retained.pending_confirmation.is_none());
+            roots
+                .replace_one(doc! {"_id": &admission.invocation.id}, original.clone())
+                .upsert(true)
+                .await
+                .unwrap();
+        }
+        let parents = state.db.collection::<bson::Document>(CONVERSATIONS);
+        parents
+            .update_one(
+                doc! {"_id": &conversation.id},
+                doc! {"$set":{"active_turn.invocation_id":"changed"}},
+            )
+            .await
+            .unwrap();
+        assert!(require_live(&state.db, &chat).await.is_err());
+        assert!(
+            issue(&state.db, &chat, &read, &read.candidates[0])
+                .await
+                .is_err()
+        );
+        assert!(
+            Box::pin(engine::attach_resource_image(
+                &state.db,
+                &state.encryption_keys,
+                &chat,
+                &resource,
+                Some(&media()),
+                Output::Attach
+            ))
+            .await
+            .is_err()
+        );
+        parents
+            .update_one(
+                doc! {"_id": &conversation.id},
+                doc! {"$set":{"active_turn.invocation_id": &admission.invocation.id}},
+            )
+            .await
+            .unwrap();
+        Box::pin(engine::attach_resource_image(
+            &state.db,
+            &state.encryption_keys,
+            &chat,
+            &resource,
+            Some(&media()),
+            Output::Attach,
+        ))
+        .await
+        .unwrap();
+        state.db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn resource_download_cannot_commit_after_stop_expiry_rotation_or_new_turn() {
         let (state, chat) = setup("resource_fences").await;

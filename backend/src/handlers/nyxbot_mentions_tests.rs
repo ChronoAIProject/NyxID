@@ -1430,16 +1430,19 @@ async fn external_gateway_bot_policy_is_negotiated_reconciled_and_acknowledged()
         .insert_one(service)
         .await
         .unwrap();
-    // An old gateway returns 404: keep the existing human-compatible connection.
-    assert!(
+    // An old gateway returns 404: retain the human-compatible connection, but
+    // report that its independent quiet-policy reconciliation is unavailable.
+    assert_eq!(
         chats::sync_gateway_groups(&state, &row, true)
             .await
-            .unwrap()
-            .is_none()
+            .unwrap(),
+        Some("gateway_unavailable")
     );
     let old = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(old.status, "active");
     assert!(!old.gateway_bot_mentions.enabled);
+    assert!(!old.gateway_no_progress);
+    assert!(old.gateway_groups_retry_at.is_some());
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
         .unwrap();
@@ -1494,6 +1497,7 @@ async fn external_gateway_bot_policy_is_negotiated_reconciled_and_acknowledged()
     );
     let refused = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(!refused.gateway_bot_mentions.enabled);
+    assert!(!refused.gateway_no_progress);
     assert_eq!(refused.status, "active");
     assert_eq!(refused.gateway_version, Some(2));
     assert!(refused.gateway_groups_retry_at.is_some());
@@ -1502,6 +1506,7 @@ async fn external_gateway_bot_policy_is_negotiated_reconciled_and_acknowledged()
         .respond_with(|request: &wiremock::Request| {
             let policy: Value = request.body_json().unwrap();
             assert_eq!(policy["expected_version"], 2);
+            assert_eq!(policy["reply"]["ack_after_ms"], 0);
             assert_eq!(policy["sources"][0]["bot_id"], "77");
             assert_eq!(policy["sources"][0]["bot_username"], "helper_bot");
             assert_eq!(policy["sources"][0]["route_ids"], json!(["existing-route"]));
@@ -1522,6 +1527,7 @@ async fn external_gateway_bot_policy_is_negotiated_reconciled_and_acknowledged()
     );
     let enabled = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(enabled.gateway_bot_mentions.enabled);
+    assert!(enabled.gateway_no_progress);
     assert_eq!(enabled.gateway_version, Some(3));
     assert_eq!(enabled.agent_api_key_id, row.agent_api_key_id);
     assert_eq!(enabled.route_api_key_id, row.route_api_key_id);
@@ -2103,6 +2109,217 @@ async fn native_redelivery_has_one_turn(actor: &str) {
             .native_bot_hops_remaining,
         Some(2),
         "a provider redelivery cannot reset or spend again"
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn previously_acknowledged_quiet_policy_is_revoked_by_unconfirmed_replacement() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::*};
+    for status in [200, 409] {
+        for ack in [Some(1000_u64), None] {
+            let (state, _, server) = setup("external_quiet_proof_replacement").await;
+            let (mut row, _) = channel(&state, "gateway").await;
+            row.gateway_channel_id = Some("cmaeg1.ch.quiet".into());
+            row.gateway_version = Some(1);
+            row.gateway_no_progress = true;
+            row.gateway_groups = Some("all".into()); // desired policy has changed
+            row.gateway_bot_mentions.checked_at = Some(Utc::now());
+            row.gateway_threads.checked_at = Some(Utc::now());
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .replace_one(doc! {"_id": &row.id}, &row)
+                .await
+                .unwrap();
+            let gateway = MockServer::start().await;
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = Uuid::new_v4().to_string();
+            service.slug = GATEWAY_SLUG.into();
+            service.requires_user_credential = false;
+            service.service_category = "internal".into();
+            service.base_url = gateway.uri();
+            state
+                .db
+                .collection::<DownstreamService>(SERVICES)
+                .insert_one(service)
+                .await
+                .unwrap();
+            let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+                .await
+                .unwrap();
+            let mut unsafe_policy = gateway_policy(
+                &state,
+                &row,
+                &bot,
+                &[row.route_id.clone().unwrap()],
+                GATEWAY_GROUPS_DEFAULT,
+            );
+            match ack {
+                Some(value) => unsafe_policy["reply"]["ack_after_ms"] = json!(value),
+                None => {
+                    unsafe_policy["reply"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("ack_after_ms");
+                }
+            }
+            let fresh = json!({"version": 2, "definition": unsafe_policy});
+            Mock::given(method("PUT"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(fresh.clone()))
+                .expect(1)
+                .mount(&gateway)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/channels/cmaeg1.ch.quiet"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(fresh))
+                .expect(1)
+                .mount(&gateway)
+                .await;
+            assert!(
+                chats::sync_gateway_groups(&state, &row, true)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let unconfirmed = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert!(
+                !unconfirmed.gateway_no_progress,
+                "status={status}, ack={ack:?}"
+            );
+            assert_eq!(unconfirmed.gateway_version, Some(2));
+            gateway.verify().await;
+            gateway.reset().await;
+            // Missing proof must prevent the early return even if other policy
+            // fields happen to match. A trustworthy echoed replacement restores it.
+            Mock::given(method("PUT"))
+                .respond_with(|request: &wiremock::Request| {
+                    let policy: Value = request.body_json().unwrap();
+                    assert_eq!(policy["expected_version"], 2);
+                    assert_eq!(policy["reply"]["ack_after_ms"], 0);
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"version":3, "definition":policy}))
+                })
+                .expect(1)
+                .mount(&gateway)
+                .await;
+            assert_eq!(
+                chats::sync_gateway_groups(&state, &unconfirmed, true)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert!(
+                load_channel(&state, OWNER, &row.id)
+                    .await
+                    .unwrap()
+                    .gateway_no_progress
+            );
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn binding_quiet_proof_is_idempotent_but_resets_on_replacement_and_reports_write_failure() {
+    let (state, _, server) = setup("external_binding_quiet_proof").await;
+    let (mut row, key) = channel(&state, "gateway").await;
+    row.binding_id = Some("quiet-binding".into());
+    row.gateway_no_progress = true;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id": &row.id}, &row)
+        .await
+        .unwrap();
+    let put = || {
+        put_binding(
+            State(state.clone()),
+            Path("quiet-binding".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+    };
+    assert_eq!(put().await.status(), StatusCode::OK);
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_no_progress
+    );
+    // A failed delete is not acknowledged and does not remove the old binding.
+    state
+        .db
+        .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",
+        "validator": {"binding_id": "quiet-binding"}})
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_binding(
+            State(state.clone()),
+            Path("quiet-binding".into()),
+            bearer(&key)
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .as_deref(),
+        Some("quiet-binding")
+    );
+    state
+        .db
+        .run_command(doc! {"collMod": CHANNELS, "validator": {}})
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_binding(
+            State(state.clone()),
+            Path("quiet-binding".into()),
+            bearer(&key)
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        !load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_no_progress
+    );
+    state
+        .db
+        .run_command(doc! {"collMod": CHANNELS, "validationLevel": "strict",
+        "validator": {"binding_id": bson::Bson::Null}})
+        .await
+        .unwrap();
+    assert_eq!(put().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .binding_id
+            .is_none()
+    );
+    state
+        .db
+        .run_command(doc! {"collMod": CHANNELS, "validator": {}})
+        .await
+        .unwrap();
+    assert_eq!(put().await.status(), StatusCode::OK);
+    assert!(
+        !load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_no_progress
     );
     server.abort();
     state.db.drop().await.unwrap();

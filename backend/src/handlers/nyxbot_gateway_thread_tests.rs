@@ -36,7 +36,6 @@ impl Fixture {
         let (mut row, key) = channel(&state, "gateway").await;
         row.platform = "lark".into();
         row.owner_sender_ids = vec!["human".into()];
-        row.route_id = Some(Uuid::new_v4().to_string());
         row.gateway_channel_id = Some("cmaeg1.ch.test".into());
         row.gateway_bot_id = Some("ou_bot".into());
         row.gateway_version = Some(1);
@@ -82,7 +81,12 @@ impl Fixture {
             )
             .await
             .unwrap();
-        state.db.collection::<bson::Document>("channel_conversations").insert_one(doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        // Reuse channel()'s real route so native validation sees one active
+        // default whose identity matches the source, rather than two defaults.
+        assert_eq!(state.db.collection::<bson::Document>("channel_conversations").replace_one(
+            doc! {"_id": &row.route_id},
+            doc! {"_id":&row.route_id,"user_id":OWNER,"channel_bot_id":&row.channel_bot_id,"platform":"lark","platform_conversation_id":"*","platform_conversation_type":"group","agent_api_key_id":&row.route_api_key_id,"default_agent":true,"is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}
+        ).await.unwrap().matched_count, 1);
         state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":"follow-flag","org_user_id":bson::Bson::Null,"flag_key":crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,"target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
         let gateway = MockServer::start().await;
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
@@ -578,17 +582,30 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
         .unwrap();
     let legacy = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
     assert!(!threads::gateway::negotiated(&legacy));
+    assert!(legacy.gateway_no_progress);
     chats::sync_gateway_groups(&f.state, &legacy, true)
         .await
         .unwrap();
-    assert_eq!(f.gateway.received_requests().await.unwrap().len(), 1);
+    let requests = f.gateway.received_requests().await.unwrap();
+    // Unsupported thread capability is probed once and backs off, while an
+    // independent, echoed policy update reconciles quiet delivery exactly once.
+    assert_eq!(requests.iter().filter(|r| r.method == "GET").count(), 1);
+    let updates = requests
+        .iter()
+        .filter(|r| r.method == "PUT")
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(
+        updates[0].body_json::<Value>().unwrap()["reply"]["ack_after_ms"],
+        0
+    );
     f.gateway.reset().await;
     f.state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&f.row.id},
-            doc! {"$unset":{"gateway_threads.checked_at":""}},
+            doc! {"$unset":{"gateway_threads.checked_at":""}, "$set":{"gateway_no_progress":false}},
         )
         .await
         .unwrap();
@@ -609,9 +626,9 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
             .unwrap(),
         Some("gateway_thread_contract_unavailable")
     );
-    assert!(!threads::gateway::negotiated(
-        &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
-    ));
+    let unconfirmed = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
+    assert!(!threads::gateway::negotiated(&unconfirmed));
+    assert!(!unconfirmed.gateway_no_progress);
     f.gateway.reset().await;
     Mock::given(method("PUT"))
         .respond_with(|r: &wiremock::Request| {
@@ -626,9 +643,9 @@ async fn gateway_negotiation_requires_advertisement_and_echo_and_backs_off_legac
             .unwrap()
             .is_none()
     );
-    assert!(threads::gateway::negotiated(
-        &load_channel(&f.state, OWNER, &f.row.id).await.unwrap()
-    ));
+    let confirmed = load_channel(&f.state, OWNER, &f.row.id).await.unwrap();
+    assert!(threads::gateway::negotiated(&confirmed));
+    assert!(confirmed.gateway_no_progress);
 }
 
 #[tokio::test]

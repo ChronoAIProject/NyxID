@@ -42,6 +42,8 @@ async fn image_fixture(platform: &str, transport: &str) -> (Fixture, MockServer)
     f.event.relay_message_id = Some(original.clone());
     let d = f.event.delivery.as_mut().unwrap();
     d.transport = transport.into();
+    d.source_route_id = f.channel.route_id.clone();
+    d.source_route_api_key_id = Some(f.channel.route_api_key_id.clone());
     d.origin.platform = platform.into();
     let origin = bson::to_bson(&d.origin).unwrap();
     f.state
@@ -2454,5 +2456,259 @@ async fn external_bot_delayed_images_keep_guest_authority_and_one_delivery_per_i
             .count(),
         2
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn nyxbot_queued_direct_source_admission_preserves_original_anchor_for_text_media_and_silence()
+ {
+    for (text, media) in [
+        ("Queued direct answer", false),
+        (" \n", false),
+        (" \n", true),
+    ] {
+        let (mut f, server) = image_fixture("telegram", "direct").await;
+        mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+        let conversation = f.event.conversation_id.clone().unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .delete_many(doc! {"conversation_id": &conversation})
+            .await
+            .unwrap();
+        patch(&f, doc! {"status":"running", "turn_id":bson::Bson::Null}).await;
+        let mut work = crate::services::assistant_team_service::event(
+            "message",
+            "Queued direct question".into(),
+            None,
+        );
+        work.source_event_ids = vec![f.event.id.clone()];
+        work.reply_to = vec![f.event.delivery.as_ref().unwrap().origin.clone()];
+        assert!(
+            delivery::enqueue(&f.state.db, OWNER, &conversation, work)
+                .await
+                .unwrap()
+        );
+        f.state
+            .db
+            .collection::<bson::Document>(THREADS)
+            .update_one(
+                doc! {"channel_id":&f.channel.id},
+                doc! {"$set":{"last_message_id":"C-newer", "last_relay_message_id":"C-newer"}},
+            )
+            .await
+            .unwrap();
+        let mut start = engine::TurnStart::from(&engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            agent_id: None,
+            conversation_id: Some(conversation),
+            text: String::new(),
+            model: None,
+            access_mode: None,
+        });
+        start.origin = TurnOrigin::Event;
+        let row = engine::begin_turn(&f.state.db, OWNER, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = row.active_turn.as_ref().unwrap();
+        assert_eq!(turn.channel_event_id.as_deref(), Some(f.event.id.as_str()));
+        f.event.turn_id = Some(turn.turn_id.clone());
+        engine::finish_turn(
+            &f.state.db,
+            &row,
+            &row.credential_api_key_id,
+            "direct-queued-response",
+            &engine::TurnResult {
+                text: text.into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        if media {
+            add_images(&f).await;
+        }
+        late_delivery::process(&f.state, &f.event.id).await;
+        late_delivery::process(&f.state, &f.event.id).await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            if media {
+                2
+            } else if text.trim().is_empty() {
+                0
+            } else {
+                1
+            }
+        );
+        for request in requests {
+            if media {
+                assert_eq!(request.url.path(), "/bottoken/sendPhoto");
+                let content_type = request.headers["content-type"].to_str().unwrap();
+                let boundary = content_type.split("boundary=").nth(1).unwrap();
+                let body = String::from_utf8_lossy(&request.body);
+                let delimiter = format!("--{boundary}");
+                let fields = body.split(&delimiter);
+                let reply_ids = fields
+                    .filter_map(|part| {
+                        let (headers, value) = part.split_once("\r\n\r\n")?;
+                        headers
+                            .contains("name=\"reply_to_message_id\"")
+                            .then_some(value.trim_end_matches("\r\n"))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(reply_ids.len(), 1);
+                let anchor: Value = serde_json::from_str(reply_ids[0]).unwrap();
+                assert_eq!(anchor, 17);
+                assert!(!body.contains("C-newer"));
+            } else {
+                let body = request.body_json::<Value>().unwrap();
+                assert_eq!(body["reply_to_message_id"], 17);
+                assert!(!String::from_utf8_lossy(&request.body).contains("C-newer"));
+                assert_eq!(body["text"], text);
+            }
+        }
+        assert_eq!(
+            status(&f).await,
+            if !media && text.trim().is_empty() {
+                "silent"
+            } else {
+                "sent"
+            }
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_source() {
+    let (f, server) = image_fixture("telegram", "direct").await;
+    mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
+    let conversation = f.event.conversation_id.as_deref().unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation},
+            // image_fixture already persisted the prior answer at seq 1.
+            doc! {"$set": {"channel": bson::Bson::Null, "message_count": 1}},
+        )
+        .await
+        .unwrap();
+    let current = engine::begin_turn(
+        &f.state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            agent_id: None,
+            conversation_id: Some(conversation.into()),
+            text: "current work".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    for i in 0..engine::MAX_PENDING_EVENTS {
+        let source = super::source_queue_tests::source(&f, &format!("full-{i}")).await;
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                conversation,
+                super::source_queue_tests::work(&source, &format!("question {i}")),
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let id = "full-queue-source";
+    let mut original = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {"_id": &f.event.relay_message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    original.insert("_id", id);
+    original.insert("platform_message_id", "18");
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(original)
+        .await
+        .unwrap();
+    let body = json!({"message_id": id, "correlation_id": "full-queue-correlation", "platform": "telegram",
+        "conversation": {"id": f.channel.route_id, "platform_id": "123", "type": "private"},
+        "sender": {"platform_id": "7", "display_name": "Owner"},
+        "content": {"type": "text", "text": "one question too many"},
+        "raw_platform_data": {"message": {"chat": {"id": 123, "type": "private"},
+            "from": {"id": 7, "is_bot": false}, "text": "one question too many"}}});
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let token = crate::crypto::jwt::generate_relay_callback_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        "full-queue-correlation",
+        &f.channel.route_api_key_id,
+        id,
+        "telegram",
+        &sha256_hex(&bytes),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+    let (_guard, done) = super::super::watch_relay_callback(&f.channel.id, id);
+    assert_eq!(
+        relay_callback(
+            State(f.state.clone()),
+            Path(f.channel.id.clone()),
+            headers,
+            Bytes::from(bytes)
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(Duration::from_secs(30), done)
+        .await
+        .unwrap()
+        .unwrap();
+    let saved = f
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id": &f.channel.id, "event_id": id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved.status, "queued");
+    assert!(saved.turn_id.is_none());
+    let home = engine::get(&f.state.db, OWNER, conversation).await.unwrap();
+    assert_eq!(home.pending_events.len(), engine::MAX_PENDING_EVENTS);
+    assert!(
+        home.pending_events
+            .iter()
+            .all(|e| !e.source_event_ids.contains(&saved.id))
+    );
+    assert_eq!(
+        home.active_turn.unwrap().turn_id,
+        current.active_turn.unwrap().turn_id
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let reply: Value = requests[0].body_json().unwrap();
+    assert_eq!(
+        reply["text"],
+        "I couldn't accept this message right now. Please try again in a moment."
+    );
+    assert_eq!(reply["reply_to_message_id"], 18);
     f.state.db.drop().await.unwrap();
 }

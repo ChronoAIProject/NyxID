@@ -935,6 +935,8 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        invocation_controlled: false,
+        credential_invocation_id: None,
         platform_thread: None,
         machine_previews: false,
         platform_cleanup_pending: false,
@@ -955,6 +957,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             channel_adapter_origin: None,
+            invocation_id: None,
             resource_refs: Vec::new(),
             platform_reply: None,
             execution_started: false,
@@ -5108,6 +5111,8 @@ async fn platform_thread_requires_live_turn_with_ordinary_rollout_disabled() {
     let owner = Uuid::new_v4().to_string();
     let mut fence = AssistantTurnFence {
         channel_adapter_origin: None,
+        invocation_id: None,
+        invocation_controlled: false,
         conversation_id: Uuid::new_v4().to_string(),
         turn_id: None,
         turn_live: false,
@@ -5151,6 +5156,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     row.platform_thread = Some(fresh.thread.clone());
     row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
     let delivery = DeliveryBinding {
+        invocation_id: None,
         platform_reply: Some(
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
                 origin: Box::new(original.clone()),

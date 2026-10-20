@@ -33,6 +33,10 @@ const reasons: Record<NonNullable<PublicReadiness["reason"]>, string> = {
   unsupported_input: "Use a text question or the available channel controls.",
   public_turn_failed:
     "The public turn failed. Try again to start a fresh turn.",
+  confirmation_rejected:
+    "Request a fresh account review and confirm in the same private chat.",
+  control_invalid: "Use the bot’s help control to review supported commands.",
+  control_rate_limited: "Wait a moment, then retry the chat control.",
   mode_disabled: "Public access is not available on this server.",
   manager_unavailable: "The manager is unavailable.",
   emergency_stopped:
@@ -134,9 +138,11 @@ function BasicRuntimeForm({
   );
   const [source, setSource] = useState(runtime?.public_policy ? "ai" : "faq");
   const [failure, setFailure] = useState<string>();
+  const [aiRecovery, setAiRecovery] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   async function save(pause = false) {
     setFailure(undefined);
+    setAiRecovery(false);
     try {
       await mutation.mutateAsync({
         action: "update",
@@ -145,14 +151,39 @@ function BasicRuntimeForm({
           ...(pause
             ? { emergency_stopped: true }
             : {
-                personal_enabled: personal,
-                public_enabled: publicEnabled,
+                ...(!runtime ||
+                stopped ||
+                initializedOff ||
+                personal !== runtime.personal_enabled
+                  ? { personal_enabled: personal }
+                  : {}),
+                ...(!runtime ||
+                stopped ||
+                initializedOff ||
+                publicEnabled !== runtime.public_enabled
+                  ? { public_enabled: publicEnabled }
+                  : {}),
                 ...(stopped ? { emergency_stopped: false } : {}),
-                ...(source === "faq" ? { public_policy: null } : {}),
+                ...(source === "faq" && runtime?.public_policy
+                  ? { public_policy: null }
+                  : {}),
               }),
         },
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      setAiRecovery(
+        !pause &&
+          publicEnabled &&
+          source === "ai" &&
+          !!runtime?.public_policy &&
+          (/public|nyxagent|sponsor|model|readiness|deployment|billing|credits/i.test(
+            message,
+          ) ||
+            (error instanceof ApiError &&
+              (error.status === 429 ||
+                [11300, 11302].includes(error.errorCode ?? 0)))),
+      );
       setFailure(
         error instanceof Error
           ? error.message
@@ -160,24 +191,78 @@ function BasicRuntimeForm({
       );
     }
   }
+  const state =
+    value.state ??
+    (stopped
+      ? "paused"
+      : runtime?.personal_enabled || runtime?.public_enabled
+        ? "active"
+        : "setup_incomplete");
+  const active = state === "active";
+  const initializedOff =
+    !!runtime && !runtime.personal_enabled && !runtime.public_enabled;
+  const statusLabel = {
+    active: "Bot active",
+    paused: "Bot paused",
+    setup_incomplete: "Setup required",
+    connection_repair_required: "Repair required",
+    retired: "Bot retired",
+  }[state];
+  const statusText = {
+    active: runtime?.personal_enabled
+      ? runtime.public_enabled
+        ? "Public answers are enabled. Personal NyxBot is active."
+        : "Personal NyxBot is active. Public answers are off."
+      : "Public answers are enabled. Personal NyxBot is off.",
+    paused:
+      "The bot is paused. Select the modes you want, then choose Resume bot.",
+    setup_incomplete: "Select the modes you want, then choose Enable bot.",
+    connection_repair_required:
+      "Connection repair required. Use Repair connection below, then refresh status. Your saved mode choices are retained.",
+    retired:
+      "This bot is retired. Prepare another shared bot to enable access.",
+  }[state];
   return (
     <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
       <div className="flex flex-wrap gap-2">
-        <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
-          Public {runtime?.public_enabled ? "enabled" : "paused"}
+        <Badge variant={active ? "success" : "warning"}>{statusLabel}</Badge>
+        <Badge
+          variant={active && runtime?.public_enabled ? "success" : "secondary"}
+        >
+          Public{" "}
+          {runtime?.public_enabled
+            ? active
+              ? "enabled"
+              : "configured"
+            : "off"}
         </Badge>
-        <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
-          Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+        <Badge
+          variant={
+            active && runtime?.personal_enabled ? "success" : "secondary"
+          }
+        >
+          Personal{" "}
+          {runtime?.personal_enabled
+            ? active
+              ? "enabled"
+              : "configured"
+            : "off"}
         </Badge>
-        {stopped && <Badge variant="warning">Bot paused</Badge>}
       </div>
-      <p role="status">
-        {value.public_readiness.status === "faq_ready"
-          ? "Built-in FAQ is ready. No model or sponsor is required."
-          : value.public_readiness.status === "ready"
+      <p role="status">{statusText}</p>
+      {active &&
+        runtime?.public_enabled &&
+        !runtime.public_policy &&
+        value.public_readiness.status === "faq_ready" && (
+          <p>Built-in FAQ is ready. No model or sponsor is required.</p>
+        )}
+      {active && runtime?.public_enabled && runtime.public_policy && (
+        <p>
+          {value.public_readiness.status === "ready"
             ? "The configured public AI deployment is ready."
-            : reasons[value.public_readiness.reason ?? "public_disabled"]}
-      </p>
+            : reasons[value.public_readiness.reason ?? "public_not_ready"]}
+        </p>
+      )}
       <form
         className="space-y-3"
         onSubmit={(event) => {
@@ -229,13 +314,28 @@ function BasicRuntimeForm({
           <p>Select at least one mode to enable or resume this bot.</p>
         )}
         {failure && <ErrorBanner message={failure} />}
+        {aiRecovery && (
+          <p>
+            To continue without public AI, choose Built-in approved FAQ or turn
+            off Public FAQ, then save or resume. Personal NyxBot can run without
+            a public AI deployment.
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
           <Button
             type="submit"
             variant="primary"
-            disabled={mutation.isPending || (!personal && !publicEnabled)}
+            disabled={
+              mutation.isPending ||
+              state === "retired" ||
+              (!personal && !publicEnabled)
+            }
           >
-            {stopped ? "Resume bot" : runtime ? "Save modes" : "Enable bot"}
+            {stopped
+              ? "Resume bot"
+              : !runtime || initializedOff
+                ? "Enable bot"
+                : "Save modes"}
           </Button>
           {runtime && !stopped && (
             <Button

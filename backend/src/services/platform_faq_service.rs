@@ -92,7 +92,7 @@ pub(crate) fn render_for(
         ChatPresentation::Native(
             crate::models::platform_entry_identity::EntryPlatform::Discord,
         ) => {
-            "Choose /nyx ask and enter a topic in its question option. Choose /nyx help to browse help."
+            "Choose /nyx ask and enter faq followed by a topic in its question option. Choose /nyx help to browse help."
         }
         _ => "Send faq to browse help, or faq followed by a topic as a plain message.",
     };
@@ -211,7 +211,9 @@ mod tests {
                     if matches!(entry, EntryIdentity::NativeV2 { ref platform_entry } if platform_entry.platform == EntryPlatform::Discord)
                     {
                         assert!(
-                            rendered.contains("/nyx ask") && rendered.contains("question option")
+                            rendered.contains("/nyx ask")
+                                && rendered
+                                    .contains("faq followed by a topic in its question option")
                         );
                         assert!(rendered.contains("/nyx help"));
                     }

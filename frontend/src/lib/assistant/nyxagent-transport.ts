@@ -607,7 +607,7 @@ export class NyxAgentTransport {
           steering: settled?.steering,
           continuation_of: settled?.continuation_of ?? message.continuation_of,
           via: settled?.via ?? (settled?.platform_origin ? "telegram" : null),
-          turnId: settled?.turn_id,
+          turnId: settled?.turn_id ?? (streaming ? live.state.activeTurn?.turnId ?? conversation?.active_turn?.turn_id : undefined),
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? (live.state.activeTurn?.status === "failed" ? "error" : "streaming") : "complete",
@@ -637,6 +637,7 @@ export class NyxAgentTransport {
     if (running && !liveSettled && messages.at(-1)?.status !== "streaming") {
       messages.push({
         id: `${conversation?.active_turn?.turn_id ?? "pending"}-assistant`,
+        turnId: conversation?.active_turn?.turn_id ?? live?.state.activeTurn?.turnId,
         role: "assistant",
         content: "",
         timestamp: Date.now(),
@@ -662,20 +663,30 @@ export class NyxAgentTransport {
         status: "complete",
       });
     }
+    // Build a linear, exact-turn join. The receipt keeps its own virtual row
+    // and stable card ID, so deep links and offscreen focusing keep working.
+    const replies = new Map(messages.filter((m) => m.role === "assistant" && m.turnId)
+      .map((m) => [m.turnId!, m.id]));
+    const footers = new Map<string, ChatMessage[]>();
     for (const acknowledgement of history?.acknowledgements ?? []) {
       const timestamp = Date.parse(acknowledgement.created_at);
-      const position =
-        acknowledgement.status === "pending"
-          ? -1
-          : messages.findIndex((message) => message.timestamp > timestamp);
-      messages.splice(position < 0 ? messages.length : position, 0, {
+      const receipt: ChatMessage = {
         id: `nyxagent-acknowledgement:${acknowledgement.id}`,
-        role: "system",
-        content: acknowledgement.summary,
-        timestamp,
-        status: "complete",
-      });
+        role: "system", content: acknowledgement.summary, timestamp, status: "complete",
+      };
+      const reply = acknowledgement.creation_turn_id && replies.get(acknowledgement.creation_turn_id);
+      if (acknowledgement.status !== "pending" && reply) {
+        const rows = footers.get(reply) ?? [];
+        rows.push(receipt);
+        footers.set(reply, rows);
+      } else {
+        // Legacy/unloaded anchors stay standalone; never infer a turn by time.
+        const position = acknowledgement.status === "pending" ? -1
+          : messages.findIndex((message) => message.timestamp > timestamp);
+        messages.splice(position < 0 ? messages.length : position, 0, receipt);
+      }
     }
+    if (footers.size) messages = messages.flatMap((message) => [message, ...(footers.get(message.id) ?? [])]);
     // Proxy approvals block the running tool call until decided; show them
     // at the tail while the turn waits.
     for (const approval of history?.approvals ?? []) {

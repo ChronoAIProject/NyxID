@@ -80,6 +80,7 @@ for (const width of [1440, 390]) {
     expect(enabled).toBe(true);
     await page.screenshot({ path: `/tmp/nyx-typed-activity-route-${width}.png`, fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }
@@ -179,6 +180,7 @@ for (const viewport of [
       .getByRole("button", { name: "Connect X (Twitter) account" })
       .click();
     await expect(page).toHaveURL(/channel-bots\/connected-x$/);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(starts).toEqual([{ label: bot.label }]);
     expect(completes).toEqual([
       { connection_id: connection, label: bot.label },
@@ -273,6 +275,7 @@ for (const viewport of [
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
+    await expect(page.getByText(/^Health is unavailable/)).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 }

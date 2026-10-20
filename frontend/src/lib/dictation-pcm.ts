@@ -5,15 +5,23 @@ export class DictationPcm {
   private context?: AudioContext;
   private node?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
+  private readonly workletReady: Promise<void>;
   private closed = false;
   constructor() {
     this.context = new AudioContext();
     void this.context.resume().catch(() => {});
+    // Fetch/compile while permission and source discovery run. No microphone
+    // node is attached until start, after the provider acknowledges readiness.
+    this.workletReady = Promise.resolve().then(() => {
+      if (!this.closed) return this.context!.audioWorklet.addModule(workletUrl);
+    });
+    // A cancelled/denied capture may never call start to observe this failure.
+    void this.workletReady.catch(() => {});
   }
   async start(stream: MediaStream, pcm: (bytes: ArrayBuffer) => void) {
     const context = this.context!;
     await context.resume();
-    await context.audioWorklet.addModule(workletUrl);
+    await this.workletReady;
     if (this.closed) return;
     const node = new AudioWorkletNode(context, "nyx-grok-audio", {
       numberOfInputs: 1,

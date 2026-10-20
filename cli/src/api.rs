@@ -367,7 +367,11 @@ impl ApiClient {
 
     fn reject_agent_key_unauthorized(&self, response: &reqwest::Response) -> Result<()> {
         if self.agent_key_auth && response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("{}", crate::auth::agent_key::REJECTED_MESSAGE);
+            return Err(crate::auth::ReauthRequired {
+                code: "agent_key_rejected",
+                message: crate::auth::agent_key::REJECTED_MESSAGE.into(),
+            }
+            .into());
         }
         Ok(())
     }
