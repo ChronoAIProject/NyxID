@@ -102,8 +102,17 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     file.write_all(bytes)?;
     file.as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    preserve_access_acl(path, file.as_file())?;
+    file.as_file().sync_all()?;
+    file.persist(path)?;
+    Ok(())
+}
+
+fn preserve_access_acl(path: &Path, replacement: &std::fs::File) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = (path, replacement);
     #[cfg(target_os = "linux")]
-    if path.exists() {
+    if std::fs::symlink_metadata(path).is_ok() {
         // Reinstallation must retain named developer denials for live contexts.
         // Replacing the inode without its ACL would silently restore access.
         use std::os::fd::AsRawFd;
@@ -129,7 +138,7 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             anyhow::ensure!(
                 unsafe {
                     libc::fsetxattr(
-                        file.as_file().as_raw_fd(),
+                        replacement.as_raw_fd(),
                         c"system.posix_acl_access".as_ptr(),
                         acl.as_ptr().cast(),
                         count as usize,
@@ -145,8 +154,6 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
             );
         }
     }
-    file.as_file().sync_all()?;
-    file.persist(path)?;
     Ok(())
 }
 
@@ -273,6 +280,7 @@ pub fn install(
     executable_file
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    preserve_access_acl(&executable_path, executable_file.as_file())?;
     executable_file.as_file().sync_all()?;
     executable_file.persist(&executable_path)?;
     write_owned(&resources.join("filler.crx"), PACKAGE, 0o644)?;

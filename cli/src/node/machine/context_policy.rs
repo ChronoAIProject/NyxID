@@ -250,8 +250,8 @@ mod tests {
         for name in protected {
             let path = root.path().join(name);
             assert!(readable(65533, &path), "legacy/secure reader retained");
-            assert!(!readable(65534, &path), "first developer denied");
-            assert!(!readable(65532, &path), "second developer denied");
+            assert!(!readable(65534, &path), "first developer denied: {name}");
+            assert!(!readable(65532, &path), "second developer denied: {name}");
         }
         let dev = root
             .path()
