@@ -38,6 +38,8 @@ pub mod delivery {
         },
     };
 
+    pub mod execution;
+
     pub const COLLECTION_NAME: &str = "notification_deliveries_v1";
     const DEDUPE_INDEX: &str = "notification_delivery_product_destination";
 
@@ -253,9 +255,66 @@ pub mod delivery {
         {
             self.permit.run(|| effect(self.delivery)).await
         }
+
+        /// Consume the same one-shot claim only for an independently resolved,
+        /// immutable product payload and destination. Data is not authority.
+        pub async fn run_bound<F, Fut, T>(
+            self,
+            binding: &DeliveryBinding,
+            channel: Channel,
+            effect: F,
+        ) -> AppResult<T>
+        where
+            F: FnOnce(QueuedDelivery) -> Fut,
+            Fut: std::future::Future<Output = T>,
+        {
+            check_binding(&self.delivery, binding, channel)?;
+            self.run(effect).await
+        }
     }
 
-    #[derive(Clone, Copy)]
+    pub struct DeliveryBinding {
+        pub destination_id: Uuid,
+        pub payload: PayloadRef,
+    }
+
+    /// Provider receipts stay in protected product storage. Ambiguous delivery
+    /// is never a positive rejection or permission to send again.
+    pub enum SendOutcome<T> {
+        Accepted(T),
+        Rejected {
+            status: Option<u16>,
+            invalid_destination: bool,
+        },
+        Uncertain,
+    }
+
+    impl<T> SendOutcome<T> {
+        pub fn delivery_outcome(&self) -> DeliveryOutcome {
+            match self {
+                Self::Accepted(_) => DeliveryOutcome::Succeeded,
+                Self::Rejected { .. } => DeliveryOutcome::DefinitiveFailure,
+                Self::Uncertain => DeliveryOutcome::Uncertain,
+            }
+        }
+    }
+
+    fn check_binding(
+        delivery: &QueuedDelivery,
+        binding: &DeliveryBinding,
+        channel: Channel,
+    ) -> AppResult<()> {
+        require_v4(binding.destination_id)?;
+        if delivery.channel != channel
+            || delivery.destination_id != binding.destination_id.to_string()
+            || delivery.payload != binding.payload
+        {
+            return Err(AppError::AuditIntegrityConflict);
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum DeliveryOutcome {
         Succeeded,
         /// Positive evidence of rejection/non-delivery; never an ambiguous timeout.

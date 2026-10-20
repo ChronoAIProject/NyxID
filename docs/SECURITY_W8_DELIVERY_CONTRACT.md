@@ -81,9 +81,9 @@ The existing core validator checks these identities and safe event fields.
 | `permit.run(\|queued\| async move { ... })` | Consume that permit and context once. The core rechecks its process/attempt claim and live admission before entering the closure. Resolve/fence product inputs and perform one provider effect. Never detach the send or return the permit as a boolean. |
 | `finish_in_session(db, session, runtime, operation_id, outcome)` | Join the product receipt/outcome transaction and call the core's terminal helper. Uses its reserved slot, even after new admission closes. |
 
-CORE-B's next resolver/sink implementation will add the following interfaces
-with their real consumers. They are deliberately absent from the current Rust
-API until that implementation lands together, without unused declarations:
+The bound execution adapter in `delivery::execution` consumes these interfaces
+together. Producer-owned resolvers supply protected payload versions and receipts;
+no automatic queue scan or recovered envelope grants dispatch authority:
 
 | Interface | Required consumer and contract |
 | --- | --- |
@@ -92,9 +92,33 @@ API until that implementation lands together, without unused declarations:
 | `SendOutcome<T>` | A sink returns `Accepted(T)` for positive provider acceptance, `Rejected { status: Option<u16>, invalid_destination: bool }` only for positive rejection, or `Uncertain` for ambiguous delivery. Provider receipt `T` stays in protected product storage; no free-form response enters audit detail. |
 | `SendOutcome::delivery_outcome()` | The worker maps those outcomes to Succeeded, DefinitiveFailure or Uncertain and commits the product receipt plus the reviewed core terminal completion together. Webhook failure detail uses `finish_effect_with_detail_in_session`; mapping never grants retry authority. |
 
-Until those consumers land, use the published `DeliveryPermit::run` and enforce
-the final product/destination fences inside its closure. Do not create a second
-intent, bypass a permit, or equate a timeout with proof of rejection.
+`execution::DeliveryConsumer` supplies `resolve`, `send`,
+`record_outcome_in_session` and `terminal_detail`. `resolve` loads and authorizes
+the immutable product version and independently constructs
+`ResolvedDelivery { binding, channel, prepared }`; copying identity fields from
+the queue is not a resolver. ID's Account resolver owns that protected version
+store and can return the same `DeliveryBinding`; no dependency on the Account
+model is required by the shared sink.
+
+After confirmed enqueue commit and materialization, invoke
+`execution::dispatch_one(db, serving_runtime, operation_id, consumer)`. It
+checks the resolved binding before claiming and again in `run_bound`, consumes
+the existing core permit for one provider send, then runs a DB-only bounded
+transaction that records the protected product result and calls the reviewed
+terminal-detail helper together. `SendOutcome::delivery_outcome` determines the
+terminal stage. Detail freezes before this transaction's retries. Consumers
+record by stable operation ID and must refuse any changed receipt replay.
+
+`execution::commit_outcome` retries the receipt/terminal transaction from known
+provider or reviewed reconciliation evidence without sending. If completion is
+unresolved, the durable claim remains reserved for reconciliation. A later
+`dispatch_one` cannot resend a claimed or terminal operation; a lost response
+never proves non-delivery. Account/approval/connection workers retain their own
+live owner, revision, destination and revocation fences, and must recheck any
+mutable authority immediately before the network effect. There is no new
+automatic worker that could dispatch an unconverted producer. Do not create a
+second intent, bypass a permit, fan out inside one send, detach the effect, or
+equate a timeout with positive rejection.
 
 Use the serving process's existing `AuditRuntime`. Do not bind effects, create
 an unconfigured runtime or synthesize readiness in a producer or sink.
