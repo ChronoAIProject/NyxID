@@ -1,4 +1,7 @@
+export type GlobalApprovalMode = "writes_only" | "all" | "off";
+
 export interface NotificationSettings {
+  readonly global_approval_mode?: GlobalApprovalMode;
   readonly telegram_connected: boolean;
   readonly telegram_username: string | null;
   readonly telegram_enabled: boolean;
@@ -31,6 +34,7 @@ export interface RemoveDeviceResponse {
 }
 
 export interface UpdateNotificationSettingsRequest {
+  readonly global_approval_mode?: GlobalApprovalMode;
   readonly telegram_enabled?: boolean;
   readonly push_enabled?: boolean;
   readonly approval_required?: boolean;

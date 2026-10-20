@@ -360,7 +360,7 @@ struct TelegramLinkOutcome {
 
 fn telegram_link_outcome(channel: &NotificationChannel) -> TelegramLinkOutcome {
     TelegramLinkOutcome {
-        message: if channel.approval_required {
+        message: if channel.approval_required != Some(false) {
             TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE
         } else {
             TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE
@@ -443,7 +443,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required,
+            approval_required: Some(approval_required),
             push_enabled: false,
             push_devices: vec![],
             created_at: chrono::Utc::now(),

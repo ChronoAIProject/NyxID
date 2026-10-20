@@ -548,9 +548,13 @@ fn discord_browser_consent_saved_personal_reply_history_continuation_and_logout_
             .await
             .unwrap();
             assert!(
-                crate::services::approval_service::user_requires_approval(&j.state.db, &j.personal)
-                    .await
-                    .unwrap()
+                crate::services::approval_service::user_requires_approval(
+                    &j.state.db,
+                    &j.personal,
+                    &crate::models::service_approval_config::ApprovalVerb::Write
+                )
+                .await
+                .unwrap()
             );
             j.state
                 .db

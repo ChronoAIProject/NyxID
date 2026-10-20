@@ -39,13 +39,24 @@ pub async fn resolve_approval_mode(
     Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
 }
 
-/// Resolve the stored preference, or the new-user default before lazy settings
-/// creation. Notification delivery never authorizes an otherwise gated effect:
-/// requests remain pending for a web decision or expire without executing.
-pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
-    Ok(user_global_approval_setting(db, user_id)
-        .await?
-        .unwrap_or(true))
+/// Resolve the explicit preference without materializing lazy notification settings.
+pub async fn user_approval_mode(
+    db: &Database,
+    user_id: &str,
+) -> AppResult<approval_policy::GlobalApprovalMode> {
+    Ok(approval_policy::GlobalApprovalMode::from_stored(
+        user_global_approval_setting(db, user_id).await?,
+    ))
+}
+
+/// Notification delivery never authorizes an otherwise gated effect. The
+/// unset preference allows reads and requires approval for writes/destruction.
+pub async fn user_requires_approval(
+    db: &Database,
+    user_id: &str,
+    verb: &crate::models::service_approval_config::ApprovalVerb,
+) -> AppResult<bool> {
+    Ok(user_approval_mode(db, user_id).await?.requires(verb))
 }
 
 // `requires_approval_for_service` was removed in favor of the org-aware
@@ -171,7 +182,7 @@ pub async fn resolve_org_aware_approval(
         let required = if is_auto_connected {
             false
         } else {
-            user_requires_approval(db, actor_user_id).await?
+            user_requires_approval(db, actor_user_id, &descriptor.verb).await?
         };
         (
             required,
@@ -384,7 +395,7 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
         .await?;
-    Ok(channel.map(|c| c.approval_required))
+    Ok(channel.and_then(|c| c.approval_required))
 }
 
 /// Pure resolution helper kept for unit-testable semantics. Used to be the
@@ -392,7 +403,10 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
 /// still exercise it directly.
 #[cfg(test)]
 fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>) -> bool {
-    per_service.or(global).unwrap_or(true)
+    per_service.unwrap_or_else(|| {
+        approval_policy::GlobalApprovalMode::from_stored(global)
+            .requires(&crate::models::service_approval_config::ApprovalVerb::Write)
+    })
 }
 
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
@@ -839,9 +853,8 @@ pub async fn create_tool_approval_request(
     requester_id: &str,
     requester_label: Option<&str>,
 ) -> AppResult<ApprovalRequest> {
-    // Materialize the same new-user defaults as proxy/LLM/SSH before freezing
-    // this request's lifetime. Existing and legacy missing-field values remain
-    // governed by the model's stored read defaults.
+    // Materialize notification delivery/lifetime defaults without choosing a
+    // global approval preference on the user's behalf.
     let timeout_secs = notification_service::get_or_create_channel(db, user_id)
         .await?
         .approval_timeout_secs;
@@ -2317,13 +2330,26 @@ mod tests {
             .await
             .unwrap();
         // No prior settings GET, channel insert, device or provider credentials.
-        assert!(user_requires_approval(&db, &owner).await.unwrap());
+        assert!(
+            user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
         assert_eq!(
             db.collection::<NotificationChannel>(CHANNELS)
                 .count_documents(doc! {"user_id": &owner})
                 .await
                 .unwrap(),
             0
+        );
+        let operation = crate::services::operation_descriptor::build_http_descriptor(
+            "POST",
+            "/v1/actions",
+            None,
         );
         for mode in 0..4 {
             let mut channel = notification_service::get_or_create_channel(&db, &owner)
@@ -2371,7 +2397,7 @@ mod tests {
                         &owner,
                         &owner,
                         &service,
-                        &test_operation(),
+                        &operation,
                         Some("api_key"),
                         "agent",
                         false,
@@ -2394,7 +2420,7 @@ mod tests {
                     "api_key",
                     "agent",
                     None,
-                    ApprovalRequestOperation::from_descriptor(&test_operation(), None),
+                    ApprovalRequestOperation::from_descriptor(&operation, None),
                     ApprovalMode::PerRequest,
                     300,
                     vec![],
@@ -2464,8 +2490,8 @@ mod tests {
                 );
             }
         }
-        // A legacy document lacking the field remains false; do not reinterpret
-        // stored read defaults when changing newly created settings.
+        // Clearing the choice restores writes-only, without changing any
+        // previously stored true/false preference on read.
         db.collection::<NotificationChannel>(CHANNELS)
             .update_one(
                 doc! {"user_id": &owner},
@@ -2473,7 +2499,217 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!user_requires_approval(&db, &owner).await.unwrap());
+        assert!(
+            user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !user_requires_approval(
+                &db,
+                &owner,
+                &crate::models::service_approval_config::ApprovalVerb::Read
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn writes_only_default_survives_lazy_tool_request_and_preserves_guest_org_and_deny_controls()
+     {
+        use crate::models::service_approval_config::ApprovalVerb;
+        use approval_policy::GlobalApprovalMode;
+        let db = crate::test_utils::connect_test_database("writes_only_policy_controls")
+            .await
+            .expect("real Mongo required");
+        let owner = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        let service = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_many([
+                crate::test_utils::test_user(&owner, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org, crate::models::user::UserType::Org),
+            ])
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        for verb in [
+            ApprovalVerb::Read,
+            ApprovalVerb::Write,
+            ApprovalVerb::Destructive,
+        ] {
+            let mut operation = test_operation();
+            operation.verb = verb.clone();
+            let outcome = evaluate_and_check(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &operation,
+                Some("api_key"),
+                "guest",
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            if verb == ApprovalVerb::Read {
+                assert!(matches!(
+                    outcome,
+                    ApprovalOutcome::Allowed { required: false }
+                ));
+                crate::services::agent_operation_scope_service::check_guest_approval(
+                    true, &outcome,
+                )
+                .unwrap();
+            } else {
+                assert!(matches!(outcome, ApprovalOutcome::NeedsApproval(_)));
+                assert!(
+                    crate::services::agent_operation_scope_service::check_guest_approval(
+                        true, &outcome
+                    )
+                    .is_err()
+                );
+            }
+        }
+        assert_eq!(
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "fixture_write",
+            None,
+            None,
+            false,
+            "api_key",
+            "agent",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            user_approval_mode(&db, &owner).await.unwrap(),
+            GlobalApprovalMode::WritesOnly
+        );
+        assert!(
+            !user_requires_approval(&db, &owner, &ApprovalVerb::Read)
+                .await
+                .unwrap()
+        );
+        let raw = db
+            .collection::<Document>(CHANNELS)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!raw.contains_key("approval_required"));
+        // Existing stored booleans keep their exact meaning, even for rows
+        // lazily created by the unreleased W9.3 build (no provenance marker).
+        for (stored, mode) in [
+            (true, GlobalApprovalMode::All),
+            (false, GlobalApprovalMode::Off),
+        ] {
+            db.collection::<Document>(CHANNELS)
+                .update_one(
+                    doc! {"user_id":&owner},
+                    doc! {"$set":{"approval_required":stored}},
+                )
+                .await
+                .unwrap();
+            notification_service::get_or_create_channel(&db, &owner)
+                .await
+                .unwrap();
+            assert_eq!(user_approval_mode(&db, &owner).await.unwrap(), mode);
+            for verb in [
+                ApprovalVerb::Read,
+                ApprovalVerb::Write,
+                ApprovalVerb::Destructive,
+            ] {
+                assert_eq!(
+                    user_requires_approval(&db, &owner, &verb).await.unwrap(),
+                    stored
+                );
+            }
+            let after = db
+                .collection::<Document>(CHANNELS)
+                .find_one(doc! {"user_id":&owner})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.get_bool("approval_required").unwrap(), stored);
+        }
+        // An org's explicit policy wins over the actor's explicit Off.
+        set_service_approval_config(
+            &db,
+            &org,
+            &service,
+            "Org resource",
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let read = test_operation();
+        let org_outcome = evaluate_and_check(
+            &db,
+            &owner,
+            &org,
+            &service,
+            &read,
+            Some("api_key"),
+            "agent",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(org_outcome,ApprovalOutcome::NeedsApproval(ref p) if p.resolution.from_org_policy && p.primary_owner_user_id == org)
+        );
+        assert!(matches!(
+            evaluate_and_check(
+                &db, &owner, &org, &service, &read, None, "session", true, false
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        set_service_approval_config(
+            &db,
+            &org,
+            &service,
+            "Org resource",
+            None,
+            None,
+            None,
+            Some(&ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            evaluate_and_check(
+                &db, &owner, &org, &service, &read, None, "session", true, true
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Denied
+        ));
     }
 
     fn test_operation() -> OperationDescriptor {
@@ -3447,7 +3683,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required,
+            approval_required: Some(approval_required),
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
@@ -3590,13 +3826,29 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
 
-        let result = user_requires_approval(&db, &user_id).await.unwrap();
+        let result = user_requires_approval(
+            &db,
+            &user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write,
+        )
+        .await
+        .unwrap();
         assert!(result);
-        assert!(
+        assert_eq!(
             notification_service::get_or_create_channel(&db, &user_id)
                 .await
                 .unwrap()
-                .approval_required
+                .approval_required,
+            None
+        );
+        assert!(
+            !user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Read
+            )
+            .await
+            .unwrap()
         );
     }
 
@@ -3610,7 +3862,13 @@ mod tests {
         let channel = make_channel(&user_id, true);
         insert_channel(&db, &channel).await;
 
-        let result = user_requires_approval(&db, &user_id).await.unwrap();
+        let result = user_requires_approval(
+            &db,
+            &user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write,
+        )
+        .await
+        .unwrap();
         assert!(result);
     }
 

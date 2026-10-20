@@ -308,9 +308,13 @@ async fn fixture(profile: Profile, gated: bool) -> Fixture {
     .await
     .unwrap();
     assert!(
-        crate::services::approval_service::user_requires_approval(&state.db, &owner)
-            .await
-            .unwrap()
+        crate::services::approval_service::user_requires_approval(
+            &state.db,
+            &owner,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
     );
     let mut b = binding(profile, &owner);
     let auth = if profile == Profile::ElevenlabsCustomLlm {
@@ -542,10 +546,20 @@ async fn guest_faq_requires_explicit_no_approval_policy_without_forwarding_or_ap
                 .await
                 .unwrap();
         }
+        // A read is gated without a per-service row only when the owner chose
+        // All requests. The unset global default now allows reads; write denial
+        // under that default is covered by the default-policy integration tests.
+        if !explicit_required {
+            crate::test_utils::set_test_approval_preference(&f.state.db, &f.b.user_id, true).await;
+        }
         assert!(
-            crate::services::approval_service::user_requires_approval(&f.state.db, &f.b.user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &f.state.db,
+                &f.b.user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
         let s = active_session(&f, "approval-required-call").await;
         let (mut output, worker) =

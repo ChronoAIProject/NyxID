@@ -58,9 +58,13 @@ async fn actual_assistant_proxy_without_settings_waits_for_web_approval_before_d
         0
     );
     assert!(
-        crate::services::approval_service::user_requires_approval(&f.state.db, &f.owner)
-            .await
-            .unwrap()
+        crate::services::approval_service::user_requires_approval(
+            &f.state.db,
+            &f.owner,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
         channels
@@ -115,7 +119,7 @@ async fn actual_assistant_proxy_without_settings_waits_for_web_approval_before_d
             .await
             .unwrap()
             .unwrap();
-        assert!(stored.approval_required);
+        assert_eq!(stored.approval_required, None);
         assert_eq!(stored.approval_timeout_secs, 300);
         let Json(result) = crate::handlers::approvals::decide_request(
             State(f.state.clone()),

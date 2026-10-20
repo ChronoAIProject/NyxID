@@ -7302,7 +7302,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 0,
                 grant_expiry_days: 30,
-                approval_required: false,
+                approval_required: Some(false),
                 push_enabled: false,
                 push_devices: vec![],
                 created_at: now,
@@ -9439,3 +9439,7 @@ mod image_handler_tests {
 #[cfg(test)]
 #[path = "mcp_resource_tests.rs"]
 mod resource_tests;
+
+#[cfg(test)]
+#[path = "approval_default_tests.rs"]
+mod approval_default_tests;

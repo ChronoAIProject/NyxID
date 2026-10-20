@@ -3576,6 +3576,7 @@ pub struct PreparedProxyCall {
     /// The content type the body is sent with.
     body_content_type: Option<String>,
     is_generic_proxy_endpoint: bool,
+    approval_metadata: McpDurableEndpointMetadata,
 }
 
 impl PreparedProxyCall {
@@ -3669,11 +3670,17 @@ impl PreparedProxyCall {
     }
 
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
-        operation_descriptor::build_mcp_descriptor(
+        let mut descriptor = operation_descriptor::build_mcp_descriptor(
             self.method.as_str(),
             &self.path,
             self.body.as_ref().map(|bytes| bytes.as_ref()),
-        )
+        );
+        operation_descriptor::apply_operation_effects(
+            &mut descriptor,
+            operation_effects(&self.method, self.approval_metadata),
+            self.carries_method_override(),
+        );
+        descriptor
     }
 
     pub(crate) fn authorize_agent_operations(
@@ -3869,6 +3876,7 @@ pub(crate) fn http_carries_method_override(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         is_generic_proxy_endpoint: true,
+        approval_metadata: Default::default(),
     }
     .carries_override(true)
 }
@@ -3955,6 +3963,15 @@ pub fn prepare_proxy_tool_call(
             .then(|| request_content_type_or_default(endpoint).to_string()),
         body,
         is_generic_proxy_endpoint,
+        approval_metadata: if is_generic_proxy_endpoint {
+            Default::default()
+        } else {
+            service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .copied()
+                .unwrap_or_default()
+        },
     })
 }
 
@@ -5353,6 +5370,7 @@ async fn execute_tool_resolved_inner(
             body,
             body_content_type: _,
             is_generic_proxy_endpoint,
+            approval_metadata: _,
         } = prepared;
 
         proxy_service::validate_ifttt_request(

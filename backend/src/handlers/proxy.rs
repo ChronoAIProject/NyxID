@@ -4387,6 +4387,47 @@ async fn execute_resolved_proxy_inner<'a>(
         },
     );
 
+    let method_override = crate::services::mcp_service::http_carries_method_override(
+        &method_str,
+        &all_headers,
+        query.as_deref(),
+        &body_bytes,
+    );
+    // Only POST needs catalog authority to become a read. Preserve method
+    // classification and the existing endpoint-query budget for other raw
+    // requests; guest/operation-scope authorization has already run above.
+    let effects = if method == reqwest::Method::POST {
+        crate::services::agent_operation_scope_service::unscoped_effects(
+            &state.db,
+            operation_scope_id,
+            operation_catalog_id,
+            &method,
+            operation_path.as_ref(),
+        )
+        .await?
+    } else {
+        crate::services::mcp_service::operation_effects(&method, Default::default())
+    };
+    operation_descriptor::apply_operation_effects(&mut operation, effects, method_override);
+    operation_descriptor::apply_inference_contract(
+        &mut operation,
+        &target.service,
+        Some(&body_bytes),
+        method_override,
+    );
+    // The unforgeable extension is installed only after the server admits an
+    // owner turn and validates the fixed engine contract. Tool effects retain
+    // their own approval checks on callbacks; arbitrary raw POSTs do not qualify.
+    if nyxagent_admission
+        && !method_override
+        && !effects.destructive
+        && method_str == "POST"
+        && path.trim_matches('/') == "v1/responses"
+        && crate::services::assistant_nyxagent::row_contract(Some(&target.service), None).valid()
+    {
+        operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
+    }
+
     if machine_git && method_str == "POST" && path.ends_with("/git-upload-pack") {
         // Smart-HTTP fetch uses POST for its negotiation body but cannot
         // mutate repository refs. Receive-pack remains an ordinary write.
@@ -11700,7 +11741,7 @@ mod proxy_resolution_integration_tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: timeout_secs,
             grant_expiry_days: 30,
-            approval_required: false,
+            approval_required: Some(false),
             push_enabled: false,
             push_devices: vec![],
             created_at: now,

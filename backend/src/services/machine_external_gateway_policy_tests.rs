@@ -124,9 +124,13 @@ async fn actual_signed_external_gateway_preserves_personal_and_org_streaming_and
         .await
         .unwrap();
         assert!(
-            crate::services::approval_service::user_requires_approval(&f.state.db, &f.owner)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &f.state.db,
+                &f.owner,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
         let grant = grants::edit(
             &f.state.db,

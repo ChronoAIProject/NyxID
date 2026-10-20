@@ -245,9 +245,13 @@ pub(crate) async fn set_test_approval_preference(
         .await
         .expect("store fixture approval preference");
     assert_eq!(
-        crate::services::approval_service::user_requires_approval(db, user_id)
-            .await
-            .expect("read effective fixture approval preference"),
+        crate::services::approval_service::user_requires_approval(
+            db,
+            user_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .expect("read effective fixture approval preference"),
         approval_required,
     );
 }

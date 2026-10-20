@@ -27,6 +27,15 @@ it("keeps required approval active with web decisions and no notifications", () 
   expect(screen.queryByText(/suspended/i)).not.toBeInTheDocument();
 });
 
+it("describes the writes-only default without claiming reads require approval", () => {
+  state.settings = { ...state.settings, global_approval_mode: "writes_only" };
+  const card = render(<NotificationSetupCard />);
+  expect(screen.getByText(/Writes and destructive operations require approval; reads and stateless model inference can proceed/)).toBeInTheDocument();
+  card.unmount();
+  render(<ApprovalSetupWizard hasChannel={false} channelEnabled={false} approvalEnabled approvalMode="writes_only" approvalSuspended={false} webAvailable />);
+  expect(screen.getByText(/Writes and destructive operations require approval by default; reads and stateless model inference can proceed/)).toBeInTheDocument();
+});
+
 it("allows explicit web-only activation without a registered channel", async () => {
   state.settings = { ...state.settings, approval_required: false };
   render(<NotificationSetupCard />);

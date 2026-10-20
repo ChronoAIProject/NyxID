@@ -76,6 +76,7 @@ export type NotificationSettings = {
   telegram_connected: boolean;
   telegram_username: string | null;
   telegram_enabled: boolean;
+  global_approval_mode?: "writes_only" | "all" | "off";
   approval_required: boolean;
   approval_suspended: boolean;
   approval_web_available?: boolean;
@@ -96,6 +97,7 @@ export type TelegramLinkInfo = {
 export type UpdateNotificationSettingsInput = {
   telegram_enabled?: boolean;
   push_enabled?: boolean;
+  global_approval_mode?: "writes_only" | "all" | "off";
   approval_required?: boolean;
   approval_timeout_secs?: number;
   grant_expiry_days?: number;

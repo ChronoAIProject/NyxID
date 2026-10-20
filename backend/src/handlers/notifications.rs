@@ -8,6 +8,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
 use crate::mw::auth::AuthUser;
+use crate::services::approval_policy::GlobalApprovalMode;
 use crate::services::{audit_service, notification_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -20,7 +21,9 @@ pub struct NotificationSettingsResponse {
     pub telegram_link_pending: bool,
     pub telegram_username: Option<String>,
     pub telegram_enabled: bool,
+    /// Compatibility flag: some operations need approval. Use global_approval_mode for the scope.
     pub approval_required: bool,
+    pub global_approval_mode: GlobalApprovalMode,
     /// Retained for older clients; required approval is never suspended by delivery.
     pub approval_suspended: bool,
     pub approval_delivery_configured: bool,
@@ -41,7 +44,9 @@ pub struct NotificationSettingsAuthorizationEvidenceResponse {
     pub telegram_connected: bool,
     pub telegram_link_pending: bool,
     pub telegram_enabled: bool,
+    /// Compatibility flag: some operations need approval. Use global_approval_mode for the scope.
     pub approval_required: bool,
+    pub global_approval_mode: GlobalApprovalMode,
     pub approval_timeout_secs: u32,
     pub grant_expiry_days: u32,
     pub push_enabled: bool,
@@ -57,6 +62,7 @@ impl NotificationSettingsAuthorizationEvidenceResponse {
             telegram_link_pending: response.telegram_link_pending,
             telegram_enabled: response.telegram_enabled,
             approval_required: response.approval_required,
+            global_approval_mode: response.global_approval_mode,
             approval_timeout_secs: response.approval_timeout_secs,
             grant_expiry_days: response.grant_expiry_days,
             push_enabled: response.push_enabled,
@@ -70,6 +76,7 @@ impl NotificationSettingsAuthorizationEvidenceResponse {
 pub struct UpdateNotificationSettingsRequest {
     pub telegram_enabled: Option<bool>,
     pub approval_required: Option<bool>,
+    pub global_approval_mode: Option<GlobalApprovalMode>,
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
     pub push_enabled: Option<bool>,
@@ -121,6 +128,13 @@ pub async fn update_settings(
     auth_user: AuthUser,
     Json(body): Json<UpdateNotificationSettingsRequest>,
 ) -> AppResult<Json<NotificationSettingsResponse>> {
+    if let (Some(legacy), Some(mode)) = (body.approval_required, body.global_approval_mode)
+        && mode.stored() != Some(legacy)
+    {
+        return Err(AppError::ValidationError(
+            "approval_required conflicts with global_approval_mode".to_string(),
+        ));
+    }
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
@@ -162,7 +176,11 @@ pub async fn update_settings(
     if let Some(v) = body.telegram_enabled {
         update_doc.insert("telegram_enabled", v);
     }
-    if let Some(v) = body.approval_required {
+    if let Some(v) = body
+        .global_approval_mode
+        .and_then(GlobalApprovalMode::stored)
+        .or(body.approval_required)
+    {
         update_doc.insert("approval_required", v);
     }
     if let Some(v) = body.approval_timeout_secs {
@@ -180,10 +198,14 @@ pub async fn update_settings(
         update_doc.insert("push_enabled", v);
     }
 
+    let mut update = doc! { "$set": update_doc };
+    if body.global_approval_mode == Some(GlobalApprovalMode::WritesOnly) {
+        update.insert("$unset", doc! { "approval_required": "" });
+    }
     state
         .db
         .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(doc! { "_id": &channel.id }, doc! { "$set": update_doc })
+        .update_one(doc! { "_id": &channel.id }, update)
         .await?;
 
     let updated = notification_service::get_or_create_channel(&state.db, &user_id).await?;
@@ -195,6 +217,7 @@ pub async fn update_settings(
         Some(serde_json::json!({
             "telegram_enabled": updated.telegram_enabled,
             "approval_required": updated.approval_required,
+            "global_approval_mode": GlobalApprovalMode::from_stored(updated.approval_required),
             "approval_suspended": false,
             "approval_delivery_configured": delivery_configured(&state, &updated),
             "approval_timeout_secs": updated.approval_timeout_secs,
@@ -302,8 +325,8 @@ pub async fn telegram_disconnect(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let web_only =
-        updated_channel.approval_required && !delivery_configured(&state, &updated_channel);
+    let web_only = updated_channel.approval_required != Some(false)
+        && !delivery_configured(&state, &updated_channel);
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -367,7 +390,8 @@ fn to_settings_response(
                 .is_some_and(|expires_at| expires_at > Utc::now()),
         telegram_username: channel.telegram_username.clone(),
         telegram_enabled: channel.telegram_enabled,
-        approval_required: channel.approval_required,
+        approval_required: channel.approval_required != Some(false),
+        global_approval_mode: GlobalApprovalMode::from_stored(channel.approval_required),
         approval_suspended: false,
         approval_delivery_configured: delivery_configured,
         approval_web_available: true,
@@ -382,6 +406,54 @@ fn to_settings_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unrelated_settings_preserve_unset_mode_and_conflicting_choices_do_not_create_rows() {
+        let db = crate::test_utils::connect_test_database("notification_unset_mode_updates")
+            .await
+            .expect("real Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let request =
+            |value| serde_json::from_value::<UpdateNotificationSettingsRequest>(value).unwrap();
+        for (mode, legacy) in [("writes_only", true), ("all", false), ("off", true)] {
+            let result = update_settings(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Json(request(
+                    serde_json::json!({"global_approval_mode":mode,"approval_required":legacy}),
+                )),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::ValidationError(_))));
+        }
+        assert_eq!(
+            db.collection::<NotificationChannel>(COLLECTION_NAME)
+                .count_documents(doc! {"user_id":&owner})
+                .await
+                .unwrap(),
+            0
+        );
+        let Json(updated) = update_settings(
+            State(state),
+            crate::test_utils::test_auth_user(&owner),
+            Json(request(
+                serde_json::json!({"approval_timeout_secs":60,"telegram_enabled":false}),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.global_approval_mode, GlobalApprovalMode::WritesOnly);
+        assert_eq!(updated.approval_timeout_secs, 60);
+        let raw = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"user_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!raw.contains_key("approval_required"));
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn web_only_settings_allow_explicit_enable_opt_out_and_disabled_delivery() {
@@ -407,6 +479,7 @@ mod tests {
                     telegram_enabled: Some(false),
                     push_enabled: Some(false),
                     approval_required: Some(required),
+                    global_approval_mode: None,
                     approval_timeout_secs: None,
                     grant_expiry_days: None,
                 }),
@@ -416,9 +489,13 @@ mod tests {
             assert_eq!(result.approval_required, required);
             assert!(!result.approval_suspended);
             assert_eq!(
-                crate::services::approval_service::user_requires_approval(&db, &owner)
-                    .await
-                    .unwrap(),
+                crate::services::approval_service::user_requires_approval(
+                    &db,
+                    &owner,
+                    &crate::models::service_approval_config::ApprovalVerb::Write
+                )
+                .await
+                .unwrap(),
                 required
             );
         }
@@ -475,7 +552,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: false,
+            approval_required: Some(false),
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -542,7 +619,7 @@ mod tests {
     #[test]
     fn to_settings_response_with_custom_approval_settings() {
         let mut channel = make_channel();
-        channel.approval_required = true;
+        channel.approval_required = Some(true);
         channel.approval_timeout_secs = 120;
         channel.grant_expiry_days = 7;
 
@@ -583,6 +660,7 @@ mod tests {
             telegram_username: Some("alice".to_string()),
             telegram_enabled: true,
             approval_required: false,
+            global_approval_mode: GlobalApprovalMode::Off,
             approval_suspended: false,
             approval_delivery_configured: false,
             approval_web_available: true,
@@ -614,6 +692,7 @@ mod tests {
             telegram_username: None,
             telegram_enabled: false,
             approval_required: false,
+            global_approval_mode: GlobalApprovalMode::Off,
             approval_suspended: false,
             approval_delivery_configured: false,
             approval_web_available: true,

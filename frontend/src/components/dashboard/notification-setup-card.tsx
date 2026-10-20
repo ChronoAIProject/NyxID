@@ -154,7 +154,9 @@ export function NotificationSetupCard() {
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                AI agents must request your approval before accessing services.{" "}
+                {settings?.global_approval_mode === "writes_only"
+                  ? "Writes and destructive operations require approval; reads and stateless model inference can proceed. "
+                  : "AI agents must request your approval before accessing services. "}
                 <Link
                   to="/approvals/settings"
                   className="text-primary-text hover:underline"

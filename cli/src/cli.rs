@@ -3196,6 +3196,40 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_approval_modes_parse_and_refuse_ambiguous_legacy_toggle() {
+        for mode in ["writes_only", "all", "off"] {
+            let cli =
+                Cli::try_parse_from(["nyxid", "notification", "update", "--approval-mode", mode])
+                    .unwrap();
+            assert!(matches!(cli.command,
+                Commands::Notification { command: NotificationCommands::Update { approval_mode: Some(value), .. } }
+                if value == mode));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "unknown",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "notification",
+                "update",
+                "--approval-mode",
+                "writes_only",
+                "--approval-email",
+                "true",
+            ])
+            .is_err()
+        );
+    }
     use clap::Parser;
 
     #[test]
@@ -4857,7 +4891,10 @@ pub enum NotificationCommands {
     },
     /// Update notification settings
     Update {
-        /// Enable/disable approval email notifications
+        /// Global approval: writes_only (default), all, or off
+        #[arg(long, value_parser = ["writes_only", "all", "off"], conflicts_with = "approval_email")]
+        approval_mode: Option<String>,
+        /// Legacy global approval toggle: true = all requests, false = off
         #[arg(long)]
         approval_email: Option<bool>,
         /// Enable/disable approval push notifications
@@ -4955,7 +4992,7 @@ pub enum ApprovalCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Enable approval protection globally (requires notification channel)
+    /// Require approval for all requests (select writes_only via notification update --approval-mode)
     Enable {
         #[command(flatten)]
         auth: AuthArgs,

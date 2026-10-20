@@ -141,6 +141,48 @@ pub fn build_ssh_descriptor(kind: SshOperationKind, command: Option<&str>) -> Op
     }
 }
 
+/// Reuse the trusted operation contract, including conservative remote marks.
+pub fn apply_operation_effects(
+    descriptor: &mut OperationDescriptor,
+    effects: crate::services::mcp_service::OperationEffects,
+    method_override: bool,
+) {
+    descriptor.verb = if effects.destructive {
+        ApprovalVerb::Destructive
+    } else if effects.reads && !method_override {
+        ApprovalVerb::Read
+    } else {
+        ApprovalVerb::Write
+    };
+}
+
+/// Model generation is read-class only under the catalog's inference contract
+/// and the same closed, stateless request contract used for assistant consent.
+/// Provider storage, resource handles, hosted effects and unknown extensions
+/// retain method classification. Service names never establish this authority.
+pub fn apply_inference_contract(
+    descriptor: &mut OperationDescriptor,
+    service: &crate::models::downstream_service::DownstreamService,
+    body: Option<&[u8]>,
+    method_override: bool,
+) {
+    if !method_override
+        && descriptor.verb != ApprovalVerb::Destructive
+        && service.inference.is_some()
+        && descriptor.method.as_deref() == Some("POST")
+        && body
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+            .is_some_and(|body| {
+                crate::services::assistant_service_execution::stateless_inference(
+                    descriptor.resource.as_deref().unwrap_or_default(),
+                    &body,
+                )
+            })
+    {
+        descriptor.verb = ApprovalVerb::Read;
+    }
+}
+
 pub fn derive_verb_from_method(method: &str) -> ApprovalVerb {
     match method.trim().to_ascii_uppercase().as_str() {
         "GET" | "HEAD" | "OPTIONS" => ApprovalVerb::Read,
@@ -261,6 +303,38 @@ fn truncate_summary(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_verbs_and_untrusted_read_marks_cannot_bypass_write_approval() {
+        for method in ["CONNECT", "TRACE", "UNKNOWN", ""] {
+            assert_eq!(derive_verb_from_method(method), ApprovalVerb::Write);
+        }
+        let mut descriptor = build_mcp_descriptor("POST", "/search", None);
+        let mut metadata = crate::services::mcp_service::McpDurableEndpointMetadata {
+            risk: Some(crate::models::service_endpoint::EndpointRisk::Read),
+            ..Default::default()
+        };
+        let method = reqwest::Method::POST;
+        apply_operation_effects(
+            &mut descriptor,
+            crate::services::mcp_service::operation_effects(&method, metadata),
+            false,
+        );
+        assert_eq!(descriptor.verb, ApprovalVerb::Write);
+        metadata.catalog_contract = true;
+        apply_operation_effects(
+            &mut descriptor,
+            crate::services::mcp_service::operation_effects(&method, metadata),
+            false,
+        );
+        assert_eq!(descriptor.verb, ApprovalVerb::Read);
+        apply_operation_effects(
+            &mut descriptor,
+            crate::services::mcp_service::operation_effects(&method, metadata),
+            true,
+        );
+        assert_eq!(descriptor.verb, ApprovalVerb::Write);
+    }
 
     #[test]
     fn http_descriptor_derives_read_write_destructive_verbs() {

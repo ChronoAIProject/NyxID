@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const globalApprovalModeSchema = z.enum(["writes_only", "all", "off"]);
+
 export const approvalModeSchema = z.enum(["per_request", "grant"]);
 export const approvalEffectSchema = z.enum([
   "require_approval",
@@ -60,7 +62,7 @@ export const setServiceApprovalConfigSchema = z
 export const updateNotificationSettingsSchema = z.object({
   telegram_enabled: z.boolean(),
   push_enabled: z.boolean(),
-  approval_required: z.boolean(),
+  global_approval_mode: globalApprovalModeSchema,
   approval_timeout_secs: z
     .number()
     .int()

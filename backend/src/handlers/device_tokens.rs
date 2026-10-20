@@ -397,7 +397,7 @@ pub async fn remove_device(
         .await?;
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
-    let web_only = updated_channel.approval_required
+    let web_only = updated_channel.approval_required != Some(false)
         && !notification_service::approval_delivery_configured(
             &updated_channel,
             &state.config,
@@ -487,7 +487,7 @@ pub async fn remove_current_device(
 
     let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
     let web_only = token_was_present
-        && updated_channel.approval_required
+        && updated_channel.approval_required != Some(false)
         && !notification_service::approval_delivery_configured(
             &updated_channel,
             &state.config,
@@ -966,14 +966,14 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
-        assert!(channel.approval_required);
+        assert_eq!(channel.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &channel
         ));
@@ -991,7 +991,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: true,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1015,7 +1015,7 @@ mod tests {
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
-            approval_required: true,
+            approval_required: Some(true),
             push_enabled: false,
             push_devices: vec![],
             created_at: Utc::now(),
@@ -1039,7 +1039,7 @@ mod tests {
         );
 
         let mut approval_off = channel;
-        approval_off.approval_required = false;
+        approval_off.approval_required = Some(false);
         assert_eq!(
             push_device_registered_audit_metadata(&approval_off, "device-id", "fcm")["approval_resumed"],
             false
@@ -1131,7 +1131,7 @@ mod tests {
                         telegram_link_code_expires_at: None,
                         approval_timeout_secs: 30,
                         grant_expiry_days: 30,
-                        approval_required,
+                        approval_required: Some(approval_required),
                         push_enabled: has_existing_device,
                         push_devices: if has_existing_device {
                             vec![old_device.clone()]
@@ -1161,7 +1161,8 @@ mod tests {
                     .unwrap()
                     .expect("registration channel");
                 assert_eq!(
-                    saved.approval_required, approval_required,
+                    saved.approval_required,
+                    Some(approval_required),
                     "{path} path changed approval_required"
                 );
             }
@@ -1197,7 +1198,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
-                approval_required: true,
+                approval_required: Some(true),
                 push_enabled: true,
                 push_devices: vec![old_device],
                 created_at: Utc::now(),
@@ -1220,14 +1221,18 @@ mod tests {
         let after_logout = notification_service::get_or_create_channel(&db, &user_id)
             .await
             .unwrap();
-        assert!(after_logout.approval_required);
+        assert_eq!(after_logout.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &after_logout
         ));
         assert!(
-            crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
 
         let new_device = DeviceToken {
@@ -1250,14 +1255,18 @@ mod tests {
         let after_login = notification_service::get_or_create_channel(&db, &user_id)
             .await
             .unwrap();
-        assert!(after_login.approval_required);
+        assert_eq!(after_login.approval_required, Some(true));
         assert!(notification_service::has_active_notification_channel(
             &after_login
         ));
         assert!(
-            crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 
@@ -1294,7 +1303,7 @@ mod tests {
                 telegram_link_code_expires_at: None,
                 approval_timeout_secs: 30,
                 grant_expiry_days: 30,
-                approval_required: true,
+                approval_required: Some(true),
                 push_enabled: true,
                 // `$pull` removes every matching token. Duplicate legacy rows
                 // must still count as losing the previous owner's last channel.
@@ -1320,14 +1329,18 @@ mod tests {
             .await
             .unwrap()
             .expect("previous owner channel");
-        assert!(saved.approval_required);
+        assert_eq!(saved.approval_required, Some(true));
         assert!(!notification_service::has_active_notification_channel(
             &saved
         ));
         assert!(
-            crate::services::approval_service::user_requires_approval(&db, &previous_user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &previous_user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 }

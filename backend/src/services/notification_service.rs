@@ -952,7 +952,7 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         telegram_link_code_expires_at: None,
         approval_timeout_secs: 300,
         grant_expiry_days: 30,
-        approval_required: true,
+        approval_required: None,
         push_enabled: false,
         push_devices: vec![],
         created_at: now,
@@ -1398,7 +1398,7 @@ mod tests {
         assert!(channel.push_devices.is_empty());
         assert_eq!(channel.approval_timeout_secs, 300);
         assert_eq!(channel.grant_expiry_days, 30);
-        assert!(channel.approval_required);
+        assert_eq!(channel.approval_required, None);
     }
 
     #[tokio::test]
@@ -1479,7 +1479,7 @@ mod tests {
         assert!(channel.telegram_link_code_expires_at.is_none());
         assert_eq!(channel.approval_timeout_secs, 300);
         assert_eq!(channel.grant_expiry_days, 30);
-        assert!(channel.approval_required);
+        assert_eq!(channel.approval_required, None);
         assert!(!channel.push_enabled);
         assert!(channel.push_devices.is_empty());
     }
@@ -1527,7 +1527,7 @@ mod tests {
 
         // Create the channel
         let channel = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(channel.approval_required);
+        assert_eq!(channel.approval_required, None);
 
         // Manually update approval_required in DB
         let now = bson::DateTime::from_chrono(Utc::now());
@@ -1545,7 +1545,7 @@ mod tests {
 
         // Fetch again -- should return the modified state
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(updated.approval_required);
+        assert_eq!(updated.approval_required, Some(true));
         assert_eq!(updated.approval_timeout_secs, 60);
         assert_eq!(updated.id, channel.id);
     }
@@ -1751,13 +1751,17 @@ mod tests {
         remove_stale_device_tokens(&db, &channel.id, &["dev-only".to_string()]).await;
 
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
-        assert!(updated.approval_required);
+        assert_eq!(updated.approval_required, Some(true));
         assert!(updated.push_devices.is_empty());
         assert!(!updated.push_enabled);
         assert!(
-            crate::services::approval_service::user_requires_approval(&db, &user_id)
-                .await
-                .unwrap()
+            crate::services::approval_service::user_requires_approval(
+                &db,
+                &user_id,
+                &crate::models::service_approval_config::ApprovalVerb::Write
+            )
+            .await
+            .unwrap()
         );
     }
 

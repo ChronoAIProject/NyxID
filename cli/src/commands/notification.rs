@@ -19,7 +19,16 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     let telegram = optional_bool_display(&settings, "telegram_enabled");
                     let telegram_connected =
                         settings["telegram_connected"].as_bool().unwrap_or(false);
-                    let approval = optional_bool_display(&settings, "approval_required");
+                    let approval = match settings["global_approval_mode"].as_str() {
+                        Some("writes_only") => "Writes only (default)",
+                        Some("all") => "All requests",
+                        Some("off") => "Off",
+                        _ => match settings["approval_required"].as_bool() {
+                            Some(true) => "All requests",
+                            Some(false) => "Off",
+                            None => "Unknown",
+                        },
+                    };
                     let delivery = optional_bool_display(&settings, "approval_delivery_configured");
                     let web = optional_bool_display(&settings, "approval_web_available");
 
@@ -28,7 +37,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     eprintln!("Push Enabled:        {push}");
                     eprintln!("Telegram Enabled:    {telegram}");
                     eprintln!("Telegram Connected:  {telegram_connected}");
-                    eprintln!("Approval Required:   {approval}");
+                    eprintln!("Approval Mode:       {approval}");
                     eprintln!("Delivery Configured: {delivery}");
                     eprintln!("Web Decisions:       {web}");
                     eprintln!(
@@ -50,6 +59,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
         }
 
         NotificationCommands::Update {
+            approval_mode,
             approval_email,
             approval_push,
             approval_telegram,
@@ -58,6 +68,9 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let mut body = serde_json::Map::new();
 
+            if let Some(mode) = approval_mode {
+                body.insert("global_approval_mode".into(), Value::String(mode));
+            }
             if let Some(v) = approval_email {
                 body.insert("approval_required".into(), Value::Bool(v));
             }
@@ -70,7 +83,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
 
             if body.is_empty() {
                 eprintln!(
-                    "No updates specified. Use --approval-email, --approval-push, or --approval-telegram."
+                    "No updates specified. Use --approval-mode, --approval-push, or --approval-telegram."
                 );
                 return Ok(());
             }
@@ -180,6 +193,7 @@ mod tests {
             .await;
 
         run(NotificationCommands::Update {
+            approval_mode: None,
             approval_email: Some(true),
             approval_push: Some(false),
             approval_telegram: None,
@@ -190,10 +204,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_global_mode_keeps_writes_only_distinct_from_boolean_choices() {
+        for mode in ["writes_only", "all", "off"] {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(path("/api/v1/notifications/settings"))
+                .and(body_json(serde_json::json!({"global_approval_mode":mode})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            run(NotificationCommands::Update {
+                approval_mode: Some(mode.into()),
+                approval_email: None,
+                approval_push: None,
+                approval_telegram: None,
+                auth: mock_auth(server.uri()),
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn update_with_no_flags_makes_no_request() {
         // No mock mounted: an empty update must short-circuit before any HTTP.
         let server = MockServer::start().await;
         run(NotificationCommands::Update {
+            approval_mode: None,
             approval_email: None,
             approval_push: None,
             approval_telegram: None,

@@ -175,6 +175,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
     queryFn: () => mobileApi.getNotificationSettings(),
   });
 
+  const selectedApprovalMode = notifSettings?.global_approval_mode
+    ?? (notifSettings?.approval_required ? "all" : "off");
+
   const notifMutation = useMutation({
     mutationFn: (payload: Parameters<typeof mobileApi.updateNotificationSettings>[0]) =>
       mobileApi.updateNotificationSettings(payload),
@@ -583,6 +586,31 @@ export function AccountSettingsScreen({ navigation }: Props) {
                   />
                 )}
               </View>
+              {notifSettings && (
+                <View accessibilityLabel="Approval (Global Default)">
+                  <Text style={styles.accountRowLabel}>Approval (Global Default)</Text>
+                  {([
+                    ["writes_only", "Writes only (default)"],
+                    ["all", "All requests"],
+                    ["off", "Off"],
+                  ] as const).map(([value, label]) => (
+                    <Pressable
+                      key={value}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: selectedApprovalMode === value }}
+                      disabled={notifMutation.isPending}
+                      style={styles.accountRow}
+                      onPress={() => notifMutation.mutate({ global_approval_mode: value })}
+                    >
+                      <Text style={styles.accountRowLabel}>{label}</Text>
+                      <Text style={styles.accountRowValue}>
+                        {selectedApprovalMode === value ? "Selected" : ""}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <Text style={styles.channelHint}>Per-service and organization policies still apply.</Text>
+                </View>
+              )}
               {notifSettings && (
                 <Text style={styles.channelHint}>
                   {notifSettings.approval_required

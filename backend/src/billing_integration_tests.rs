@@ -732,9 +732,13 @@ async fn run_billing_route_coverage_smoke() {
         .expect("enable per-request approval for exact redemption smoke");
     assert_eq!(updated.matched_count, 1);
     assert!(
-        crate::services::approval_service::user_requires_approval(&db, &owner_id)
-            .await
-            .unwrap()
+        crate::services::approval_service::user_requires_approval(
+            &db,
+            &owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap()
     );
     let exact_arguments = serde_json::json!({
         "method": "GET",
@@ -2869,9 +2873,13 @@ async fn set_billing_fixture_approval_required(
         "billing fixture must retain one authoritative preference row"
     );
     assert_eq!(
-        crate::services::approval_service::user_requires_approval(db, owner_id)
-            .await
-            .unwrap(),
+        crate::services::approval_service::user_requires_approval(
+            db,
+            owner_id,
+            &crate::models::service_approval_config::ApprovalVerb::Write
+        )
+        .await
+        .unwrap(),
         required
     );
 }

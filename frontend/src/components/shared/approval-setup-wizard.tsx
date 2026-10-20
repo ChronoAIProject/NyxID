@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { CheckCircle2, Info } from "lucide-react";
+import type { GlobalApprovalMode } from "@/types/approvals";
 import {
   Card,
   CardContent,
@@ -18,6 +19,7 @@ export function ApprovalSetupWizard({
   hasChannel,
   channelEnabled,
   approvalEnabled,
+  approvalMode,
   approvalSuspended,
   deliveryConfigured,
   webAvailable,
@@ -25,6 +27,7 @@ export function ApprovalSetupWizard({
   readonly hasChannel: boolean;
   readonly channelEnabled: boolean;
   readonly approvalEnabled: boolean;
+  readonly approvalMode?: GlobalApprovalMode;
   readonly approvalSuspended: boolean;
   readonly deliveryConfigured?: boolean;
   readonly webAvailable?: boolean;
@@ -45,7 +48,7 @@ export function ApprovalSetupWizard({
     {
       label: "Turn on approval protection",
       description:
-        "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.",
+        "Choose Writes only (default), All requests, or Off in approval settings. Auto-connected services remain available unless you add an explicit per-service policy.",
       done: approvalEnabled,
     },
   ];
@@ -76,8 +79,10 @@ export function ApprovalSetupWizard({
           </p>
           <p className="text-xs text-muted-foreground">
             {deliveryConfigured === undefined ? "Notification configuration is unknown. " : deliveryConfigured ? "Notifications are configured; delivery can still fail. " : "Notifications are unavailable; use the web to decide. "}
-            Programmatic proxy, LLM gateway, and SSH requests require your
-            approval by default. Auto-connected services remain available
+            {approvalMode === "writes_only"
+              ? "Writes and destructive operations require approval by default; reads and stateless model inference can proceed. "
+              : "Programmatic proxy, LLM gateway, and SSH requests require your approval by default. "}
+            Auto-connected services remain available
             unless you add an explicit per-service policy. You can approve via
             Telegram, the mobile app, or the{" "}
             <Link
