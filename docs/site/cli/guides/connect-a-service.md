@@ -99,6 +99,139 @@ Authenticate these proxy requests with your NyxID credentials. The recipient ID 
 
 This uses the user OAuth `/tasks/forward` API. The older `/tasks/transfer` operation uses a tenant token and a different request body. No bot credentials are substituted for user OAuth. See the [Lark CLI's published API contract](https://github.com/larksuite/cli/blob/7beffb086d7fa3c5b843d8affa7c089f49cfc65e/internal/registry/catalog/services/approval.json) for the user routes and permissions.
 
+## Lark Base
+
+The standalone `bitable_media_upload` tool is implemented in this revision.
+`bitable_fields_list` and `bitable_record_create_with_attachments` describe the
+managed receipt-write release contract below; their publication and executor
+are being added separately. Use the managed workflow only after your deployed
+server advertises the composite. An absent tool is not permission to recreate
+it with raw uploads and record-create calls.
+
+### Connect the account and grant Base access
+
+Use `api-lark` for a user's OAuth authority, or `api-lark-bot` for a bot app's
+tenant authority. China-region equivalents are `api-feishu` and
+`api-feishu-bot`. A tenant connection exchanges the app's credentials for a
+tenant access token; it does not borrow a user's OAuth token or the inbound
+channel bot's stored credential. Choose the exact connection that has access
+to the destination Base.
+
+For user OAuth, enable the permissions in the app's developer console and
+request them when connecting:
+
+```bash
+nyxid service add api-lark --oauth \
+  --oauth-client-id cli_your_app_id \
+  --oauth-client-secret-env LARK_APP_SECRET \
+  --scope "base:field:read,base:record:create,docs:document.media:upload"
+```
+
+For tenant access, run `nyxid connect api-lark-bot` and have the human enter the
+app credentials in the hosted page. Enable app permissions in the developer
+console rather than requesting user OAuth consent for a tenant connection.
+For an existing OAuth connection, use `nyxid service scopes <slug>` and retain
+its current scopes while adding the required ones. Seed defaults remain
+read-only; connecting a service does not automatically grant write permissions.
+
+| Permission | Purpose |
+| --- | --- |
+| `base:field:read` | Read field definitions and current select options |
+| `base:record:create` | Create Base records |
+| `docs:document.media:upload` | Upload images or files for Base attachment fields |
+| `bitable:app` | Coarse Base read/write alternative listed by these APIs |
+
+API permissions and document access are separate. The connected user needs
+access to the Base; for tenant calls, add the exact app through the Base's
+**More → Add Applications** menu and grant the needed access. Read-only access
+is enough for a field probe, but receipt creation needs write access. An
+application scope alone cannot repair the Base document ACL.
+
+The inbound channel bot is configured separately. To download message
+resources, its app needs any one of `im:message`, `im:message:readonly`, or
+`im:message.history:readonly` in the Lark/Feishu developer console, as listed
+by the official [Obtain resource files in messages](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message-resource/get)
+API (`/reference/im-v1/message-resource/get`). These permissions do not grant
+the service connection access to write a Base.
+
+### Enable only the required capabilities
+
+Both flags are per person and default off. Upgrade every replica and drain
+pre-release workers before enabling either flag. The matrix describes the
+completed release; attachment writes also require the corresponding tools and
+executor to be deployed.
+
+| `assistant:channel-media` | `assistant:attachment-writes` | Behavior |
+| --- | --- | --- |
+| Off | Off | Existing behavior; new attachment operations refuse locally |
+| On | Off | Owner channel photos/files reach the assistant; attachment-write tools stay unavailable |
+| Off | On | Attachment-write tools can use browser uploads; new channel media is not admitted |
+| On | On | Owner channel media can feed managed Base receipt writes |
+
+Turning media admission off does not discard previously accepted work. For
+queue conversion, admin drain, and rollback completion queries, see
+[Assistant uploads](https://github.com/ChronoAIProject/NyxID/blob/main/docs/chat/10-uploads.md#channel-rollout-and-rollback).
+
+### Choose the operation
+
+Operation IDs below belong to the selected connection. Discover their actual
+MCP names and schemas instead of guessing a service prefix.
+
+| Operation | Contract |
+| --- | --- |
+| `bitable_fields_list` | Read field definitions and select options before choosing values. Managed create also validates referenced fields against bounded schema pagination. |
+| `bitable_media_upload` | In a live owner chat, upload one authorized `attachment_id` and return a usable `file_token`. NyxID derives size, defaults the safe filename, and supplies `extra.drive_route_token` for `parent_node`. It creates no record and has no managed record-replay ledger. |
+| `bitable_record_create_with_attachments` | Validate fields and source completeness, upload the attachments, then create one record under the managed guard and durable replay rules. One composite decision covers the expansion. |
+
+The composite's JSON body is `{fields: object, attachments: {<field name>:
+[attachment_id, ...]}}`. It requires a nonempty attachment map and nonempty
+arrays, at most ten unique IDs and 50 MiB total, and complete photo sets from
+each inbound message. Set attachment fields through `attachments`, not
+`fields`. Use current dropdown options; an unknown option is refused rather
+than silently created. The managed route is
+`POST /nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records` inside
+NyxID's trusted MCP execution, not a public Lark HTTP endpoint to call directly.
+
+Only live, non-guest owner chat keys can use attachment-write operations.
+Ordinary Agent Keys and OAuth plugin connections cannot use them. They are
+excluded from `/mcp/config` and exact-operation descriptors, and exact, durable,
+and async execution refuse them. Plain `bitable_record_create` keeps its
+existing discovery and execution behavior. A custom or mounted copy of the
+OpenAPI document cannot grant access to chat attachments.
+
+### Handle duplicates and uncertain outcomes
+
+Managed create identifies photos by content within the same owner, Base app,
+and table, even when they are uploaded again in another conversation. An
+authorized identical successful replay returns the stored record. A changed
+receipt or overlapping batch containing a reserved photo is refused and names
+the existing record or write state. Use the existing record for corrections;
+there is no duplicate-photo override. Add a deliberate duplicate manually in
+Lark if needed.
+
+Identical-photo resend protection has a **400-day horizon**, independent of
+upload retention. Terminal write metadata and photo reservations remain for
+400 days; active writes are never deleted by retention. Owner purge removes
+both. These rules do not apply to records created outside the managed tool.
+
+After the create dispatch barrier, NyxID never automatically resends a create.
+For `uncertain`, **check the Base; NyxID will not create it again**. Do not
+re-call the composite, use plain create, change connections, or split the batch
+to work around that result. A definite refusal can be corrected only when the
+reported state proves no record was created.
+
+### Restrict a Receipt-Bot specialist
+
+Grant the chosen Lark UserService to the specialist, then allow only
+`bitable_fields_list` and `bitable_record_create_with_attachments`. Pin the
+Base/table and require the receipt's dropdown values, date, amount, and photo
+field with the [Receipt-Bot operation-scope recipe](https://github.com/ChronoAIProject/NyxID/blob/main/docs/AGENT_OPERATION_SCOPES.md#receipt-bot-recipe).
+That worked example is the single source for the complete JSON and the real
+specialist/API-key management routes. The grants UI selects operations and
+preserves saved value limits; author the recipe's nested limits through the
+API. Scoping an ordinary Agent Key does not make it eligible for live-chat
+attachment writes.
+
 ## Change an OAuth connection's scopes
 
 To re-scope an existing OAuth connection, declare the exact set you want with `service scopes <id|slug> --set`:
