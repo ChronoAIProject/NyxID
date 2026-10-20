@@ -117,7 +117,7 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             if file.size() > remaining {
                 return Err(bad("DOCX exceeds the 40 MiB decompression limit."));
             }
-            let name = file.name().to_owned();
+            let name = file.name().map_err(|_| malformed())?.into_owned();
             let mut expanded = Vec::new();
             (&mut file)
                 .take(remaining + 1)
@@ -474,6 +474,29 @@ mod tests {
         assert!(parse(b"a\0b", "txt").is_err());
         assert!(parse(b"{no}", "json").is_err());
         assert!(parse(b"<svg/>", "svg").is_err());
+    }
+    #[test]
+    fn non_utf8_zip_entry_name_returns_sanitized_error_without_panicking() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "word/document.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"<w:document/>").unwrap();
+        let mut bytes = writer.finish().unwrap().into_inner();
+        // Preserve a valid ZIP structure but corrupt each UTF-8 flagged name.
+        for (signature, flags, name) in [(b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)] {
+            let offset = bytes.windows(4).position(|w| w == signature).unwrap();
+            bytes[offset + flags + 1] |= 0x08;
+            bytes[offset + name] = 0xff;
+        }
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+        assert!(archive.by_index(0).unwrap().name().is_err());
+        let error = parse(&bytes, "docx").err().expect("malformed DOCX");
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert_eq!(error.to_string(), malformed().to_string());
     }
     #[tokio::test]
     async fn isolated_extraction_and_timeout_release_worker() {
