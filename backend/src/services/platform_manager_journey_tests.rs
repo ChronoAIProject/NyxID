@@ -2489,7 +2489,9 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                 .state
                 .db
                 .collection::<bson::Document>(crate::models::session::COLLECTION_NAME);
-            let authenticated_filter = doc! {"user_id":&registered.user_id,"revoked":false,"user_agent":{"$ne":"mfa_pending"}};
+            let authenticated_filter = crate::services::session_authority::authenticated(
+                doc! {"user_id":&registered.user_id,"revoked":false},
+            );
             let before = sessions
                 .count_documents(authenticated_filter.clone())
                 .await
@@ -2515,7 +2517,29 @@ async fn default_and_configured_signup_login_mfa_review_and_same_chat_confirmati
                     .unwrap(),
                 before
             );
-            assert!(sessions.find_one(doc! {"token_hash":crate::crypto::token::hash_token(&pending),"user_agent":"mfa_pending","revoked":false}).await.unwrap().is_some());
+            let pending_hash = crate::crypto::token::hash_token(&pending);
+            assert!(
+                j.state
+                    .db
+                    .collection::<bson::Document>(crate::models::session::MFA_CHALLENGES)
+                    .find_one(crate::services::session_authority::pending(
+                        doc! {"user_id":&registered.user_id,"token_hash":&pending_hash,"revoked":false,
+                            "expires_at":{"$gt":bson::DateTime::now()}},
+                        false,
+                    ))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "an invalid factor must leave the dedicated MFA challenge redeemable"
+            );
+            assert!(
+                sessions
+                    .find_one(doc! {"token_hash":&pending_hash})
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a pending MFA challenge must never be an ordinary session"
+            );
             assert_eq!(
                 j.state
                     .db
