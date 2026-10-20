@@ -38,6 +38,11 @@ def require_gates(data):
                  'cli/tests/updater-npm/package-lock.json', 'scripts/publication_contract.py', 'scripts/export-build-source.py', 'docs/site/index.md'):
         if not any(fnmatch.fnmatchcase(path, pattern) for pattern in filters):
             raise ValueError('packaging verifier input missing from PR selection')
+    native = [step for step in ci['jobs']['cli-test']['steps']
+              if 'scripts/test-native-secret-service.py' in step.get('run', '')]
+    if len(native) != 1 or 'if' in native[0] or native[0].get('continue-on-error') or not all(
+            text in native[0]['run'] for text in ('apt-snapshot-install.sh --install-only', 'gnome-keyring', 'dbus-daemon', 'dbus-bin')):
+        raise ValueError('real CLI Secret Service test must be required with snapshot-installed prerequisites')
     if packaging['permissions'] != {'contents': 'read'}:
         raise ValueError('PR packaging permissions')
     jobs = packaging['jobs']
@@ -144,6 +149,17 @@ def require_gates(data):
 
 
 class PackagingWorkflows(unittest.TestCase):
+    def test_real_cli_secret_service_step_cannot_be_removed_or_made_optional(self):
+        for mutation in ('removed', 'conditional', 'warning'):
+            data = workflows()
+            steps = data['ci']['jobs']['cli-test']['steps']
+            step = next(step for step in steps if 'scripts/test-native-secret-service.py' in step.get('run', ''))
+            if mutation == 'removed': steps.remove(step)
+            elif mutation == 'conditional': step['if'] = 'false'
+            else: step['continue-on-error'] = True
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, 'Secret Service'):
+                require_gates(data)
+
     def test_runtime_failure_regressions_cannot_be_skipped(self):
         for script in ('test-image-runtime.py', 'test-image-entrypoint-dispatch.py'):
             data = workflows()

@@ -382,3 +382,13 @@
 - Real retained report + exact native package proof replay: 8/8 component/arch mappings remove only 309 approved identities; 8/8 injected new-CVE cases remain blocking. This is not a rebuilt final-image scan.
 - Local: eligibility 15/15, vulnerabilities 14/14, scanner workflows 7/7, packaging workflows 17/17, SBOM workflows 3/3, runtime 9/9; diff whitespace passes.
 - PR: Security Scans / Scanner Policy; Artifact Packaging Policy; every workstation Shipped Image Identity matrix cell. Private hosted builds rerun final proof through the operator gate.
+
+## W7 CI82 follow-up — pure Rust keyring and shell-free node
+- Use async-io Secret Service plus RustCrypto; upstream requires a crypto feature, so the approved D-Bus session changes Plain→Dh; no active Linux libdbus parent or OpenSSL dependency.
+- Replace shell registration/start with the real CLI paths; keep file custody, config/URL defaults, pre-parse forwarded args and redact registration failures.
+- Node exports five signed-snapshot runtime packages, snapshot CA and scannable dpkg records into scratch; no shell or DBus runtime.
+- Require real CLI Tokio preflight/set/get/delete in isolated gnome-keyring/D-Bus on CLI Test; missing tools/test, timeout or failure blocks. Native Lima production-backend fixture passed the same roundtrip.
+- Linux archives reject libdbus DT_NEEDED; final node executes version/help plus the entrypoint's no-config refusal.
+- Targeted entrypoint 5/5 and existing keychain 5/5 pass using nyxid-387c312571c94c44; all-target node-proxy-test Clippy has only A’s cutover.rs unused_unit/chunks_exact_to_as_chunks lints; PM accepts the gate with no compile/owned diagnostics.
+- Cargo audit: only the two existing RSA findings; 3/3 exact lock-subgraph dispositions validate. No new exception or RSA source refresh.
+- PR: CLI Test; Rust Clippy; both Linux CLI Archive Identity; node-agent Shipped Image Identity both arches; Artifact Packaging Policy; Every Dependency Root Audit.

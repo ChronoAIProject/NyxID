@@ -214,3 +214,33 @@ These Debian baseline findings have no dispositions. The image gate continues
 to fail on them until the minimal service images remove their packages. Active
 header-only records live in `security/image-dispositions.json`, with all of the
 exact eligibility checks above.
+
+## Pure Rust keychain and shell-free node runtime
+
+The CLI uses keyring 3.6.3 with `async-secret-service`, `async-io` and
+`crypto-rust`, alongside the native Apple/Windows backends. The async-io choice
+avoids keyring's documented Tokio main-thread deadlock. Secret Service 4.0.0
+cannot compile without a crypto implementation, so the reviewed feature set
+changes its D-Bus session negotiation from **Plain to Dh** using RustCrypto,
+without OpenSSL or libdbus. Native keychain APIs and credential names stay the
+same. Cargo may retain weak optional dbus packages in its lock resolution;
+`cargo tree --target <linux-target> -i libdbus-sys` must have no active parent,
+and the actual Linux archives and images must have no libdbus DT_NEEDED entry.
+The dependency audit and exact lock-subgraph guard remain mandatory.
+
+`nyxid node docker-entrypoint` now performs the old container registration and
+start sequence in Rust. Existing config starts directly; missing config uses
+`NYXID_NODE_TOKEN` and `NYXID_NODE_URL` to register with file custody, and missing
+config plus absent token refuses with exit 1. `NYXID_NODE_CONFIG_DIR` defaults to
+`/app/config`; start arguments are parsed before consuming registration input.
+The node image contains exactly the five declared snapshot runtime packages
+and the same snapshot's CA bundle, with real dpkg inventory retained for scans.
+It contains no shell, SSH client, util-linux, Perl, ncurses or DBus library.
+
+Required CLI Test runs the actual CLI test executable in a disposable, unlocked
+gnome-keyring/D-Bus session, with preflight/set/get/delete inside Tokio and a
+90-second deadlock bound. A native arm64 Lima replay of the unchanged production
+KeychainBackend also passed these operations in Tokio; that small fixture does
+not replace the hosted actual-CLI check. Both Linux archive checks parse the
+actual ELF dependencies, and every final CLI image executes version/help and
+its real entrypoint. Node additionally proves no-config startup exits 1.

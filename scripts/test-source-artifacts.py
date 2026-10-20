@@ -84,6 +84,28 @@ class BinaryIdentity(unittest.TestCase):
         self.binary.write_bytes(b'\xcf\xfa\xed\xfe' + struct.pack('<III', 0x01000007, 0, 2) + b'\0' * 48)
         with self.assertRaisesRegex(ValueError, 'architecture/format'): self.check(self.receipt())
 
+    def test_both_linux_cli_architectures_reject_dbus_in_the_actual_packaged_elf(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('elf_fixtures', Path(__file__).with_name('test-elf-runtime.py'))
+        fixtures = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixtures)
+        elf = fixtures.elf
+        for arch, machine in (('x86_64', 62), ('aarch64', 183)):
+            target = arch + '-unknown-linux-gnu'
+            for libraries in (['libc.so.6'], ['libc.so.6', 'libdbus-1.so.3']):
+                interpreter = {'x86_64': '/lib64/ld-linux-x86-64.so.2', 'aarch64': '/lib/ld-linux-aarch64.so.1'}[arch]
+                data = elf(libraries, interpreter)
+                struct.pack_into('<H', data, 18, machine)
+                struct.pack_into('<Q', data, 24, 0x10100)
+                self.binary.write_bytes(data)
+                self.identity['target'] = target
+                with self.subTest(target=target, libraries=libraries), patch('source_artifacts.subprocess.check_output',
+                        return_value=json.dumps(self.receipt()).encode()):
+                    if any('libdbus' in name for name in libraries):
+                        with self.assertRaisesRegex(ValueError, 'forbidden libdbus'):
+                            verify_binary(self.binary, Path('/extractor'), 'nyxid-cli', '0.72.0', target, COMMIT, EPOCH)
+                    else:
+                        verify_binary(self.binary, Path('/extractor'), 'nyxid-cli', '0.72.0', target, COMMIT, EPOCH)
+
     def test_scratch_updater_requires_static_musl(self):
         header = bytearray(64)
         header[:6] = b'\x7fELF\x02\x01'

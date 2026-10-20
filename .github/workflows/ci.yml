@@ -883,6 +883,13 @@ jobs:
       - name: Run CLI tests
         run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
 
+      - name: Real Linux Secret Service from the CLI Tokio runtime
+        timeout-minutes: 10
+        run: |
+          . /etc/os-release
+          sudo -n sh scripts/apt-snapshot-install.sh --install-only security/apt-snapshots.tsv "$ID:$VERSION_CODENAME" -- gnome-keyring dbus-daemon dbus-bin
+          python3 scripts/test-native-secret-service.py
+
       - name: Publish test summary
         if: always()
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6

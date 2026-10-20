@@ -44,6 +44,8 @@ def check(image_id, component, binary=None):
         # Exercise Tini and the real configured entrypoint too. Its sole-flag
         # help path must return before any writes, capability probes or effects.
         probe(image_id, None, ['--help'], required='Usage:')
+        if component == 'node-agent':
+            probe(image_id, None, [], expected_code=1, required='No node config found')
     elif component == 'backend':
         probe(image_id, '/usr/local/bin/nyxid-server', ['--version'], required='nyxid ')
         probe(image_id, None, ['--help'], required='Usage:')

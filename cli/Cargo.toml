@@ -71,7 +71,7 @@ zeroize = { version = "1", features = ["derive", "serde"] }
 # Telemetry (first-run consent TTY detection)
 is-terminal = "0.4"
 directories = "6"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 thiserror = "2"
 libc = "0.2"
 nix = { version = "0.31.2", features = ["process", "signal"] }

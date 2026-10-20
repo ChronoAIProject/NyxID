@@ -63,6 +63,11 @@ def verify_binary(binary, extractor, package, version, target, commit, epoch):
         static_musl(binary, target)
     else:
         archives.check_binary_target(binary, target)
+    if package == 'nyxid-cli' and '-unknown-linux-' in target:
+        libraries = elf_runtime(binary)['needed']
+        if any(name.startswith('libdbus') for name in libraries):
+            raise ValueError('shipped Linux CLI links forbidden libdbus: ' + ', '.join(libraries))
+        print('Final Linux CLI DT_NEEDED (no libdbus): ' + ', '.join(libraries))
     receipt = json.loads(subprocess.check_output([str(extractor), '--identity-only', str(binary)]))
     require_build_identity(receipt, package, version, target, source_identity(commit, epoch))
     subject = receipt['subject']

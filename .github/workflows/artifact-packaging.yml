@@ -21,6 +21,7 @@ jobs:
       - run: python3 scripts/test-source-artifacts.py
       - run: python3 scripts/test-elf-runtime.py
       - run: python3 scripts/test-node-rootfs.py
+      - run: python3 scripts/test-native-secret-service-runner.py
       - run: python3 scripts/test-image-dispositions.py
       - run: python3 scripts/test-image-runtime.py
       - run: python3 scripts/test-image-entrypoint-dispatch.py

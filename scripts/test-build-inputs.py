@@ -75,7 +75,7 @@ class BuildPolicy(unittest.TestCase):
         self.mutate("frontend/Dockerfile", "node:22.23.2-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85", "node:22.23.2-alpine", "unpinned base")
 
     def test_raw_apt_rejected_in_any_dockerfile(self):
-        self.mutate("cli/Dockerfile.node", "-- ca-certificates", "-- ca-certificates && apt-get install curl",
+        self.mutate("cli/Dockerfile.node", "-- python3 libc6", "-- python3 libc6 && apt-get install curl",
                     "raw APT command bypasses")
 
     def test_missing_apt_parser_copy_rejected(self):

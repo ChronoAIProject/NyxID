@@ -1,3 +1,5 @@
+mod docker_entrypoint;
+
 use std::io::Write;
 
 use anyhow::Result;
@@ -478,6 +480,8 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         }
 
         // --- Agent-side commands (local node operations) ---
+        NodeCommands::DockerEntrypoint { args } => docker_entrypoint::run(args).await,
+
         NodeCommands::Register {
             token,
             url,

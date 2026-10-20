@@ -68,9 +68,14 @@ class Runtime(unittest.TestCase):
         for component in ('node-agent', 'nyxid-node-machine', 'machine-node-only', 'machine-hosted-desktop', 'machine-hosted'):
             with self.subTest(component=component), patch.object(image_runtime, 'probe') as probe:
                 image_runtime.check(self.image, component, self.binary)
-                self.assertEqual([c.args[:3] for c in probe.call_args_list], [
+                expected = [
                     (self.image, '/usr/local/bin/nyxid', ['--version']),
-                    (self.image, '/usr/local/bin/nyxid', ['--help']), (self.image, None, ['--help'])])
+                    (self.image, '/usr/local/bin/nyxid', ['--help']), (self.image, None, ['--help'])]
+                if component == 'node-agent':
+                    expected.append((self.image, None, []))
+                self.assertEqual([c.args[:3] for c in probe.call_args_list], expected)
+                if component == 'node-agent':
+                    self.assertEqual(probe.call_args.kwargs, dict(expected_code=1, required='No node config found'))
 
     def test_mcp_real_stdio_protocol_response_is_required(self):
         for response in ('', '{}', '{"jsonrpc":"2.0","id":1,"result":{}}'):

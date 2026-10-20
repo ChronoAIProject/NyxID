@@ -9,4 +9,4 @@ case "$ID:${VERSION_CODENAME:-}" in
 esac
 sudo -n sh "$build_repo_root/scripts/apt-snapshot-install.sh" --install-only \
   "$build_repo_root/security/apt-snapshots.tsv" "$ID:$VERSION_CODENAME" -- \
-  libdbus-1-dev pkg-config ripgrep
+  pkg-config ripgrep
