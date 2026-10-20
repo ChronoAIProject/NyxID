@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs",
+    "build": "tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.public-render.config.ts && node scripts/prerender-public.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/verify-public-build.mjs",
     "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint .",
@@ -18,7 +18,8 @@
     "test:coverage": "NODE_ENV=test vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "test:watch": "NODE_ENV=test vitest"
+    "test:watch": "NODE_ENV=test vitest",
+    "build:public-render": "vite build --config vite.public-render.config.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

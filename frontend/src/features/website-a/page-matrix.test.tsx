@@ -26,7 +26,8 @@ vi.mock("@tanstack/react-router", () => ({
   useLocation: () => location,
   Link: forwardRef<HTMLAnchorElement, Record<string, unknown>>(
     function TestLink({ to, search, hash, preload: _preload, ...props }, ref) {
-      const query = new URLSearchParams(
+      void _preload;
+    const query = new URLSearchParams(
         search as Record<string, string>,
       ).toString();
       return (

@@ -14,4 +14,18 @@ Disallow: /cli-auth
 Disallow: /oauth-consent
 Disallow: /ssh
 
+Disallow: /assistant
+Disallow: /billing
+Disallow: /orgs
+Disallow: /channel-bots
+Disallow: /automations
+Disallow: /triggers
+Disallow: /login
+Disallow: /register
+Disallow: /onboarding
+Disallow: /preview
+Disallow: /api/
+Disallow: /oauth/
+Disallow: /mcp
+
 Sitemap: https://nyx.chrono-ai.fun/sitemap.xml

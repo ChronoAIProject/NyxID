@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import { useLocation } from "@tanstack/react-router";
@@ -19,6 +19,8 @@ import {
 } from "./contact-mailto";
 import "./contact.css";
 
+const noSubscribe = () => () => {};
+
 function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
   const { language } = useWebsite();
   const zh = language === "zh";
@@ -30,6 +32,7 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
       openContactMailto(
         createContactMailto(websiteConfig.contactEmail, fields, language),
       );
+      document.dispatchEvent(new Event("nyxid:contact-mailto-open"));
       setMailClient("requested");
     } catch {
       setMailClient("unavailable");
@@ -174,10 +177,11 @@ function ContactForm({ form }: { form: UseFormReturn<WebsiteContactData> }) {
 export function ContactSection({ children }: { children: ReactNode }) {
   const { language } = useWebsite();
   const location = useLocation();
-  const [committedSearch, setCommittedSearch] = useState("");
-  useEffect(() => {
-    setCommittedSearch(location.searchStr);
-  }, [location.searchStr]);
+  const committedSearch = useSyncExternalStore(
+    noSubscribe,
+    () => location.searchStr,
+    () => "",
+  );
   const topic = contactTopicFromSearch(committedSearch);
   const schema = useMemo(
     () => createWebsiteContactSchema(language),

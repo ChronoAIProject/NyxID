@@ -87,6 +87,15 @@ export async function startPublicSession(
         props: { page_id: page.id, locale },
       });
   };
+  document.addEventListener("nyxid:contact-mailto-open", () => {
+    const { route, locale } = parsePublicPath(window.location.pathname),
+      page = publishedRoute(route);
+    if (page)
+      capture({
+        name: "contact_mailto_open",
+        props: { page_id: page.id, locale },
+      });
+  });
   document.addEventListener("click", (event) => {
     const anchor = (event.target as Element | null)?.closest("a[href]");
     const href = anchor?.getAttribute("href");

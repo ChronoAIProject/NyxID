@@ -20,7 +20,7 @@ log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
     '"$nyxid_access_request" $status $body_bytes_sent '
     '"$nyxid_access_referrer" "$http_user_agent"';
 
-include /etc/nginx/legal-cache.conf;
+include /etc/nginx/public-routing-maps.conf;
 
 server {
     listen 8080;
@@ -46,7 +46,7 @@ server {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
 
     # Proxy API requests to the backend
-    location /api/ {
+    location ^~ /api/ {
         proxy_pass ${BACKEND_URL};
         proxy_http_version 1.1;
         proxy_buffer_size 32k;
@@ -68,7 +68,7 @@ server {
     }
 
     # Proxy OAuth requests to the backend
-    location /oauth/ {
+    location ^~ /oauth/ {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -77,7 +77,7 @@ server {
     }
 
     # Proxy OIDC discovery endpoints to the backend
-    location /.well-known {
+    location ^~ /.well-known {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -86,7 +86,7 @@ server {
     }
 
     # Proxy MCP StreamableHTTP endpoint to the backend
-    location /mcp {
+    location ^~ /mcp {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -98,7 +98,7 @@ server {
     }
 
     # Proxy health check to the backend
-    location /health {
+    location ^~ /health {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_hide_header Cache-Control;
@@ -117,7 +117,7 @@ server {
     }
 
     # Cache hashed static assets for 1 year
-    location ~* \.(?:js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
+    location ~ ^/assets/.*\.(?:js|css|woff2?|svg|png|jpg|jpeg|gif|ico)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         add_header X-Frame-Options "DENY" always;
@@ -126,48 +126,15 @@ server {
         try_files $uri =404;
     }
 
-    # Stable content hashes let clients reuse unchanged pages after their
-    # 24-hour freshness window, even when unrelated deployments occur.
-    location = /privacy {
-        default_type text/html;
-        etag off;
-        if_modified_since off;
-        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
-        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
-        add_header ETag $nyxid_legal_etag;
-        add_header Cache-Control "public, max-age=86400, must-revalidate";
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
-        try_files /privacy.html =404;
-    }
+    include /etc/nginx/public-routing.conf;
 
-    location = /terms {
-        default_type text/html;
-        etag off;
-        if_modified_since off;
-        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
-        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
-        add_header ETag $nyxid_legal_etag;
-        add_header Cache-Control "public, max-age=86400, must-revalidate";
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy $nyxid_referrer_policy always;
-        try_files /terms.html =404;
-    }
-
-    # SPA fallback -- serve index.html for all non-file routes.
-    # Do NOT add `$uri/`: the build mirrors `docs/site/**` into `public/docs/`,
-    # so a real `/docs/` directory exists. With `$uri/`, a request to `/docs`
-    # matches that directory and nginx 301-redirects to `/docs/`, leaking the
-    # internal :8080 listen port into the Location URL and never reaching the
-    # SPA router. Real doc assets (`/docs/*.md`, `/docs/search-index.json`) are
-    # still served by the `$uri` match; client routes fall through to index.html.
+    # Only built public assets may use the filesystem fallback. Unknown routes
+    # receive a real 404; application routes are generated from router declarations.
     location / {
         add_header Cache-Control "no-cache" always;
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy $nyxid_referrer_policy always;
-        try_files $uri /index.html;
+        try_files $uri =404;
     }
 }

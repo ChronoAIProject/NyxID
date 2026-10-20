@@ -297,7 +297,9 @@ export function DocsLayout({
 
       {hideNav ? (
         <div className="mx-auto max-w-5xl px-4 pt-14 sm:px-6">
-          <main className="py-10">{children}</main>
+          <main tabIndex={-1} className="py-10">
+            {children}
+          </main>
         </div>
       ) : (
         <div className="mx-auto flex max-w-7xl gap-8 px-4 pt-14 sm:px-6">
@@ -307,7 +309,9 @@ export function DocsLayout({
             </div>
           </aside>
 
-          <main className="min-w-0 flex-1 py-10">{children}</main>
+          <main tabIndex={-1} className="min-w-0 flex-1 py-10">
+            {children}
+          </main>
 
           {toc && toc.length > 0 && (
             <aside className="hidden w-52 shrink-0 xl:block">

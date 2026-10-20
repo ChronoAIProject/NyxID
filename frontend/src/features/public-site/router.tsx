@@ -80,6 +80,7 @@ function Content() {
   const location = useLocation();
   useEffect(() => {
     applyMetadata(meta);
+    document.documentElement.dataset.publicReady = "v1";
   }, [meta]);
   useEffect(() => {
     const main = document.querySelector<HTMLElement>("main");

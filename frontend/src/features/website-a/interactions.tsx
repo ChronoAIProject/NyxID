@@ -1,3 +1,4 @@
+import { useBrowserContext } from "../public-site/browser-context";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Sparkles, Utensils, Newspaper, Monitor, Phone } from "lucide-react";
@@ -25,27 +26,18 @@ export function AudienceSwitcher({
 }: {
   items: { id: string; label: ReactNode; content: ReactNode }[];
 }) {
-  const initial = null;
-  const [selected, setSelected] = useState(() =>
-    Math.max(
-      0,
-      items.findIndex((item) => item.id === initial),
-    ),
-  );
-  const [stopped, setStopped] = useState(Boolean(initial));
+  const requested = new URLSearchParams(useBrowserContext().search).get("for");
+  const requestedIndex = items.findIndex((item) => item.id === requested);
+  const [selectedIndex, setSelected] = useState(0);
+  const [selectedByUser, setSelectedByUser] = useState(false);
+  const selected =
+    selectedByUser || requestedIndex < 0 ? selectedIndex : requestedIndex;
+  const [stopped, setStopped] = useState(false);
   const paused = useRef(false);
   const visible = useRef(true);
   const root = useRef<HTMLDivElement>(null);
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const reduced = useReducedMotion();
-  useEffect(() => {
-    const requested = new URLSearchParams(window.location.search).get("for");
-    const index = items.findIndex((item) => item.id === requested);
-    if (index >= 0) {
-      setSelected(index);
-      setStopped(true);
-    }
-  }, [items]);
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -57,7 +49,7 @@ export function AudienceSwitcher({
     return () => observer.disconnect();
   }, []);
   useEffect(() => {
-    if (stopped || reduced) return;
+    if (stopped || requestedIndex >= 0 || reduced) return;
     let remaining = 9000;
     let previous = Date.now();
     const timer = window.setInterval(() => {
@@ -71,8 +63,9 @@ export function AudienceSwitcher({
       }
     }, 200);
     return () => window.clearInterval(timer);
-  }, [stopped, reduced, items.length]);
+  }, [stopped, requestedIndex, reduced, items.length]);
   const select = (index: number) => {
+    setSelectedByUser(true);
     setStopped(true);
     setSelected(index);
   };
@@ -135,7 +128,7 @@ export function AudienceSwitcher({
           id={`icp-p-${item.id}`}
           aria-labelledby={`icp-t-${item.id}`}
           hidden={selected !== index}
-          className={`icp-panel play ${stopped || reduced ? "is-stopped" : "is-running"}`}
+          className={`icp-panel play ${stopped || requestedIndex >= 0 || reduced ? "is-stopped" : "is-running"}`}
         >
           {item.content}
         </div>

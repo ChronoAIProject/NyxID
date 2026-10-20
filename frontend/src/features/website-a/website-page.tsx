@@ -1,3 +1,4 @@
+import { useBrowserContext } from "../public-site/browser-context";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { ReactNode, SyntheticEvent } from "react";
 import { useLocation } from "@tanstack/react-router";
@@ -34,13 +35,10 @@ function Website({ children }: { children?: ReactNode }) {
   const location = useLocation();
   // Canonical HTML has no visitor query. The first client tree must match it;
   // apply browser context after hydration and after subsequent URL changes.
-  const [urlContext, setUrlContext] = useState({ search: "", hash: "" });
+  const urlContext = useBrowserContext();
   useEffect(() => {
     injectRedditDefaultCode();
-    setUrlContext({
-      search: window.location.search,
-      hash: window.location.hash,
-    });
+    window.dispatchEvent(new Event("nyxid:public-url-context"));
   }, [location.pathname, location.searchStr, location.hash]);
   const { locale: language, route } = parsePublicPath(location.pathname);
   const [menuOpen, setMenuOpen] = useState(false);

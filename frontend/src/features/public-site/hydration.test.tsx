@@ -10,6 +10,7 @@ vi.mock("@tanstack/react-router", () => ({
     { to, search, hash, preload: _preload, ...props },
     ref,
   ) {
+    void _preload;
     const query = new URLSearchParams(
       search as Record<string, string>,
     ).toString();

@@ -1,3 +1,4 @@
+import { isContentPath } from "./features/public-site/routes";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -14,6 +15,12 @@ import { ConsentBanner } from "./components/consent-banner";
 import { shouldRetryQuery } from "./lib/query-retry";
 import { BuildUpdateBanner } from "./components/build-update-banner";
 import "./app.css";
+
+// Public content has its own hydration router. Crossing this application boundary
+// loads that entry so title, locale and rendering contracts stay identical.
+router.subscribe("onBeforeLoad", ({ toLocation }) => {
+  if (isContentPath(toLocation.pathname)) window.location.assign(toLocation.href);
+});
 
 const queryClient = new QueryClient({
   defaultOptions: {

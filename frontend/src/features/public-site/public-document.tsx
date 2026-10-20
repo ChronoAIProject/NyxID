@@ -1,7 +1,8 @@
+import { useRef } from "react";
+import { useDocumentNavigation } from "./document-navigation";
 import { DocMarkdown } from "../docs/docs-markdown";
 import { DocsLayout } from "../docs/docs-layout-view";
 import { DocsIndexPage } from "../docs/docs-index-page";
-import { docTabForSlug } from "../docs/manifest";
 export function parseDoc(markdown: string) {
   const front = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n*/);
   return {
@@ -19,14 +20,15 @@ export function PublicDocument({
   slug: string;
   markdown?: string;
 }) {
+  const content = useRef<HTMLElement>(null);
+  const navigation = useDocumentNavigation(slug, content);
   if (!slug) return <DocsIndexPage />;
   if (markdown === undefined)
     throw new Error("Missing approved documentation body");
-  const doc = parseDoc(markdown),
-    tab = docTabForSlug(slug);
+  const doc = parseDoc(markdown);
   return (
-    <DocsLayout activeTab={tab === "shared" ? "ai" : tab} currentSlug={slug}>
-      <article id="website-main" className="max-w-3xl">
+    <DocsLayout {...navigation} currentSlug={slug}>
+      <article ref={content} id="website-main" className="max-w-3xl">
         <h1 className="mb-6 font-display text-3xl font-bold">{doc.title}</h1>
         <DocMarkdown
           markdown={doc.body}
