@@ -6,6 +6,7 @@ use super::{
     assistant_acknowledgement_service::{self as acks, ChatAuthority},
     assistant_agent_learning::{self as learning, GeneratedProposal},
     assistant_learning_publication as publication, assistant_team_service as team,
+    audit_runtime::policy::AuditTier,
     feature_flag_service, org_agent_service,
 };
 use crate::{
@@ -2165,6 +2166,7 @@ pub async fn accept_scope(
     };
     let db = state.db.clone();
     let key = state.audit_chain_hmac_key.clone();
+    let runtime = state.audit_runtime.clone();
     let operator = super::audit_service::AuditActor {
         user_id: actor.into(),
         ip_address: None,
@@ -2179,6 +2181,7 @@ pub async fn accept_scope(
                 doc! {"_id":&row.id,"owner_id":&row.owner_id,"revision":row.revision,"publication.operation_id":&p.operation_id,"publication.reduced_scope_acceptance":bson::to_bson(&p.reduced_scope_acceptance).map_err(|_| conflict())?},
                 doc! {"$set":{"publication.reduced_scope_acceptance":bson::to_bson(&consent).map_err(|_| conflict())?}}).session(&mut *session).await?;
             if changed.matched_count != 1 { return Err(conflict()); }
+            runtime.require_new_in_session(&db, session, AuditTier::Standard, 1).await?;
             Box::pin(super::audit_service::log_actor_event_in_session(&db, session, key.as_ref().as_ref(), &operator,
                 "assistant_skill_reduced_scope_accepted", json!({"proposal_id":row.id,"revision":row.revision,"omission_count":consent.omission_count}))).await?;
             Ok(())

@@ -22,6 +22,469 @@ mod validation_regressions;
 #[path = "assistant_learning_recovery_tests.rs"]
 mod recovery;
 
+const W8_STANDARD_CEILING: i64 = 100_000;
+
+const W8_STANDARD_CASES: [&str; 7] = [
+    "local",
+    "stale",
+    "count_below",
+    "count",
+    "age_below",
+    "age",
+    "diverged",
+];
+
+/// Exercise admission from persisted backlog, without fabricating witness contact.
+async fn w8_standard_admission(f: &mut Fixture, case: &str) -> bool {
+    use crate::services::{audit_runtime::AuditRuntime, audit_state_service};
+    f.state.audit_runtime =
+        std::sync::Arc::new(AuditRuntime::new(Default::default(), case != "local"));
+    let state = audit_state_service::load(&f.state.db).await.unwrap();
+    let (count, age) = match case {
+        "count_below" => (W8_STANDARD_CEILING - 1, 0),
+        "count" => (W8_STANDARD_CEILING, 0),
+        "age_below" => (1, 3_500),
+        "age" => (1, 3_601),
+        _ => (0, 0),
+    };
+    f.state.db.collection::<bson::Document>(crate::models::audit_state::COLLECTION_NAME)
+        .update_one(doc! {"singleton":true}, doc! {"$set":{
+            "pending_count":count, "next_order":state.next_order.max(count),
+            "oldest_pending_at": if count == 0 { bson::Bson::Null } else {
+                bson::Bson::DateTime(bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(age)))
+            },
+        }}).await.unwrap();
+    if case == "diverged" {
+        f.state.db.collection::<bson::Document>(crate::models::audit_witness_delivery::COLLECTION_NAME)
+            .insert_one(doc! {"_id":state.id,"divergence":{"seq":0_i64,"local_hash":"a","witnessed_hash":"b"}})
+            .await.unwrap();
+    }
+    matches!(case, "local" | "stale" | "count_below" | "age_below")
+}
+
+enum W8Command {
+    Started {
+        request_id: i32,
+        name: String,
+        command: bson::Document,
+    },
+    Finished {
+        request_id: i32,
+        transient: bool,
+        unknown: bool,
+    },
+}
+
+type W8Commands = std::sync::Arc<std::sync::Mutex<Vec<W8Command>>>;
+
+fn w8_proposal_mutation(command: &bson::Document, proposal_id: &str) -> bool {
+    command.get_str("update") == Ok(PROPOSALS_COLLECTION_NAME)
+        && command.get_bool("autocommit") == Ok(false)
+        && command.get_array("updates").unwrap().iter().any(|update| {
+            update
+                .as_document()
+                .unwrap()
+                .get_document("q")
+                .unwrap()
+                .get_str("_id")
+                == Ok(proposal_id)
+        })
+}
+
+/// Inject a labeled transient before the first business update, then an unknown
+/// result only at its eventual commit, after any read-only precheck and
+/// independent proxy-audit transactions. The guard holds cross-process fault
+/// ownership and scopes its single monitored connection; its independent
+/// controller arms synchronously at the exact Started observer boundary.
+async fn w8_unknown_commit(
+    f: &mut Fixture,
+    proposal_id: &str,
+) -> (crate::test_utils::fail_command::Guard, W8Commands) {
+    use crate::test_utils::fail_command::{FailCommandController, Guard};
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let controller = std::sync::Arc::new(std::sync::OnceLock::<FailCommandController>::new());
+    let control = controller.clone();
+    let proposal_id = proposal_id.to_owned();
+    let commands = W8Commands::default();
+    let capture = commands.clone();
+    let injected = AtomicBool::new(false);
+    let transient_injected = AtomicBool::new(false);
+    let handler = EventHandler::callback(move |event| {
+        let event = match event {
+            CommandEvent::Started(event) => {
+                let business_commit = event.command_name == "commitTransaction"
+                    && capture.lock().unwrap().iter().any(|item| {
+                        matches!(item, W8Command::Started { command, .. }
+                            if w8_proposal_mutation(command, &proposal_id)
+                                && command.get("lsid") == event.command.get("lsid")
+                                && command.get("txnNumber") == event.command.get("txnNumber"))
+                    });
+                let transient = w8_proposal_mutation(&event.command, &proposal_id)
+                    && !transient_injected.swap(true, Ordering::SeqCst);
+                let unknown = business_commit && !injected.swap(true, Ordering::SeqCst);
+                if transient || unknown {
+                    let data = if transient {
+                        doc! {"failCommands":["update"],
+                        "errorCode":112,"errorLabels":["TransientTransactionError"]}
+                    } else {
+                        doc! {"failCommands":["commitTransaction"],
+                        "writeConcernError":{"code":64,"errmsg":"injected uncertain learning commit"},
+                        "errorLabels":["UnknownTransactionCommitResult"]}
+                    };
+                    control
+                        .get()
+                        .expect("guard controller installed before tested operations")
+                        .arm(doc! {"times":1}, data)
+                        .unwrap();
+                }
+                W8Command::Started {
+                    request_id: event.request_id,
+                    name: event.command_name,
+                    command: event.command,
+                }
+            }
+            CommandEvent::Failed(event) => W8Command::Finished {
+                request_id: event.request_id,
+                transient: event.failure.contains_label("TransientTransactionError"),
+                unknown: event
+                    .failure
+                    .contains_label("UnknownTransactionCommitResult"),
+            },
+            CommandEvent::Succeeded(event) => {
+                let labels = event.reply.get_array("errorLabels").ok();
+                let has = |label: &str| {
+                    labels.is_some_and(|labels| labels.iter().any(|v| v.as_str() == Some(label)))
+                };
+                W8Command::Finished {
+                    request_id: event.request_id,
+                    transient: has("TransientTransactionError"),
+                    unknown: has("UnknownTransactionCommitResult"),
+                }
+            }
+            _ => return,
+        };
+        capture.lock().unwrap().push(event);
+    });
+    let guard = Guard::acquire(&f.state.db, Some(handler)).await;
+    assert!(controller.set(guard.controller()).is_ok());
+    f.state.db = guard.database().clone();
+    (guard, commands)
+}
+
+fn w8_assert_single_mutation_commit_retry(commands: &W8Commands, proposal_id: &str) {
+    let commands = commands.lock().unwrap();
+    let mutations: Vec<_> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            W8Command::Started { command, .. } if w8_proposal_mutation(command, proposal_id) => {
+                Some((index, command))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        mutations.len() >= 2,
+        "exercise the injected pre-commit transient retry"
+    );
+    let same_transaction = |a: &bson::Document, b: &bson::Document| {
+        a.get("lsid") == b.get("lsid") && a.get("txnNumber") == b.get("txnNumber")
+    };
+    // Any complete body retry must be explained by an actual transient label
+    // on THAT transaction, before any commit or unknown result. Never relax
+    // this to a bound on the number of proposal updates.
+    for pair in mutations.windows(2) {
+        let ((start, transaction), (end, next)) = (pair[0], pair[1]);
+        assert!(!same_transaction(transaction, next));
+        let attempts = &commands[start..end];
+        assert!(!attempts.iter().any(|event| matches!(event,
+            W8Command::Started { name, command, .. }
+                if name == "commitTransaction" && same_transaction(transaction, command))));
+        let transient = attempts.iter().any(|event| match event {
+            W8Command::Finished {
+                request_id,
+                transient: true,
+                unknown: false,
+            } => attempts.iter().any(|started| {
+                matches!(started, W8Command::Started { request_id: id, command, .. }
+                    if id == request_id && same_transaction(transaction, command))
+            }),
+            _ => false,
+        });
+        assert!(
+            transient,
+            "every pre-commit body retry requires its own TransientTransactionError label"
+        );
+        assert!(
+            !attempts
+                .iter()
+                .any(|event| matches!(event, W8Command::Finished { unknown: true, .. }))
+        );
+    }
+    let (last_mutation, transaction) = *mutations.last().unwrap();
+    let commits: Vec<_> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            W8Command::Started {
+                request_id,
+                name,
+                command,
+            } if name == "commitTransaction" && same_transaction(transaction, command) => {
+                Some((index, request_id))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commits.len(),
+        2,
+        "retry only commit on the same business transaction"
+    );
+    for (attempt, (index, request_id)) in commits.iter().enumerate() {
+        assert!(*index > last_mutation);
+        let outcome = commands
+            .iter()
+            .find_map(|event| match event {
+                W8Command::Finished {
+                    request_id: id,
+                    transient,
+                    unknown,
+                } if id == *request_id => Some((*transient, *unknown)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(outcome, (false, attempt == 0));
+    }
+    assert!(!commands[commits[0].0..].iter().any(|event| matches!(event,
+        W8Command::Started { name, command, .. }
+            if (name == "abortTransaction" && same_transaction(transaction, command))
+                || w8_proposal_mutation(command, proposal_id))));
+    eprintln!(
+        "w8 transaction trace: {} labeled pre-commit transient retries; 1 business commit with UnknownTransactionCommitResult; 1 same-transaction successful recommit; 0 body replays after unknown",
+        mutations.len() - 1
+    );
+}
+
+async fn w8_reduced_draft(f: &Fixture) -> AssistantAgentLearningProposal {
+    let mut value = input(&f.chat.agent_id);
+    value["scope"] = json!({"status":"reduced","omissions":["w8_private_omission_content"]});
+    make(f, value).await.0
+}
+
+#[tokio::test]
+async fn w8_assist_scope_acceptance_standard_c2_rolls_back_and_preserves_replay() {
+    for case in W8_STANDARD_CASES {
+        let mut f = fixture(&format!("w8_assist_scope_{case}")).await;
+        let row = w8_reduced_draft(&f).await;
+        let binding = publication::binding(
+            &row,
+            row.publication.as_ref().unwrap(),
+            row.agent_skills_revision,
+        );
+        let allowed = w8_standard_admission(&mut f, case).await;
+        let result =
+            review::accept_scope(&f.state, &f.owner, &row.agent_id, &row.id, &binding, true).await;
+        if allowed {
+            result.unwrap();
+            let count = crate::services::audit_state_service::load(&f.state.db)
+                .await
+                .unwrap()
+                .pending_count;
+            // Recognize durable consent even after new Standard work closes.
+            w8_standard_admission(&mut f, "count").await;
+            review::accept_scope(&f.state, &f.owner, &row.agent_id, &row.id, &binding, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                crate::services::audit_state_service::load(&f.state.db)
+                    .await
+                    .unwrap()
+                    .pending_count,
+                100_000
+            );
+            assert!(count > 0);
+        } else {
+            assert!(matches!(
+                result,
+                Err(AppError::AuditAdmissionClosed { .. } | AppError::AuditWitnessDiverged)
+            ));
+        }
+        let current = stored(&f, &row.id).await;
+        assert_eq!(
+            current
+                .publication
+                .unwrap()
+                .reduced_scope_acceptance
+                .is_some(),
+            allowed
+        );
+        let logs: Vec<bson::Document> = f.state.db.collection(crate::models::audit_log::COLLECTION_NAME)
+            .find(doc! {"event_type":"assistant_skill_reduced_scope_accepted","event_data.proposal_id":&row.id})
+            .await.unwrap().try_collect().await.unwrap();
+        assert_eq!(logs.len(), usize::from(allowed));
+        if allowed {
+            assert_eq!(logs[0].get_str("user_id").unwrap(), f.owner);
+            let data = logs[0].get_document("event_data").unwrap();
+            assert_eq!(data.len(), 3);
+            assert_eq!(data.get_i64("omission_count").unwrap(), 1);
+            assert!(!format!("{logs:?}").contains("w8_private_omission_content"));
+        }
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn w8_assist_scope_acceptance_unknown_commit_and_append_failure_are_atomic() {
+    let mut f = fixture("w8_assist_scope_unknown").await;
+    let row = w8_reduced_draft(&f).await;
+    let binding = publication::binding(
+        &row,
+        row.publication.as_ref().unwrap(),
+        row.agent_skills_revision,
+    );
+    let logs = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    f.state
+        .db
+        .run_command(doc! {"collMod":crate::models::audit_log::COLLECTION_NAME,
+        "validator":{"w8_forced_rejection":{"$exists":true}}})
+        .await
+        .unwrap();
+    assert!(
+        review::accept_scope(&f.state, &f.owner, &row.agent_id, &row.id, &binding, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        stored(&f, &row.id)
+            .await
+            .publication
+            .unwrap()
+            .reduced_scope_acceptance
+            .is_none()
+    );
+    assert_eq!(logs.count_documents(doc! {"event_type":"assistant_skill_reduced_scope_accepted","event_data.proposal_id":&row.id}).await.unwrap(), 0);
+    f.state
+        .db
+        .run_command(doc! {"collMod":crate::models::audit_log::COLLECTION_NAME,"validator":{}})
+        .await
+        .unwrap();
+    let (_fault, commands) = w8_unknown_commit(&mut f, &row.id).await;
+    review::accept_scope(&f.state, &f.owner, &row.agent_id, &row.id, &binding, true)
+        .await
+        .unwrap();
+    w8_assert_single_mutation_commit_retry(&commands, &row.id);
+    assert!(
+        stored(&f, &row.id)
+            .await
+            .publication
+            .unwrap()
+            .reduced_scope_acceptance
+            .is_some()
+    );
+    assert_eq!(logs.count_documents(doc! {"event_type":"assistant_skill_reduced_scope_accepted","event_data.proposal_id":&row.id}).await.unwrap(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn w8_assist_scope_acceptance_keeps_two_people_and_two_orgs_separate() {
+    use crate::{
+        models::{assistant_agent::AgentKind, org_membership::OrgRole, user::UserType},
+        test_utils::{test_membership, test_user},
+    };
+    let f = fixture("w8_assist_scope_orgs").await;
+    let template = w8_reduced_draft(&f).await;
+    let mut people = vec![f.owner.clone(), Uuid::new_v4().to_string()];
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&people[1], UserType::Person))
+        .await
+        .unwrap();
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        learning::FLAG_KEY,
+        &FlagTarget::User(people[1].clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let agent =
+        crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+    let mut rows = Vec::new();
+    for actor in &people {
+        let org = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection(crate::models::org_membership::COLLECTION_NAME)
+            .insert_one(test_membership(&org, actor, OrgRole::Member, None))
+            .await
+            .unwrap();
+        let mut agent = agent.clone();
+        agent.id = Uuid::new_v4().to_string();
+        agent.user_id = org.clone();
+        agent.kind = AgentKind::Specialist;
+        agent.name = format!("w8-{}", rows.len());
+        f.state
+            .db
+            .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .insert_one(&agent)
+            .await
+            .unwrap();
+        let mut row = template.clone();
+        row.id = Uuid::new_v4().to_string();
+        row.agent_id = agent.id;
+        row.owner_id = org;
+        row.publication.as_mut().unwrap().operation_id = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        rows.push(row);
+    }
+    for row in rows {
+        let actor = people.remove(0);
+        let other = if actor == f.owner {
+            people[0].as_str()
+        } else {
+            f.owner.as_str()
+        };
+        let binding = publication::binding(
+            &row,
+            row.publication.as_ref().unwrap(),
+            row.agent_skills_revision,
+        );
+        assert!(
+            review::accept_scope(&f.state, other, &row.agent_id, &row.id, &binding, true)
+                .await
+                .is_err()
+        );
+        review::accept_scope(&f.state, &actor, &row.agent_id, &row.id, &binding, true)
+            .await
+            .unwrap();
+        let log = f.state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {"event_type":"assistant_skill_reduced_scope_accepted","event_data.proposal_id":&row.id}).await.unwrap().unwrap();
+        assert_eq!(log.get_str("user_id").unwrap(), actor);
+        assert_ne!(log.get_str("user_id").unwrap(), row.owner_id);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
 fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }

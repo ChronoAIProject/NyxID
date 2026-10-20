@@ -19,6 +19,25 @@ fn target_unresolved() -> AppError {
     AppError::Conflict("legacy_target_unresolved".into())
 }
 
+/// Fail before registry I/O when Standard work is already closed. This read-only
+/// snapshot reserves nothing: registry proxy audits are real pending work, and
+/// the mutation must still pass its authoritative check in its own transaction.
+async fn precheck_standard(state: &AppState) -> AppResult<()> {
+    let context = (&state.db, state.audit_runtime.as_ref());
+    crate::services::audit_runtime::transaction::run(
+        &state.db,
+        &context,
+        |session, (db, runtime)| {
+            Box::pin(async move {
+                runtime
+                    .require_new_in_session(db, session, AuditTier::Standard, 1)
+                    .await
+            })
+        },
+    )
+    .await
+}
+
 /// Owner-driven rebuild of a legacy update package. An authored draft is
 /// rebuilt from any of its cards (live or expired) and its new card is
 /// raised in that card's conversation; a learned draft is rebuilt from the
@@ -158,6 +177,7 @@ async fn rebuild<R: OrnnReader>(
         .await?;
         return Err(AppError::Conflict("base_skill_changed".into()));
     }
+    precheck_standard(state).await?;
     let snapshot = match publication::snapshot(reader, actor, base).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -211,6 +231,7 @@ async fn rebuild<R: OrnnReader>(
         "$or":[{"publication.lease_expires_at":bson::Bson::Null},{"publication.lease_expires_at":{"$lte":bson::DateTime::now()}}]});
     let db = state.db.clone();
     let audit_key = state.audit_chain_hmac_key.clone();
+    let runtime = state.audit_runtime.clone();
     let owner = owner.clone();
     let (old_operation, old_sha, new_revision) =
         (p.operation_id.clone(), p.sha256.clone(), row.revision + 1);
@@ -239,6 +260,9 @@ async fn rebuild<R: OrnnReader>(
                 if changed.modified_count != 1 {
                     return Err(conflict());
                 }
+                runtime
+                    .require_new_in_session(&db, session, AuditTier::Standard, 1)
+                    .await?;
                 audit_service::log_actor_event_in_session(
                     &db,
                     session,
@@ -421,6 +445,7 @@ where
             "min_age_hours must be 24..=8760 and limit 1..=200".into(),
         ));
     }
+    precheck_standard(state).await?;
     let deadline = tokio::time::Instant::now() + STALE_RELEASE_DEADLINE;
     let cutoff = bson::DateTime::from_chrono(Utc::now() - Duration::hours(min_age_hours));
     let (aged, unstamped) = stale_candidate_filters(cutoff);
@@ -482,23 +507,6 @@ where
             .await;
     results.sort_by_key(|(index, _)| *index);
     let rows: Vec<StaleReleaseRow> = results.into_iter().map(|(_, row)| row).collect();
-    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
-    for row in &rows {
-        *counts.entry(row.decision.as_str()).or_default() += 1;
-    }
-    if let Err(error) = audit_service::log_actor_event(
-        state.db.clone(),
-        operator,
-        "assistant_learning_publication_stale_release_summary",
-        Some(
-            json!({"batch_id":batch_id,"dry_run":dry_run,"min_age_hours":min_age_hours,
-            "limit":limit,"decisions":counts}),
-        ),
-    )
-    .await
-    {
-        tracing::error!(%error, batch_id, "Stale skill publication release summary audit failed");
-    }
     Ok(
         json!({"batch_id":batch_id,"dry_run":dry_run,"min_age_hours":min_age_hours,"limit":limit,
         "evidence":ABSENCE_ONLY,"residual":STALE_RELEASE_RESIDUAL,"rows":rows}),
@@ -670,6 +678,7 @@ async fn release_one(
         "package_sha256":evidence.package_sha256,"min_age_hours":evidence.min_age_hours});
     let db = state.db.clone();
     let audit_key = state.audit_chain_hmac_key.clone();
+    let runtime = state.audit_runtime.clone();
     let operator = operator.clone();
     let (target, operation, sha) = (target.to_owned(), p.operation_id.clone(), p.sha256.clone());
     let mut session = db.client().start_session().await?;
@@ -705,6 +714,9 @@ async fn release_one(
                 }
                 let mut event = event.clone();
                 event["previous_state"] = barrier.state.into();
+                runtime
+                    .require_new_in_session(&db, session, AuditTier::Standard, 1)
+                    .await?;
                 audit_service::log_actor_event_in_session(
                     &db,
                     session,
