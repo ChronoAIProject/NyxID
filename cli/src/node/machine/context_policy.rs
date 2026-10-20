@@ -22,6 +22,40 @@ fn entry(tag: u16, perm: u16, id: u32) -> [u8; 8] {
     bytes[4..].copy_from_slice(&id.to_le_bytes());
     bytes
 }
+/// Browser contexts share a policy-reading group with their legacy role. That
+/// group must never confer home access. Replace any old ACL with one exact UID
+/// grant, while the supervisor owns the directory and can prevent chmod.
+pub(super) fn legacy_home(file: &File, uid: u32) -> Result<()> {
+    let meta = file.metadata()?;
+    ensure!(
+        uid != 0 && meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o077 == 0,
+        "context_legacy_home_gate_invalid"
+    );
+    let mut bytes = 2u32.to_le_bytes().to_vec();
+    for e in [
+        entry(1, 7, UNDEFINED),
+        entry(2, 7, uid),
+        entry(4, 0, UNDEFINED),
+        entry(16, 7, UNDEFINED),
+        entry(32, 0, UNDEFINED),
+    ] {
+        bytes.extend_from_slice(&e);
+    }
+    ensure!(
+        unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                ATTRIBUTE.as_ptr(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                0,
+            )
+        } == 0,
+        "context_legacy_home_acl_unavailable"
+    );
+    file.sync_all()?;
+    Ok(())
+}
 fn named_access(file: &File, uid: u32, allow: u16) -> Result<()> {
     let meta = file.metadata()?;
     ensure!(

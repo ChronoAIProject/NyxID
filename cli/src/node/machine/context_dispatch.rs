@@ -3,7 +3,7 @@
 //! recovery path. Parent jobs/gateway/authority fences remain node-wide.
 use super::{
     Runtime,
-    context_runtime::{Store, protect_legacy_roots},
+    context_runtime::{Store, protect_legacy_browser_home, protect_legacy_roots},
     cua, files,
 };
 use anyhow::{Context, Result, ensure};
@@ -192,10 +192,17 @@ impl Runtime {
             roots.push(self.identity.home.clone());
         }
         let legacy = self.identity.clone();
+        let browsers = [
+            Some(self.browser_identity.clone()),
+            self.dev_identity.clone(),
+        ];
         let a = authority.clone();
         let store = contexts.store.take();
         let (store, prepared) = tokio::task::spawn_blocking(move || -> Result<_> {
             protect_legacy_roots(&roots, &legacy).context(Stage("legacy_roots"))?;
+            for browser in browsers.into_iter().flatten() {
+                protect_legacy_browser_home(&browser).context(Stage("legacy_browser_home"))?;
+            }
             let mut store = match store {
                 Some(s) => s,
                 None => Store::open(&directory, &node).context(Stage("allocation_store"))?,

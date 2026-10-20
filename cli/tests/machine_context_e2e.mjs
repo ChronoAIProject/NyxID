@@ -177,8 +177,8 @@ else: raise AssertionError('cross-context native socket accessible')`]);
    const policyGroup=actor===allocation(from).command_uid?undefined:run('id',['-g',actor===allocation(from).browsers['1'].secure_uid?legacyUsers[1]:legacyUsers[2]]).trim();
    run('setpriv',[`--reuid=${actor}`,`--regid=${actor}`,...(policyGroup?[`--groups=${policyGroup}`]:['--clear-groups']),'python3','-c',`import os
 for path in ${JSON.stringify(denied)}:
- assert not os.access(path,os.R_OK), 'cross-context or legacy read permitted'
- assert not os.access(path,os.W_OK), 'cross-context or legacy write permitted'`]);
+ assert not os.access(path,os.R_OK), 'cross-context or legacy read permitted: '+path
+ assert not os.access(path,os.W_OK), 'cross-context or legacy write permitted: '+path`]);
   }
   for(const targetRole of ['secure','dev']) {
    const targetUid=allocation(to).browsers['1'][`${targetRole}_uid`];

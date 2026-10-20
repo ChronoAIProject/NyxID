@@ -405,6 +405,38 @@ pub fn protect_legacy_roots(roots: &[PathBuf], legacy: &Identity) -> Result<()> 
     Ok(())
 }
 
+pub fn protect_legacy_browser_home(legacy: &Identity) -> Result<()> {
+    ensure!(
+        legacy.uid != 0 && legacy.gid != 0,
+        "context_legacy_identity_required"
+    );
+    let parent = protected(legacy.home.parent().context("context_legacy_home_unsafe")?)?;
+    let name = std::ffi::CString::new(
+        legacy
+            .home
+            .file_name()
+            .context("context_legacy_home_unsafe")?
+            .as_bytes(),
+    )?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_DIRECTORY | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    ensure!(fd >= 0, "context_legacy_home_unsafe");
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let file = File::from(fd.try_clone()?);
+    let meta = file.metadata()?;
+    ensure!(
+        meta.uid() == legacy.uid || (meta.uid() == 0 && meta.gid() == 0),
+        "context_legacy_home_unsafe"
+    );
+    own(&fd, 0, 0, 0o700)?;
+    super::context_policy::legacy_home(&file, legacy.uid)
+}
+
 pub struct BrowserResources {
     _secure_display: super::dev_display::Server,
     _dev_display: super::dev_display::Server,
@@ -585,6 +617,51 @@ mod tests {
             (0, 65534, 0o770)
         );
         assert_eq!(std::fs::metadata(workspace).unwrap().uid(), 65534);
+    }
+    #[test]
+    fn legacy_browser_home_denies_policy_group_but_preserves_legacy_uid_access() {
+        let Some(root) = root_fixture() else { return };
+        use std::os::unix::process::CommandExt;
+        let home = root.path().join("legacy-browser");
+        std::fs::create_dir(&home).unwrap();
+        super::super::browser::chown(&home, 65534, 65534).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let mut identity = Identity::resolve(None).unwrap();
+        identity.uid = 65534;
+        identity.gid = 65534;
+        identity.home = home.clone();
+        for _ in 0..2 {
+            protect_legacy_browser_home(&identity).unwrap();
+            for (uid, script) in [
+                (
+                    65534,
+                    "test -r \"$1\" && touch \"$1/ours\" && ! chmod 0755 \"$1\" 2>/dev/null",
+                ),
+                (
+                    65533,
+                    "test ! -r \"$1\" && test ! -w \"$1\" && test ! -x \"$1\"",
+                ),
+            ] {
+                let mut command = std::process::Command::new("/bin/sh");
+                command.args(["-c", script, "fixture"]).arg(&home);
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::setgroups(1, [65534].as_ptr()) != 0
+                            || libc::setgid(uid) != 0
+                            || libc::setuid(uid) != 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                assert!(command.status().unwrap().success(), "UID {uid}");
+            }
+        }
+        let link = root.path().join("substitute");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        identity.home = link;
+        assert!(protect_legacy_browser_home(&identity).is_err());
     }
     #[test]
     fn allocation_store_rejects_parallel_supervisors_symlinks_and_corruption() {
