@@ -320,6 +320,15 @@ pending count and recalculating the remaining oldest reservation share one
 majority+journal Mongo transaction. Local materialization never releases it.
 Pending requests are rechecked against real canonical rows before any retry.
 
+A sibling dispatch claim can consume an advance request's predecessor without
+moving the audit head. After authenticating that successor history, the relay
+can rebuild an unaccepted advance from the unchanged canonical rows at the new
+receipt cursor: its old predecessor is spent, and its links extend beyond the
+authenticated head, so the old request cannot have been accepted or be accepted
+later. While its predecessor remains current, retries retain the original request
+identity. This advance-only rescheduling never reassigns an effect claim or
+authorizes another provider send.
+
 Conflicting enrollment/history/local rows latch a durable incident and remove
 live contact. Startup reloads that incident even while the witness is unreachable.
 There is no application method to clear it. Removing configuration after
@@ -447,12 +456,14 @@ guest; it creates/deletes only its own `/tmp/nyxid-w8-witness-permissions-*` fix
 It fails rather than skips if prerequisites are missing. Batch command/result
 counts are in [SECURITY_W8_LOG.md](SECURITY_W8_LOG.md).
 
-Pending: integration of the client with the server's reserved AppError block,
-independent deployment/readiness and writer drain, Mongo outbox/lag counters,
-live local-row verification against the witness, retention/checkpoint and
-key-version transitions, provider dispatch one-shot consumption/reconciliation,
-full restored-Mongo/paused-provider tests, scoped audit UI, and the remaining
-critical workflow conversions. Keep these pending in the living inventory.
+W8-4 adds application configuration, relay, local-row comparisons, AppErrors,
+outbox/lag diagnostics and one-shot intent/claim consumption. Its signed-provider
+tests exercise restored Mongo, response loss and paused/restarted dispatch at
+the foundation boundary. Pending: replica capability/drain integration, protected
+retained verification/checkpoints and key transitions, independent production
+provisioning, the Object Lock provider, scoped audit UI, and every remaining
+critical workflow's adoption and provider-specific reconciliation/crash tests.
+Keep these pending in the living inventory.
 
 ## Admin-custody replacement and DR restore
 

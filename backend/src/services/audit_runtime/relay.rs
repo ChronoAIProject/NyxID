@@ -584,9 +584,16 @@ impl WitnessRelay {
                 return Err(AppError::AuditWitnessDiverged.into());
             }
             let pending = saved.pending.filter(|r| {
-                r.links
-                    .last()
-                    .is_some_and(|l| l.seq > receipt.body.head.seq)
+                // Authenticated history consumed this conditional predecessor.
+                // A request extending beyond the observed head cannot have
+                // been accepted in that history, and can never be accepted at
+                // its spent predecessor now. Rebuild from canonical rows at
+                // the new cursor; preserve identical retry only while its
+                // original predecessor remains the observed tip.
+                r.previous_receipt == receipt_digest(receipt)
+                    && r.links
+                        .last()
+                        .is_some_and(|l| l.seq > receipt.body.head.seq)
             });
             progress.update_one(doc! {"_id": &state.id}, doc! {"$set": {
                 "receipt": bson::to_bson(receipt).map_err(|_| AppError::AuditIntegrityConflict)?,

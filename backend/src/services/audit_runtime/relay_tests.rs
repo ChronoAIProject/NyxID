@@ -524,6 +524,57 @@ async fn audit_witness_relay_detects_database_restore_with_a_self_consistent_old
 }
 
 #[tokio::test]
+async fn audit_witness_relay_rebuilds_unaccepted_batch_after_authenticated_predecessor_consumption()
+{
+    let f = Fixture::new("audit_relay_spent_predecessor").await;
+    f.event().await;
+    f.relay.tick().await.unwrap();
+    f.relay.tick().await.unwrap();
+    let prior = f.provider.receipts.lock().unwrap().last().unwrap().clone();
+    f.event().await;
+    let queued = f
+        .relay
+        .prepare_batch()
+        .await
+        .unwrap_or_else(|_| panic!("prepare conditional batch"))
+        .unwrap();
+    assert_eq!(queued.previous_receipt, receipt_digest(&prior));
+    // A sibling claims an already witnessed intent while this batch is paused
+    // before send. The audit head stays fixed, but the predecessor is spent.
+    f.provider
+        .claim_dispatch(DispatchRequest {
+            chain_id: prior.body.chain_id,
+            operation_id: Uuid::new_v4(),
+            attempt_id: Uuid::new_v4(),
+            process_id: Uuid::new_v4(),
+            intent_seq: prior.body.head.seq,
+            intent_hash: prior.body.head.entry_hash.clone(),
+            previous_receipt: receipt_digest(&prior),
+        })
+        .await
+        .unwrap();
+    f.relay.tick().await.unwrap();
+    f.relay.tick().await.unwrap();
+    let state = audit_state_service::load(&f.db).await.unwrap();
+    assert_eq!(state.witnessed_seq, 2);
+    assert_eq!(state.pending_count, 0);
+    assert_eq!(
+        f.runtime
+            .diagnostics(Some(&state), chrono::Utc::now())
+            .witness,
+        WitnessState::Ready
+    );
+    let receipts = f.provider.receipts.lock().unwrap();
+    assert_eq!(receipts.len(), 4);
+    assert!(receipts.iter().all(|r| !matches!(&r.body.event,
+        WitnessEvent::Advance { request } if request.request_id == queued.request_id)));
+    assert!(
+        matches!(&receipts[3].body.event, WitnessEvent::Advance {request}
+        if request.links == queued.links && request.previous_receipt == receipt_digest(&receipts[2]))
+    );
+}
+
+#[tokio::test]
 async fn audit_witness_relay_rechecks_persisted_request_and_does_not_sign_changed_outbox() {
     let f = Fixture::new("audit_relay_mutation").await;
     f.event().await;
