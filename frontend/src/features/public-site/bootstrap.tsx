@@ -6,6 +6,9 @@ export async function bootPublicSite() {
   const root = document.getElementById("root");
   if (!root) throw new Error("Root element not found");
   const router = publicRouter();
+  // TanStack's native SSR marker preserves its server boundary shape. Loaders
+  // are resolved explicitly here, so no serialized private application state is needed.
+  if (root.dataset.publicRender === "v1") router.ssr = { manifest: undefined };
   await router.load();
   const tree = <RouterProvider router={router} />;
   if (root.dataset.publicRender === "v1")
