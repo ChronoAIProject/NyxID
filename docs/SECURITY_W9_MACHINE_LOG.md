@@ -105,3 +105,15 @@
 - Container E2E sets NYXID_MACHINE_SEPARATION=require-separated through setup’s existing environment contract; no entrypoint argument/parser or Dockerfile changes.
 - Shared-target cargo test --locked -p nyxid-cli --test node_docker -- --test-threads=1: 6 passed / 0 failed / 0 ignored; rustfmt, node --check and scoped git diff --check pass.
 - Hosted container execution and Chromium timeout calibration remain pending; this fixture commit does not establish Docker/runtime acceptance.
+
+## D-5 — native acceptance in progress; browser probe revision pending
+- Source commits `001fae5aa` and `7bf31eadb`: native profile traversal preserves private node state; context useradd requests no subordinate UID/GID allocations. Explicit owned pathspecs only.
+- Guest archive/committed deltas through 7bf31eadb, native Ubuntu 24.04.5/aarch64/kernel7.0/ABI8; no writable host mount. AppArmor restriction=1 and executable attachment retained.
+- Native run: fresh required separate-users setup/evidence, two-context commands/files/reconnect, actual daemon restart/journal/private-file persistence pass; browser cold-start fails; login/browser/display/socket/quarantine/final-renderer acceptance not reached.
+- Linux unit filters on traversal revision: context 13 + config 4 + setup 12 + separation 6 + process 6 + context-runtime 4 + context-policy 1 = 46 pass/0 fail/0 ignored; root context-runtime filter on final 7bf31eadb source also passes 4/0/0 (overlap, not additive).
+- Full existing adversarial check.py --disposable --native-profile: 44 pass/0 fail, no tool failures; negative controls and documented metadata/shm/pathname-socket residuals retained. Temporary fixture dependency correction imports committed production modules; checked-in Cargo approval pending.
+- Strict Linux machine Clippy passes; CLI Clippy fails with 7 A-owned dead-code diagnostics in secret_snapshot/secret_transaction/storage, none D-owned; no suppression.
+- Guest mutations: copied archives/cache/ws, installed libnss3-tools/x11-utils/g++/nodejs/npm/cargo/rustc dependencies, created disposable native profiles/role users and m13 test users without subids; diagnostic UID21999 removed; global managed resources refreshed by setup.
+- Root-owned /etc/chromium-browser -> /etc/chromium alias exposes the same protected policies to real Snap Chromium. Wrappers restored; fixture daemons/browser processes stopped; no AppArmor/sysctl/subid relaxation.
+- Root cause: policy-loaded --dump-dom refuses DevTools, emits no DOM and times out even at 120s. No production bound raised; v3 OS-observation correction proposed to PM, not implemented.
+- Prototype fresh-profile timings: 24 positive namespace/NNP/seccomp observations, median0.128s/max0.289s; 4 stricter descendant/executable/additional-filter controls pass, max1.445s. Hosted timings and production calibration remain pending.

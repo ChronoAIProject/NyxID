@@ -759,24 +759,45 @@ Agent labels are batch-resolved from the listed contexts' agent IDs, including
 organization agents. Shared Linux secure/dev display control remains independent;
 a developer-display takeover does not select the secure browser.
 
-Native validation remains a release gate. Run the existing machine context
-harness on a Linux VM provisioned with `--separate-users` (for example, the
-`cli/tests/machine_context_spike` fixture plus `cli/tests/machine_context_e2e.mjs`)
-and repeat the two-context browser/profile/display/D-Bus/native-host denial,
-restart, saved-login binding and generation-quarantine cases. This worktree has
-no Linux VM provider available (`limactl`, `multipass`, QEMU and Tart are absent),
-so no native VM result is claimed here. Unsupported hosts return an explicit
-separated-unavailable reason; they never silently become `shared_legacy`.
+Native browser acceptance remains a release gate. D-5 ran natively in the
+expendable Lima guest `nyxid-security-validation`: Ubuntu 24.04.5 aarch64,
+kernel 7.0.0-38-generic, Landlock ABI 8, with the AppArmor unprivileged-userns
+restriction still enabled. The guest uses an enforcing executable AppArmor
+attachment for the real Snap Chromium binary. The shared worktree was copied
+from committed source into the guest; it was not mounted writable.
 
-A feasible next validation environment is a disposable arm64 Lima VM using
-Apple's Virtualization.framework (or a Colima-managed VM accessed through SSH),
-with host-directory sharing disabled. Run the daemon natively inside the guest
-with `--separate-users`, not inside Docker. Ubuntu 24.04 needs an HWE kernel
-providing Landlock ABI 6 or newer: its original 6.8 kernel is insufficient.
-Debian 13 with kernel 6.12 is another candidate. Live-probe Landlock and retain
-the guest's AppArmor policy. Adapt the container harness's fixed paths and
-entrypoint checks to the native setup, then exercise two concurrent contexts,
-browser relaunch/restart, cross-context denials, fill binding and quarantine.
-The earlier QEMU/TCG spike proved an independent Linux kernel can run locally,
-but did not validate native browser lifecycle. No VM tooling was installed for
-this follow-up; the flag remains off pending that release gate.
+The native runner is `cli/tests/machine_native_e2e.mjs --disposable`, with
+`NYXID_TEST_CLI` and `NYXID_TEST_CUA_DRIVER` naming the built CLI and pinned
+Linux driver. On committed D-5 source through `7bf31eadb`, fresh
+`--separate-users --separation require-separated` setup, two-context command/file
+operations, reconnect replay and a real daemon restart with unchanged allocation
+journal/private files passed before browser startup failed. That run did not
+reach saved-login binding, browser/display/D-Bus/native-host cross-context
+denials, quarantine or the final renderer checks; none is claimed as passing.
+
+The existing adversarial `machine_context_spike/check.py --disposable
+--native-profile` suite passed all 44 checks, including its negative controls,
+private roots, inherited descriptors, signals, ptrace, sockets and offline tool
+workloads. The launcher imported the committed production process/sandbox
+modules through a temporary standalone crate with the missing `thiserror` and
+Tokio I/O/time dependencies; the checked-in fixture manifests remain unchanged.
+System metadata mutation, shared-memory names/capacity and public pathname Unix
+sockets retain their documented residuals.
+
+The guest's Chromium reads `/etc/chromium-browser/policies`; setup currently
+writes `/etc/chromium/policies`. A root-owned alias made it load the same
+protected files without changing their contents or permissions. With the secure
+policy actually loaded, Chromium refuses the DevTools transport used internally
+by `--dump-dom`, logging that remote debugging is disallowed by the administrator.
+The v2 `chrome://sandbox` probe then produced no output and still had not finished
+at 120 seconds. Increasing the five-second timeout alone does not fix this
+policy conflict. Keep `RemoteDebuggingAllowed=false`; the policy-compatible
+probe correction and full native browser rerun are pending PM review.
+
+A diagnostic prototype without DevTools observed actual renderer namespaces,
+NNP and seccomp under both browser identities. Its preliminary timings are not
+a calibration of shipped production code or hosted amd64 acceptance. Hosted
+Docker/amd64 timing and lifecycle checks are still required. Unsupported or
+unobserved hosts must never silently become `shared_legacy`; existing stored
+assignments retain their mode. The feature remains gated pending browser and
+rollout acceptance.
