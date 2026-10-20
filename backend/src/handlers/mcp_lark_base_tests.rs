@@ -947,11 +947,13 @@ async fn lark_base_write_uncertain_replay_never_calls_provider_and_definite_corr
     for code in [1254001, 1254607, 1254291, 1255006, 1254608, 999999] {
         let u = setup("base_create_outcome").await;
         let auth = authenticate(&u.f).await;
-        let fail = Mock::given(method("POST"))
+        Mock::given(method("POST"))
             .and(path("/open-apis/bitable/v1/apps/base/tables/table/records"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code":code})))
             .with_priority(1)
-            .mount_as_scoped(&u.server)
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&u.server)
             .await;
         assert_error(&call(&u, &auth, false, args(&u.attachment_id)).await);
         let old = ledger(&u).await;
@@ -963,7 +965,6 @@ async fn lark_base_write_uncertain_replay_never_calls_provider_and_definite_corr
                 crate::models::lark_base_write::WriteState::Uncertain
             }
         );
-        drop(fail);
         let mut correction = args(&u.attachment_id);
         correction["fields"]["Amount"] = json!(13.34);
         let response = call(&u, &auth, true, correction).await;
