@@ -311,7 +311,7 @@ class UpdateCoverage(unittest.TestCase):
                         pattern = pattern.replace('(?<currentValue>', '(?P<currentValue>').replace('(?<currentDigest>', '(?P<currentDigest>')
                         matches.extend(re.finditer(pattern, (ROOT / name).read_text()))
             self.assertEqual(len(matches), 1, manager['depNameTemplate'])
-        self.assertEqual(dependencies, {'axodotdev/cargo-dist', 'rust-lang/rustup', 'rust-secure-code/cargo-auditable',
+        self.assertEqual(dependencies, {'axodotdev/cargo-dist', 'rust-lang/rustup', 'rust-secure-code/cargo-auditable', 'nextest-rs/nextest',
                                        'anchore/syft', 'rhysd/actionlint', 'cli/cli', 'gitleaks/gitleaks', 'aquasecurity/trivy', 'rustsec/rustsec', 'regclient/regclient', 'npm', 'node', 'rust', '@openai/codex', '@agentclientprotocol/codex-acp',
                                        'getheca/heca-artifacts', 'trycua/cua', 'https://github.com/ChronoAIProject/cma.git'})
 

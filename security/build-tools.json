@@ -71,6 +71,16 @@
     "integrity": "sha512-YTzL6QBEJXyHcTu0JiUc7RKMp+mzlJtl7rGLmERaXUQeFHIMc9atdr6G9M9C8vDWbv40epoTQAzNL2/PtZVDhQ==",
     "source": "https://registry.npmjs.org/npm/11.21.1"
   },
+  "cargo-nextest": {
+    "version": "0.9.146",
+    "targets": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/cargo-nextest-0.9.146-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428",
+        "source": "https://api.github.com/repos/nextest-rs/nextest/releases/tags/cargo-nextest-0.9.146"
+      }
+    }
+  },
   "cargo-auditable": {
     "version": "0.7.7",
     "targets": {

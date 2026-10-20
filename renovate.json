@@ -24,6 +24,18 @@
         "/^security/build-tools\\.json$/"
       ],
       "matchStrings": [
+        "\"cargo-nextest\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
+      ],
+      "depNameTemplate": "nextest-rs/nextest",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^cargo-nextest-(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^security/build-tools\\.json$/"
+      ],
+      "matchStrings": [
         "\"cargo-dist\":\\s*\\{\\s*\"version\":\\s*\"(?<currentValue>[^\"\\s]+)\""
       ],
       "depNameTemplate": "axodotdev/cargo-dist",

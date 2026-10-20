@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import itertools
+import json
+import os
+import subprocess
 import unittest
 import yaml
 from workflow_yaml import RUST_ACTION, load_unique, validate_rust_steps
@@ -126,6 +130,95 @@ class CatalogWorkflowBoundary(unittest.TestCase):
         checkout = next(step for step in publisher['steps'] if step.get('uses', '').startswith('actions/checkout@'))
         self.assertEqual(checkout['with']['ref'], '${{ github.workflow_sha }}')
         self.assertFalse(checkout['with']['persist-credentials'])
+
+
+
+class BackendTestPartitions(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.workflow = load_unique((self.root / '.github/workflows/ci.yml').read_text())
+        self.jobs = self.workflow['jobs']
+
+    def test_one_locked_archive_build_preserves_packages_features_and_toolchain(self):
+        build = self.jobs['backend-test-build']
+        self.assertEqual(build['needs'], 'changes')
+        self.assertEqual(build['timeout-minutes'], 90)
+        self.assertEqual(build['env']['CARGO_PROFILE_TEST_DEBUG'], 'line-tables-only')
+        commands = [step['run'] for step in build['steps'] if 'run' in step]
+        archives = [cmd for cmd in commands if 'cargo nextest archive' in cmd]
+        self.assertEqual(len(archives), 1)
+        self.assertIn('cargo nextest archive --locked -p nyxid -p nyxid-service-adapters --features nyxid/aws-kms,nyxid/gcp-kms --profile ci', archives[0])
+        self.assertIn('--archive-file "$RUNNER_TEMP/backend-tests.tar.zst"', archives[0])
+        self.assertNotIn('cargo nextest run', '\n'.join(commands))
+        self.assertNotIn('start-test-mongodb.sh', '\n'.join(commands))
+        upload = next(step for step in build['steps'] if step.get('name') == 'Upload backend test archive')
+        self.assertEqual(upload['with']['name'], 'backend-test-archive')
+        self.assertEqual(upload['with']['path'], '${{ runner.temp }}/backend-tests.tar.zst')
+        self.assertEqual(upload['with']['if-no-files-found'], 'error')
+        self.assertNotIn('if', upload)
+
+    def test_two_partitions_replay_same_archive_with_independent_mongo_and_reports(self):
+        run = self.jobs['backend-test-partition']
+        self.assertEqual(run['needs'], 'backend-test-build')
+        self.assertEqual(run['strategy'], {'fail-fast': False, 'matrix': {'partition': [1, 2]}})
+        self.assertEqual(run['timeout-minutes'], 90)
+        self.assertEqual(run['runs-on'], self.jobs['backend-test-build']['runs-on'])
+        mongo = next(step for step in run['steps'] if step.get('name') == 'Start transaction-capable MongoDB')
+        self.assertEqual(mongo['run'], 'bash .github/scripts/start-test-mongodb.sh')
+        self.assertNotIn('if', mongo)
+        download = next(step for step in run['steps'] if step.get('name') == 'Download backend test archive')
+        self.assertEqual(download['with']['name'], 'backend-test-archive')
+        command = next(step['run'] for step in run['steps'] if step.get('name') == 'Run backend test partition')
+        for arg in ('--archive-file "$RUNNER_TEMP/backend-test-archive/backend-tests.tar.zst"',
+                    '--workspace-remap "$GITHUB_WORKSPACE"', '--extract-to "$RUNNER_TEMP/backend-test-run"',
+                    '--partition hash:${{ matrix.partition }}/2', '--profile ci'):
+            self.assertIn(arg, command)
+        for compile_option in ('cargo nextest archive', 'cargo build', 'cargo test', '--features', '--package'):
+            self.assertNotIn(compile_option, command)
+        junit = '${{ runner.temp }}/backend-test-run/target/nextest/ci/junit.xml'
+        summary = next(step for step in run['steps'] if step.get('name') == 'Publish test summary')
+        results = next(step for step in run['steps'] if step.get('name') == 'Upload backend test results')
+        self.assertEqual(summary['with']['paths'], junit)
+        self.assertEqual(results['with']['path'], junit)
+        self.assertEqual(results['with']['name'], 'test-results-backend-${{ matrix.partition }}')
+        for step in (summary, results):
+            self.assertEqual(step['if'], 'always()')
+        self.assertNotIn('continue-on-error', run)
+
+    def test_both_archive_jobs_use_the_same_integrity_locked_nextest(self):
+        catalog = json.loads((self.root / 'security/build-tools.json').read_text())
+        self.assertEqual(catalog['cargo-nextest']['version'], '0.9.146')
+        for name in ('backend-test-build', 'backend-test-partition'):
+            with self.subTest(job=name):
+                steps = self.jobs[name]['steps']
+                install = next(step for step in steps if step.get('name') == 'Install checksum-locked nextest 0.9.146')
+                self.assertIn('python3 scripts/bootstrap-build-tool.py cargo-nextest', install['run'])
+                self.assertNotIn('if', install)
+                self.assertNotIn('continue-on-error', install)
+                rust = next(step for step in steps if step.get('uses', '').startswith('dtolnay/rust-toolchain@'))
+                self.assertEqual(rust['uses'], RUST_ACTION)
+
+    def test_required_name_and_pipeline_keep_the_fail_closed_aggregate(self):
+        aggregate = self.jobs['backend-test']
+        self.assertEqual(aggregate['name'], 'Backend Test')
+        self.assertEqual(aggregate['if'], 'always()')
+        self.assertEqual(set(aggregate['needs']), {'changes', 'backend-test-build', 'backend-test-partition'})
+        self.assertIn('backend-test', self.jobs['ci-pass']['needs'])
+        self.assertIn('backend-test=${{ needs.backend-test.result }}', str(self.jobs['ci-pass']['steps']))
+        step = aggregate['steps'][0]
+        self.assertNotIn('continue-on-error', step)
+        self.assertEqual(step['env']['EXPECTED'], '${{ ' + self.jobs['backend-test-build']['if'] + ' }}')
+        # Execute the real gate for every upstream status combination: cancelled,
+        # failed or unexpectedly skipped partitions must never turn green.
+        for expected in ('true', 'false'):
+            for changes, build, partitions in itertools.product(('success', 'failure', 'cancelled', 'skipped'), repeat=3):
+                should_pass = changes == 'success' and ((expected == 'true' and build == partitions == 'success') or
+                                                       (expected == 'false' and build == partitions == 'skipped'))
+                env = dict(os.environ, EXPECTED=expected, CHANGES_RESULT=changes,
+                           BUILD_RESULT=build, PARTITIONS_RESULT=partitions)
+                with self.subTest(expected=expected, changes=changes, build=build, partitions=partitions):
+                    result = subprocess.run(['bash', '-c', step['run']], env=env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode == 0, should_pass, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

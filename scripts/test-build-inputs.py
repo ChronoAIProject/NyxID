@@ -27,6 +27,30 @@ policy = module("check-build-inputs")
 bootstrap = module("bootstrap-build-tool")
 
 
+class LockedNextestBootstrap(unittest.TestCase):
+    def test_nextest_archive_installs_and_queries_its_cargo_subcommand(self):
+        # cargo-nextest is a Cargo plugin: plain --version is not its CLI.
+        binary = b'#!/bin/sh\n[ "$#" = 2 ] && [ "$1" = nextest ] && [ "$2" = --version ] || exit 41\necho "cargo-nextest 0.9.146"\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "security").mkdir()
+            shutil.copyfile(ROOT / "security/build-tools.json", root / "security/build-tools.json")
+            archive = root / "nextest.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo("cargo-nextest")
+                member.size = len(binary)
+                package.addfile(member, io.BytesIO(binary))
+            destination = root / "bin"
+            with patch.object(bootstrap, "ROOT", root), \
+                    patch.object(bootstrap, "host_target", return_value="x86_64-unknown-linux-gnu"), \
+                    patch.object(bootstrap, "download_verified", side_effect=lambda _, path: shutil.copyfile(archive, path)), \
+                    patch.object(sys, "argv", ["bootstrap-build-tool.py", "cargo-nextest", "--bin-dir", str(destination)]):
+                bootstrap.main()
+            self.assertEqual((destination / "cargo-nextest").read_bytes(), binary)
+            self.assertEqual(subprocess.check_output([str(destination / "cargo-nextest"), "nextest", "--version"], text=True).strip(),
+                             "cargo-nextest 0.9.146")
+
+
 class BuildPolicy(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
