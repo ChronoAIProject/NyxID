@@ -1609,3 +1609,18 @@ Own isolated all-target Clippy stopped at PM shared-build-policy change; no resu
 Instrumented invocation via cargo llvm-cov test --locked -p nyxid --no-report passes1/0/0. Reusing its copied instrumented binary --exact --test-threads=1 gives capacity recovery3/0/0 and heartbeat3/0/0; six nonzero llvm-profdata profiles verified.
 Instrumented recovery durations85.96/93.10/71.30s; heartbeat61.63/61.49/61.70s. Zero Pending/observer errors; heartbeat6–7 timestamps. Historical coverage timing cause remains unproven; hosted Linux decides full concurrency.
 Two harness CLI preflights rejected arguments before compilation/tests; the next queued Cargo run was stopped without building, then the successful instrumented artifact was reused. CLAUDE/ENV patch awaits shared-file permission. No Batch2 code or push.
+
+
+## W9.6 checkpoint 1 — foundation and initial reader cutover, 2026-10-20 (awaiting PM review)
+
+PM accepted writes-only commits through b5b3a6a91; approved CLAUDE/ENV patch committed alone at fa4f09ac3. EXECUTION/REVIEW remain local/untracked.
+Committed scope includes the inherited registration-prep foundation, pinned typed operations/read adapter, guarded registration, typed credential/SSH/pending-key reads, status and standalone SSH lookup.
+Registration refuses existing custody before key/preflight/network effects and retains its pinned directory/lease across await. Full ancestry-sync retry and publication CAS remain enforced.
+Read controls cover complete distinct field sentinels, optional empty/absence, no legacy discovery/repair, lock-held graph/object/key health, missing/replaced keys and directory retargeting without generation or secret output.
+Shared Cargo policy used throughout: /tmp/nyxid-shared-target, jobs4, incremental0, dev/test debug0, no profile overrides. Other streams' Cargo processes were left running.
+Executed cargo test --locked -p nyxid-cli --features node-proxy-test --bin nyxid node:: -- --test-threads=2:516 passed/0 failed/3 existing ignored,43.22s,zero compiler warnings; earlier overlapping node run516/0/3 also passes.
+Executed cargo check --locked -p nyxid-cli --features node-proxy-test --lib:exit0. Owned rustfmt --check and staged git diff --check pass.
+Executed cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:final exit101,seven dead_code groups/15 unused APIs in remaining migration/recovery/path helpers; no suppressions.
+All four reported needless borrows are fixed. Initial Clippy also found snapshot test-module ordering; unchanged tests were moved after production items and the final diagnostic is gone. No tests/bounds/denial assertions removed or weakened.
+Runtime startup/reload and ordinary writers still use the legacy factory and refuse immutable configs. OAuth returned-token recovery/redaction, all writers, resumable migration and enforced old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not closed.
+Artifacts additionally include .registration.lock and .storage-writer.lock; keychain namespaces unchanged. Mock key service/native file controls only; Linux and actual OS/separate-UID custody remain unverified. Logs:/tmp/nyxid-w5w9-codex-b0.SPJwrX/w96-reader-*.log. No push.

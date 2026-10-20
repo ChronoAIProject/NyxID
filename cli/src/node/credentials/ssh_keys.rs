@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::node::config::{NodeConfig, SshAlgorithmPreferences, SshKeyConfig};
 use crate::node::error::{Error, Result};
 use crate::node::secret_backend::SecretBackend;
+use crate::node::secret_fields::SecretField;
 use crate::node::ssh_host_key_store::SharedCertHostKeyStore;
 
 pub const SSH_PRIVATE_KEY_SUFFIX: &str = "private_key";
@@ -118,29 +119,30 @@ pub fn load_entries(config: &NodeConfig, backend: &SecretBackend) -> Result<Vec<
     config
         .ssh_keys
         .iter()
-        .map(|entry| load_entry(entry, backend))
+        .map(|entry| load_entry(config, entry, backend))
         .collect()
 }
 
-pub fn load_entry(config: &SshKeyConfig, backend: &SecretBackend) -> Result<SshKeyEntry> {
-    let private_key = backend.load_credential_value(
-        &secret_key_name(
-            &config.service_slug,
-            &config.principal,
-            SSH_PRIVATE_KEY_SUFFIX,
-        ),
-        config.private_key_pem_encrypted.as_deref(),
+pub fn load_entry(
+    node_config: &NodeConfig,
+    config: &SshKeyConfig,
+    backend: &SecretBackend,
+) -> Result<SshKeyEntry> {
+    let private_key = backend.require_field(
+        node_config,
+        &SecretField::SshPrivate {
+            service: config.service_slug.clone(),
+            principal: config.principal.clone(),
+        },
     )?;
-
     let passphrase = match &config.passphrase_encrypted {
-        Some(encrypted) => Some(Zeroizing::new(backend.load_credential_value(
-            &secret_key_name(
-                &config.service_slug,
-                &config.principal,
-                SSH_PASSPHRASE_SUFFIX,
-            ),
-            Some(encrypted),
-        )?)),
+        Some(_) => Some(backend.require_field(
+            node_config,
+            &SecretField::SshPassphrase {
+                service: config.service_slug.clone(),
+                principal: config.principal.clone(),
+            },
+        )?),
         None => None,
     };
 
@@ -151,7 +153,7 @@ pub fn load_entry(config: &SshKeyConfig, backend: &SecretBackend) -> Result<SshK
     Ok(SshKeyEntry {
         service_slug: config.service_slug.clone(),
         principal: config.principal.clone(),
-        private_key_pem: Zeroizing::new(private_key),
+        private_key_pem: private_key,
         passphrase,
         certificate_openssh: None,
         target_host: config.target_host.clone(),

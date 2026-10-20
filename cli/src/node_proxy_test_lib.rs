@@ -11,6 +11,8 @@ pub mod encryption;
 pub mod error;
 #[path = "node/keychain.rs"]
 mod keychain;
+#[path = "node/legacy_secrets.rs"]
+mod legacy_secrets;
 #[path = "node/machine/runtime.rs"]
 pub mod machine;
 #[path = "node/managed_config.rs"]
@@ -23,8 +25,18 @@ mod metrics;
 pub mod proxy_executor;
 #[path = "node/proxy_upload.rs"]
 pub mod proxy_upload;
+#[path = "node/registration.rs"]
+mod registration;
 #[path = "node/secret_backend.rs"]
 mod secret_backend;
+#[path = "node/secret_fields.rs"]
+mod secret_fields;
+#[path = "node/secret_operation.rs"]
+mod secret_operation;
+#[path = "node/secret_snapshot.rs"]
+mod secret_snapshot;
+#[path = "node/secret_transaction.rs"]
+mod secret_transaction;
 #[path = "node/signing.rs"]
 mod signing;
 #[path = "node/storage.rs"]
@@ -78,6 +90,8 @@ fn test_credentials(
     );
     let config = config::NodeConfig {
         publication: Default::default(),
+        storage_generation: None,
+        keychain_format: None,
         server: config::ServerConfig {
             url: String::new(),
             proxy_max_body_size: config::DEFAULT_NODE_PROXY_MAX_BODY_SIZE,

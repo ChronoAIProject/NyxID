@@ -52,10 +52,9 @@ pub async fn cmd_register(
     use_keychain: bool,
 ) -> Result<()> {
     let config_dir = config::resolve_config_dir(config_path);
-    std::fs::create_dir_all(&config_dir)?;
     let backend_name = if use_keychain { "keychain" } else { "file" };
-
-    SecretBackend::preflight(backend_name, &config_dir)?;
+    let custody = super::registration::RegistrationCustody::acquire(&config_dir, backend_name)?;
+    custody.preflight()?;
 
     // M2: Use ws:// for localhost (wss:// requires TLS not available in dev)
     let ws_url = url.unwrap_or("ws://localhost:3001/api/v1/nodes/ws");
@@ -66,16 +65,20 @@ pub async fn cmd_register(
 
     tracing::info!(node_id = %node_id, "Registration successful");
 
-    let backend = SecretBackend::new(backend_name, &node_id, &config_dir)?;
-
+    let auth_token = Zeroizing::new(auth_token);
+    let signing_secret = signing_secret.map(Zeroizing::new);
+    let config_file = custody.config_file().to_owned();
+    let keychain = super::keychain::KeychainBackend::new(&node_id);
     let mut node_config = NodeConfig::new(ws_url.to_string(), node_id, backend_name.to_string());
-    backend.store_auth_token(&mut node_config, &auth_token)?;
+    let operation = custody.into_operation(&node_config, keychain)?;
+    operation.prepare(&mut node_config)?;
+    node_config.node.auth_token_encrypted =
+        operation.store(super::secret_fields::SecretField::AuthToken, &auth_token)?;
     if let Some(secret) = signing_secret {
-        backend.store_signing_secret(&mut node_config, &secret)?;
+        node_config.signing.shared_secret_encrypted =
+            Some(operation.store(super::secret_fields::SecretField::SigningSecret, &secret)?);
     }
-
-    let config_file = config_dir.join("config.toml");
-    node_config.save(&config_file)?;
+    operation.publish(&node_config, &config_file)?;
 
     tracing::info!(path = %config_file.display(), "Configuration saved");
     println!("Node registered successfully.");
@@ -150,22 +153,29 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
 
 pub fn cmd_status(config_path: Option<&str>) -> Result<()> {
     let config_dir = config::resolve_config_dir(config_path);
-    let config_file = config_dir.join("config.toml");
+    status_to_writer(&config_dir, None, &mut std::io::stdout().lock())
+}
 
-    let node_config = NodeConfig::load(&config_file)?;
-    let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+fn status_to_writer(
+    config_dir: &Path,
+    keychain: Option<super::keychain::KeychainBackend>,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let node_config = NodeConfig::load(&config_dir.join("config.toml"))?;
+    let backend = match keychain {
+        Some(keychain) => SecretBackend::reader_with_keychain(&node_config, config_dir, keychain)?,
+        None => SecretBackend::reader(&node_config, config_dir)?,
+    };
     let credentials = CredentialStore::from_config_with_backend(&node_config, &backend)?;
 
-    println!("Node Status");
-    println!("  Node ID:     {}", node_config.node.id);
-    println!("  Server:      {}", node_config.server.url);
-    println!("  Storage:     {}", node_config.storage_backend);
-    println!("  Credentials: {} configured", credentials.count());
-
+    writeln!(output, "Node Status")?;
+    writeln!(output, "  Node ID:     {}", node_config.node.id)?;
+    writeln!(output, "  Server:      {}", node_config.server.url)?;
+    writeln!(output, "  Storage:     {}", node_config.storage_backend)?;
+    writeln!(output, "  Credentials: {} configured", credentials.count())?;
     for slug in credentials.service_slugs() {
-        println!("    - {slug}");
+        writeln!(output, "    - {slug}")?;
     }
-
     Ok(())
 }
 
@@ -830,7 +840,7 @@ pub async fn cmd_ssh_credentials(
                         "No SSH key found for service '{service}' principal '{principal}'"
                     ))
                 })?;
-            let entry = ssh_keys::load_entry(stored, &backend)?;
+            let entry = ssh_keys::load_entry(&node_config, stored, &backend)?;
             let result = ssh_node_exec::test_connection(entry, 10).await;
             match result {
                 Ok(()) => {
@@ -2636,8 +2646,524 @@ mod tests {
     use super::super::error::Error;
     use super::*;
 
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::super::config::{CredentialConfig, PendingCryptoKeyConfig, SshKeyConfig};
+    use super::super::credential_store::CredentialStore;
+    use super::super::credentials::{pending_key_store::PendingCredentialKeyStore, ssh_keys};
+    use super::super::keychain::KeychainBackend;
+    use super::super::secret_fields::{self, CredentialPart, SecretField};
+    use super::super::secret_snapshot::SecretSnapshot;
+    use super::super::secret_transaction::Attempt;
+    use super::super::storage::Directory;
+
+    struct ModernFixture {
+        directory: tempfile::TempDir,
+        config: NodeConfig,
+        store: KeychainBackend,
+        expected: BTreeMap<SecretField, Option<Zeroizing<String>>>,
+    }
+
+    fn modern_fixture() -> ModernFixture {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let encryption = LocalEncryption::initialize(directory.path()).unwrap();
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        config.signing.shared_secret_encrypted = Some(String::new());
+        let mut credential = CredentialConfig::new_header("Authorization".into(), None, None);
+        credential.oauth_managed = true;
+        config.credentials.insert("oauth".into(), credential);
+        config.credentials.insert(
+            "query".into(),
+            CredentialConfig::new_query_param("key".into(), None, None),
+        );
+        config
+            .credentials
+            .insert("none".into(), CredentialConfig::new_no_auth(None));
+        config.ssh_keys.push(SshKeyConfig {
+            service_slug: "ssh".into(),
+            principal: "alice".into(),
+            private_key_pem_encrypted: None,
+            passphrase_encrypted: None,
+            target_host: "example.invalid".into(),
+            target_port: 22,
+            host_key_sha256: None,
+            algorithms: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        config.pending_crypto_keys.insert(
+            "pending".into(),
+            PendingCryptoKeyConfig {
+                version: nyxid_crypto::VERSION_V1.into(),
+                service_slug: "oauth".into(),
+                injection_method: "header".into(),
+                field_name: "Authorization".into(),
+                target_url: None,
+                expires_at: "2026-10-20T00:00:00Z".into(),
+                public_key: "synthetic-public".into(),
+                private_key_encrypted: None,
+            },
+        );
+        let mut expected = BTreeMap::new();
+        for (field, _) in secret_fields::fields(&config).unwrap() {
+            let value = match &field {
+                SecretField::Credential {
+                    part: CredentialPart::OAuthRefresh,
+                    ..
+                }
+                | SecretField::SshPassphrase { .. } => None,
+                SecretField::Credential {
+                    part: CredentialPart::OAuthClientSecret,
+                    ..
+                } => Some(Zeroizing::new(String::new())),
+                SecretField::PendingPrivate { .. } => Some(nyxid_crypto::encode_private_key_b64u(
+                    &Zeroizing::new([49; 32]),
+                )),
+                _ => Some(Zeroizing::new(format!(
+                    "synthetic:{}",
+                    serde_json::to_string(&field).unwrap()
+                ))),
+            };
+            let encoded = value
+                .as_ref()
+                .map(|value| encryption.encrypt(value).unwrap());
+            field.replace(&mut config, encoded).unwrap();
+            expected.insert(field, value);
+        }
+        config.save(&path).unwrap();
+        let source = NodeConfig::load(&path).unwrap();
+        let snapshot = SecretSnapshot::read(&source, &path, None, None).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        let attempt = Attempt::begin(&path, source.publication.snapshot(), "node").unwrap();
+        let modern = snapshot
+            .project_keychain(&source, &attempt, &store)
+            .unwrap();
+        modern.save(&path).unwrap();
+        drop(attempt);
+        ModernFixture {
+            directory,
+            config: NodeConfig::load(&path).unwrap(),
+            store,
+            expected,
+        }
+    }
+
+    #[test]
+    fn typed_reader_reopens_every_modern_slot_without_legacy_discovery_or_mutation() {
+        let fixture = modern_fixture();
+        // Neither corrupt legacy custody nor stale optional values may be read.
+        fixture.store.set("vault", "invalid legacy vault").unwrap();
+        fixture
+            .store
+            .set("cred/oauth:oauth_refresh", "stale-refresh")
+            .unwrap();
+        let names = Directory::open(fixture.directory.path())
+            .unwrap()
+            .names()
+            .unwrap();
+        let bytes = std::fs::read(fixture.directory.path().join("config.toml")).unwrap();
+        let legacy_reads = Arc::new(AtomicUsize::new(0));
+        let probe = legacy_reads.clone();
+        let store = fixture.store.clone().with_read_probe(move |key| {
+            if !key.starts_with("object/v1/") {
+                probe.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let reader =
+            SecretBackend::reader_with_keychain(&fixture.config, fixture.directory.path(), store)
+                .unwrap();
+        for (field, expected) in &fixture.expected {
+            assert!(reader.load_field(&fixture.config, field).unwrap() == *expected);
+        }
+        let credentials =
+            CredentialStore::from_config_with_backend(&fixture.config, &reader).unwrap();
+        assert_eq!(credentials.count(), 3);
+        assert!(
+            credentials.get("oauth").unwrap().header().unwrap().1
+                == fixture.expected[&SecretField::Credential {
+                    slug: "oauth".into(),
+                    part: CredentialPart::Header
+                }]
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+        );
+        let ssh = ssh_keys::load_entries(&fixture.config, &reader).unwrap();
+        assert!(
+            ssh[0].private_key_pem.as_str()
+                == fixture.expected[&SecretField::SshPrivate {
+                    service: "ssh".into(),
+                    principal: "alice".into()
+                }]
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+        );
+        assert!(ssh[0].passphrase.is_none());
+        let mut config = fixture.config.clone();
+        let pending = PendingCredentialKeyStore::new(&mut config, &reader)
+            .load_private_key("pending")
+            .unwrap();
+        assert!(*pending == [49; 32]);
+        assert_eq!(legacy_reads.load(Ordering::SeqCst), 0);
+        assert!(std::fs::read(fixture.directory.path().join("config.toml")).unwrap() == bytes);
+        assert_eq!(
+            Directory::open(fixture.directory.path())
+                .unwrap()
+                .names()
+                .unwrap(),
+            names
+        );
+        assert!(
+            reader
+                .store_credential_value("oauth", "never-staged")
+                .is_err()
+        );
+        assert!(reader.delete_credential("oauth").is_err());
+        assert!(SecretBackend::from_config(&fixture.config, fixture.directory.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_keychain_graph_and_object_health_reads_hold_the_publication_lock() {
+        use std::os::fd::AsRawFd;
+        let fixture = modern_fixture();
+        let lock = fixture.directory.path().join(".storage-writer.lock");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = calls.clone();
+        let store = fixture.store.clone().with_read_probe(move |_| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock)
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EWOULDBLOCK)
+            );
+            probe.fetch_add(1, Ordering::SeqCst);
+        });
+        let reader =
+            SecretBackend::reader_with_keychain(&fixture.config, fixture.directory.path(), store)
+                .unwrap();
+        reader.refresh().unwrap();
+        reader.load_auth_token(&fixture.config).unwrap();
+        assert!(calls.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn reader_rejects_forged_projection_before_keychain_effects() {
+        let fixture = modern_fixture();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe = calls.clone();
+        let store = fixture.store.clone().with_read_probe(move |_| {
+            probe.fetch_add(1, Ordering::SeqCst);
+        });
+        let reader =
+            SecretBackend::reader_with_keychain(&fixture.config, fixture.directory.path(), store)
+                .unwrap();
+        calls.store(0, Ordering::SeqCst);
+        let mut forged = fixture.config.clone();
+        forged
+            .credentials
+            .get_mut("query")
+            .unwrap()
+            .oauth_client_secret_encrypted = Some(String::new());
+        assert!(reader.load_auth_token(&forged).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn legacy_snapshot_reader_never_consolidates_or_promotes_stale_custody() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node".into(),
+            "keychain".into(),
+        );
+        config.credentials.insert(
+            "service".into(),
+            CredentialConfig::new_header("Authorization".into(), None, None),
+        );
+        config.save(&path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let store = KeychainBackend::new_mock("node");
+        let vault = r#"{"auth_token":"synthetic-vault-auth","credentials":{"service":"synthetic-vault-credential"}}"#;
+        store.set("vault", vault).unwrap();
+        store.set("auth_token", "synthetic-stale-auth").unwrap();
+        store
+            .set("cred/service", "synthetic-stale-credential")
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let names = Directory::open(dir.path()).unwrap().names().unwrap();
+        let reader =
+            SecretBackend::reader_with_keychain(&config, dir.path(), store.clone()).unwrap();
+        assert!(reader.load_auth_token(&config).unwrap() == "synthetic-vault-auth");
+        reader.refresh().unwrap();
+        assert!(store.get("vault").unwrap() == vault);
+        assert!(store.get("auth_token").unwrap() == "synthetic-stale-auth");
+        assert!(std::fs::read(&path).unwrap() == bytes);
+        assert_eq!(Directory::open(dir.path()).unwrap().names().unwrap(), names);
+        store.delete("vault").unwrap();
+        assert!(reader.load_auth_token(&config).is_err());
+        assert!(reader.refresh().is_err());
+        assert!(store.get_optional("vault").unwrap().is_none());
+        assert!(store.get("auth_token").unwrap() == "synthetic-stale-auth");
+    }
+
+    #[test]
+    fn file_reader_checks_cached_key_health_and_full_projection_without_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let enc = LocalEncryption::initialize(dir.path()).unwrap();
+        let mut config =
+            NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+        config.set_auth_token("synthetic-auth", &enc).unwrap();
+        config
+            .add_header_credential("service", "Authorization", "synthetic-header", &enc)
+            .unwrap();
+        config.save(&path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let reader = SecretBackend::reader_with_keychain(
+            &config,
+            dir.path(),
+            KeychainBackend::new_failing_mock("node", "must not touch keychain"),
+        )
+        .unwrap();
+        assert!(reader.load_signing_secret(&config).unwrap().is_none());
+        let mut forged = config.clone();
+        forged.node.auth_token_encrypted = config.credentials["service"]
+            .header_value_encrypted
+            .clone()
+            .unwrap();
+        assert!(reader.load_auth_token(&forged).is_err());
+        std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
+        assert!(reader.load_auth_token(&config).is_err());
+        assert!(reader.refresh().is_err());
+        assert!(!dir.path().join(".keyfile").exists());
+        LocalEncryption::initialize(dir.path()).unwrap();
+        assert!(reader.refresh().is_err());
+    }
+
+    #[test]
+    fn reader_keeps_pinned_directory_after_path_retarget_and_never_uses_a_cached_object() {
+        let fixture = modern_fixture();
+        let reader = SecretBackend::reader_with_keychain(
+            &fixture.config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let moved = parent.path().join("moved");
+        std::fs::rename(fixture.directory.path(), &moved).unwrap();
+        Directory::create_private(fixture.directory.path()).unwrap();
+        assert!(reader.load_auth_token(&fixture.config).is_ok());
+        let encoded = fixture
+            .config
+            .node
+            .auth_token_encrypted
+            .strip_prefix("nyxid-key:v1:")
+            .unwrap();
+        let (attempt, object) = encoded.split_once(':').unwrap();
+        fixture
+            .store
+            .delete(&format!("object/v1/{attempt}/{object}"))
+            .unwrap();
+        assert!(reader.load_auth_token(&fixture.config).is_err());
+        assert!(reader.refresh().is_err());
+        assert_eq!(
+            std::fs::read_dir(fixture.directory.path()).unwrap().count(),
+            0
+        );
+    }
+
     const KEY_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const KEY_B: &str = "SHA256://////////////////////////////////////////8";
+
+    #[test]
+    fn status_command_uses_strict_file_and_immutable_readers_without_secret_output() {
+        use super::super::keychain::KeychainBackend;
+        use super::super::registration::RegistrationCustody;
+        use super::super::secret_fields::SecretField;
+        for backend in ["file", "keychain"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = NodeConfig::new(
+                "wss://example.invalid".into(),
+                "node".into(),
+                backend.into(),
+            );
+            let store = KeychainBackend::new_mock("node");
+            let operation = RegistrationCustody::acquire(dir.path(), backend)
+                .unwrap()
+                .into_operation(&config, store.clone())
+                .unwrap();
+            operation.prepare(&mut config).unwrap();
+            config.node.auth_token_encrypted = operation
+                .store(SecretField::AuthToken, "synthetic-status-auth")
+                .unwrap();
+            operation
+                .publish(&config, &dir.path().join("config.toml"))
+                .unwrap();
+            drop(operation);
+            let before = std::fs::read(dir.path().join("config.toml")).unwrap();
+            let mut output = Vec::new();
+            status_to_writer(dir.path(), Some(store), &mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("Credentials: 0 configured"));
+            assert!(!output.contains("synthetic-status-auth"));
+            assert!(!output.contains("nyxid-key:"));
+            assert!(std::fs::read(dir.path().join("config.toml")).unwrap() == before);
+            if backend == "file" {
+                std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
+                assert!(cmd_status(dir.path().to_str()).is_err());
+                assert!(!dir.path().join(".keyfile").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_command_existing_config_refuses_before_network_or_key_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = super::super::storage::Directory::open(dir.path()).unwrap();
+        directory
+            .publish(
+                std::ffi::OsStr::new("config.toml"),
+                b"existing-config-without-key",
+                false,
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let result = cmd_register(
+            "synthetic-unused-registration",
+            Some(&url),
+            dir.path().to_str(),
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(Error::Config(_))));
+        assert_eq!(
+            directory.names().unwrap(),
+            [std::ffi::OsString::from("config.toml")]
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("config.toml")).unwrap(),
+            b"existing-config-without-key"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_command_retains_custody_across_await_and_path_retarget() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        for retarget in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let profile = dir.path().join("profile");
+            let moved = dir.path().join("moved");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let parsed: serde_json::Value =
+                    serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_eq!(parsed["type"], "register");
+                assert!(parsed["token"] == "synthetic-registration");
+                seen_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                socket.send(Message::Text(json!({"type":"register_ok", "node_id":"synthetic-node", "auth_token":"synthetic-command-auth", "signing_secret":"synthetic-command-signing"}).to_string().into())).await.unwrap();
+                let _ = socket.next().await;
+            });
+            let first_path = profile.to_string_lossy().into_owned();
+            let first_url = url.clone();
+            let first = tokio::spawn(async move {
+                cmd_register(
+                    "synthetic-registration",
+                    Some(&first_url),
+                    Some(&first_path),
+                    false,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), seen_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!profile.join(".keyfile").exists());
+            let authoritative = if retarget {
+                std::fs::rename(&profile, &moved).unwrap();
+                super::super::storage::Directory::create_private(&profile).unwrap();
+                &moved
+            } else {
+                &profile
+            };
+            let second = cmd_register(
+                "synthetic-unused-competitor",
+                Some(&url),
+                authoritative.to_str(),
+                false,
+            )
+            .await;
+            assert!(
+                matches!(second, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+            if retarget {
+                assert_eq!(std::fs::read_dir(&profile).unwrap().count(), 0);
+            }
+            let loaded = NodeConfig::load(&authoritative.join("config.toml")).unwrap();
+            let encryption = LocalEncryption::open_existing(authoritative).unwrap();
+            assert!(loaded.decrypt_auth_token(&encryption).unwrap() == "synthetic-command-auth");
+            assert!(
+                loaded
+                    .decrypt_signing_secret(&encryption)
+                    .unwrap()
+                    .as_deref()
+                    == Some("synthetic-command-signing")
+            );
+            let installed = std::fs::read(authoritative.join("config.toml")).unwrap();
+            assert!(
+                cmd_register(
+                    "synthetic-unused-retry",
+                    Some(&url),
+                    authoritative.to_str(),
+                    false
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(authoritative.join("config.toml")).unwrap(),
+                installed
+            );
+        }
+    }
 
     #[test]
     fn normalize_cli_scopes_splits_mixed_separators() {

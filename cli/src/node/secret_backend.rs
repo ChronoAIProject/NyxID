@@ -1,27 +1,38 @@
 use std::path::Path;
 
-use super::config::NodeConfig;
+use super::config::{KeychainFormat, NodeConfig};
 use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
 use super::keychain::{KeychainBackend, KeychainVault};
+use super::secret_fields::SecretField;
+use super::secret_operation::SecretOperation;
 use zeroize::Zeroizing;
+
+/// A pinned, read-only observation. Mutation requires a separate guarded
+/// operation; legacy writer APIs cannot reinterpret immutable references.
+pub struct ObservedSecrets {
+    operation: SecretOperation,
+    baseline: NodeConfig,
+}
 
 /// Unified secret storage -- either file-based AES-GCM or OS keychain vault.
 pub enum SecretBackend {
     File(LocalEncryption),
     Keychain(KeychainVault),
+    Observed(Box<ObservedSecrets>),
 }
 
 impl SecretBackend {
     /// Verify that the selected backend is usable before registration consumes
     /// a one-time token from the server.
-    pub fn preflight(backend: &str, config_dir: &Path) -> Result<()> {
+    pub(crate) fn preflight_in(backend: &str, directory: &super::storage::Directory) -> Result<()> {
         match backend {
             "keychain" => KeychainBackend::new("__preflight__").preflight(),
-            "file" => {
-                LocalEncryption::initialize(config_dir)?;
-                Ok(())
-            }
+            "file" => match LocalEncryption::open_in(directory) {
+                Ok(_) => Ok(()),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
             _ => Err(unknown_backend()),
         }
     }
@@ -29,6 +40,11 @@ impl SecretBackend {
     /// Build the appropriate backend from an existing config.
     /// For keychain: loads the vault (single keychain read = single prompt).
     pub fn from_config(config: &NodeConfig, config_dir: &Path) -> Result<Self> {
+        if config.keychain_format == Some(KeychainFormat::ImmutableV1) {
+            // Legacy writer entry points must never open an immutable store.
+            // Read-only callers explicitly request a snapshot reader.
+            return Err(guarded_write_required());
+        }
         match config.storage_backend.as_str() {
             "keychain" => Ok(Self::Keychain(KeychainVault::load(
                 &config.node.id,
@@ -37,6 +53,60 @@ impl SecretBackend {
             "file" => Ok(Self::File(LocalEncryption::open_existing(config_dir)?)),
             _ => Err(unknown_backend()),
         }
+    }
+
+    /// Read all fields from one authoritative configuration without staging,
+    /// legacy consolidation, key generation or backend repair.
+    pub(crate) fn reader(config: &NodeConfig, config_dir: &Path) -> Result<Self> {
+        Self::reader_with_keychain(config, config_dir, KeychainBackend::new(&config.node.id))
+    }
+
+    pub(crate) fn reader_with_keychain(
+        config: &NodeConfig,
+        config_dir: &Path,
+        keychain: KeychainBackend,
+    ) -> Result<Self> {
+        let operation = SecretOperation::open(config, &config_dir.join("config.toml"), keychain)?;
+        Ok(Self::Observed(Box::new(ObservedSecrets {
+            operation,
+            baseline: config.clone(),
+        })))
+    }
+
+    pub(crate) fn load_field(
+        &self,
+        config: &NodeConfig,
+        field: &SecretField,
+    ) -> Result<Option<Zeroizing<String>>> {
+        match self {
+            Self::Observed(reader) => reader.operation.load(config, field),
+            Self::File(file) => field
+                .encoded(config)?
+                .map(|encoded| file.decrypt(encoded).map(Zeroizing::new))
+                .transpose(),
+            Self::Keychain(vault) => match field {
+                SecretField::AuthToken => vault.get_auth_token().map(Zeroizing::new).map(Some),
+                SecretField::SigningSecret => vault
+                    .get_signing_secret()
+                    .map(|value| value.map(Zeroizing::new)),
+                SecretField::PendingPrivate { pending_id } => {
+                    vault.get_pending_crypto_key(pending_id).map(Some)
+                }
+                _ => vault
+                    .get_credential(&field.legacy_key())
+                    .map(Zeroizing::new)
+                    .map(Some),
+            },
+        }
+    }
+
+    pub(crate) fn require_field(
+        &self,
+        config: &NodeConfig,
+        field: &SecretField,
+    ) -> Result<Zeroizing<String>> {
+        self.load_field(config, field)?
+            .ok_or_else(|| Error::Config("Required node secret is unavailable".into()))
     }
 
     /// Build during registration (before config is loaded from disk).
@@ -55,10 +125,7 @@ impl SecretBackend {
             "keychain" => {
                 let config_file = config_dir.join("config.toml");
                 let config = super::config::NodeConfig::load(&config_file)?;
-                Ok(Self::Keychain(KeychainVault::load(
-                    &config.node.id,
-                    &config,
-                )?))
+                Self::from_config(&config, config_dir)
             }
             "file" => Ok(Self::File(LocalEncryption::open_existing(config_dir)?)),
             _ => Err(unknown_backend()),
@@ -80,6 +147,7 @@ impl SecretBackend {
                 config.node.auth_token_encrypted = String::new();
                 Ok(())
             }
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -87,6 +155,9 @@ impl SecretBackend {
         match self {
             Self::File(enc) => config.decrypt_auth_token(enc),
             Self::Keychain(vault) => vault.get_auth_token(),
+            Self::Observed(_) => self
+                .require_field(config, &SecretField::AuthToken)
+                .map(|value| value.to_string()),
         }
     }
 
@@ -100,6 +171,7 @@ impl SecretBackend {
                 config.signing.shared_secret_encrypted = Some(String::new());
                 Ok(())
             }
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -118,6 +190,9 @@ impl SecretBackend {
                     Ok(None)
                 }
             }
+            Self::Observed(_) => self
+                .load_field(config, &SecretField::SigningSecret)
+                .map(|value| value.map(|value| value.to_string())),
         }
     }
 
@@ -136,6 +211,7 @@ impl SecretBackend {
                 vault.set_credential(service_slug, value)?;
                 Ok(None)
             }
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -155,6 +231,9 @@ impl SecretBackend {
                 enc.decrypt(encrypted)
             }
             Self::Keychain(vault) => vault.get_credential(service_slug),
+            Self::Observed(_) => Err(Error::Config(
+                "Typed node secret location is required".into(),
+            )),
         }
     }
 
@@ -163,6 +242,7 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.delete_credential(service_slug),
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -181,25 +261,7 @@ impl SecretBackend {
                 vault.set_pending_crypto_key(pending_id, private_key_b64u)?;
                 Ok(None)
             }
-        }
-    }
-
-    /// Load a pending private key from the appropriate backend.
-    pub fn load_pending_crypto_key(
-        &self,
-        pending_id: &str,
-        encrypted: Option<&str>,
-    ) -> Result<Zeroizing<String>> {
-        match self {
-            Self::File(enc) => {
-                let encrypted = encrypted.ok_or_else(|| {
-                    Error::Config(format!(
-                        "Missing encrypted private key for pending credential '{pending_id}'"
-                    ))
-                })?;
-                enc.decrypt(encrypted).map(Zeroizing::new)
-            }
-            Self::Keychain(vault) => vault.get_pending_crypto_key(pending_id),
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -208,6 +270,7 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.delete_pending_crypto_key(pending_id),
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -216,6 +279,7 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.delete_auth_token(),
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -224,6 +288,7 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.delete_signing_secret(),
+            Self::Observed(_) => Err(guarded_write_required()),
         }
     }
 
@@ -234,8 +299,13 @@ impl SecretBackend {
         match self {
             Self::File(_) => Ok(()),
             Self::Keychain(vault) => vault.refresh(),
+            Self::Observed(reader) => reader.operation.health(&reader.baseline),
         }
     }
+}
+
+fn guarded_write_required() -> Error {
+    Error::Config("Immutable node secret storage requires a guarded write operation".into())
 }
 
 fn unknown_backend() -> Error {
@@ -258,9 +328,10 @@ mod tests {
     #[test]
     fn all_unknown_backend_entry_points_refuse_without_side_effects() {
         let dir = tempfile::tempdir().unwrap();
+        let directory = super::super::storage::Directory::open(dir.path()).unwrap();
         for backend in ["", "FILE", "keychian", "file "] {
             let config = NodeConfig::new(String::new(), "test-node".into(), backend.into());
-            assert!(SecretBackend::preflight(backend, dir.path()).is_err());
+            assert!(SecretBackend::preflight_in(backend, &directory).is_err());
             assert!(SecretBackend::from_config(&config, dir.path()).is_err());
             assert!(SecretBackend::new(backend, "test-node", dir.path()).is_err());
             assert!(SecretBackend::from_storage_backend_str(backend, dir.path()).is_err());

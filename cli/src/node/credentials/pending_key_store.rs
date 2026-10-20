@@ -7,6 +7,7 @@ use super::crypto::PendingCredentialCryptoMetadata;
 use crate::node::config::{NodeConfig, PendingCryptoKeyConfig};
 use crate::node::error::{Error, Result};
 use crate::node::secret_backend::SecretBackend;
+use crate::node::secret_fields::SecretField;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PendingCredentialPublicKey {
@@ -82,14 +83,16 @@ impl<'a> PendingCredentialKeyStore<'a> {
     }
 
     pub fn load_private_key(&self, pending_id: &str) -> Result<Zeroizing<[u8; 32]>> {
-        let entry = self
-            .config
+        self.config
             .pending_crypto_keys
             .get(pending_id)
             .ok_or_else(|| Error::Config(format!("No pending crypto key for '{pending_id}'")))?;
-        let private_key_b64u = self
-            .backend
-            .load_pending_crypto_key(pending_id, entry.private_key_encrypted.as_deref())?;
+        let private_key_b64u = self.backend.require_field(
+            self.config,
+            &SecretField::PendingPrivate {
+                pending_id: pending_id.into(),
+            },
+        )?;
         nyxid_crypto::decode_private_key_b64u(&private_key_b64u)
             .map_err(|error| Error::Encryption(error.to_string()))
     }
@@ -213,10 +216,16 @@ mod tests {
         let mut store = PendingCredentialKeyStore::new(&mut config, &backend);
         store.create_or_load(&meta).unwrap();
         assert!(store.load_private_key("pending-1").is_ok());
+        let prior = store.config.clone();
         assert!(store.delete("pending-1").unwrap());
         assert!(
             backend
-                .load_pending_crypto_key("pending-1", None)
+                .require_field(
+                    &prior,
+                    &SecretField::PendingPrivate {
+                        pending_id: "pending-1".into(),
+                    },
+                )
                 .unwrap_err()
                 .to_string()
                 .contains("pending-1")

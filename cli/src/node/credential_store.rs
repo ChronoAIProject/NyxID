@@ -8,6 +8,7 @@ use super::config::NodeConfig;
 use super::encryption::LocalEncryption;
 use super::error::{Error, Result};
 use super::secret_backend::SecretBackend;
+use super::secret_fields::{CredentialPart, SecretField};
 
 /// Type-safe credential injection, avoiding empty-string placeholders.
 #[derive(Clone)]
@@ -295,18 +296,19 @@ impl CredentialStore {
         for (slug, cred_config) in &config.credentials {
             match cred_config.injection_method.as_str() {
                 "ifttt_webhook" => {
-                    let key = backend.load_credential_value(
-                        slug,
-                        cred_config.header_value_encrypted.as_deref(),
+                    let key = backend.require_field(
+                        config,
+                        &SecretField::Credential {
+                            slug: slug.clone(),
+                            part: CredentialPart::Header,
+                        },
                     )?;
                     nyxid_service_adapters::ifttt::validate_credential(&key)
                         .map_err(|error| Error::Config(error.to_string()))?;
                     map.insert(
                         slug.clone(),
                         ServiceCredential {
-                            injection: CredentialInjection::IftttWebhook {
-                                key: Zeroizing::new(key),
-                            },
+                            injection: CredentialInjection::IftttWebhook { key },
                             target_url: cred_config.target_url.clone(),
                         },
                     );
@@ -316,16 +318,19 @@ impl CredentialStore {
                         .header_name
                         .as_deref()
                         .unwrap_or("Authorization");
-                    let value = backend.load_credential_value(
-                        slug,
-                        cred_config.header_value_encrypted.as_deref(),
+                    let value = backend.require_field(
+                        config,
+                        &SecretField::Credential {
+                            slug: slug.clone(),
+                            part: CredentialPart::Header,
+                        },
                     )?;
                     map.insert(
                         slug.clone(),
                         ServiceCredential {
                             injection: CredentialInjection::Header {
                                 name: header_name.to_string(),
-                                value: Zeroizing::new(value),
+                                value,
                             },
                             target_url: cred_config.target_url.clone(),
                         },
@@ -337,16 +342,19 @@ impl CredentialStore {
                             "Credential '{slug}' has query_param injection but no param_name"
                         ))
                     })?;
-                    let value = backend.load_credential_value(
-                        slug,
-                        cred_config.param_value_encrypted.as_deref(),
+                    let value = backend.require_field(
+                        config,
+                        &SecretField::Credential {
+                            slug: slug.clone(),
+                            part: CredentialPart::Parameter,
+                        },
                     )?;
                     map.insert(
                         slug.clone(),
                         ServiceCredential {
                             injection: CredentialInjection::QueryParam {
                                 name: param_name.to_string(),
-                                value: Zeroizing::new(value),
+                                value,
                             },
                             target_url: cred_config.target_url.clone(),
                         },
@@ -354,16 +362,19 @@ impl CredentialStore {
                 }
                 "path_prefix" => {
                     let prefix = cred_config.header_name.as_deref().unwrap_or("bot");
-                    let value = backend.load_credential_value(
-                        slug,
-                        cred_config.header_value_encrypted.as_deref(),
+                    let value = backend.require_field(
+                        config,
+                        &SecretField::Credential {
+                            slug: slug.clone(),
+                            part: CredentialPart::Header,
+                        },
                     )?;
                     map.insert(
                         slug.clone(),
                         ServiceCredential {
                             injection: CredentialInjection::PathPrefix {
                                 prefix: prefix.to_string(),
-                                credential: Zeroizing::new(value),
+                                credential: value,
                             },
                             target_url: cred_config.target_url.clone(),
                         },
@@ -379,15 +390,18 @@ impl CredentialStore {
                     );
                 }
                 "aws_sigv4" => {
-                    let json = backend.load_credential_value(
-                        slug,
-                        cred_config.header_value_encrypted.as_deref(),
+                    let json = backend.require_field(
+                        config,
+                        &SecretField::Credential {
+                            slug: slug.clone(),
+                            part: CredentialPart::Header,
+                        },
                     )?;
                     map.insert(
                         slug.clone(),
                         ServiceCredential {
                             injection: CredentialInjection::AwsSigv4 {
-                                credential_json: Zeroizing::new(json),
+                                credential_json: json,
                             },
                             target_url: cred_config.target_url.clone(),
                         },

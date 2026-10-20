@@ -24,7 +24,148 @@ fn invalid() -> Error {
 pub(crate) struct Directory(File);
 
 impl Directory {
+    pub(crate) fn try_clone(&self) -> Result<Self> {
+        Ok(Self(self.0.try_clone()?))
+    }
+
+    /// Create a unique attempt lease. Callers never recreate an existing
+    /// attempt's lock inode; recovery opens that inode without O_CREAT.
+    pub(crate) fn create_lease(&self, name: &std::ffi::OsStr) -> Result<File> {
+        #[cfg(unix)]
+        {
+            let file = open_at(
+                &self.0,
+                name,
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )?;
+            lock_file(&file, false)?;
+            self.0.sync_all()?;
+            Ok(file)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            Err(invalid())
+        }
+    }
+
+    /// GC must not block behind an active attempt or recreate its removed
+    /// inode. All recovery opens and lease removals also hold the writer lock.
+    pub(crate) fn try_existing_lease(&self, name: &std::ffi::OsStr) -> Result<Option<File>> {
+        #[cfg(unix)]
+        {
+            // Only a held lock means an active writer. Missing ownership
+            // metadata is an error, never an active lease or permission to
+            // create a replacement inode during recovery.
+            let file = open_at(&self.0, name, libc::O_RDWR | libc::O_NONBLOCK, 0)?;
+            match lock_file(&file, true) {
+                Ok(()) => Ok(Some(file)),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            Err(invalid())
+        }
+    }
+
+    /// Enumerate the pinned directory, with a fresh directory stream offset.
+    /// A bounded recovery pass refuses excessive or unreadable inventories.
+    pub(crate) fn names(&self) -> Result<Vec<std::ffi::OsString>> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStringExt;
+            // A new open description avoids sharing readdir offsets with the
+            // pinned fd or another concurrent recovery pass.
+            let fd = unsafe {
+                libc::openat(
+                    self.0.as_raw_fd(),
+                    c".".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let stream = unsafe { libc::fdopendir(fd) };
+            if stream.is_null() {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(error.into());
+            }
+            struct Stream(*mut libc::DIR);
+            impl Drop for Stream {
+                fn drop(&mut self) {
+                    unsafe {
+                        libc::closedir(self.0);
+                    }
+                }
+            }
+            let stream = Stream(stream);
+            let mut names = Vec::new();
+            loop {
+                #[cfg(target_os = "macos")]
+                let errno = unsafe { libc::__error() };
+                #[cfg(target_os = "linux")]
+                let errno = unsafe { libc::__errno_location() };
+                unsafe {
+                    *errno = 0;
+                }
+                let entry = unsafe { libc::readdir(stream.0) };
+                if entry.is_null() {
+                    if unsafe { *errno } != 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    break;
+                }
+                let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+                if name == b"." || name == b".." {
+                    continue;
+                }
+                names.push(std::ffi::OsString::from_vec(name.to_vec()));
+                if names.len() > 100_000 {
+                    return Err(invalid());
+                }
+            }
+            names.sort();
+            Ok(names)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(invalid())
+        }
+    }
+
+    /// Remove only a single caller-owned journal/lease name while holding the
+    /// writer lock. No path resolution or recursive cleanup is performed.
+    pub(crate) fn remove(&self, name: &std::ffi::OsStr) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let name = filename(name)?;
+            if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            self.0.sync_all().map_err(Error::StorageDurabilityUncertain)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            Err(invalid())
+        }
+    }
+
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        Self::open_with_policy(path, true)
+    }
+
+    fn open_with_policy(path: &Path, final_component: bool) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -34,7 +175,7 @@ impl Directory {
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
                 .open(path)?;
-            validate_directory(&initial, true)?;
+            validate_directory(&initial, final_component)?;
             // Resolve platform aliases such as macOS /var, then walk without
             // following any further symlinks. Compare identities so a path swap
             // during validation cannot silently select a different directory.
@@ -52,7 +193,7 @@ impl Directory {
             if first.dev() != last.dev() || first.ino() != last.ino() {
                 return Err(invalid());
             }
-            validate_directory(&directory, true)?;
+            validate_directory(&directory, final_component)?;
             Ok(Self(directory))
         }
         #[cfg(not(unix))]
@@ -61,6 +202,133 @@ impl Directory {
             Err(Error::Config(
                 "Node configuration custody currently requires a supported Unix supervisor".into(),
             ))
+        }
+    }
+
+    /// Deliberate registration only. Pin trusted existing ancestry before
+    /// creating components relative to it. Each new child and its parent entry
+    /// are synced before proceeding; failure preserves custody for recovery.
+    pub(crate) fn create_private(path: &Path) -> Result<Self> {
+        Self::create_private_with_sync(path, File::sync_all)
+    }
+
+    fn create_private_with_sync(
+        path: &Path,
+        mut sync: impl FnMut(&File) -> std::io::Result<()>,
+    ) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if std::fs::symlink_metadata(path).is_ok() {
+                let directory = Self::open(path)?;
+                directory.sync_ancestry(path, &mut sync)?;
+                return Ok(directory);
+            }
+            let absolute = std::path::absolute(path)?;
+            if absolute
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(invalid());
+            }
+            let mut ancestor = absolute.as_path();
+            let mut missing = Vec::new();
+            loop {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing.push(ancestor.file_name().ok_or_else(invalid)?.to_owned());
+                        ancestor = ancestor.parent().ok_or_else(invalid)?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            // Existing ancestor aliases (macOS /tmp and /var) are allowed only
+            // after canonicalization and the same trusted custody walk.
+            let mut parent = Self::open_with_policy(&std::fs::canonicalize(ancestor)?, false)?;
+            for name in missing.iter().rev() {
+                let encoded = filename(name)?;
+                if unsafe { libc::mkdirat(parent.0.as_raw_fd(), encoded.as_ptr(), 0o700) } != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(error.into());
+                    }
+                }
+                let child = open_at(&parent.0, name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+                validate_directory(&child, true)?;
+                // Also sync a raced, valid child: another creator's unfinished
+                // parent sync cannot justify our own durability claim.
+                sync(&child).map_err(Error::StorageDurabilityUncertain)?;
+                sync(&parent.0).map_err(Error::StorageDurabilityUncertain)?;
+                parent = Self(child);
+            }
+            validate_directory(&parent.0, true)?;
+            // An earlier interrupted registration may have created any of the
+            // now-existing ancestors without completing its parent-entry sync.
+            // Reconcile the entire trusted lineage even on the existing path.
+            parent.sync_ancestry(&absolute, &mut sync)?;
+            Ok(parent)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path, sync);
+            Err(invalid())
+        }
+    }
+
+    #[cfg(unix)]
+    fn sync_ancestry(
+        &self,
+        path: &Path,
+        sync: &mut impl FnMut(&File) -> std::io::Result<()>,
+    ) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let canonical = std::fs::canonicalize(path)?;
+        let mut lineage = vec![File::open("/")?];
+        validate_directory(&lineage[0], false)?;
+        for component in canonical.components() {
+            if let std::path::Component::Normal(name) = component {
+                let child = open_at(
+                    lineage.last().ok_or_else(invalid)?,
+                    name,
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                    0,
+                )?;
+                validate_directory(&child, false)?;
+                lineage.push(child);
+            }
+        }
+        let expected = self.0.metadata()?;
+        let actual = lineage.last().ok_or_else(invalid)?.metadata()?;
+        if expected.dev() != actual.dev() || expected.ino() != actual.ino() {
+            return Err(invalid());
+        }
+        // Deepest child first, then every containing directory through root.
+        // Syncing only the final profile would not reconcile its own entry.
+        for directory in lineage.iter().rev() {
+            sync(directory).map_err(Error::StorageDurabilityUncertain)?;
+        }
+        Ok(())
+    }
+
+    /// Persistent registration custody survives network awaits. Do not unlink
+    /// the inode on release or mistake a free lease for old-daemon quiescence.
+    pub(crate) fn registration_lock(&self) -> Result<File> {
+        #[cfg(unix)]
+        {
+            let file = open_at(
+                &self.0,
+                std::ffi::OsStr::new(".registration.lock"),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NONBLOCK,
+                0o600,
+            )?;
+            lock_file(&file, true)?;
+            self.0.sync_all()?;
+            Ok(file)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(invalid())
         }
     }
 
@@ -175,6 +443,17 @@ impl Directory {
             Err(invalid())
         }
     }
+}
+
+#[cfg(unix)]
+fn lock_file(file: &File, nonblocking: bool) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    validate(file)?;
+    let flags = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
+    if unsafe { libc::flock(file.as_raw_fd(), flags) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 /// No link/unlink emulation: interruption between those operations strands
@@ -319,7 +598,11 @@ impl Drop for Temporary<'_> {
 }
 
 pub(crate) fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let directory = Directory::open(path.parent().unwrap_or(Path::new(".")))?;
+    let directory = Directory::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
     directory.read(path.file_name().ok_or_else(invalid)?, limit)
 }
 
@@ -343,6 +626,9 @@ impl std::fmt::Debug for Publication {
 }
 
 impl Publication {
+    pub(crate) fn snapshot(&self) -> Option<[u8; 32]> {
+        *self.0.lock().expect("publication lock poisoned")
+    }
     pub(crate) fn observed(bytes: &[u8]) -> Self {
         Self(Mutex::new(Some(Sha256::digest(bytes).into())))
     }
@@ -351,11 +637,31 @@ impl Publication {
         self.save_with_sync(path, bytes, File::sync_all)
     }
 
+    pub(crate) fn save_validated_in(
+        &self,
+        directory: &Directory,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+        validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
+    ) -> Result<()> {
+        self.save_inner_in(directory, name, bytes, File::sync_all, validate)
+    }
+
     fn save_with_sync(
         &self,
         path: &Path,
         bytes: &[u8],
         sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<()> {
+        self.save_inner(path, bytes, sync, |_, _| Ok(()))
+    }
+
+    fn save_inner(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+        validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
     ) -> Result<()> {
         // Enforce the reader's bound before even creating a writer-lock file.
         if bytes.len() as u64 > MAX_CONFIG_BYTES {
@@ -363,20 +669,44 @@ impl Publication {
                 "Node configuration exceeds its size limit".into(),
             ));
         }
-        let directory = Directory::open(path.parent().unwrap_or(Path::new(".")))?;
+        let directory = Directory::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
         let name = path.file_name().ok_or_else(invalid)?;
+        self.save_inner_in(&directory, name, bytes, sync, validate)
+    }
+
+    fn save_inner_in(
+        &self,
+        directory: &Directory,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+        validate: impl FnOnce(&Directory, Option<&[u8]>) -> Result<()>,
+    ) -> Result<()> {
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::Config(
+                "Node configuration exceeds its size limit".into(),
+            ));
+        }
         let _writer = directory.writer_lock()?;
         let mut expected = self.0.lock().expect("publication lock poisoned");
-        let current = match directory.read(name, MAX_CONFIG_BYTES) {
-            Ok(bytes) => Some(<[u8; 32]>::from(Sha256::digest(&bytes))),
+        let current_bytes = match directory.read(name, MAX_CONFIG_BYTES) {
+            Ok(bytes) => Some(bytes),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let current = current_bytes
+            .as_deref()
+            .map(|bytes| <[u8; 32]>::from(Sha256::digest(bytes)));
         if current != *expected {
             return Err(Error::Config(
                 "Node configuration changed; reload before retrying this operation".into(),
             ));
         }
+        validate(directory, current_bytes.as_deref())?;
         let result = directory.publish_with_sync(name, bytes, current.is_some(), sync);
         if result.is_ok() || matches!(result, Err(Error::StorageDurabilityUncertain(_))) {
             // Installation happened. Preserve the new observation even when its
@@ -390,6 +720,86 @@ impl Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn creation_sync_faults_and_existing_ancestry_retries_never_skip_durability() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        for fault in 0..4 {
+            let root = tempfile::tempdir().unwrap();
+            let profiles = root.path().join("profiles");
+            let profile = profiles.join("node");
+            let mut calls = 0;
+            let result = Directory::create_private_with_sync(&profile, |directory| {
+                let index = calls;
+                calls += 1;
+                if index == fault {
+                    Err(std::io::Error::from_raw_os_error(libc::EIO))
+                } else {
+                    directory.sync_all()
+                }
+            });
+            assert!(matches!(result, Err(Error::StorageDurabilityUncertain(_))));
+            assert!(profiles.is_dir());
+            assert!(!profile.join(".keyfile").exists());
+            // The previously-created ancestor must be synced again, whether
+            // this retry finds the whole profile or just a partial lineage.
+            let ancestor = std::fs::metadata(&profiles).unwrap();
+            let mut caught_ancestor = false;
+            let result = Directory::create_private_with_sync(&profile, |directory| {
+                let metadata = directory.metadata()?;
+                if metadata.dev() == ancestor.dev() && metadata.ino() == ancestor.ino() {
+                    caught_ancestor = true;
+                    Err(std::io::Error::from_raw_os_error(libc::EIO))
+                } else {
+                    directory.sync_all()
+                }
+            });
+            assert!(caught_ancestor);
+            assert!(matches!(result, Err(Error::StorageDurabilityUncertain(_))));
+            let mut synced = std::collections::BTreeSet::new();
+            Directory::create_private_with_sync(&profile, |directory| {
+                let metadata = directory.metadata()?;
+                synced.insert((metadata.dev(), metadata.ino()));
+                directory.sync_all()
+            })
+            .unwrap();
+            for path in [
+                root.path(),
+                profiles.as_path(),
+                profile.as_path(),
+                Path::new("/"),
+            ] {
+                let metadata = std::fs::metadata(path).unwrap();
+                assert!(synced.contains(&(metadata.dev(), metadata.ino())));
+            }
+            assert_eq!(
+                std::fs::metadata(&profiles).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(std::fs::read_dir(&profile).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_creation_refuses_mutable_ancestors_without_repair_or_children() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let ancestor = root.path().join("mutable");
+        std::fs::create_dir(&ancestor).unwrap();
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(Directory::create_private(&ancestor.join("profile")).is_err());
+        assert!(!ancestor.join("profile").exists());
+        assert_eq!(
+            std::fs::metadata(&ancestor).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
+    }
 
     fn wait_for_test_file(path: &Path) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

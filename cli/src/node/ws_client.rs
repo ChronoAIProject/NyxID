@@ -2566,9 +2566,14 @@ fn load_ssh_node_key_entry(
     principal: &str,
 ) -> Result<ssh_keys::SshKeyEntry> {
     NodeConfig::load(config_path).and_then(|config| {
-        let backend = SecretBackend::from_storage_backend_str(storage_backend, config_dir)?;
+        if config.storage_backend != storage_backend {
+            return Err(Error::Config(
+                "Node storage selection changed; reload before SSH execution".into(),
+            ));
+        }
+        let backend = SecretBackend::reader(&config, config_dir)?;
         match ssh_keys::config_find(&config, service_slug, principal) {
-            Some(stored) => ssh_keys::load_entry(stored, &backend),
+            Some(stored) => ssh_keys::load_entry(&config, stored, &backend),
             None => Err(Error::Config(format!(
                 "SSH key missing for service '{service_slug}' principal '{principal}'"
             ))),

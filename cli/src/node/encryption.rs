@@ -12,6 +12,7 @@ use super::error::{Error, Result};
 /// Key is loaded from `<config_dir>/.keyfile` (generated on first register).
 pub struct LocalEncryption {
     key: Zeroizing<[u8; 32]>,
+    directory: super::storage::Directory,
 }
 
 impl LocalEncryption {
@@ -21,7 +22,7 @@ impl LocalEncryption {
         Self::open_in(&directory)
     }
 
-    fn open_in(directory: &super::storage::Directory) -> Result<Self> {
+    pub(crate) fn open_in(directory: &super::storage::Directory) -> Result<Self> {
         let bytes = Zeroizing::new(directory.read(std::ffi::OsStr::new(".keyfile"), 32)?);
         if bytes.len() != 32 {
             return Err(Error::Encryption(
@@ -30,7 +31,22 @@ impl LocalEncryption {
         }
         let mut key = Zeroizing::new([0u8; 32]);
         key.copy_from_slice(&bytes);
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            directory: directory.try_clone()?,
+        })
+    }
+
+    /// A cached key never authorizes continued use after its selected custody
+    /// disappears or changes, even when the configuration mtime is unchanged.
+    pub(crate) fn check_available(&self) -> Result<()> {
+        let bytes = Zeroizing::new(self.directory.read(std::ffi::OsStr::new(".keyfile"), 32)?);
+        if bytes.as_slice() != self.key.as_ref() {
+            return Err(Error::Encryption(
+                "Authoritative node keyfile changed".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Deliberate registration/migration initialization only. Never replaces
@@ -38,13 +54,22 @@ impl LocalEncryption {
     pub fn initialize(config_dir: &Path) -> Result<Self> {
         let directory = super::storage::Directory::open(config_dir)?;
         let _writer = directory.writer_lock()?;
-        match Self::open_in(&directory) {
+        Self::initialize_in_locked(&directory)
+    }
+
+    /// Caller holds this pinned directory's writer lock and checks its exact
+    /// config observation inside the same critical section before creation.
+    pub(crate) fn initialize_in_locked(directory: &super::storage::Directory) -> Result<Self> {
+        match Self::open_in(directory) {
             Ok(existing) => Ok(existing),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut key = Zeroizing::new([0u8; 32]);
                 OsRng.fill_bytes(key.as_mut());
                 directory.publish(std::ffi::OsStr::new(".keyfile"), key.as_ref(), false)?;
-                Ok(Self { key })
+                Ok(Self {
+                    key,
+                    directory: directory.try_clone()?,
+                })
             }
             Err(error) => Err(error),
         }
@@ -58,6 +83,7 @@ impl LocalEncryption {
 
     /// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
+        self.check_available()?;
         let cipher = Aes256Gcm::new_from_slice(&*self.key)
             .map_err(|e| Error::Encryption(format!("Failed to create cipher: {e}")))?;
 
@@ -79,6 +105,7 @@ impl LocalEncryption {
 
     /// Decrypt a base64-encoded `nonce || ciphertext`. Returns plaintext string.
     pub fn decrypt(&self, encoded: &str) -> Result<String> {
+        self.check_available()?;
         let data = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|e| Error::Encryption(format!("Invalid base64: {e}")))?;
@@ -95,18 +122,40 @@ impl LocalEncryption {
         let cipher = Aes256Gcm::new_from_slice(&*self.key)
             .map_err(|e| Error::Encryption(format!("Failed to create cipher: {e}")))?;
 
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| Error::Encryption(format!("Decryption failed: {e}")))?;
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| Error::Encryption("Node secret decryption failed".into()))?,
+        );
 
-        String::from_utf8(plaintext)
-            .map_err(|e| Error::Encryption(format!("Decrypted data is not valid UTF-8: {e}")))
+        std::str::from_utf8(&plaintext)
+            .map(str::to_owned)
+            .map_err(|_| Error::Encryption("Decrypted node secret is not valid UTF-8".into()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_key_refuses_disappearance_or_replacement_without_config_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let enc = LocalEncryption::initialize(dir.path()).unwrap();
+        let ciphertext = enc.encrypt("synthetic-health-value").unwrap();
+        let key_path = dir.path().join(".keyfile");
+        let original = Zeroizing::new(std::fs::read(&key_path).unwrap());
+        std::fs::remove_file(&key_path).unwrap();
+        assert!(enc.check_available().is_err());
+        assert!(enc.decrypt(&ciphertext).is_err());
+        assert!(enc.encrypt("replacement").is_err());
+        assert!(!key_path.exists());
+        let replacement = LocalEncryption::initialize(dir.path()).unwrap();
+        assert!(replacement.check_available().is_ok());
+        assert!(enc.decrypt(&ciphertext).is_err());
+        std::fs::write(&key_path, &original).unwrap();
+        assert!(enc.decrypt(&ciphertext).is_ok());
+    }
 
     #[test]
     fn strict_missing_read_has_no_filesystem_side_effects() {

@@ -9,12 +9,21 @@ use super::error::{Error, Result};
 use super::secret_backend::SecretBackend;
 
 /// Top-level configuration structure, serialized as TOML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Local optimistic publication state; clones retain independent snapshots.
     /// This is process state, never a Mongo model or serialized configuration.
     #[serde(skip)]
     pub publication: super::storage::Publication,
+    /// A fresh value is serialized by every publication, including metadata
+    /// edits. The live CAS observation remains in `publication`, not this
+    /// loaded projection, so cloning or an awaited operation cannot erase ABA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_generation: Option<uuid::Uuid>,
+    /// Absent only for legacy keychain custody. Immutable optional None means
+    /// absent and must never trigger discovery of a stale legacy value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keychain_format: Option<KeychainFormat>,
     pub server: ServerConfig,
     pub node: NodeSection,
     /// Only controlled managed bootstrap may set this. Self-hosted nodes leave
@@ -45,8 +54,49 @@ pub struct NodeConfig {
     pub pending_crypto_keys: BTreeMap<String, PendingCryptoKeyConfig>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeychainFormat {
+    ImmutableV1,
+}
+
 fn default_storage_backend() -> String {
     "file".to_string()
+}
+
+impl fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("storage_backend", &self.storage_backend)
+            .field("credentials", &self.credentials.len())
+            .field("ssh_keys", &self.ssh_keys.len())
+            .field("pending_crypto_keys", &self.pending_crypto_keys.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for NodeSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("NodeSection { identity_and_auth: [REDACTED] }")
+    }
+}
+impl fmt::Debug for SigningConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SigningConfig { secret: [REDACTED] }")
+    }
+}
+impl fmt::Debug for CredentialConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialConfig")
+            .field("injection_method", &self.injection_method)
+            .field("oauth_managed", &self.oauth_managed)
+            .finish_non_exhaustive()
+    }
+}
+impl fmt::Debug for SshKeyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SshKeyConfig { key_configuration: [REDACTED] }")
+    }
 }
 
 pub const DEFAULT_NODE_PROXY_MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
@@ -63,14 +113,14 @@ pub struct ServerConfig {
     pub proxy_max_body_size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSection {
     pub id: String,
     /// AES-GCM encrypted auth token (base64)
     pub auth_token_encrypted: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SigningConfig {
     /// AES-GCM encrypted HMAC shared secret (base64)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,7 +165,7 @@ fn default_ssh_io_timeout_secs() -> u64 {
     3600
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialConfig {
     /// "header" or "query_param"
     pub injection_method: String,
@@ -214,7 +264,7 @@ impl std::fmt::Debug for OAuthRequestOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SshKeyConfig {
     pub service_slug: String,
     pub principal: String,
@@ -434,6 +484,8 @@ impl NodeConfig {
     pub fn new(server_url: String, node_id: String, storage_backend: String) -> Self {
         Self {
             publication: Default::default(),
+            storage_generation: None,
+            keychain_format: None,
             server: ServerConfig {
                 url: server_url,
                 proxy_max_body_size: DEFAULT_NODE_PROXY_MAX_BODY_SIZE,
@@ -457,11 +509,23 @@ impl NodeConfig {
     /// Load config from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = super::storage::read(path, super::storage::MAX_CONFIG_BYTES)?;
-        let content = std::str::from_utf8(&bytes)
+        Self::from_bytes(&bytes)
+    }
+
+    pub(crate) fn load_in(directory: &super::storage::Directory, path: &Path) -> Result<Self> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error::Config("Missing config filename".into()))?;
+        let bytes = directory.read(name, super::storage::MAX_CONFIG_BYTES)?;
+        Self::from_bytes(&bytes)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let content = std::str::from_utf8(bytes)
             .map_err(|_| Error::Config("Node configuration is not valid UTF-8".into()))?;
         let mut config: Self = toml::from_str(content)
             .map_err(|_| Error::Config("Node configuration is invalid TOML".into()))?;
-        config.publication = super::storage::Publication::observed(&bytes);
+        config.publication = super::storage::Publication::observed(bytes);
         if let Some(binding) = &config.managed_runtime {
             super::managed_config::validate_existing_config(&config, binding).map_err(|_| {
                 Error::Config(
@@ -476,8 +540,45 @@ impl NodeConfig {
     /// Serialize cross-process writers and refuse a stale loaded snapshot.
     /// Secret-backend transactions must also fence their effects before here.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)?;
-        self.publication.save(path, content.as_bytes())
+        self.save_with_secret_validation(path, |_, _| Ok(()))
+    }
+
+    /// Additional selected-store validation runs inside the same writer lock
+    /// and observed CAS as the actual install, before any config replacement.
+    pub(crate) fn save_with_secret_validation(
+        &self,
+        path: &Path,
+        validate: impl FnOnce(&super::storage::Directory, &NodeConfig) -> Result<()>,
+    ) -> Result<()> {
+        let directory = super::storage::Directory::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
+        self.save_with_secret_validation_in(&directory, path, validate)
+    }
+
+    pub(crate) fn save_with_secret_validation_in(
+        &self,
+        directory: &super::storage::Directory,
+        path: &Path,
+        validate: impl FnOnce(&super::storage::Directory, &NodeConfig) -> Result<()>,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        next.storage_generation = Some(uuid::Uuid::new_v4());
+        let content = toml::to_string_pretty(&next)?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| Error::Config("Missing config filename".into()))?;
+        self.publication.save_validated_in(
+            directory,
+            name,
+            content.as_bytes(),
+            |directory, current| {
+                super::secret_transaction::validate_publication(directory, name, current, &next)?;
+                validate(directory, &next)
+            },
+        )
     }
 
     /// Encrypt and store the auth token.
@@ -777,6 +878,27 @@ fn validate_node_profile_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_publication_changes_generation_and_fences_same_metadata_aba() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into())
+            .save(&path)
+            .unwrap();
+        let observed = NodeConfig::load(&path).unwrap();
+        let initial = observed.storage_generation.unwrap();
+        let stale = observed.clone();
+        observed.save(&path).unwrap();
+        let second = NodeConfig::load(&path).unwrap();
+        assert_ne!(second.storage_generation.unwrap(), initial);
+        assert_eq!(second.server.url, observed.server.url);
+        assert_eq!(second.node.id, observed.node.id);
+        assert!(stale.save(&path).is_err());
+        second.save(&path).unwrap();
+        let third = NodeConfig::load(&path).unwrap();
+        assert_ne!(third.storage_generation, second.storage_generation);
+    }
 
     #[test]
     fn config_dir_default_profile() {

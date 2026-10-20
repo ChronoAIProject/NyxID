@@ -23,19 +23,29 @@ enum KeychainClient {
     Faulty(String),
 }
 
+#[cfg(test)]
+type ReadProbe = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// OS keychain backend for secret storage.
 /// Uses macOS Keychain, Windows Credential Manager, or Linux Secret Service.
 #[derive(Clone)]
 pub struct KeychainBackend {
     node_id: String,
     client: KeychainClient,
+    #[cfg(test)]
+    read_probe: Option<ReadProbe>,
 }
 
 impl KeychainBackend {
+    pub(crate) fn owner_id(&self) -> &str {
+        &self.node_id
+    }
     pub fn new(node_id: &str) -> Self {
         Self {
             node_id: node_id.to_string(),
             client: KeychainClient::System,
+            #[cfg(test)]
+            read_probe: None,
         }
     }
 
@@ -44,6 +54,7 @@ impl KeychainBackend {
         Self {
             node_id: node_id.to_string(),
             client: KeychainClient::Memory(Arc::new(Mutex::new(HashMap::new()))),
+            read_probe: None,
         }
     }
 
@@ -52,7 +63,14 @@ impl KeychainBackend {
         Self {
             node_id: node_id.to_string(),
             client: KeychainClient::Faulty(message.to_string()),
+            read_probe: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_read_probe(mut self, probe: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.read_probe = Some(Arc::new(probe));
+        self
     }
 
     /// Verify that the backing keychain is writable before depending on it.
@@ -100,6 +118,10 @@ impl KeychainBackend {
 
     /// Retrieve a secret from the OS keychain.
     pub fn get(&self, key: &str) -> Result<String> {
+        #[cfg(test)]
+        if let Some(probe) = &self.read_probe {
+            probe(key);
+        }
         match &self.client {
             KeychainClient::System => {
                 let entry = self.entry(key)?;
@@ -121,6 +143,10 @@ impl KeychainBackend {
 
     /// Retrieve a secret, returning None if not found.
     pub fn get_optional(&self, key: &str) -> Result<Option<String>> {
+        #[cfg(test)]
+        if let Some(probe) = &self.read_probe {
+            probe(key);
+        }
         match &self.client {
             KeychainClient::System => {
                 let entry = self.entry(key)?;
