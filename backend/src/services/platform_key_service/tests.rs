@@ -10,6 +10,7 @@ use crate::test_utils::{
     connect_transaction_test_database, test_encryption_keys, test_membership, test_user,
     test_user_endpoint, test_user_service,
 };
+use chrono::{Duration, Utc};
 use mongodb::bson;
 use std::sync::Arc;
 
@@ -134,6 +135,69 @@ async fn platform_acl_checks_people_org_roles_activity_and_revocation() {
     assert!(available(&db, &service, &stranger).await.unwrap());
     service.platform_key = Some(PlatformKeyConfig::default());
     assert!(!available(&db, &service, &stranger).await.unwrap());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_grants_listing_matches_proxy_organization_order() {
+    let db = connect_transaction_test_database("platform_listing_org_order").await;
+    let actor = owner(&db, UserType::Person).await;
+    let primary = owner(&db, UserType::Org).await;
+    let earliest = owner(&db, UserType::Org).await;
+    let tie_a = owner(&db, UserType::Org).await;
+    let tie_b = owner(&db, UserType::Org).await;
+    let now = Utc::now();
+
+    let mut primary_membership = test_membership(&primary, &actor, OrgRole::Member, None);
+    primary_membership.created_at = now - Duration::days(3);
+    let mut earliest_membership = test_membership(&earliest, &actor, OrgRole::Member, None);
+    earliest_membership.created_at = now - Duration::days(5);
+    let mut tie_membership_a = test_membership(&tie_a, &actor, OrgRole::Member, None);
+    tie_membership_a.created_at = now - Duration::days(1);
+    let mut tie_membership_b = test_membership(&tie_b, &actor, OrgRole::Member, None);
+    tie_membership_b.created_at = tie_membership_a.created_at;
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_many([
+            primary_membership,
+            earliest_membership,
+            tie_membership_a,
+            tie_membership_b,
+        ])
+        .await
+        .unwrap();
+
+    db.collection::<bson::Document>(USERS)
+        .update_one(
+            doc! { "_id": &actor },
+            doc! { "$set": { "primary_org_id": &primary } },
+        )
+        .await
+        .unwrap();
+    let grants = OwnerGrants::load_for_listing(&db, &actor).await.unwrap();
+    let ordered: Vec<_> = grants
+        .memberships()
+        .iter()
+        .map(|membership| membership.org_user_id.as_str())
+        .collect();
+    assert_eq!(ordered[0], primary);
+    assert_eq!(ordered[1], earliest);
+    let expected_tie = if tie_a < tie_b {
+        [tie_a.as_str(), tie_b.as_str()]
+    } else {
+        [tie_b.as_str(), tie_a.as_str()]
+    };
+    assert_eq!(ordered[2], expected_tie[0]);
+    assert_eq!(ordered[3], expected_tie[1]);
+
+    db.collection::<bson::Document>(USERS)
+        .update_one(
+            doc! { "_id": &actor },
+            doc! { "$unset": { "primary_org_id": "" } },
+        )
+        .await
+        .unwrap();
+    let grants = OwnerGrants::load_for_listing(&db, &actor).await.unwrap();
+    assert_eq!(grants.memberships()[0].org_user_id, earliest);
     db.drop().await.unwrap();
 }
 

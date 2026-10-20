@@ -48,6 +48,20 @@ bindings. Personal resources and saved logins MUST be refused. Maintenance must
 not grant resources the maintaining person cannot access. Account-wide personal
 management access and guest/channel sharing are not organization-agent grants.
 
+MCP discovery and execution use the same organization-bound connection scope.
+The live member ACL is applied before slug collision resolution, so a personal
+connection or a connection from another organization cannot shadow an
+organization connection. `nyx__list_connected_services`, `nyx__search_tools`,
+`tools/list`, `/api/v1/mcp/config`, `nyx__call_tool` and direct `tools/call`
+dispatch preserve the selected `UserService.id`. On REST slug routes, a
+granted bound-organization connection, including a model/inference connection,
+owns its slug over a same-slug personal connection. Without that grant, the
+existing cascade and the documented implicit model-transport exception are
+unchanged. Granted rows report `chat_access: granted`; other live organization
+rows may report `acknowledgement_required` and are handled by the existing
+service gate rather than becoming an `Unknown tool`. A new request rechecks the
+same live ACL.
+
 ## Management, skills and memory
 
 Personal NyxBot tools accept an explicit `org` selector (ID, slug or unambiguous

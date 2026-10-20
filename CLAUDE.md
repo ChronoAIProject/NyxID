@@ -133,6 +133,11 @@ Key files: `services/openclaw_channel_service.rs`, `handlers/openclaw_channel.rs
 
 ### 8. Streamlined Services Architecture
 
+MCP and proxy connection selection applies live service authority before
+same-slug resolution and preserves the selected `UserService.id` through
+discovery and dispatch; see [`docs/API_DISCOVERY.md`](docs/API_DISCOVERY.md)
+for the connection-selection invariant.
+
 - Tools are internal catalog offerings with publication enforced across MCP, HTTP and WS execution; preserve legacy defaults and MCP names. See `docs/TOOLS.md` for runtime creation, publication and listing rules.
 - `service_preferences` is per acting identity: NyxBot enforces eligible personal-first, per-catalog connection order at concrete execution; ordinary external clients retain advisory discovery ordering (`nyx__search_tools`/`nyx__list_connected_services`, `/keys` group-relative `preference_rank` and disabled-inclusive `preference_position`). Exact owner selection and bounded verified fallback are described in `docs/NYXBOT_SERVICE_EXECUTION.md`; `tools/list`/`/mcp/config` stay unchanged. Exposed ranks are dense after authorization; scoped group PUT and explicit hidden DELETE require verified first-party human auth. Scoped saves preserve unrelated/hidden/stale IDs; only hidden DELETE releases IDs outside the full authorized inventory.
 

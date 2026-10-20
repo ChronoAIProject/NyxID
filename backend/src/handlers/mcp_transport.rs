@@ -1359,17 +1359,14 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
-    if auth
-        .assistant_agent_owner_id
-        .as_deref()
-        .is_some_and(|owner| owner != auth.user_id)
-    {
-        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
-    } else if auth.chat.is_some() || auth.allow_all_services {
-        mcp_service::ServiceScope::Unrestricted
-    } else {
-        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
-    }
+    mcp_service::caller_service_scope(
+        &auth.user_id,
+        auth.assistant_agent_owner_id.as_deref(),
+        auth.org_agent_access.as_deref(),
+        auth.chat.as_ref(),
+        auth.allow_all_services,
+        auth.allowed_service_ids.as_slice(),
+    )
 }
 
 #[cfg(test)]
@@ -3625,7 +3622,8 @@ async fn authorize_mcp_operation(
 const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
     acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
     orchestrator for permission and tells you to end your turn; you are resumed with \
-    the decision. source meanings: user_service = the user's own connection; \
+    the decision. source meanings: user_service = a personal or organization connection; \
+    owner_kind identifies whether a user_service row is personal or organization-owned; \
     platform = NyxID's shared platform credential, not the user's account. To connect \
     the user's own account, use nyx__discover_services then nyx__connect_service and \
     give the user the link.";
@@ -4688,29 +4686,37 @@ async fn handle_meta_search(
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
+    let exact_service_id_query = mcp_service::exact_connection_query(&services, query).is_some();
     let search_result = mcp_service::search_all_tools_ranked(&services, query, &ranks);
 
     let mut candidates = search_result.matches;
-    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
-        candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
-        candidates.push(crate::services::assistant_upload_service::definition());
-    } else if auth.chat.is_none()
-        && let Some(source) = auth.machine_source.as_ref()
-        && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
-            state, source,
-        ))
-        .await
-    {
-        candidates.extend(tools);
+    if !exact_service_id_query {
+        if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+            candidates.extend(Box::pin(machine_discovery_definitions(state, chat)).await);
+            candidates.push(crate::services::assistant_upload_service::definition());
+        } else if auth.chat.is_none()
+            && let Some(source) = auth.machine_source.as_ref()
+            && let Ok(tools) = Box::pin(crate::services::machine_external_service::definitions(
+                state, source,
+            ))
+            .await
+        {
+            candidates.extend(tools);
+        }
+        if auth
+            .chat
+            .as_ref()
+            .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
+        {
+            candidates.push(crate::services::assistant_resource_service::definition());
+        }
     }
-    if auth
-        .chat
-        .as_ref()
-        .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
-    {
-        candidates.push(crate::services::assistant_resource_service::definition());
-    }
-    let results: Vec<_> = mcp_service::rank_search_candidates(candidates, query)
+    let ranked_candidates = if exact_service_id_query {
+        candidates
+    } else {
+        mcp_service::rank_search_candidates(candidates, query)
+    };
+    let results: Vec<_> = ranked_candidates
         .into_iter()
         .map(|tool| {
             let mut value = serde_json::json!({
@@ -4719,6 +4725,7 @@ async fn handle_meta_search(
                 "inputSchema": webhook_tool_schema(auth, &tool.input_schema),
             });
             if let Some((service, _)) = mcp_service::resolve_tool_call(&tool.name, &services) {
+                value["service_id"] = serde_json::json!(service.service_id);
                 value["executable"] = serde_json::json!(service.executable);
                 value["preference_rank"] =
                     serde_json::json!(ranks.get(&service.service_id).copied());
@@ -4761,11 +4768,8 @@ async fn load_all_services_for_meta_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
-        if auth.chat.is_some() {
-            mcp_service::NodeScope::Unrestricted
-        } else {
-            mcp_node_scope(auth)
-        },
+        mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await?;
     crate::services::agent_operation_scope_service::filter_catalog(
@@ -4827,7 +4831,8 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let mut result = mcp_service::list_connected_services_ranked(&services, query, &ranks);
+    let mut result =
+        mcp_service::list_connected_services_ranked(&services, query, &ranks, &auth.user_id);
     if auth.chat.is_some()
         && let Some(rows) = result["services"].as_array_mut()
     {
@@ -8700,6 +8705,28 @@ mod machine_mcp_tests;
 #[cfg(test)]
 mod org_agent_mcp_tests {
     use super::*;
+    use crate::handlers::mcp as mcp_config;
+
+    async fn decode_meta_result(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        serde_json::from_str(
+            envelope["result"]["content"][0]["text"]
+                .as_str()
+                .expect("meta-tool response text"),
+        )
+        .unwrap()
+    }
+
+    async fn response_body(response: Response) -> String {
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
     #[tokio::test]
     async fn org_agent_mcp_auth_discovery_and_revocation() {
         use std::sync::atomic::Ordering;
@@ -8745,14 +8772,1330 @@ mod org_agent_mcp_tests {
         assert_eq!(actual.allow_all_services, expected.allow_all_services);
         assert_eq!(actual.allowed_node_ids, expected.allowed_node_ids);
         assert_eq!(actual.allow_all_nodes, expected.allow_all_nodes);
-        assert!(
-            matches!(mcp_service_scope(&ctx), mcp_service::ServiceScope::Allowed(ids) if ids.is_empty())
-        );
+        // Organization specialists discover the live organization catalog;
+        // grants remain enforced by chat_service_gate during execution.
+        assert!(matches!(
+            mcp_service_scope(&ctx),
+            mcp_service::ServiceScope::Organization { .. }
+        ));
         f.revoke(&f.admin).await;
         assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
         assert_eq!(memberships.load(Ordering::SeqCst), 2);
         assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
         assert_eq!(memberships.load(Ordering::SeqCst), 3);
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn org_agent_catalog_authority_precedes_personal_slug_collisions() {
+        let f = crate::services::org_agent_tests::Fixture::new("org_agent_slug_collision").await;
+        let (agent, row) = f.create().await;
+        let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
+            &f.state,
+            &f.admin,
+            "Coordinate",
+        )
+        .await;
+        crate::services::assistant_authority_tests::pin_assignment(
+            &f.state.db,
+            &f.admin,
+            &row.id,
+            Some(&nyxbot.id),
+        )
+        .await;
+        let personal = f.service(&f.admin, "api-github-pat").await;
+        let organization = f.service(&f.org, "api-github-pat").await;
+        let ungranted_organization = f.service(&f.org, "org-only").await;
+        let unrelated_personal = f.service(&f.admin, "api-github-pat-2").await;
+        let mut auto_platform = crate::test_utils::test_auto_connected_catalog_service();
+        auto_platform.slug = "auto-platform".into();
+        auto_platform.name = "Auto platform".into();
+        let auto_platform_id = auto_platform.id.clone();
+        f.state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .insert_one(auto_platform)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .insert_one(crate::test_utils::test_service_endpoint(
+                &auto_platform_id,
+                "status",
+                "GET",
+                "/status",
+            ))
+            .await
+            .unwrap();
+        let other_org = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &other_org,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        let mut other_membership = crate::test_utils::test_membership(
+            &other_org,
+            &f.admin,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        );
+        other_membership.created_at = chrono::Utc::now() - chrono::Duration::days(1);
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .insert_one(other_membership)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &f.admin },
+                doc! { "$set": { "primary_org_id": &other_org } },
+            )
+            .await
+            .unwrap();
+        let other_organization = f.service(&other_org, "api-github-pat").await;
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.admin,
+            &agent.id,
+            crate::services::assistant_team_service::GrantChange::Add(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![organization.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let key = f.key(&row).await;
+        let mut headers = HeaderMap::new();
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.admin,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        let auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+        let scope = mcp_service_scope(&auth);
+        let catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &auth.user_id,
+            mcp_node_scope(&auth),
+            scope,
+        )
+        .await
+        .unwrap();
+        assert!(
+            catalog
+                .services
+                .iter()
+                .any(|service| { service.service_id == organization && service.executable })
+        );
+        assert!(!catalog.services.iter().any(|service| {
+            service.service_id == personal
+                || service.service_id == unrelated_personal
+                || service.service_id == other_organization
+                || service.service_id == auto_platform_id
+        }));
+
+        let routed = crate::services::service_pool_routing::select_slug_metadata(
+            &f.state.db,
+            &f.state.encryption_keys,
+            None,
+            None,
+            &auth.user_id,
+            "api-github-pat",
+            auth.org_agent_access.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            routed,
+            crate::services::service_pool_routing::SlugMetadataRoute::Service(id)
+                if id == organization
+        ));
+
+        let listed = crate::services::mcp_service::list_connected_services_ranked(
+            &catalog.services,
+            Some(&organization),
+            &std::collections::HashMap::new(),
+            &auth.user_id,
+        );
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["services"][0]["service_id"], organization);
+        assert_eq!(listed["services"][0]["owner_kind"], "organization");
+        let listed = decode_meta_result(
+            handle_meta_list_connected(
+                &f.state,
+                &auth,
+                &serde_json::json!({"query": organization}),
+                Some(serde_json::json!(2)),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["services"][0]["service_id"], organization);
+
+        let all_listed = decode_meta_result(
+            handle_meta_list_connected(
+                &f.state,
+                &auth,
+                &serde_json::json!({}),
+                Some(serde_json::json!(4)),
+            )
+            .await,
+        )
+        .await;
+        let ungranted = all_listed["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|service| service["service_id"] == ungranted_organization)
+            .expect("ungranted organization connection remains discoverable");
+        assert_eq!(ungranted["chat_access"], "acknowledgement_required");
+        assert!(
+            !all_listed["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|service| service["service_id"] == auto_platform_id)
+        );
+
+        let platform_search = decode_meta_result(
+            handle_meta_search(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({"query": "auto-platform"}),
+                Some(serde_json::json!(12)),
+                false,
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !platform_search["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["service_id"] == auto_platform_id)
+        );
+
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.admin,
+            crate::services::assistant_settings_service::Update {
+                specialist_access_requests: Some(
+                    crate::models::assistant_settings::SpecialistAccessRequests::Denied,
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let gated = response_body(
+            handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({
+                    "tool_name": "org-only__request",
+                    "arguments": {}
+                }),
+                Some(serde_json::json!(5)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await,
+        )
+        .await;
+        assert!(gated.contains("access_request_denied"), "{gated}");
+        assert!(!gated.contains("Unknown tool"));
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {
+                    "event_type": "mcp_tool_call",
+                    "event_data.service_id": &ungranted_organization,
+                })
+                .await
+                .unwrap(),
+            0,
+            "the denied gate must not execute upstream or write an MCP call audit"
+        );
+
+        let unknown_personal = response_body(
+            handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({
+                    "tool_name": "api-github-pat-2__request",
+                    "arguments": {}
+                }),
+                Some(serde_json::json!(6)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await,
+        )
+        .await;
+        assert!(unknown_personal.contains("Unknown tool"));
+        let search =
+            crate::services::mcp_service::search_all_tools(&catalog.services, &organization);
+        assert!(
+            !search.matches.is_empty(),
+            "exact connection IDs must search"
+        );
+        let search = decode_meta_result(
+            handle_meta_search(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({"query": organization}),
+                Some(serde_json::json!(3)),
+                false,
+            )
+            .await,
+        )
+        .await;
+        assert!(search["matches"].as_array().is_some_and(|matches| {
+            matches.iter().any(|tool| {
+                tool["service_id"] == organization && tool["name"] == "api-github-pat__request"
+            })
+        }));
+        let (targets, refused) = crate::services::assistant_team_service::resolve_each_target(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.admin,
+            std::slice::from_ref(&organization),
+        )
+        .await
+        .unwrap();
+        assert!(refused.is_empty());
+        assert_eq!(targets.service_ids, vec![organization.clone()]);
+
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        };
+        let response = handle_tools_list(&f.state, &auth, None, &request).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let tools: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "api-github-pat__request" })
+        );
+        assert!(
+            !tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "api-github-pat-2__request" })
+        );
+        assert!(
+            !tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "auto-platform__status")
+        );
+
+        let rest = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let axum::Json(config) =
+            mcp_config::get_mcp_config(axum::extract::State(f.state.clone()), rest)
+                .await
+                .unwrap();
+        assert!(
+            config
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        assert!(!config.services.iter().any(|service| {
+            service.service_id == personal
+                || service.service_id == unrelated_personal
+                || service.service_id == other_organization
+                || service.service_id == auto_platform_id
+        }));
+        assert_eq!(config.diagnostics.shadowed_connections, 0);
+
+        let platform_call = response_body(
+            handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({
+                    "tool_name": "auto-platform__status",
+                    "arguments": {}
+                }),
+                Some(serde_json::json!(13)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await,
+        )
+        .await;
+        assert!(platform_call.contains("Unknown tool"), "{platform_call}");
+
+        // Unrestricted human and NyxBot catalogs retain the credential-free
+        // platform service; only restricted organization discovery excludes it.
+        let unrestricted = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.admin,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            unrestricted
+                .services
+                .iter()
+                .any(|service| service.service_id == auto_platform_id)
+        );
+
+        // A restricted non-chat key still selects the exact granted O1 before
+        // slug collisions; the personal and other-organization rows cannot
+        // shadow it. Reuse the real authenticated key context while removing
+        // its chat authority, which exercises the restricted branch directly.
+        let mut restricted_auth = auth.clone();
+        restricted_auth.chat = None;
+        restricted_auth.allowed_service_ids = vec![organization.clone()];
+        restricted_auth.allow_all_services = false;
+        let restricted_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &restricted_auth.user_id,
+            mcp_node_scope(&restricted_auth),
+            mcp_service_scope(&restricted_auth),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restricted_catalog
+                .services
+                .iter()
+                .map(|service| service.service_id.as_str())
+                .collect::<Vec<_>>(),
+            [organization.as_str()]
+        );
+        let ordinary_allowed = vec![organization.clone()];
+        let ordinary_key = crate::services::key_service::create_api_key_with_scope_authorization(
+            &f.state.db,
+            &f.admin,
+            Some(&f.admin),
+            "ordinary-restricted",
+            "proxy",
+            None,
+            None,
+            Some(&ordinary_allowed),
+            Some(&[]),
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut ordinary_headers = HeaderMap::new();
+        ordinary_headers.insert("x-api-key", ordinary_key.full_key.parse().unwrap());
+        let ordinary_auth = authenticate_mcp(&f.state, &ordinary_headers, false)
+            .await
+            .unwrap();
+        assert!(ordinary_auth.chat.is_none());
+        let tools = handle_tools_list(
+            &f.state,
+            &ordinary_auth,
+            None,
+            &JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.into(),
+                id: Some(serde_json::json!(8)),
+                method: "tools/list".into(),
+                params: None,
+            },
+        )
+        .await;
+        let tools_body = axum::body::to_bytes(tools.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let tools: serde_json::Value = serde_json::from_slice(&tools_body).unwrap();
+        assert!(
+            tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "api-github-pat__request" })
+        );
+        let ordinary_model =
+            crate::services::key_service::get_api_key(&f.state.db, &f.admin, &ordinary_key.id)
+                .await
+                .unwrap();
+        let ordinary_rest =
+            crate::mw::auth::api_key_auth_user(&f.state.db, &ordinary_model, None, None, None)
+                .await
+                .unwrap();
+        let axum::Json(ordinary_config) =
+            mcp_config::get_mcp_config(axum::extract::State(f.state.clone()), ordinary_rest)
+                .await
+                .unwrap();
+        assert!(
+            ordinary_config
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        let machine_services =
+            crate::services::machine_gateway_service::services(&f.state.db, &f.admin, &key.id)
+                .await
+                .unwrap();
+        assert_eq!(
+            machine_services
+                .iter()
+                .find(|service| service.slug == "api-github-pat")
+                .map(|service| service.id.as_str()),
+            Some(organization.as_str()),
+            "machine declarations must keep the granted organization connection after slug resolution"
+        );
+        // Keep the primary organization newer than the existing organization
+        // membership so each precedence rule has a distinct winner.
+        let ordering_org = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &ordering_org,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        let ordering_membership = crate::test_utils::test_membership(
+            &ordering_org,
+            &f.member,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        );
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .insert_one(ordering_membership)
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! { "org_user_id": &f.org, "member_user_id": &f.member },
+                doc! { "$set": { "created_at": bson::DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::days(2)
+                ) } },
+            )
+            .await
+            .unwrap();
+        let ordering_bound = f.service(&f.org, "ordering-collision").await;
+        let ordering_primary = f.service(&ordering_org, "ordering-collision").await;
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &f.member },
+                doc! { "$set": { "primary_org_id": &ordering_org } },
+            )
+            .await
+            .unwrap();
+        let primary_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.member,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            primary_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == ordering_primary)
+        );
+        assert!(
+            !primary_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == ordering_bound)
+        );
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &f.member },
+                doc! { "$unset": { "primary_org_id": "" } },
+            )
+            .await
+            .unwrap();
+        let created_at_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.member,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            created_at_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == ordering_bound)
+        );
+        assert!(
+            !created_at_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == ordering_primary)
+        );
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! { "org_user_id": &f.org, "member_user_id": &f.admin },
+                doc! { "$set": { "allowed_service_ids": Vec::<String>::new() } },
+            )
+            .await
+            .unwrap();
+        let narrowed = authenticate_mcp(&f.state, &headers, false)
+            .await
+            .expect("scope narrowing keeps the key authenticated");
+        let narrowed_tools = handle_tools_list(
+            &f.state,
+            &narrowed,
+            None,
+            &JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.into(),
+                id: Some(serde_json::json!(9)),
+                method: "tools/list".into(),
+                params: None,
+            },
+        )
+        .await;
+        let narrowed_body = axum::body::to_bytes(narrowed_tools.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let narrowed_tools: serde_json::Value = serde_json::from_slice(&narrowed_body).unwrap();
+        assert!(
+            !narrowed_tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "api-github-pat__request")
+        );
+        let narrowed_search = decode_meta_result(
+            handle_meta_search(
+                &f.state,
+                &narrowed,
+                None,
+                &serde_json::json!({"query": "api-github-pat"}),
+                Some(serde_json::json!(11)),
+                false,
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !narrowed_search["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| {
+                    tool["service_id"] == organization || tool["name"] == "api-github-pat__request"
+                })
+        );
+        let narrowed_list = decode_meta_result(
+            handle_meta_list_connected(
+                &f.state,
+                &narrowed,
+                &serde_json::json!({"query": "api-github-pat"}),
+                Some(serde_json::json!(12)),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !narrowed_list["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|service| { service["service_id"] == organization })
+        );
+        let narrowed_rest = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let axum::Json(narrowed_config) =
+            mcp_config::get_mcp_config(axum::extract::State(f.state.clone()), narrowed_rest)
+                .await
+                .unwrap();
+        assert!(
+            !narrowed_config
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+
+        // A Member loses an admin-only organization connection at
+        // authentication and therefore on every discovery surface.
+        f.state
+            .db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"_id": &organization},
+                doc! {"$set": {"admin_only": true}},
+            )
+            .await
+            .unwrap();
+        let member_agent_thread = crate::services::assistant_team_service::home_thread_for(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.member,
+            &agent,
+        )
+        .await
+        .unwrap();
+        let member_credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.member,
+                &member_agent_thread.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut member_headers = HeaderMap::new();
+        member_headers.insert("x-api-key", member_credential.raw_key.parse().unwrap());
+        let member_auth = authenticate_mcp(&f.state, &member_headers, false)
+            .await
+            .unwrap();
+        let member_tools = handle_tools_list(
+            &f.state,
+            &member_auth,
+            None,
+            &JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.into(),
+                id: Some(serde_json::json!(13)),
+                method: "tools/list".into(),
+                params: None,
+            },
+        )
+        .await;
+        let member_tools: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(member_tools.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !member_tools["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["name"] == "api-github-pat__request" })
+        );
+        let member_search = decode_meta_result(
+            handle_meta_search(
+                &f.state,
+                &member_auth,
+                None,
+                &serde_json::json!({"query": "api-github-pat"}),
+                Some(serde_json::json!(14)),
+                false,
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !member_search["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| {
+                    tool["service_id"] == organization || tool["name"] == "api-github-pat__request"
+                })
+        );
+        let member_list = decode_meta_result(
+            handle_meta_list_connected(
+                &f.state,
+                &member_auth,
+                &serde_json::json!({"query": "api-github-pat"}),
+                Some(serde_json::json!(15)),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !member_list["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|service| { service["service_id"] == organization })
+        );
+        let member_model = crate::services::key_service::get_api_key(
+            &f.state.db,
+            &f.member,
+            &member_auth.api_key_id.clone().unwrap(),
+        )
+        .await
+        .unwrap();
+        let member_rest =
+            crate::mw::auth::api_key_auth_user(&f.state.db, &member_model, None, None, None)
+                .await
+                .unwrap();
+        let axum::Json(member_config) =
+            mcp_config::get_mcp_config(axum::extract::State(f.state.clone()), member_rest)
+                .await
+                .unwrap();
+        assert!(
+            !member_config
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &organization},
+                doc! {"$set": {"admin_only": false}},
+            )
+            .await
+            .unwrap();
+        let stale = response_body(
+            handle_meta_call_tool(
+                &f.state,
+                &narrowed,
+                None,
+                &serde_json::json!({
+                    "tool_name": "api-github-pat__request",
+                    "arguments": {"path": "/repository"}
+                }),
+                Some(serde_json::json!(10)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await,
+        )
+        .await;
+        assert!(stale.contains("Unknown tool"), "stale tool must be refused");
+        f.revoke(&f.admin).await;
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn org_specialist_executes_granted_connection_by_id_through_both_mcp_paths() {
+        use axum::routing::any;
+        use futures::TryStreamExt;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let f = crate::services::org_agent_tests::Fixture::new("org_agent_mcp_execution").await;
+        let (agent, row) = f.create().await;
+        let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
+            &f.state,
+            &f.admin,
+            "Coordinate",
+        )
+        .await;
+        crate::services::assistant_authority_tests::pin_assignment(
+            &f.state.db,
+            &f.admin,
+            &row.id,
+            Some(&nyxbot.id),
+        )
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = observed.clone();
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/{*path}",
+                any(move |headers: HeaderMap| {
+                    let captured = captured.clone();
+                    async move {
+                        let value = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        captured.lock().await.push(value);
+                        (StatusCode::OK, "repository-read")
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let personal_endpoint = uuid::Uuid::new_v4().to_string();
+        let personal = uuid::Uuid::new_v4().to_string();
+        let organization_endpoint = uuid::Uuid::new_v4().to_string();
+        let organization = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<crate::models::user_endpoint::UserEndpoint>(
+                crate::models::user_endpoint::COLLECTION_NAME,
+            )
+            .insert_many([
+                crate::test_utils::test_user_endpoint(
+                    &personal_endpoint,
+                    &f.admin,
+                    "GitHub personal",
+                    &address,
+                    None,
+                    None,
+                ),
+                crate::test_utils::test_user_endpoint(
+                    &organization_endpoint,
+                    &f.org,
+                    "GitHub organization",
+                    &address,
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .insert_many([
+                crate::test_utils::test_user_service(
+                    &personal,
+                    &f.admin,
+                    "api-github-pat",
+                    &personal_endpoint,
+                    None,
+                    None,
+                ),
+                crate::test_utils::test_user_service(
+                    &organization,
+                    &f.org,
+                    "api-github-pat",
+                    &organization_endpoint,
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        let personal_key = crate::services::user_api_key_service::create_api_key(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.admin,
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "personal github",
+                credential_type: "bearer",
+                credential: "personal-credential",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let organization_key = crate::services::user_api_key_service::create_api_key(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.org,
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "organization github",
+                credential_type: "bearer",
+                credential: "organization-credential",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &personal},
+                doc! {"$set": {"auth_method": "bearer", "api_key_id": &personal_key.id}},
+            )
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &organization},
+                doc! {"$set": {"auth_method": "bearer", "api_key_id": &organization_key.id}},
+            )
+            .await
+            .unwrap();
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.admin,
+            &agent.id,
+            crate::services::assistant_team_service::GrantChange::Add(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![organization.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.admin,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        let auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+        let permit = crate::services::billing::route_inventory::internal_node_dispatch_permit();
+
+        let generic = response_body(
+            handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &serde_json::json!({
+                    "tool_name": "api-github-pat__request",
+                    "arguments": {"path": "/repository"}
+                }),
+                Some(serde_json::json!(1)),
+                false,
+                permit,
+            )
+            .await,
+        )
+        .await;
+        assert!(generic.contains("repository-read"), "{generic}");
+
+        let direct = response_body(
+            handle_tools_call(
+                &f.state,
+                &auth,
+                None,
+                &JsonRpcRequest {
+                    jsonrpc: JSONRPC_VERSION.into(),
+                    id: Some(serde_json::json!(2)),
+                    method: "tools/call".into(),
+                    params: Some(serde_json::json!({
+                        "name": "api-github-pat__request",
+                        "arguments": {"path": "/repository"}
+                    })),
+                },
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await,
+        )
+        .await;
+        assert!(direct.contains("repository-read"), "{direct}");
+
+        let observed = observed.lock().await.clone();
+        assert_eq!(
+            observed,
+            [
+                "Bearer organization-credential",
+                "Bearer organization-credential",
+            ]
+        );
+        let audits = f.state.db.collection::<crate::models::audit_log::AuditLog>(
+            crate::models::audit_log::COLLECTION_NAME,
+        );
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows: Vec<_> = audits
+                    .find(doc! {
+                        "event_type": "mcp_tool_call",
+                        "event_data.tool": "api-github-pat__request",
+                    })
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                if rows.len() >= 2 {
+                    break rows;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event
+                .event_data
+                .as_ref()
+                .is_some_and(|data| data["service_id"] == organization)
+        }));
+        server.abort();
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_specialist_preference_does_not_change_unrestricted_slug_owner() {
+        let f = crate::services::assistant_authority_tests::direct_fixture(
+            "personal_specialist_slug_collision",
+        )
+        .await;
+        let org_id = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &org_id,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(
+                crate::models::org_membership::COLLECTION_NAME,
+            )
+            .insert_one(crate::test_utils::test_membership(
+                &org_id,
+                &f.owner,
+                crate::models::org_membership::OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        let personal = crate::services::assistant_authority_tests::connected(
+            &f.state.db,
+            &f.owner,
+            "api-github-pat",
+            "https://example.invalid/personal",
+        )
+        .await;
+        let organization = crate::services::assistant_authority_tests::connected(
+            &f.state.db,
+            &org_id,
+            "api-github-pat",
+            "https://example.invalid/organization",
+        )
+        .await;
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            crate::services::assistant_team_service::GrantChange::Add(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![organization.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                &f.row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut specialist_headers = HeaderMap::new();
+        specialist_headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        let specialist = authenticate_mcp(&f.state, &specialist_headers, false)
+            .await
+            .unwrap();
+        let specialist_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.owner,
+            mcp_node_scope(&specialist),
+            mcp_service_scope(&specialist),
+        )
+        .await
+        .unwrap();
+        assert!(
+            specialist_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        assert!(
+            !specialist_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == personal)
+        );
+
+        let human_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.owner,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            human_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == personal)
+        );
+        assert!(
+            !human_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        assert_eq!(human_catalog.diagnostics.shadowed_connections, 1);
+
+        let nyxbot_row = crate::services::assistant_authority_tests::new_orchestrator(
+            &f.state,
+            &f.owner,
+            "Use my connected services",
+        )
+        .await;
+        let nyxbot_credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.owner,
+                &nyxbot_row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut nyxbot_headers = HeaderMap::new();
+        nyxbot_headers.insert("x-api-key", nyxbot_credential.raw_key.parse().unwrap());
+        let nyxbot = authenticate_mcp(&f.state, &nyxbot_headers, false)
+            .await
+            .unwrap();
+        let nyxbot_catalog = crate::services::mcp_service::load_operation_catalog(
+            &f.state.db,
+            &f.state.node_ws_manager,
+            &f.owner,
+            mcp_node_scope(&nyxbot),
+            mcp_service_scope(&nyxbot),
+        )
+        .await
+        .unwrap();
+        assert!(
+            nyxbot_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == personal)
+        );
+        assert!(
+            !nyxbot_catalog
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        assert_eq!(nyxbot_catalog.diagnostics.shadowed_connections, 1);
+
+        let (_, nyxbot_key, credential_id) =
+            crate::services::key_service::validate_api_key(&f.state.db, &nyxbot_credential.raw_key)
+                .await
+                .unwrap();
+        let rest =
+            crate::mw::auth::api_key_auth_user(&f.state.db, &nyxbot_key, credential_id, None, None)
+                .await
+                .unwrap();
+        let axum::Json(config) =
+            crate::handlers::mcp::get_mcp_config(axum::extract::State(f.state.clone()), rest)
+                .await
+                .unwrap();
+        assert!(
+            config
+                .services
+                .iter()
+                .any(|service| service.service_id == personal)
+        );
+        assert!(
+            !config
+                .services
+                .iter()
+                .any(|service| service.service_id == organization)
+        );
+        assert_eq!(config.diagnostics.shadowed_connections, 1);
         f.state.db.drop().await.unwrap();
     }
 }

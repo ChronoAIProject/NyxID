@@ -1191,7 +1191,8 @@ pub async fn list_admin_user_ids(
 /// Find all active memberships for `member_user_id`, bounded by a wall-clock
 /// timeout (see [`ORG_FALLBACK_TIMEOUT`]). The result is **already ordered**
 /// for proxy resolution: the user's `primary_org_id` (if set) comes first,
-/// then the rest by ascending `created_at` (earliest membership wins).
+/// then the rest by ascending `created_at` (earliest membership wins), with
+/// `org_user_id` as the deterministic tie-breaker.
 ///
 /// Returns `OrgQueryTimeout` if the underlying MongoDB query exceeds the
 /// timeout. Returns `Ok(vec![])` when the user has no memberships.
@@ -1210,7 +1211,7 @@ pub async fn find_active_memberships_with_timeout(
     let primary_org_id = user.primary_org_id.clone();
 
     let opts = FindOptions::builder()
-        .sort(doc! { "created_at": 1 })
+        .sort(doc! { "created_at": 1, "org_user_id": 1 })
         .build();
 
     let query = async {

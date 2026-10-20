@@ -230,7 +230,18 @@ impl OwnerGrants {
             .await?
             .try_collect()
             .await?;
-        let actor_active = owners.iter().any(|u| u.id == owner_id);
+        let actor = owners.iter().find(|u| u.id == owner_id);
+        let actor_active = actor.is_some();
+        let primary_org_id = actor.and_then(|user| user.primary_org_id.as_deref());
+        let mut ordered_memberships = memberships.to_vec();
+        ordered_memberships.sort_by(|left, right| {
+            let left_is_primary = primary_org_id == Some(left.org_user_id.as_str());
+            let right_is_primary = primary_org_id == Some(right.org_user_id.as_str());
+            right_is_primary
+                .cmp(&left_is_primary)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.org_user_id.cmp(&right.org_user_id))
+        });
         let org_owner_ids = owners
             .iter()
             .filter(|u| u.user_type.is_org())
@@ -259,7 +270,7 @@ impl OwnerGrants {
             active_owner_ids,
             readable_owner_ids,
             org_owner_ids,
-            memberships: memberships.to_vec(),
+            memberships: ordered_memberships,
         })
     }
 

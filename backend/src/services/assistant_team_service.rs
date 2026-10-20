@@ -791,16 +791,20 @@ pub async fn resolve_each_target(
     if targets.is_empty() {
         return Ok((resolved, refused));
     }
+    let trimmed_targets: Vec<String> = targets
+        .iter()
+        .map(|target| target.trim().to_string())
+        .collect();
     let catalog = mcp_service::load_operation_catalog(
         db,
         node_manager,
         owner,
         mcp_service::NodeScope::Unrestricted,
-        mcp_service::ServiceScope::Unrestricted,
+        mcp_service::ServiceScope::Preferring(&trimmed_targets),
     )
     .await?;
-    for target in targets {
-        let target = target.trim();
+    for target in &trimmed_targets {
+        let target = target.as_str();
         let refuse = |reason: String| Refused {
             service: identifier(target),
             reason,

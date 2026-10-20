@@ -1439,13 +1439,22 @@ async fn select_slug_metadata(
     actor: &str,
     slug: &str,
 ) -> AppResult<SlugMetadataRoute> {
+    // Organization-bound callers route by their effective grant snapshot, the
+    // same rule applied by caller_service_scope, independently of the
+    // allow_all_services flag.
+    let allowed_service_ids = if auth.org_agent_access.is_some() {
+        Some(auth.allowed_service_ids.as_slice())
+    } else {
+        (!auth.allow_all_services).then_some(auth.allowed_service_ids.as_slice())
+    };
     Box::pin(crate::services::service_pool_routing::select_slug_metadata(
         &state.db,
         &state.encryption_keys,
-        (!auth.allow_all_services).then_some(auth.allowed_service_ids.as_slice()),
+        allowed_service_ids,
         (!auth.allow_all_nodes).then_some(auth.allowed_node_ids.as_slice()),
         actor,
         slug,
+        auth.org_agent_access.as_deref(),
     ))
     .await
 }
@@ -11370,6 +11379,24 @@ mod proxy_resolution_integration_tests {
         (format!("http://{addr}"), server)
     }
 
+    async fn start_labeled_downstream(
+        label: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/{*path}", get(move || async move { label }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind labeled downstream test listener");
+        let addr = listener
+            .local_addr()
+            .expect("labeled downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve labeled downstream test app");
+        });
+        (format!("http://{addr}"), server)
+    }
+
     async fn start_auth_downstream() -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().route("/{*path}", get(downstream_auth_header));
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -12586,6 +12613,207 @@ mod proxy_resolution_integration_tests {
             Some(member_id.as_str())
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn org_bound_slug_route_prefers_granted_org_service_and_falls_back_for_ungranted() {
+        let f = crate::services::org_agent_tests::Fixture::new("proxy_org_slug_collision").await;
+        let (agent, row) = f.create().await;
+        let nyxbot = crate::services::assistant_authority_tests::new_orchestrator(
+            &f.state,
+            &f.admin,
+            "Coordinate",
+        )
+        .await;
+        crate::services::assistant_authority_tests::pin_assignment(
+            &f.state.db,
+            &f.admin,
+            &row.id,
+            Some(&nyxbot.id),
+        )
+        .await;
+        let (org_base_url, org_server) = start_labeled_downstream("organization").await;
+        let (personal_base_url, personal_server) = start_labeled_downstream("personal").await;
+        let personal = f.service(&f.admin, "shared-model").await;
+        let organization = f.service(&f.org, "shared-model").await;
+        for (service_id, url) in [
+            (&personal, &personal_base_url),
+            (&organization, &org_base_url),
+        ] {
+            let service = f
+                .state
+                .db
+                .collection::<UserService>(USER_SERVICES)
+                .find_one(doc! {"_id": service_id})
+                .await
+                .unwrap()
+                .unwrap();
+            f.state
+                .db
+                .collection::<UserEndpoint>(USER_ENDPOINTS)
+                .update_one(
+                    doc! {"_id": &service.endpoint_id},
+                    doc! {"$set": {"url": url}},
+                )
+                .await
+                .unwrap();
+        }
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.admin,
+            &agent.id,
+            crate::services::assistant_team_service::GrantChange::Add(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![organization.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let key = f.key(&row).await;
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.admin,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, _, credential_id) =
+            crate::services::key_service::validate_api_key(&f.state.db, &credential.raw_key)
+                .await
+                .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, credential_id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            auth.assistant_agent_owner_id.as_deref(),
+            Some(f.org.as_str())
+        );
+        assert!(auth.allowed_service_ids.contains(&organization));
+
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &f.state,
+            &auth,
+            "shared-model",
+            "status",
+            proxy_request("/proxy/s/shared-model/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("granted bound-org service should be selected");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap(),
+            "organization"
+        );
+        assert_eq!(resolved_slug, "shared-model");
+
+        // Availability must not change collision ownership: an unavailable
+        // granted organization credential still owns the requested slug.
+        f.state
+            .db
+            .collection::<bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &organization},
+                doc! {"$set": {"auth_method": "bearer", "api_key_id": "missing-key"}},
+            )
+            .await
+            .unwrap();
+        let error = proxy_request_by_slug_inner(
+            &f.state,
+            &auth,
+            "shared-model",
+            "status",
+            proxy_request("/proxy/s/shared-model/status"),
+            &mut String::new(),
+        )
+        .await
+        .expect_err("unavailable granted organization credential must not fall back to personal");
+        assert!(
+            matches!(error, AppError::Internal(message) if message.contains("API key not found"))
+        );
+
+        // Remove the grant and re-authenticate the real thread key. The
+        // organization row is now outside its live access snapshot, so slug
+        // routing follows the personal cascade and the final organization
+        // fence rejects that personal connection before any upstream call.
+        crate::services::assistant_team_service::set_grants(
+            &f.state.db,
+            &f.admin,
+            &agent.id,
+            crate::services::assistant_team_service::GrantChange::Remove(
+                crate::models::assistant_agent::AgentGrants {
+                    service_ids: vec![organization.clone()],
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let key = f.key(&row).await;
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.admin,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, _, credential_id) =
+            crate::services::key_service::validate_api_key(&f.state.db, &credential.raw_key)
+                .await
+                .unwrap();
+        let mut auth =
+            crate::mw::auth::api_key_auth_user(&f.state.db, &key, credential_id, None, None)
+                .await
+                .unwrap();
+        // Keep the live specialist owner/grant snapshot while allowing this
+        // case to reach the final organization fence after slug fallback.
+        auth.allow_all_services = true;
+        let selected = crate::services::service_pool_routing::select_slug_metadata(
+            &f.state.db,
+            &f.state.encryption_keys,
+            Some(auth.allowed_service_ids.as_slice()),
+            None,
+            &auth.user_id.to_string(),
+            "shared-model",
+            auth.org_agent_access.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            selected,
+            crate::services::service_pool_routing::SlugMetadataRoute::Service(id)
+                if id == personal
+        ));
+        let error = proxy_request_by_slug_inner(
+            &f.state,
+            &auth,
+            "shared-model",
+            "status",
+            proxy_request("/proxy/s/shared-model/status"),
+            &mut String::new(),
+        )
+        .await
+        .expect_err("personal fallback must hit the final organization fence");
+        assert!(matches!(
+            error,
+            AppError::Forbidden(message)
+                if message == "This service is outside the organization's live member access"
+        ));
+
+        org_server.abort();
+        personal_server.abort();
+        f.state.db.drop().await.unwrap();
     }
 
     #[tokio::test]

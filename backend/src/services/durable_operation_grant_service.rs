@@ -1908,6 +1908,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_endpoint_loading_keeps_the_allowed_connection_through_a_slug_collision() {
+        let Some(db) = connect_test_database("durable_exact_service_id_collision").await else {
+            return;
+        };
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let catalog_id = Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-github-pat".into();
+        catalog.requires_user_credential = true;
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        let endpoint = endpoint();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one({
+                let mut endpoint = endpoint.clone();
+                endpoint.service_id = catalog_id.clone();
+                endpoint
+            })
+            .await
+            .unwrap();
+        let personal = Uuid::new_v4().to_string();
+        let allowed = Uuid::new_v4().to_string();
+        let personal_endpoint = Uuid::new_v4().to_string();
+        let allowed_endpoint = Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &personal_endpoint,
+                    &owner,
+                    "Personal GitHub",
+                    "https://personal.example.test",
+                    None,
+                    Some(&catalog_id),
+                ),
+                test_user_endpoint(
+                    &allowed_endpoint,
+                    &owner,
+                    "Allowed GitHub",
+                    "https://allowed.example.test",
+                    None,
+                    Some(&catalog_id),
+                ),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([
+                test_user_service(
+                    &personal,
+                    &owner,
+                    "api-github-pat",
+                    &personal_endpoint,
+                    Some(&catalog_id),
+                    None,
+                ),
+                test_user_service(
+                    &allowed,
+                    &owner,
+                    "api-github-pat",
+                    &allowed_endpoint,
+                    Some(&catalog_id),
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        let loaded = load_active_published_endpoint(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &owner,
+            &allowed,
+            &[],
+            &endpoint.id,
+        )
+        .await
+        .unwrap()
+        .expect("allowed connection's endpoint should remain loadable");
+        assert_eq!(loaded.id, endpoint.id);
+        assert_eq!(loaded.service_id, allowed);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn durable_grant_creation_rejects_custom_method_templates() {
         let db = connect_test_database("durable_custom_method_creation")
             .await
