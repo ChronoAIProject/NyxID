@@ -1,4 +1,5 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useGroups } from "@/hooks/use-rbac";
 import { useAdminUsers } from "@/hooks/use-admin";
@@ -12,7 +13,9 @@ import { Input } from "@/components/ui/input";
 export function UserPicker({
   selected,
   onChange,
+  onBlockedChange,
 }: {
+  readonly onBlockedChange?: (blocked: boolean) => void;
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
@@ -51,6 +54,10 @@ export function UserPicker({
       : users;
   }, [search, users]);
   const loading = peopleQuery.isFetching || organizationsQuery.isFetching;
+  const failed = peopleQuery.isError || organizationsQuery.isError;
+  useEffect(() => {
+    onBlockedChange?.(failed || loading);
+  }, [onBlockedChange, failed, loading]);
 
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
@@ -114,7 +121,23 @@ export function UserPicker({
             </label>
           );
         })}
-        {filtered.length === 0 && !loading ? (
+        {failed ? (
+          <p role="alert" className="p-3 text-12 text-destructive">
+            Owners could not be loaded.{" "}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void peopleQuery.refetch();
+                void organizationsQuery.refetch();
+              }}
+            >
+              Retry owners
+            </Button>
+          </p>
+        ) : null}
+        {filtered.length === 0 && !loading && !failed ? (
           <p className="px-3 py-6 text-center text-12 text-muted-foreground">
             No owners found.
           </p>
@@ -231,6 +254,7 @@ export function ServicePicker({
 }
 
 type MemberPickerProps = {
+  readonly onBlockedChange?: (blocked: boolean) => void;
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
 };
@@ -255,6 +279,7 @@ export function OrgPicker(props: MemberPickerProps) {
       onSearch={setSearch}
       loading={query.isFetching}
       error={query.isError}
+      retry={() => void query.refetch()}
     />
   );
 }
@@ -263,11 +288,24 @@ export function PersonPicker(props: MemberPickerProps) {
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const query = useAdminUsers(1, 100, deferredSearch || undefined, "person");
-  return <MemberPicker {...props} kind="person"
-    items={(query.data?.users ?? []).filter((user) => user.is_active).map((user) => ({
-      id: user.id, name: user.display_name || user.email, detail: user.email,
-    }))}
-    search={search} onSearch={setSearch} loading={query.isFetching} error={query.isError} />;
+  return (
+    <MemberPicker
+      {...props}
+      kind="person"
+      items={(query.data?.users ?? [])
+        .filter((user) => user.is_active)
+        .map((user) => ({
+          id: user.id,
+          name: user.display_name || user.email,
+          detail: user.email,
+        }))}
+      search={search}
+      onSearch={setSearch}
+      loading={query.isFetching}
+      error={query.isError}
+      retry={() => void query.refetch()}
+    />
+  );
 }
 
 export function GroupPicker(props: MemberPickerProps) {
@@ -287,6 +325,7 @@ export function GroupPicker(props: MemberPickerProps) {
       onSearch={setSearch}
       loading={query.isFetching}
       error={query.isError}
+      retry={() => void query.refetch()}
     />
   );
 }
@@ -300,6 +339,8 @@ function MemberPicker({
   onSearch,
   loading,
   error,
+  retry,
+  onBlockedChange,
 }: MemberPickerProps & {
   readonly kind: "organization" | "group" | "person";
   readonly items: readonly { id: string; name: string; detail: string }[];
@@ -307,7 +348,11 @@ function MemberPicker({
   readonly onSearch: (value: string) => void;
   readonly loading: boolean;
   readonly error: boolean;
+  readonly retry: () => void;
 }) {
+  useEffect(() => {
+    onBlockedChange?.(error || loading);
+  }, [onBlockedChange, error, loading]);
   const needle = search.trim().toLowerCase();
   const filtered = items.filter((item) =>
     `${item.name} ${item.detail}`.toLowerCase().includes(needle),
@@ -371,7 +416,10 @@ function MemberPicker({
         ))}
         {error ? (
           <p role="alert" className="px-3 py-3 text-12 text-destructive">
-            Failed to load {kind}s.
+            Failed to load {kind}s.{" "}
+            <Button type="button" variant="outline" size="sm" onClick={retry}>
+              Retry {kind}s
+            </Button>
           </p>
         ) : null}
         {!error && !loading && filtered.length === 0 ? (

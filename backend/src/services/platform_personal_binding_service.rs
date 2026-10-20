@@ -585,34 +585,88 @@ pub async fn list_owned(
         .await?)
 }
 
-/// Project saved consent against current manager authority without changing the
-/// historical row. A repaired epoch requires a fresh independent proof.
-pub(crate) async fn inventory_state(
+/// Read-only inventory projection. Saved consent and current usability are
+/// distinct: a transport outage must not prevent an owner revoking consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingAvailability {
+    Available,
+    TemporarilyUnavailable,
+    Paused,
+    ReconnectRequired,
+    Disconnected,
+}
+
+pub struct BindingInventory {
+    pub state: PersonalBindingState,
+    pub availability: BindingAvailability,
+}
+
+pub(crate) async fn inventory_status(
     db: &Database,
     binding: &PlatformPersonalBinding,
-) -> AppResult<PersonalBindingState> {
-    if binding.state != PersonalBindingState::Active {
-        return Ok(binding.state);
-    }
-    let mut session = db.client().start_session().await?;
-    let current = super::platform_bot_runtime_control_service::validate_manager_in_session(
-        db,
-        &mut session,
-        &binding.platform_config_id,
-        &binding.manager_bot_id,
-        &binding.entry,
-        None,
-    )
-    .await?;
-    Ok(
-        if current.is_some_and(|row| {
-            !row.retired && row.manager_authority_epoch == binding.manager_authority_epoch
-        }) {
+) -> AppResult<BindingInventory> {
+    use BindingAvailability::*;
+    let availability = if binding.state != PersonalBindingState::Active {
+        Disconnected
+    } else {
+        let saved =
+            super::platform_bot_runtime_control_service::get(db, &binding.platform_config_id)
+                .await?;
+        let profile = db
+            .collection::<crate::models::platform_bot_config::PlatformBotConfig>(
+                crate::models::platform_bot_config::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&binding.platform_config_id,"deleted_at":bson::Bson::Null})
+            .await?;
+        let authority_current = match (&saved, &profile) {
+            (Some(controls), Some(profile)) => {
+                !controls.retired
+                    && controls.manager_bot_id == binding.manager_bot_id
+                    && controls.entry == binding.entry
+                    && controls.manager_authority_epoch == binding.manager_authority_epoch
+                    && profile.manager_bot_id == binding.manager_bot_id
+                    && super::platform_bot_runtime_control_service::profile_identity(profile)?
+                        == binding.entry
+            }
+            _ => false,
+        };
+        if !authority_current {
+            ReconnectRequired
+        } else {
+            let mut session = db.client().start_session().await?;
+            let current = super::platform_bot_runtime_control_service::validate_manager_in_session(
+                db,
+                &mut session,
+                &binding.platform_config_id,
+                &binding.manager_bot_id,
+                &binding.entry,
+                None,
+            )
+            .await?;
+            match current {
+                Some(controls)
+                    if controls.retired
+                        || controls.manager_authority_epoch != binding.manager_authority_epoch =>
+                {
+                    ReconnectRequired
+                }
+                Some(controls) if controls.emergency_stopped || !controls.personal_enabled => {
+                    Paused
+                }
+                Some(_) => Available,
+                None => TemporarilyUnavailable,
+            }
+        }
+    };
+    Ok(BindingInventory {
+        state: if matches!(availability, Available | Paused) {
             PersonalBindingState::Active
         } else {
             PersonalBindingState::Revoked
         },
-    )
+        availability,
+    })
 }
 
 pub async fn revoke_owned(

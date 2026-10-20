@@ -147,3 +147,5 @@ mod tests {
 pub mod catalog_tools;
 
 pub mod admin_tools;
+
+pub mod nyxbot;

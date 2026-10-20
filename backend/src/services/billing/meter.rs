@@ -42,6 +42,21 @@ pub(crate) async fn has_complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
+    complete_meter(db, ctx, false).await
+}
+
+pub(crate) async fn has_complete_funded_meter(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<bool> {
+    complete_meter(db, ctx, true).await
+}
+
+async fn complete_meter(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    require_funding: bool,
+) -> AppResult<bool> {
     let mut transaction_ids = Vec::with_capacity(2);
     if ctx.platform_metered() {
         for (_, code) in ctx.platform_specs() {
@@ -66,6 +81,113 @@ pub(crate) async fn has_complete_meter(
         .await?;
     if rows.is_empty() {
         return Ok(false);
+    }
+    if rows.iter().any(|row| {
+        row.billing_owner_id != ctx.billing_owner_id
+            || row.actor_user_id != ctx.actor_user_id
+            || row.api_key_id != ctx.api_key_id
+            || row.service_id.as_deref()
+                != ctx
+                    .catalog_service_id
+                    .as_deref()
+                    .or(ctx.user_service_id.as_deref())
+            || row.service_slug != ctx.service_slug
+            || row
+                .pool_attempt
+                .as_ref()
+                .map(|a| (&a.pool_id, &a.member_id, a.attempt))
+                != ctx
+                    .pool_attempt
+                    .as_ref()
+                    .map(|a| (&a.pool_id, &a.member_id, a.attempt))
+    }) {
+        return Err(AppError::Conflict(
+            "Billing request identity changed".into(),
+        ));
+    }
+    if ctx
+        .public_admission
+        .as_ref()
+        .is_some_and(|a| a.expires_at <= Utc::now())
+        || ctx
+            .managed_admission
+            .as_ref()
+            .is_some_and(|a| a.expires_at <= Utc::now())
+    {
+        return Err(AppError::Conflict(
+            "Billing execution authority expired".into(),
+        ));
+    }
+    if let Some(admission) = &ctx.managed_admission
+        && db.collection::<bson::Document>(crate::models::managed_execution::COLLECTION_NAME)
+            .find_one(doc! { "_id": &admission.execution_id, "billing_request_id": &ctx.billing_request_id,
+                "billing_owner_id": &ctx.billing_owner_id, "actor_user_id": &ctx.actor_user_id,
+                "route_digest": &admission.route_digest, "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) } }).await?.is_none() {
+        return Err(AppError::Conflict("Managed billing request authority changed".into()));
+    }
+    let authority_rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
+        .find(doc! { "transaction_id": { "$in": &transaction_ids } })
+        .projection(doc! { "managed_execution_id": 1, "public_call_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    for row in authority_rows {
+        if row.get_str("managed_execution_id").ok()
+            != ctx
+                .managed_admission
+                .as_ref()
+                .map(|a| a.execution_id.as_str())
+        {
+            return Err(AppError::Conflict(
+                "Managed billing request authority changed".into(),
+            ));
+        }
+        let public = row.get_str("public_call_id").ok();
+        if public != ctx.public_admission.as_ref().map(|a| a.call_id.as_str()) {
+            // Main-era public rows predate this additive identity. Their durable
+            // authority still binds the complete route; never infer permission
+            // from a matching request UUID alone.
+            if public.is_some() || ctx.public_admission.is_none() {
+                return Err(AppError::Conflict(
+                    "Public billing request authority changed".into(),
+                ));
+            }
+        }
+    }
+    if let Some(admission) = &ctx.public_admission {
+        let digest = crate::services::platform_public_budget_service::route_digest(ctx)?;
+        let authority_collection = if ctx.public_probe {
+            crate::models::platform_public_contract::PROBES
+        } else {
+            crate::models::platform_public_budget::CALLS
+        };
+        let mut authority_filter = if ctx.public_probe {
+            doc! { "_id": &admission.call_id, "route_digest": &digest }
+        } else {
+            doc! { "_id": &admission.call_id, "billing_request_id": &ctx.billing_request_id,
+            "sponsor_owner_user_id": &ctx.billing_owner_id, "credential_api_key_id": &ctx.api_key_id,
+            "route_digest": &digest, "model_id": &admission.model_id }
+        };
+        authority_filter.insert(
+            "expires_at",
+            doc! { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+        );
+        if db
+            .collection::<bson::Document>(authority_collection)
+            .find_one(authority_filter)
+            .await?
+            .is_none()
+        {
+            return Err(AppError::Conflict(
+                "Public billing request authority changed".into(),
+            ));
+        }
+    }
+    if require_funding && rows.iter().any(|row| row.funding.is_none()) {
+        return Err(AppError::Conflict(
+            "Incomplete funding record; retry with a fresh billing request id".into(),
+        ));
     }
     let active_count = rows
         .iter()
@@ -145,9 +267,10 @@ pub async fn open(
     }
     .await;
     if let Err(error) = result {
-        // The caller releases this attempt's reservation. Delete only rows
-        // inserted by this attempt: a broad request-id cleanup could erase an
-        // earlier idempotent attempt and release its funding twice.
+        // Transactional funded admission bypasses this constructor. Standalone
+        // callers own any manually created hold. Delete only rows inserted by
+        // this attempt: broad request-id cleanup could erase an earlier attempt
+        // and release its funding twice.
         if !inserted_row_ids.is_empty()
             && let Err(cleanup_error) = db
                 .collection::<UsageMeterRow>(USAGE_METER)

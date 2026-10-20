@@ -355,21 +355,24 @@ async fn concurrent_machine_and_service_reservations_conserve_shared_grant() {
                     Err(error) => panic!("Machine grant reservation failed: {error}"),
                 }
             } else {
-                // This is the actual ordinary-service grant reservation
-                // primitive called by reserve_estimated_funding/reserve_layer.
-                super::super::reserve_grants(
+                match super::super::tests::ordinary(
                     &db,
                     OWNER,
                     None,
                     Some("ordinary-service"),
-                    credits(10),
+                    BillingMetric::Requests,
+                    10,
+                    credits(1),
                 )
                 .await
-                .unwrap()
-                .iter()
-                .map(|allocation| allocation.amount)
-                .try_fold(Credits::ZERO, Credits::checked_add)
-                .unwrap()
+                {
+                    Ok(hold) => Credits::checked_sum(
+                        hold.layers[0].grant_reservations.iter().map(|a| a.amount),
+                    )
+                    .unwrap(),
+                    Err(AppError::InsufficientCredits) => Credits::ZERO,
+                    Err(error) => panic!("Ordinary admission failed: {error}"),
+                }
             };
             (is_machine, reserved)
         })
@@ -692,5 +695,63 @@ async fn machine_background_settlement_recovers_failed_claim_and_benefit_crash_b
             .unwrap(),
         1
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn capped_machine_window_and_pending_reclaim_retain_evidence_boundary() {
+    let db = fixture("machine_allocation_caps", 100).await;
+    benefits(&db).await;
+    db.collection::<Document>(ALLOWANCES)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let rule = crate::models::credit_service_limit::CreditServiceLimit {
+        key: "runtime".into(),
+        service_ids: vec!["runtime-catalog".into()],
+        service_slugs: vec![SKU.into()],
+        label: Some("Runtime".into()),
+        limit: credits(3),
+        consumed: Credits::ZERO,
+        reserved: Credits::ZERO,
+    };
+    db.collection::<Document>(GRANTS)
+        .update_one(
+            doc! { "_id": "grant" },
+            doc! { "$set": { "service_limits": bson::to_bson(&vec![rule]).unwrap() } },
+        )
+        .await
+        .unwrap();
+    let reservation = reserve(&db, 10, "cap-window").await.unwrap();
+    assert_eq!(
+        reservation.layers[0].grant_reservations[0].amount,
+        credits(3)
+    );
+    assert_eq!(reservation.total_reserved_credits, credits(7));
+    let pending = super::super::super::grants::request_revoke_grant(&db, "grant", Some("admin"))
+        .await
+        .unwrap();
+    assert!(pending.revoke_requested_at.is_some());
+    let usage = usage(&db, "cap-window").await;
+    assert!(
+        super::super::release_usage_reservations(&db, &usage)
+            .await
+            .is_err()
+    );
+    assert!(
+        super::super::settle_usage_funding(&db, &usage)
+            .await
+            .is_err()
+    );
+    let next = reserve(&db, 2, "next-window").await.unwrap();
+    assert!(next.layers[0].grant_reservations.is_empty());
+    let grant = db
+        .collection::<CreditGrant>(GRANTS)
+        .find_one(doc! { "_id": "grant" })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.reserved, credits(3));
+    assert_eq!(grant.service_limits[0].reserved, credits(3));
     db.drop().await.unwrap();
 }

@@ -199,8 +199,9 @@ impl BillingService {
             .collect::<Vec<_>>();
         let mut grant_funds = Credits::ZERO;
         for grant in grants {
-            grant_funds =
-                grant_funds.checked_add(super::super::grants::available_grant(&grant)?)?;
+            grant_funds = grant_funds.checked_add(
+                super::super::service_limits::available_for_service(&grant, None, Some(SKU))?,
+            )?;
         }
         let mut allowance_seconds = 0_i64;
         for allowance in super::super::allowances::applicable_allowances(

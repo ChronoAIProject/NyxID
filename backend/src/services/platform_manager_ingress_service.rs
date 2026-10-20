@@ -183,6 +183,9 @@ pub async fn record_admission_in_session(
 
 fn reason_code(reason: UnavailableReason) -> &'static str {
     match reason {
+        UnavailableReason::ConfirmationRejected => "confirmation_rejected",
+        UnavailableReason::ControlInvalid => "control_invalid",
+        UnavailableReason::ControlRateLimited => "control_rate_limited",
         UnavailableReason::ModeDisabled => "mode_disabled",
         UnavailableReason::ManagerUnavailable => "manager_unavailable",
         UnavailableReason::EmergencyStopped => "emergency_stopped",

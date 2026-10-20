@@ -177,6 +177,18 @@ model at `models/billing_wallet.rs`).
 
 For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
+### Administrator credit allocations
+
+Only `/admin/credits` changes for allocation authoring. Its URL-backed tabs remain **Credit grants**, **Free allowances**, **Schedules**, in that order. A compact headline reports all remaining issued credits, with optional closed **Balance details**. The visible allocation list shows allocated, used, remaining and held amounts, expiry, recipient, inline service/group limits and reclaim. Future schedule values and free usage units are excluded from monetary totals. Cached summaries are labelled stale after a refresh failure; individual records and legacy actions remain usable when the summary is unavailable.
+
+**Allocate credits** combines recipient, exact amount, one-time or daily/weekly/monthly recurrence, expiry and optional eligible-service scope. Optional service limits are expanded initially. Each row can group multiple concrete services under one ceiling and optional label. Ceilings share the total; they do not set money aside or impose account-wide limits. Each recurring issuance has independent counters and frozen rules. Creating from Schedules defaults monthly. Schedule edits affect future periods, and pause stops future issuance independently from reclaiming an existing allocation.
+
+**Reclaim remaining credits** names the allocation ID, creation date and recurring origin before confirmation. It immediately stops new use from that allocation, including extra usage, while already-held work finishes. The final unused remainder is reclaimed once; purchased credits and other allocations remain intact. Pending reclaim remains visible. Expired/revoked legacy API rows without terminal details show unknown used value instead of inferring it.
+
+New authoring requires explicit backend capability. Older servers retain the existing grant/schedule controls and allowance bundles. An exact amount in a read response alone does not establish exact-write capability: whole legacy schedules edit via `amount_credits`; fractional or capped schedules preserve exact state and permit safe sparse notes/status edits while unsupported policy changes are disabled. Credits Manager Operators can allocate/reclaim one-time credits; schedules and free-allowance writes remain admin-only.
+
+Amounts are canonical decimal-credit strings with up to 12 exact places. These balances are distinct from usage cost estimates. Purchased funds still expire 365 days after settlement; issued funds use each allocation's chosen expiry. The personal Billing wallet, top-up/receipt and usage surfaces below retain their existing scope and APIs.
+
 ### Credit-benefit recipients
 
 The admin grant, credit schedule, and allowance dialogs share four choices:

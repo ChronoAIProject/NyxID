@@ -379,6 +379,8 @@ pub struct OwnedBindingResponse {
     pub manager: ManagerResponse,
     pub sender: SenderResponse,
     pub state: crate::models::platform_personal_binding::PersonalBindingState,
+    pub consent_state: crate::models::platform_personal_binding::PersonalBindingState,
+    pub availability: bindings::BindingAvailability,
     pub conversation_id: Option<String>,
     pub consented_at: String,
     pub revoked_at: Option<String>,
@@ -422,7 +424,7 @@ pub async fn list(
             displays.insert(key, display.clone());
             display
         };
-        let live_state = bindings::inventory_state(&state.db, &row).await?;
+        let inventory = bindings::inventory_status(&state.db, &row).await?;
         projected.push(OwnedBindingResponse {
             chat: chat(&row.entry)?,
             id: row.id,
@@ -432,7 +434,9 @@ pub async fn list(
                 id: crate::services::platform_entry_scope::actor_string(&row.sender),
                 display_name: None,
             },
-            state: live_state,
+            state: inventory.state,
+            consent_state: row.state,
+            availability: inventory.availability,
             conversation_id: row.conversation_id,
             consented_at: row.consented_at.to_rfc3339(),
             revoked_at: row.revoked_at.map(|date| date.to_rfc3339()),
@@ -493,6 +497,170 @@ mod tests {
     use super::*;
     use crate::services::platform_personal_binding_service::tests::fixture;
     use mongodb::bson::{Bson, Document, doc};
+
+    struct InventorySettledHook;
+    #[async_trait::async_trait]
+    impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for InventorySettledHook {
+        async fn settled(
+            &self,
+            _: crate::models::assistant_conversation::AssistantConversation,
+            _: crate::services::platform_manager_contract::ReplyRef,
+        ) {
+            panic!("inventory and revocation must not execute a personal turn");
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_can_durably_disconnect_during_transport_outage_without_inventory_writes() {
+        use crate::models::platform_personal_binding::{
+            PersonalBindingState, PlatformPersonalBinding,
+        };
+        use bindings::BindingAvailability;
+        let (db, update, owner) = fixture("binding_inventory_outage_revoke").await;
+        let binding = bindings::tests::binding(&update, &owner);
+        let rows = db.collection::<PlatformPersonalBinding>(
+            crate::models::platform_personal_binding::COLLECTION_NAME,
+        );
+        rows.insert_one(&binding).await.unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let producers = crate::services::platform_manager_transport::compose(
+            state.clone(),
+            Arc::new(InventorySettledHook),
+        );
+        let list_for_owner = || {
+            list(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Query(ListInput { before_id: None }),
+            )
+        };
+        let (_, Json(live)) = list_for_owner().await.unwrap();
+        assert_eq!(live.bindings[0].state, PersonalBindingState::Active);
+        assert_eq!(live.bindings[0].consent_state, PersonalBindingState::Active);
+        assert_eq!(
+            live.bindings[0].availability,
+            BindingAvailability::Available
+        );
+        let runtime_rows = db
+            .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME);
+        for paused in [
+            doc! {"personal_enabled":false},
+            doc! {"personal_enabled":true,"emergency_stopped":true},
+        ] {
+            runtime_rows
+                .update_one(
+                    doc! {"platform_config_id":&update.profile_id},
+                    doc! {"$set":paused},
+                )
+                .await
+                .unwrap();
+            let (_, Json(paused)) = list_for_owner().await.unwrap();
+            assert_eq!(
+                paused.bindings[0].state,
+                PersonalBindingState::Active,
+                "legacy consent state is retained while paused"
+            );
+            assert_eq!(
+                paused.bindings[0].consent_state,
+                PersonalBindingState::Active
+            );
+            assert_eq!(paused.bindings[0].availability, BindingAvailability::Paused);
+        }
+        runtime_rows
+            .update_one(
+                doc! {"platform_config_id":&update.profile_id},
+                doc! {"$set":{"personal_enabled":true,"emergency_stopped":false}},
+            )
+            .await
+            .unwrap();
+        let credentials =
+            db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME);
+        credentials
+            .update_one(
+                doc! {"provider":"telegram-new"},
+                doc! {"$set":{"fields.webhook_ready":"false"}},
+            )
+            .await
+            .unwrap();
+        let before = db
+            .collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+            .find_one(doc! {"_id":&binding.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let controls = db
+            .collection::<Document>(crate::models::platform_bot_runtime_controls::COLLECTION_NAME);
+        let before_controls = controls
+            .find_one(doc! {"platform_config_id":&update.profile_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let (_, Json(outage)) = list_for_owner().await.unwrap();
+        assert_eq!(outage.bindings[0].state, PersonalBindingState::Revoked);
+        assert_eq!(
+            outage.bindings[0].consent_state,
+            PersonalBindingState::Active
+        );
+        assert_eq!(
+            outage.bindings[0].availability,
+            BindingAvailability::TemporarilyUnavailable
+        );
+        assert_eq!(
+            db.collection::<Document>(crate::models::platform_personal_binding::COLLECTION_NAME)
+                .find_one(doc! {"_id":&binding.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            controls
+                .find_one(doc! {"platform_config_id":&update.profile_id})
+                .await
+                .unwrap()
+                .unwrap(),
+            before_controls
+        );
+        // Revocation does not depend on the transport being usable.
+        let (_, Json(result)) = revoke(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner),
+            Extension(producers),
+            Path(uuid::Uuid::parse_str(&binding.id).unwrap()),
+            Json(RevokeInput {
+                generation: binding.generation,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.revoked);
+        credentials
+            .update_one(
+                doc! {"provider":"telegram-new"},
+                doc! {"$set":{"fields.webhook_ready":"true"}},
+            )
+            .await
+            .unwrap();
+        let (_, Json(restored)) = list_for_owner().await.unwrap();
+        assert_eq!(restored.bindings[0].state, PersonalBindingState::Revoked);
+        assert_eq!(
+            restored.bindings[0].consent_state,
+            PersonalBindingState::Revoked
+        );
+        assert_eq!(
+            restored.bindings[0].availability,
+            BindingAvailability::Disconnected
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id":&binding.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            PersonalBindingState::Revoked
+        );
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn legacy_person_can_review_but_explicit_null_org_and_unknown_fail_the_fence() {

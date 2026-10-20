@@ -172,6 +172,7 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,

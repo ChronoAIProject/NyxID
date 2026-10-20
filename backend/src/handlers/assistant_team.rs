@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        invocation_id: None,
         acknowledgement_id: None,
         retry_of: None,
         channel_event_id: None,
@@ -332,6 +333,7 @@ pub(crate) async fn owner_denial_decided(
         || row.status != "denied"
         || row.trigger_run_id.is_some()
         || row.voice_request_id.is_some()
+        || row.invocation_id.is_some()
     {
         return;
     }
@@ -457,9 +459,15 @@ pub(crate) async fn after_turn(
     }
     if row.is_subagent()
         && !row.guest_turn
-        && let Some(target) = settled_report_target(state, row, turn).await
-        && let Ok(agent) = team::agent_for_conversation(&state.db, row).await
+        && let Some(target) = match settled_report_target(state, row, turn).await {
+            Ok(target) => target,
+            Err(_) => return,
+        }
     {
+        let agent = match team::agent_for_conversation(&state.db, row).await {
+            Ok(agent) => agent,
+            Err(_) => return,
+        };
         let status = match error.map(|error| error.code) {
             None => "replied".to_owned(),
             Some("cancelled") => "was stopped".to_owned(),
@@ -471,13 +479,20 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
-        notify(
-            state,
+        let queued = engine::push_events(
+            &state.db,
             owner,
             &target,
-            vec![team::event("subagent_settled", note, Some(&agent.id))],
+            vec![
+                team::event("subagent_settled", note, Some(&agent.id))
+                    .for_invocation(turn.invocation_id.as_deref()),
+            ],
         )
         .await;
+        if queued.is_err() {
+            return;
+        }
+        Box::pin(wake(state, owner, &target)).await;
     }
     // Wake whoever has queued work now that a slot is free.
     wake(state, owner, &row.id).await;
@@ -503,6 +518,7 @@ pub(crate) async fn after_turn(
             )
             .await;
         }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
         return;
     }
     let plan = super::nyxbot::images::ImageSendPlan {
@@ -531,6 +547,7 @@ pub(crate) async fn after_turn(
     for origin in &also {
         super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
     }
+    let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
 }
 
 /// Falls back to the turn when no reply row exists (a lost turn swept
@@ -539,7 +556,7 @@ async fn settled_report_target(
     state: &AppState,
     row: &AssistantConversation,
     turn: &crate::models::assistant_conversation::ActiveTurn,
-) -> Option<String> {
+) -> AppResult<Option<String>> {
     let settled = state
         .db
         .collection::<crate::models::assistant_message::AssistantMessage>(
@@ -549,13 +566,11 @@ async fn settled_report_target(
             "conversation_id": &row.id, "user_id": &row.user_id,
             "turn_id": &turn.turn_id, "role": "assistant",
         })
-        .await
-        .ok()
-        .flatten();
-    match settled {
+        .await?;
+    Ok(match settled {
         Some(message) => message.report_to,
         None => turn.report_to.clone(),
-    }
+    })
 }
 
 /// A specialist asked for permission its grants do not cover: queue an event
@@ -606,7 +621,8 @@ pub(crate) async fn permission_requested(
             .unwrap_or_else(|| "(no text)".into()),
     );
     // A notice on a NyxBot thread is a root event: unbound.
-    let event = team::event("permission_requested", note, Some(&chat.agent_id));
+    let event = team::event("permission_requested", note, Some(&chat.agent_id))
+        .for_invocation(chat.invocation_id.as_deref());
     match Box::pin(acks::notify_nyxbot_request(&state.db, chat, request, event)).await {
         Ok(Some(target)) => Box::pin(wake(state, &chat.user_id, &target)).await,
         Ok(None) => {}
@@ -660,7 +676,7 @@ pub(crate) async fn permission_decided(
     );
     note.push(' ');
     note.push_str(acks::DECISION_NARRATION);
-    if request.trigger_run_id.is_none() {
+    if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
         let event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
@@ -741,6 +757,7 @@ async fn deliver_skill_notification(
             Some(&agent.id),
         );
         event.id = request.id.clone();
+        event.invocation_id = request.invocation_id.clone();
         if let Some(target) =
             acks::skill_notifications::enqueue(&state.db, request, &target, &attempt, event).await?
         {
@@ -865,6 +882,7 @@ pub(crate) async fn assign(
     agent: &AssistantAgent,
     text: &str,
     report_to: Option<&str>,
+    invocation_id: Option<&str>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -884,6 +902,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            invocation_id: invocation_id.map(str::to_owned),
             acknowledgement_id: None,
             retry_of: None,
             channel_event_id: None,
@@ -1343,7 +1362,15 @@ async fn dispatch_specialists(
                 Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
                         Some(task) => started_json(
-                            Box::pin(assign(state, owner, &agent, task, Some(caller))).await?,
+                            Box::pin(assign(
+                                state,
+                                owner,
+                                &agent,
+                                task,
+                                Some(caller),
+                                chat.invocation_id.as_deref(),
+                            ))
+                            .await?,
                         ),
                         None => json!({"status": "idle",
                             "note": "Give it work with nyxid__message_subagent."}),
@@ -1367,6 +1394,7 @@ async fn dispatch_specialists(
                         &agent,
                         text_arg(args, "text"),
                         Some(caller),
+                        chat.invocation_id.as_deref(),
                     ))
                     .await?,
                 ),
@@ -2052,6 +2080,11 @@ async fn dispatch_groups(
     name: &str,
     args: &Value,
 ) -> AppResult<(Value, bool)> {
+    if name == "post_to_group" && chat.invocation_id.is_some() {
+        return Err(AppError::ValidationError(
+            "Group execution is unavailable for owner invocations; assign an owned specialist directly or post from the owner group interface".into(),
+        ));
+    }
     let db = &state.db;
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
@@ -3244,6 +3277,12 @@ pub fn spawn_sweeps(state: AppState) {
                 .is_err()
             {
                 tracing::debug!("Channel thread sweep deferred");
+            }
+            if crate::services::assistant_invocation_service::reconcile_cancellations(&state)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Invocation cancellation sweep deferred");
             }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
