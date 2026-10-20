@@ -72,3 +72,18 @@
 - `python3 /tmp/nyxid-w94-d3-live-check.py /tmp/nyxid-w94-stream-d/debug/nyxid`: 18/0 live CLI/PTY and Docker-command-fixture cases, including closed stdin, self-hosted env and stop/start/restart preservation.
 - These fixture checks are not Docker engine evidence. C's hosted job must verify image startup/TLS, registration, actual anonymous-volume cleanup and no named volumes after refusal; cleanup explicitly removes retained machine containers.
 - Registration and stream A's evolving secret-storage implementation are untouched; credential absence must include the complete fresh state/profile root and applicable keychain/vault stores.
+
+## D-3 — assignment defaults, compatibility and consent
+
+- Implementation: `2fe081187`; exactly 34 D paths, including the three PM-approved shared adapters. No registry or foreign-file hunks.
+- Immutable `machine-separation-defaults-v1` marker and atomic snapshot freeze enabled-node ceilings and org-admin reachability through the existing ensure_indexes hook; no main/config/db/errors changes.
+- Owner cards carry the full legacy warning; new external grants require explicit legacy consent and acknowledgement. API/UI/tool/watch results expose actionable selection_required; watches settle once.
+- After PM's build-policy change, every Cargo invocation used the shared tree and CARGO_TARGET_DIR=/tmp/nyxid-shared-target CARGO_BUILD_JOBS=4 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0, without --config overrides; locks were awaited.
+- `cargo test --locked -p nyxid --no-default-features --bin nyxid-server --no-run`: pass in 13m50s; runtime filters used that shared build's pinned executable against the local Mongo replica set.
+- Eight Mongo/runtime filters: access 42, integration 24, external-grant 51, external-service 34, OAuth 12, handler-tools 1, service-tools 2, NyxBot guard 1 = 167 passed / 0 failed / 1 pre-existing ignored dispatch benchmark.
+- Initial isolated run was 142 passed / 2 failed / 0 ignored; both fixture failures were repaired (explicit legacy intent and specialist grant_to). No tests were deleted or newly ignored.
+- Frontend targeted Vitest: 115 passed / 0 failed / 0 ignored in ten files; TypeScript and scoped ESLint pass. D sources remain unchanged since validation.
+- `cargo clippy --locked -p nyxid --no-default-features --bin nyxid-server --tests -- -D warnings`: exit 101, only B-owned audit_runtime/mod.rs:9,11 unused exports and intent_tests.rs:325 field_reassign_with_default (2 production/2 test diagnostics); no D diagnostic.
+- `cargo clippy --locked -p nyxid-cli --bin nyxid --tests -- -D warnings`: exit 101, 7 A-owned unused-code diagnostics in secret_snapshot/secret_transaction/storage; no D diagnostic or suppression.
+- Pinned shared-target CLI test executable, built after unchanged D CLI inputs: commands::node::tests::docker_ --test-threads=1 passes 9/0/0. D's duplicate Cargo test was stopped only while waiting for the lock, before compilation.
+- Full review patch and explicit commit pathset were checked. Actual Docker image/TLS/volume cleanup remains C's hosted job; D-4/D-5 have not started. Awaiting PM D-3 verdict.
