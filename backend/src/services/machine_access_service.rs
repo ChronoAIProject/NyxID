@@ -36,6 +36,32 @@ fn refused() -> AppError {
     AppError::MachinePermissionRevoked
 }
 
+/// Advertisements alone never authorize separated execution. Re-evaluate the
+/// current protocol and every observed prerequisite, including credential custody.
+pub fn separated_support(profile: &nyxid_machine::MachineProfile) -> context::Support {
+    let evidence = profile.separation_evidence.as_ref();
+    let reason = if !profile.authority_v2() {
+        Some("machine_authority_upgrade_required")
+    } else {
+        match evidence {
+            None => Some("separated_capabilities_not_reported"),
+            Some(evidence) => evidence.unavailable_reason().or_else(|| {
+                (!profile.separated.as_ref().is_some_and(|s| s.available))
+                    .then_some("separated_context_unavailable")
+            }),
+        }
+    };
+    context::Support {
+        available: reason.is_none(),
+        landlock_abi: evidence.and_then(|e| e.landlock_abi),
+        reason: reason.map(str::to_owned),
+    }
+}
+
+pub fn supports_separated(profile: &nyxid_machine::MachineProfile) -> bool {
+    separated_support(profile).available
+}
+
 /// Current reports are mandatory for a new separated assignment. Existing
 /// assignments are never passed through this selector or reinterpreted.
 pub fn select_profile(
@@ -609,10 +635,7 @@ pub async fn assignment(db: &Database, chat: &ChatAuthority, node: &Node) -> App
         }
         "shared_legacy" => {}
         "separated"
-            if !assignment.legacy
-                && node.machine.as_ref().is_some_and(|p| {
-                    p.authority_v2() && p.separated.as_ref().is_some_and(|s| s.available)
-                }) => {}
+            if !assignment.legacy && node.machine.as_ref().is_some_and(supports_separated) => {}
         _ => return Err(AppError::MachineAuthorityUnsupported),
     }
     if !node.machine.as_ref().is_some_and(|p| p.authority_v2()) && !assignment.legacy {
@@ -1739,8 +1762,9 @@ pub fn spawn(state: crate::AppState) {
     });
 }
 
-/// Discovery shares the same stored projection as execution. One agent/policy
-/// lookup plus the existing batched node ACL query; never one query per node.
+/// Discovery retains stored assignments and derives current support only on the
+/// returned report. One agent/policy lookup plus the existing batched node ACL
+/// query; never one query per node.
 pub async fn visible_assignments(
     db: &Database,
     chat: &ChatAuthority,
@@ -1755,7 +1779,7 @@ pub async fn visible_assignments(
     }
     Ok(nodes
         .into_iter()
-        .filter_map(|node| {
+        .filter_map(|mut node| {
             if !agent.is_nyxbot() && !agent.machine_node_ids.contains(&node.id) {
                 return None;
             }
@@ -1767,12 +1791,16 @@ pub async fn visible_assignments(
             if access.mode == model::SELECTION_REQUIRED {
                 return Some((node, access));
             }
-            let supported = access.mode == "shared_legacy"
-                || (access.mode == "separated"
-                    && !access.legacy
-                    && node.machine.as_ref().is_some_and(|p| {
-                        p.authority_v2() && p.separated.as_ref().is_some_and(|s| s.available)
-                    }));
+            if access.mode == "separated" && !access.legacy {
+                // Keep reviewed assignments discoverable during an upgrade or
+                // failed observation. This projection never rewrites storage.
+                let profile = node.machine.as_mut()?;
+                if !supports_separated(profile) {
+                    profile.separated = Some(separated_support(profile));
+                }
+                return Some((node, access));
+            }
+            let supported = access.mode == "shared_legacy";
             if !supported
                 || (!access.legacy && !node.machine.as_ref().is_some_and(|p| p.authority_v2()))
             {
@@ -1797,8 +1825,11 @@ pub async fn definitions(
                 return true;
             }
             rows.iter().any(|(node, access)| {
-                node.machine.as_ref().is_some_and(|p| op.allowed(p))
-                    && access.capabilities.allows(op, &serde_json::json!({}))
+                node.machine.as_ref().is_some_and(|p| {
+                    op.allowed(p)
+                        && (access.mode == "shared_legacy"
+                            || (access.mode == "separated" && supports_separated(p)))
+                }) && access.capabilities.allows(op, &serde_json::json!({}))
             })
         })
         .collect())

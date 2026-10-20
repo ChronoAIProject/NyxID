@@ -1731,3 +1731,15 @@ Shared-policy cargo test --locked -p nyxid-machine context:::15 passed/0 failed/
 Only custody/v4 protocol and three fixture hunks are staged; D's browser diagnostic field/reason/tests and all runtime/probe WIP remain uncommitted. Owned rustfmt/diff checks pass.
 W9.5 remains open: runtime/native denial and final Clippy gates pending; Linux production CLI built, but guest test compile was SIGKILLed before tests and the VM remains stopped under PM memory/benchmark hold.
 Approved backend existing-assignment guards/necessary discovery consumers follow after C's announced edit window; stored modes/capabilities must not change. EXECUTION/REVIEW remain local/untracked. No push.
+
+## W9.5 backend guard validation — 2026-10-21 (review pending; CLI/native tests open)
+
+PM identified86ee63b25 being committed before Clippy; history stays unchanged and no further A commit precedes applicable gates.
+Original machine all-target Clippy completes with zero diagnostics (successful Cargo log survives; command session/independent exit record was lost after restart).
+C combined cargo clippy --locked -p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings exits0/zero diagnostics at00:48:35; actual TEST driver29823 starts00:48:49 after A23:14:28 freeze. Both-KMS test-no-run exits0 at02:04:30.
+Preserved nyxid-server-combined-tests machine_access --test-threads=4 --nocapture exits0:46 passed/0 failed/0 ignored in116.91s, including both new current-custody/support regressions and44 existing matches, on real replica-set Mongo50044 with isolated test databases.
+Final output recorded02:08:11.490025+08; A idle confirmed02:08:44.974550+08. PM/C/B notified; no further direct tests, Cargo, Lima or Docker during B quiet window. CLI remains unqueued until B clears and C successor actual TEST starts.
+Backend source freeze unchanged; current support derives from authority v2, current complete v4 evidence and the node's advertisement. Admission refuses unsupported separated assignments; discovery retains them with a fixed reason and no executable tools except cancellation. Stored modes, capabilities and reports stay unchanged; shared_legacy remains usable.
+Original CLI Clippy exits101 on new-test browser bool/Option mismatch and custody collapsible_if; fixed directly without changing assertions. Corrected exact all-target/node-proxy-test CLI Clippy exits0/zero diagnostics at04:52:34.199259 after the authorized stop/cancel correction; all22 freeze paths verify with only recorded replacements. D standalone machine65/0/0 and all-target Clippy exit0.
+This backend checkpoint commits only four owned backend paths and this log. CLI source stays uncommitted until targeted tests run after C's next actual TEST-start signal. Lima/Docker stay stopped under PM memory hold; native Linux custody remains a separate unexecuted evidence gate, with no isolation closure claim.
+Logs persist under ~/.cache/nyxid-stream-a-evidence/w95-{backend-machine-access-combined,corrected-cli-clippy,corrected-cli-drivers}.log and C gates/post-reboot-combined-*. EXECUTION/REVIEW stay local/untracked; no push.

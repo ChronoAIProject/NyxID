@@ -85,13 +85,18 @@ pub fn call<'a>(
             .into_iter()
             .map(|(node, assignment)| {
                 let mut row = machines::metadata(&node);
+                let support = node.machine.as_ref().map(access::separated_support);
                 row["execution_note"] = json!(tools::execution_note(
                     &assignment.mode,
-                    node.machine.as_ref().and_then(|p| p.separated.as_ref()).is_some_and(|s| s.available),
+                    support.as_ref().is_some_and(|s| s.available),
                 ));
                 if assignment.mode == "separated" {
                     row["machine"]["roots"] = json!(["."]);
                     row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                    if support.as_ref().is_none_or(|s| !s.available) {
+                        row["status"] = json!("unavailable");
+                        row["unavailable_reason"] = json!(support.as_ref().and_then(|s| s.reason.as_deref()).unwrap_or("separated_capabilities_not_reported"));
+                    }
                 }
                 if assignment.mode == crate::models::machine_access::SELECTION_REQUIRED {
                     row["status"] = json!("selection_required");

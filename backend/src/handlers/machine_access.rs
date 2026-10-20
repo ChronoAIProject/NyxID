@@ -69,6 +69,7 @@ pub async fn options(
         .into_iter()
         .filter_map(|node| {
             let profile = node.machine?;
+            let separated = access::separated_support(&profile);
             let assignment = policy
                 .assignments
                 .get(&node.id)
@@ -126,34 +127,15 @@ pub async fn options(
                 legacy: assignment.legacy,
                 execution_note: crate::services::machine_tools::execution_note(
                     &assignment.mode,
-                    profile.separated.as_ref().is_some_and(|s| s.available),
+                    separated.available,
                 ),
-                separated_setup_note: profile
-                    .separated
-                    .as_ref()
-                    .is_none_or(|s| !s.available)
+                separated_setup_note: (!separated.available)
                     .then_some(crate::services::machine_tools::SEPARATED_SETUP_NOTE),
                 selection_required,
                 selection_reason,
                 separation_choice: profile.separation_choice,
                 mode: assignment.mode,
-                separated: Some(nyxid_machine::context::Support {
-                    available: access::select_profile(
-                        &profile,
-                        Some(nyxid_machine::context::Choice::Automatic),
-                    )
-                    .is_ok(),
-                    landlock_abi: profile
-                        .separation_evidence
-                        .as_ref()
-                        .and_then(|e| e.landlock_abi),
-                    reason: access::select_profile(
-                        &profile,
-                        Some(nyxid_machine::context::Choice::Automatic),
-                    )
-                    .err()
-                    .map(str::to_owned),
-                }),
+                separated: Some(separated),
                 saved_login_ids: assignment.saved_login_ids,
             })
         })

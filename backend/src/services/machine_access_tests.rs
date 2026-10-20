@@ -3045,6 +3045,242 @@ fn supported_evidence() -> nyxid_machine::context::Evidence {
     }
 }
 
+#[tokio::test]
+async fn machine_access_existing_separated_requires_current_custody_and_stays_visible() {
+    let f = orchestrator_fixture("machine_existing_custody").await;
+    enable(&f).await;
+    let mut machine = v2(&f).await;
+    let mut policy = model::Policy::default();
+    policy.assignments.insert(
+        machine.id.clone(),
+        model::Assignment {
+            mode: "separated".into(),
+            capabilities: Capabilities {
+                shell: true,
+                files: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    f.state.db.collection::<Document>(AGENTS).update_one(
+        doc! {"_id":&f.chat.agent_id},
+        doc! {"$set":{"machine_access":bson::to_bson(&policy).unwrap(),"machine_node_ids":[&machine.id]}},
+    ).await.unwrap();
+    for (evidence, reason) in [
+        (
+            Some(nyxid_machine::context::Evidence {
+                version: 3,
+                ..supported_evidence()
+            }),
+            Some("separated_probe_version_unsupported"),
+        ),
+        (
+            Some(nyxid_machine::context::Evidence {
+                credential_custody: None,
+                ..supported_evidence()
+            }),
+            Some("node_custody_unverified"),
+        ),
+        (
+            Some(nyxid_machine::context::Evidence {
+                credential_custody: Some(false),
+                ..supported_evidence()
+            }),
+            Some("node_custody_unverified"),
+        ),
+        (None, Some("separated_capabilities_not_reported")),
+        (Some(supported_evidence()), None),
+    ] {
+        let profile = machine.machine.as_mut().unwrap();
+        profile.separation_evidence = evidence;
+        profile.separated = Some(nyxid_machine::context::Support {
+            available: true,
+            landlock_abi: Some(6),
+            reason: None,
+        });
+        assert_eq!(access::supports_separated(profile), reason.is_none());
+        f.state
+            .db
+            .collection::<Document>(crate::models::node::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&machine.id},
+                doc! {"$set":{"machine":bson::to_bson(&machine.machine).unwrap()}},
+            )
+            .await
+            .unwrap();
+        let admitted = access::admit(
+            &f.state.db,
+            &f.chat,
+            &machine,
+            Operation::Exec,
+            &json!({}),
+            None,
+        )
+        .await;
+        if reason.is_some() {
+            let error = admitted.unwrap_err();
+            assert!(matches!(error, AppError::MachineAuthorityUnsupported));
+            assert_eq!(error.error_code(), 12419);
+            for collection in [model::CONTEXTS, model::LEASES] {
+                assert_eq!(
+                    f.state
+                        .db
+                        .collection::<Document>(collection)
+                        .count_documents(doc! {"node_id":&machine.id})
+                        .await
+                        .unwrap(),
+                    0,
+                    "refusal must precede context and lease effects"
+                );
+            }
+        } else {
+            assert_eq!(admitted.unwrap().unwrap().mode, "separated");
+        }
+        let visible = access::visible_assignments(&f.state.db, &f.chat)
+            .await
+            .unwrap();
+        let (projected, assignment) = visible.iter().find(|(n, _)| n.id == machine.id).unwrap();
+        assert_eq!(assignment, &policy.assignments[&machine.id]);
+        let support = projected
+            .machine
+            .as_ref()
+            .unwrap()
+            .separated
+            .as_ref()
+            .unwrap();
+        assert_eq!(support.available, reason.is_none());
+        assert_eq!(support.reason.as_deref(), reason);
+        let definitions = access::definitions(&f.state.db, &f.chat).await.unwrap();
+        assert_eq!(
+            definitions
+                .iter()
+                .any(|tool| super::machine_tools::operation(&tool.name)
+                    .is_some_and(|op| op != Operation::JobCancel)),
+            reason.is_none()
+        );
+        assert!(
+            definitions
+                .iter()
+                .any(|tool| super::machine_tools::operation(&tool.name)
+                    == Some(Operation::JobCancel)),
+            "cancellation remains available even when new execution is refused"
+        );
+        let list =
+            crate::handlers::machine_tools::call(&f.state, &f.chat, "nyx__machine_list", json!({}))
+                .await
+                .unwrap();
+        let row = list["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == machine.id)
+            .unwrap();
+        assert_eq!(row["access"]["mode"], "separated");
+        if let Some(reason) = reason {
+            assert_eq!(row["status"], "unavailable");
+            assert_eq!(row["unavailable_reason"], reason);
+        } else {
+            assert_eq!(
+                row["status"],
+                serde_json::to_value(&machine.status).unwrap()
+            );
+        }
+        let options = serde_json::to_value(
+            crate::handlers::machine_access::options(&f.state, &f.owner, &f.chat.agent_id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let option = options
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["node_id"] == machine.id)
+            .unwrap();
+        let note = super::machine_tools::execution_note("separated", reason.is_none());
+        assert_eq!(row["execution_note"], note);
+        assert_eq!(option["execution_note"], note);
+        assert_eq!(option["separated"]["available"], reason.is_none());
+        assert_eq!(option["separated"]["reason"], json!(reason));
+        assert_eq!(option["separated_setup_note"].is_null(), reason.is_none());
+        assert_eq!(
+            access::policy(&f.state.db, &f.chat.agent_id).await.unwrap(),
+            policy
+        );
+        let stored: crate::models::node::Node = f
+            .state
+            .db
+            .collection(crate::models::node::COLLECTION_NAME)
+            .find_one(doc! {"_id":&machine.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.machine, machine.machine,
+            "derived support must never overwrite the node report"
+        );
+    }
+    // The same missing custody still permits an explicitly shared assignment.
+    let shared = v2(&f).await;
+    let mut shared_assignment = policy.assignments[&machine.id].clone();
+    shared_assignment.mode = "shared_legacy".into();
+    policy
+        .assignments
+        .insert(shared.id.clone(), shared_assignment);
+    f.state
+        .db
+        .collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id":&f.chat.agent_id},
+            doc! {"$set":{"machine_access":bson::to_bson(&policy).unwrap(),"machine_node_ids":[&machine.id,&shared.id]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        access::admit(
+            &f.state.db,
+            &f.chat,
+            &shared,
+            Operation::Exec,
+            &json!({}),
+            None
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .mode,
+        "shared_legacy"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[test]
+fn machine_access_current_support_requires_advertisement_and_authority() {
+    let mut profile = nyxid_machine::MachineProfile {
+        authority_versions: vec![2],
+        separation_evidence: Some(supported_evidence()),
+        separated: Some(nyxid_machine::context::Support {
+            available: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(access::supports_separated(&profile));
+    profile.separated.as_mut().unwrap().available = false;
+    assert_eq!(
+        access::separated_support(&profile).reason.as_deref(),
+        Some("separated_context_unavailable")
+    );
+    profile.separated = None;
+    assert!(!access::supports_separated(&profile));
+    profile.authority_versions.clear();
+    assert_eq!(
+        access::separated_support(&profile).reason.as_deref(),
+        Some("machine_authority_upgrade_required")
+    );
+}
+
 #[test]
 fn machine_access_new_assignment_selection_matrix() {
     use nyxid_machine::context::{Choice, EVIDENCE_VERSION};
