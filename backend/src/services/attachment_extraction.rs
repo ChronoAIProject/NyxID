@@ -117,6 +117,9 @@ fn parse(bytes: &[u8], extension: &str) -> AppResult<Extracted> {
             if file.size() > remaining {
                 return Err(bad("DOCX exceeds the 40 MiB decompression limit."));
             }
+            // zip 9's CP437 fallback accepts invalid UTF-8 flagged names.
+            // DOCX part names must be UTF-8 rather than silently reinterpreted.
+            std::str::from_utf8(file.name_raw()).map_err(|_| malformed())?;
             let name = file.name().map_err(|_| malformed())?.into_owned();
             let mut expanded = Vec::new();
             (&mut file)
@@ -493,7 +496,7 @@ mod tests {
             bytes[offset + name] = 0xff;
         }
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-        assert!(archive.by_index(0).unwrap().name().is_err());
+        assert!(std::str::from_utf8(archive.by_index(0).unwrap().name_raw()).is_err());
         let error = parse(&bytes, "docx").err().expect("malformed DOCX");
         assert!(matches!(error, AppError::BadRequest(_)));
         assert_eq!(error.to_string(), malformed().to_string());

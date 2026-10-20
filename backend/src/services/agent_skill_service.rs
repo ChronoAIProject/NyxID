@@ -653,6 +653,9 @@ fn package(bytes: &[u8]) -> AppResult<BTreeMap<String, Vec<u8>>> {
         let mut file = archive
             .by_index(i)
             .map_err(|_| invalid("Invalid skill ZIP entry"))?;
+        // zip 9 falls back to CP437 even for an invalid UTF-8 flagged name.
+        // Skill paths require UTF-8, so reject those bytes before decoding.
+        std::str::from_utf8(file.name_raw()).map_err(|_| invalid("Invalid skill ZIP entry"))?;
         let name = file
             .name()
             .map_err(|_| invalid("Invalid skill ZIP entry"))?
@@ -1046,7 +1049,7 @@ mod zip_filename_tests {
             bytes[offset + name] = 0xff;
         }
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-        assert!(archive.by_index(0).unwrap().name().is_err());
+        assert!(std::str::from_utf8(archive.by_index(0).unwrap().name_raw()).is_err());
         assert!(matches!(
             package(&bytes),
             Err(AppError::ValidationError(message)) if message == "Invalid skill ZIP entry"
