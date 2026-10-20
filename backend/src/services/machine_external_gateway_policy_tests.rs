@@ -138,6 +138,8 @@ async fn actual_signed_external_gateway_preserves_personal_and_org_streaming_and
             &f.grant_id,
             1,
             &GrantSelection {
+                separation: Some(nyxid_machine::context::Choice::SharedLegacy),
+                legacy_warning_acknowledged: true,
                 assignments: BTreeMap::from([(
                     f.node.id.clone(),
                     GrantAssignment {

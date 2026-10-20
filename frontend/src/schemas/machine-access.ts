@@ -8,7 +8,10 @@ export const machineAccessSchema = z.object({
   node_id: z.string(), name: z.string(), revision: z.number(), protocol_v2: z.boolean(),
   capabilities: capabilitiesSchema, ceiling: capabilitiesSchema, legacy: z.boolean(),
   can_edit: z.boolean().default(false),
-  mode: z.enum(["shared_legacy", "separated"]).optional(),
+  mode: z.enum(["shared_legacy", "separated", "selection_required"]).optional(),
+  selection_required: z.boolean().optional(),
+  selection_reason: z.string().nullish(),
+  separation_choice: z.enum(["automatic", "require_separated", "shared_legacy"]).nullish(),
   execution_note: z.string().optional(),
   separated_setup_note: z.string().nullish(),
   separated: z.object({ available: z.boolean(), landlock_abi: z.number().nullable(), reason: z.string().nullable() }).nullish(),
@@ -28,7 +31,7 @@ export const machineSelectionSchema = z.object({
   message: "Browser is required for computer and developer browser access", path: ["capabilities", "browser"],
 });
 export const machineContextSelectionSchema = machineSelectionSchema.extend({
-  mode: z.literal("separated"),
+  mode: z.enum(["separated", "automatic", "require_separated", "shared_legacy"]),
 });
 export const machineContextSchema = z.object({
   context_id: z.string().min(1),

@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
   machineAccessSchema,
@@ -39,14 +39,14 @@ export function useSetMachineAccess(id: string) {
 
 export function useRequestMachineContext(agentId: string) {
   const client = useQueryClient();
-  const userId = useAuthStore(s => s.user?.id);
-  return useMutation({
-    mutationFn: ({ node, selection }: { node: string; selection: MachineContextSelection }) =>
+  return useAgentOwnerMutation({
+    mutationFn: ({ node, selection }: { node: string; selection: MachineContextSelection }, guard) =>
       assistantJson(`${path(agentId)}/${encodeURIComponent(node)}/context-request`, {
         method: "POST",
         body: { selection },
+        authorityGuard: guard,
       }),
-    onSuccess: () => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) }),
+    onSettled: owner => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
   });
 }
 

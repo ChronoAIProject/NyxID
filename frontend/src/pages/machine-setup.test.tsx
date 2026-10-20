@@ -29,7 +29,7 @@ const mock = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", () => ({
   useSearch: () => mock.search,
   useNavigate: () => mock.navigate,
-  Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
+  Link: ({ children }: { children: React.ReactNode }) => <a href="/assistant/machines">{children}</a>,
 }));
 vi.mock("@/components/shared/org-scope-select", () => ({
   OrgScopeSelect: () => <span>Personal account</span>,
@@ -95,6 +95,8 @@ afterEach(() => {
   sessionStorage.clear();
 });
 const choices = {
+  separation: "automatic" as const,
+  legacy_warning_acknowledged: false,
   name: "coding",
   where: "docker" as const,
   capabilities: ["shell" as const, "files" as const],
@@ -327,3 +329,13 @@ it.each(["absent", "off", "loading"])(
     expect(mock.createRemote).not.toHaveBeenCalled();
   },
 );
+
+it("shows actionable separation selection when the node reports no owner choice", () => {
+  const client = new QueryClient();
+  mock.search = { setup: "intent" };
+  mock.setup = { id: "intent", choices, status: "selection_required", selection_reason: "Upgrade the old node or explicitly choose legacy.", machine: null };
+  render(<QueryClientProvider client={client}><MachineSetupPage /></QueryClientProvider>);
+  expect(screen.getByText(/machine access requires an owner separation choice/)).toBeInTheDocument();
+  expect(screen.getByText("Upgrade the old node or explicitly choose legacy.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Review machine separation" })).toBeInTheDocument();
+});

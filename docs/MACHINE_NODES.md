@@ -121,7 +121,9 @@ Nothing the server sends can enable a capability.
   level: machine access is the owner's, like SSH. Other API keys, delegated
   tokens, relay tokens and service accounts get no machine tools.
 - **Which machines:**
-  - NyxBot may use every machine node the owner can use;
+  - NyxBot uses its stored assignments on machine nodes the owner can use;
+    flag-off compatibility preserves reachability frozen at the W9.4 cutover,
+    while new reachability requires a recorded owner separation choice;
   - a specialist may use only the machine nodes granted to it;
   - "can use" = the node's owner is the agent's owner, or the node is org-owned
     and `org_service::resolve_owner_access(owner, node.user_id)` gives the owner

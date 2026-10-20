@@ -67,8 +67,49 @@ OpenDots is ahead in per-agent lifecycle/UX and continuously rechecked capabilit
 
 The owner-approved mode is `separated`; the UI label is **Separate workspace and
 browser for this agent**. It combines the former workspace and browser phases.
-`shared_legacy` remains the default. **Full isolation requires a separate machine
-container or VM per agent.** Never label this mode “isolated”.
+Existing assignments retain `shared_legacy`. New assignments follow the W9.4
+selection contract below. **Full isolation requires a separate machine container
+or VM per agent.** Never label this mode “isolated”.
+
+#### W9.4 new-assignment selection
+
+Node setup records the owner's `automatic`, `require_separated`, or
+`shared_legacy` intent. New server assignments use current v2 capability evidence;
+the older support boolean, missing evidence and unknown evidence versions cannot
+establish support. Automatic and required intent select `separated` only when the
+supported mechanisms are positively observed and context creation is enabled.
+Otherwise the assignment is denied with an actionable `selection_required` state.
+An omitted choice never selects legacy. An explicit legacy choice is available on
+unsupported and older hosts after the owner reviews the complete warning in
+[NYXID_NODE.md](NYXID_NODE.md#machine-access-for-nyxbot-and-specialists).
+
+Existing assignments keep their stored mode, capabilities and login restrictions.
+Changing the node's intent, upgrading it, or changing a feature flag does not
+reinterpret them. The first capable server atomically writes the immutable
+`machine-separation-defaults-v1` marker and a compatibility snapshot of enabled
+machines, their capability ceilings, and existing organization-admin reachability.
+Flag-off NyxBot discovery may materialize only that pre-marker reachability when
+the node has no recorded choice, while rechecking live ACLs. Later node enablement,
+organization promotion, and capability expansion cannot extend this snapshot.
+Existing assignment restrictions and removal tombstones win.
+
+Machine settings links each eligible agent to its separation controls. Missing
+selection appears in the API, settings, setup progress, and NyxBot tool/watch
+results, with an owner action and no execution retry loop. The human action card
+contains the full legacy warning before approving a new legacy assignment or a
+separated-to-shared change; an assistant cannot choose legacy on the owner's
+behalf. New external OAuth/API-key Machine grants support explicit legacy consent
+only, with affirmative warning acknowledgement; automatic/required contexts are
+refused. Revalidation of an existing external grant retains its existing policy
+and live source, ACL, and capability checks.
+
+Upgrade and drain every server replica before relying on W9.4 for new grants;
+older replicas do not enforce the new recorded-intent contract. Publish the
+matching frontend and CLI/container versions together. An old node that reports
+neither intent nor evidence remains usable through an existing legacy assignment;
+new access requires the owner action. Missing UI fields from an older server are
+accepted for existing assignments, while new grant submissions without explicit
+external legacy consent are rejected by the upgraded server with an explanation.
 
 #### What separated does and does not guarantee
 
@@ -430,15 +471,15 @@ activity has an explicit “Unknown (older node)” filter.
 M1.2 adds an explicit boxed `machine_access` sibling policy (version, monotonic
 editor revision, per-machine execution revisions and assignments). For acting people
 with `assistant:machine-capabilities` enabled, new selections start with all
-capabilities off and the editor is available. With the flag off, existing workflows
-keep working: NyxBot snapshots missing assignments at discovery or first use after
-live ACL checks, and the specialist Grants picker snapshots selected machines.
-Both use `legacy:true` and the node's current legacy capability profile. The
-one-time cutover likewise snapshots pre-existing reachability as `shared_legacy`.
-Turning the flag on preserves these snapshots until edited. Turning it off never
-widens an explicitly configured assignment.
-Migration and grant writes serialize on the agent row. Removal and re-addition
-retain the global revision fence rather than growing an unbounded tombstone map.
+capabilities off and the editor is available. W9.4 narrows the original flag-off
+compatibility path: existing assignments remain usable; missing NyxBot assignments
+inherit only the frozen pre-marker reachability described above. New Grants and
+specialist creation use recorded setup intent and current capability evidence, or
+remain denied pending owner selection. Turning either flag on or off never widens
+an explicitly configured assignment.
+Migration and grant writes serialize on the agent row. Removal retains the mode
+and an all-off assignment so later discovery or re-addition cannot resurrect a
+revoked compatibility grant.
 Legacy rosters above the 500-machine discovery page remain explicit and usable;
 migration streams all pre-cutover rows in batches of 100. The editor limits new
 assignments to 64 without truncating or revoking larger legacy rosters.

@@ -64,6 +64,14 @@ pub async fn validate_choices(
     mut choices: Choices,
 ) -> AppResult<Choices> {
     validate_machine_name(&choices.name)?;
+    if choices.separation == Some(nyxid_machine::context::Choice::SharedLegacy)
+        && !choices.legacy_warning_acknowledged
+    {
+        return Err(AppError::ValidationError(format!(
+            "Explicit shared legacy acknowledgement is required. {}",
+            nyxid_machine::context::SHARED_LEGACY_WARNING
+        )));
+    }
     if !matches!(choices.location.as_str(), "this_computer" | "vm" | "docker") {
         return Err(AppError::ValidationError(
             "Choose this_computer, vm or docker".into(),
@@ -177,6 +185,8 @@ pub async fn initiate(
         db,
         "",
         Choices {
+            separation: None,
+            legacy_warning_acknowledged: false,
             automatic_updates: None,
             owner_id: None,
             name,
@@ -249,6 +259,47 @@ pub async fn get(db: &Database, owner: &str, id: &str) -> AppResult<MachineSetup
         .ok_or_else(|| AppError::NotFound("Machine setup not found".into()))
 }
 
+pub async fn setup_selection_reason(
+    db: &Database,
+    row: &MachineSetup,
+    node: &crate::models::node::Node,
+) -> AppResult<Option<&'static str>> {
+    if row.status == "connected" {
+        return Ok(None);
+    }
+    let mut assignment_pending = false;
+    if let Some(agent) = row.choices.grant_to.as_deref() {
+        let policy = Box::pin(super::machine_access_service::policy(db, agent)).await?;
+        if let Some(assignment) = policy.assignments.get(&node.id) {
+            if matches!(assignment.mode.as_str(), "shared_legacy" | "separated") {
+                // Existing authority and denials are retained by the grant path.
+                return Ok(None);
+            }
+            // Membership writes retain stored assignments. A usable new node
+            // intent alone cannot settle an assignment awaiting owner action.
+            assignment_pending = true;
+        }
+    }
+    let Some(profile) = node.machine.as_ref() else {
+        return Ok(Some("separated_capabilities_not_reported"));
+    };
+    match super::machine_access_service::select_profile(profile, profile.separation_choice) {
+        Err(reason) => Ok(Some(reason)),
+        Ok(nyxid_machine::context::Mode::Separated)
+            if !super::feature_flag_service::personal_flag_enabled(
+                db,
+                &row.user_id,
+                super::machine_access_service::CONTEXT_FLAG,
+            )
+            .await? =>
+        {
+            Ok(Some("machine_context_setup_not_enabled"))
+        }
+        Ok(_) if assignment_pending => Ok(Some("machine_selection_required")),
+        Ok(_) => Ok(None),
+    }
+}
+
 /// Page-only setups have no waiting NyxBot to apply the reviewed grant. Commit
 /// the grant and completion together so a reconnect cannot restore a later
 /// revoked grant. Chat-led setups leave verification and granting to NyxBot.
@@ -256,7 +307,7 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
     use super::{api_key_mutation_service as transactions, assistant_team_service as team};
     let Some(row) = db
         .collection::<MachineSetup>(COLLECTION_NAME)
-        .find_one(doc! {"_id":id,"conversation_id":null,"status":"waiting"})
+        .find_one(doc! {"_id":id,"conversation_id":null,"status":{"$in":["waiting","selection_required"]}})
         .await?
     else {
         return Ok(());
@@ -276,6 +327,14 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
     {
         return Ok(());
     }
+    if let Some(reason) = Box::pin(setup_selection_reason(db, &row, &node)).await? {
+        db.collection::<MachineSetup>(COLLECTION_NAME).update_one(
+            doc! {"_id":id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
+            doc! {"$set":{"status":"selection_required"}},
+        ).await?;
+        tracing::debug!(reason, "Machine setup awaits owner separation selection");
+        return Ok(());
+    }
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let id = id.to_owned();
@@ -286,7 +345,7 @@ pub async fn complete_page_setup(db: &Database, id: &str) -> AppResult<()> {
                 let changed = db
                     .collection::<MachineSetup>(COLLECTION_NAME)
                     .update_one(
-                        doc! {"_id":&id,"status":"waiting","conversation_id":null},
+                        doc! {"_id":&id,"status":{"$in":["waiting","selection_required"]},"conversation_id":null},
                         doc! {"$set":{"status":"connected"}},
                     )
                     .session(&mut *session)

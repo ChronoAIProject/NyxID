@@ -17,7 +17,7 @@ import {
   useSetNyxBotAgentGrants,
 } from "@/hooks/use-nyxbot-agents";
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
-import { SINGLE_USER_WARNING } from "@/schemas/machines";
+import { SHARED_LEGACY_WARNING, SINGLE_USER_WARNING } from "@/schemas/machines";
 import { SEPARATED_SETUP_NOTE } from "@/schemas/machine-access";
 import type { NodeInfo } from "@/types/nodes";
 import { Badge } from "@/components/ui/badge";
@@ -281,11 +281,19 @@ export function MachineSettings({
               ) : null}
             </SettingsSection>
           ) : null}
+          {canManage ? <SettingsSection title="Agent separation choices">
+            <p className="text-muted-foreground">New assignments need a recorded choice and confirmed support. Existing Shared legacy assignments retain their configured access. Open an agent’s access settings to select supported separation or explicitly approve shared legacy access through its owner card.</p>
+            <p className="text-muted-foreground">{SHARED_LEGACY_WARNING}</p>
+            {(agents.data?.agents ?? []).filter(agent => agent.status !== "destroyed" && (agent.kind === "nyxbot" || agent.machines?.includes(node.id))).map(agent => <Button key={agent.id} asChild variant="outline" className="max-w-full whitespace-normal">
+              <Link to="/assistant" search={{ agent: agent.id, details: "grants" }}>Review {agent.display_name ?? agent.name} separation</Link>
+            </Button>)}
+          </SettingsSection> : null}
           {canManage ? (
             <SettingsSection title="Specialist access">
               <p className="text-muted-foreground">
-                NyxBot can use every machine you own or administer. Choose which
-                specialists can use this one.
+                NyxBot uses configured assignments on machines you own or administer.
+                Choose which specialists may use this one, then review their separation
+                choices and capabilities.
               </p>
               {agents.isPending ? (
                 <p role="status">Loading specialists…</p>

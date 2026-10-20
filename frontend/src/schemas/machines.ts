@@ -709,6 +709,8 @@ export type RemoteMachineConfirmationDecision = z.infer<
 >;
 
 export const machineChoicesSchema = z.object({
+  separation: z.enum(["automatic", "require_separated", "shared_legacy"]).nullish(),
+  legacy_warning_acknowledged: z.boolean().optional(),
   owner_id: z.string().uuid().nullable().optional(),
   name: z
     .string()
@@ -722,9 +724,12 @@ export const machineChoicesSchema = z.object({
     .max(4),
   grant_to: z.string().nullable(),
   automatic_updates: z.boolean().nullable().optional(),
+}).refine((choices) => choices.separation !== "shared_legacy" || choices.legacy_warning_acknowledged === true, {
+  path: ["legacy_warning_acknowledged"], message: "Acknowledge the shared legacy warning before continuing",
 });
 export type MachineChoices = z.infer<typeof machineChoicesSchema>;
 export interface MachineProfile {
+  separation_choice?: "automatic" | "require_separated" | "shared_legacy" | null;
   version: number;
   shell: boolean;
   files: boolean;
@@ -754,6 +759,7 @@ export interface MachineProfile {
   updater_ready?: boolean;
 }
 export interface MachineSetup {
+  selection_reason?: string | null;
   id: string;
   choices: MachineChoices;
   status: string;
@@ -768,6 +774,7 @@ export const MACHINE_SAFETY =
   "Recommended: use the machine container or a VM set up with --separate-users. Agents act with that OS user's full access, and prompt injection is possible. Workspace roots constrain file tools and working directories; shell commands can access anything that user can.";
 export const SINGLE_USER_SHELL_WARNING =
   "Not isolated: agent commands can read this node's stored credentials, signing secret and node token, including its config and local credential store. File-tool workspace limits do not constrain the shell. You may proceed; prefer the machine container or a VM set up with --separate-users.";
+export const SHARED_LEGACY_WARNING = "Shared legacy access gives agent commands the full access of their OS user. A misbehaving or prompt-injected agent may read node tokens, signing secrets and stored credentials accessible to that user, including the node config and local credential store. Workspace roots constrain file tools and working directories, not the shell. Supported separated contexts still share the host kernel and retain kernel-exploit and supervisor-compromise risks; they are not a VM boundary. Use a separate machine container or VM per agent for stronger isolation; containers also share their host kernel.";
 export const SINGLE_USER_WARNING =
   "Agent commands run as the same user as the browser on this machine. A misbehaving or prompt-injected agent could read what is typed. Use the machine container or a VM with separate browser and agent users for better isolation.";
 
@@ -785,6 +792,10 @@ export function machineSetupCommand(
 ): string {
   if (!/^nyx_nreg_[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid setup credential");
+  const selection = choices.separation ?? "automatic";
+  if (!["automatic", "require_separated", "shared_legacy"].includes(selection) || (selection === "shared_legacy" && choices.legacy_warning_acknowledged !== true))
+    throw new Error("Review and explicitly acknowledge the machine separation choice");
+  const cliSelection = selection.replaceAll("_", "-");
   const args = choices.capabilities
     .map((capability) => `--${capability}`)
     .join(" ");
@@ -795,11 +806,11 @@ export function machineSetupCommand(
       );
     const profileUrl = new URL("/machine-seccomp.json", window.location.origin)
       .href;
-    return `(nyx_machine_dir=$(mktemp -d) && trap 'rm -rf "$nyx_machine_dir"' EXIT && curl -fsSL ${shellQuote(profileUrl)} -o "$nyx_machine_dir/seccomp.json" && docker run -d --security-opt "seccomp=$nyx_machine_dir/seccomp.json" --name ${shellQuote(choices.name)} --restart unless-stopped --shm-size=1g --label ${shellQuote(`dev.nyxid.machine=${choices.name}`)} -v ${shellQuote(`${choices.name}-nyxid-update:/var/lib/nyxid-machine-update`)} -v ${shellQuote(`${choices.name}-identity:/var/lib/nyxid-machine`)} -v ${shellQuote(`${choices.name}-workspace:/workspace`)} -e ${shellQuote(`NYXID_NODE_TOKEN=${token}`)} -e ${shellQuote(`NYXID_NODE_URL=${wsUrl}`)} ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:${version} ${args} && ${machineCompanionCommand(choices.name, version, updaterImage)})`;
+    return `(nyx_machine_dir=$(mktemp -d) && trap 'rm -rf "$nyx_machine_dir"' EXIT && curl -fsSL ${shellQuote(profileUrl)} -o "$nyx_machine_dir/seccomp.json" && docker run -d --security-opt "seccomp=$nyx_machine_dir/seccomp.json" --name ${shellQuote(choices.name)} --restart unless-stopped --shm-size=1g --label ${shellQuote(`dev.nyxid.machine=${choices.name}`)} -v ${shellQuote(`${choices.name}-nyxid-update:/var/lib/nyxid-machine-update`)} -v ${shellQuote(`${choices.name}-identity:/var/lib/nyxid-machine`)} -v ${shellQuote(`${choices.name}-workspace:/workspace`)} -e ${shellQuote(`NYXID_MACHINE_SEPARATION=${cliSelection}`)} -e ${shellQuote(`NYXID_NODE_TOKEN=${token}`)} -e ${shellQuote(`NYXID_NODE_URL=${wsUrl}`)} ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:${version} ${args} && ${machineCompanionCommand(choices.name, version, updaterImage)})`;
   }
   const installer =
     "https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh";
-  return `(command -v nyxid >/dev/null 2>&1 || bash -c "$(curl -fsSL ${installer})") && PATH="$HOME/.local/bin:$PATH" nyxid node setup --token ${shellQuote(token)} --url ${shellQuote(wsUrl)} ${args}`;
+  return `(command -v nyxid >/dev/null 2>&1 || bash -c "$(curl -fsSL ${installer})") && PATH="$HOME/.local/bin:$PATH" nyxid node setup --separation ${shellQuote(cliSelection)} --token ${shellQuote(token)} --url ${shellQuote(wsUrl)} ${args}`;
 }
 
 export interface MachineUpdateStatus {

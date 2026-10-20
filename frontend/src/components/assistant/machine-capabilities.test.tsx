@@ -131,3 +131,31 @@ describe("machine capability editor", () => {
     expect(screen.getByText("Owner approval requested in the NyxBot Assistant thread.")).toBeInTheDocument();
   });
 });
+
+it("keeps missing evidence actionable with flags off and requires affirmative legacy consent", async () => {
+  feature.mockReturnValue(false);
+  query.mockReturnValue({ data: [{ ...machine, mode: "selection_required", selection_required: true, selection_reason: "Old node: no capability report", separated: null }] });
+  render(<MachineCapabilities agentId="agent" />);
+  expect(screen.getByText("Owner selection required")).toBeInTheDocument();
+  expect(screen.getByText("Old node: no capability report")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
+  const request = screen.getByRole("button", { name: "Request shared legacy owner approval" });
+  expect(request).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ }));
+  fireEvent.click(request);
+  await waitFor(() => expect(contextSave).toHaveBeenCalledWith({ node: "node", selection: { mode: "shared_legacy", expected_revision: 3, capabilities: off, saved_login_ids: [] } }));
+  expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
+});
+
+ it("keeps owner selection available with capability editing off and disables it for a read-only view", () => {
+   const pending = { ...machine, mode: "selection_required" as const, selection_required: true };
+   const view = render(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} />);
+   const consent = screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ });
+   expect(consent).toBeEnabled();
+   fireEvent.click(consent);
+   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeEnabled();
+   expect(screen.getByRole("button", { name: "Save capabilities" })).toBeDisabled();
+   view.rerender(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} disabled />);
+   expect(consent).toBeDisabled();
+   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeDisabled();
+ });
