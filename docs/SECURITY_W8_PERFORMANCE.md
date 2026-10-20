@@ -239,3 +239,179 @@ The CORE-B RSA guard refresh procedure is now committed. Both the refresh and
 the working-tree reference/private-operation validation pass; retaining the
 cleanup guard changes no bound RSA reference or private-operation line, so
 there is no policy pin delta to include with this focused test correction.
+
+## Hosted 82e7605bb follow-up (2026-10-20)
+
+The first fixes did **not** restore the hosted Backend Test job: its 90-minute
+deadline fired after 8,740/9,786 tests, including about 23 minutes of compilation.
+Coverage completed 9,749 tests in 3,591.6 s, versus 9,615 tests / 3,356 s in
+the pre-W8 job. These jobs are distinct measurements, not interchangeable proof.
+
+Parsing the supplied nextest logs gives 8,728 Backend passing-test durations
+summing to 15,941.925 s (median 0.059 s, p95 12.176 s). Coverage's 9,739 passing
+durations sum to 14,305.287 s; the baseline's 9,614 sum to 13,412.114 s. The
+Coverage log contains repeated failure summaries, which are not extra executed
+tests. For common passing names only: 8,552 Backend/baseline tests total
+15,755.136 / 13,091.276 s (1.203x), while 9,554 Coverage/baseline tests total
+14,036.676 / 13,357.413 s (1.051x). These sums are aggregate process time, not
+wall-clock runtime; parallel tests overlap.
+
+The timed-out Backend host also recorded substantially more I/O pressure than
+Coverage. From resource samples at elapsed >=1,500 s through the last sample,
+Backend spent 678.0 s with some I/O stall and 586.9 s with full I/O stall in
+3,843.0 s; Coverage recorded 172.3 / 121.1 s in 3,542.8 s. Memory-pressure
+stalls in those windows were 0.14 / 0.001 s. This is an observed host/job
+difference; it does not establish that all remaining cost is environmental.
+
+Before the reboot, a same-machine command profile measured fixture initialization at
+250.638 ms, including the writable readiness probe at 6.322 ms and five audit
+index commands totalling 159.146 ms. The earlier 7,757.788 ms probe was a
+contended sample, not a fixed per-test sleep. Restart took 2.463 ms; 256 direct
+appends took 1,443.204 ms (177.38/s), including 969.701 ms in majority+journal
+commit commands. HMAC alone took 15.979 microseconds per invocation. The index
+commands are independent across collections and can overlap, but all results
+must succeed before initialization or writer activation; this optimization is
+in validation. Every index definition, tail HMAC check, snapshot, head CAS and
+majority+journal guarantee stays intact.
+
+An alternating direct-Mongo DDL experiment used eight trials per ordering
+on the same replica, with the same five collection/index commands and index
+verification after every trial. Serial median was 311.391 ms; concurrent median
+was 268.552 ms, saving 42.839 ms (13.8%). This is a modest isolated DDL saving,
+not proof that the hosted timeout is resolved. Subsequent Rust profiles under
+shared host load varied from 1,031.771 to 1,468.275 ms per fixture and 45.10 to
+70.12 appends/s, so they are not comparable throughput improvements against
+the quiet sample above. Evidence: `hosted82-index-ddl-causal.log` and
+`hosted82-profile-index-parallel-{0,1,2}.log` in the same local evidence directory.
+
+Fault scripts were not isolated across nextest processes. The hosted delivery
+script armed two unscoped insert failures at 12:27:56; another process's probe
+failed at 0.008 s and the script then observed two bodies rather than three.
+Other scripts used a process-local mutex, so their server-global configurations
+could overwrite one another even with app-name restrictions. The shared guard
+now owns the cross-process kernel lock, unique client/appName, arming and joined
+panic-safe disarming. The source scan now finds configureFailPoint only in
+the shared helper; the lane migrations use its documented API. This is a test
+isolation correction, not a production retry-budget change.
+
+Contention is independently reproducible: the unchanged cached executable ran
+the 256-append/16-task test alone 20 times on own Mongo :50012, with 17 passes
+and three failures (rounds 0/12/18). No fault script ran on that replica during
+this measurement. Errors contain the natural server WriteConflict message and
+TransientTransactionError, which the runner already classifies as retryable.
+A second isolated diagnostic series stopped after two passes and one failure.
+That failure reached body attempt 32 with zero commits, Mongo code 112 and the
+`TransientTransactionError` label. The existing classifier recognizes both:
+this reproduced case exhausts the bounded body budget under starvation; it is
+not an unlabeled error escaping classification. Evidence:
+`/tmp/nyxid-w8-ci-perf/hosted82-contention-diagnostic-2.log`. Local FIFO
+scheduling before opening transaction snapshots is being evaluated separately;
+no retry/timeout increase or passing contention claim follows from these failures.
+
+The platform rotation test also reproduced locally (0/1/0 in 5.48 s). Its
+fixture signed one chain with native-review-test-audit and later used AppState's
+[2;32] key. W8's tail HMAC validation correctly rejected that mismatch. PM
+approved exactly five fixture argument corrections; `d31615713` uses the fixture
+key throughout and leaves production verification intact. The complete platform
+service test filter passed 13/0/0 on the first post-reboot shared both-KMS binary.
+
+The first post-reboot shared executable (compiler start 22:10:43, binary mtime
+22:20:43) also passes the scoped helper 4/0/0, its cross-process lock 1/0/0,
+the bounded core conflict/unknown-commit test 1/0/0 and service-history coordinator
+tests 3/0/0. Fixture-owned heartbeat teardown `cc4a8e0e6` passes 2/0/0 without
+heartbeat failure or panic diagnostics. Evidence now lives under
+`~/Library/Caches/nyxid-w8-core/evidence/post-reboot-*.log`: the host reboot
+cleared the earlier `/tmp` evidence, so earlier counts are recorded observations,
+not surviving raw logs. None of these focused passes establishes restored
+end-to-end runtime or resolves the separate natural contention failure.
+
+The following top-40 tables include both jobs and their same-name pre-W8
+durations. New/unavailable means no baseline passing result with that exact
+name. Full paths: /tmp/pm-ci82/Backend_Test_.log,
+/tmp/pm-ci82/Coverage__Backend__.log, /tmp/pm-job-118380570787.log. Local evidence:
+/tmp/nyxid-w8-ci-perf/hosted82-{profile-before,platform-before}.log and
+hosted82-isolated-contention-before.csv. Final post-fix numbers and any
+sharding recommendation remain pending validation.
+
+| Job | Test | Seconds | Pre-W8 seconds | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| backend | `services::remote_machine_runtime::tests::journeys::local_journey_paid_http_manager_billing` | 219.929 | 212.422 | 1.04 |
+| backend | `handlers::service_pool_ai_tests::operation_scopes::service_pool_operation_scope_checks_translated_backup_on_every_entry` | 97.773 | 82.336 | 1.19 |
+| backend | `handlers::service_pool_proxy_tests::operation_scopes::service_pool_credential_fallback_checks_selected_member_scope` | 90.490 | 78.938 | 1.15 |
+| backend | `handlers::service_pool_ai_tests::pool_ai_custom_api_prefixes_match_actual_native_dispatch` | 85.611 | 63.169 | 1.36 |
+| backend | `services::platform_public_contract_service::tests::handshake::expired_consent_and_changed_signed_body_prevent_funding_and_provider_effects` | 82.291 | 54.892 | 1.50 |
+| backend | `services::channel_x_tests::review::oversized_backlog_advances_with_notice_and_does_not_fail` | 81.439 | 56.722 | 1.44 |
+| backend | `handlers::assistant_nyxagent::tests::capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound` | 81.167 | 88.698 | 0.92 |
+| backend | `services::mfa_service::tests::w8_id_mfa_enable_disable_rollback_and_secret_free_events` | 68.766 | new/unavailable | — |
+| backend | `handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot` | 61.865 | 61.933 | 1.00 |
+| backend | `services::destination_routing::tests::auto_activation::google_concurrent_sync_inserts_editors_and_updates_old_contracts_once` | 59.162 | 58.940 | 1.00 |
+| backend | `handlers::login_approval::tests::app_identity_creates_a_browser_session_only_for_the_persistent_choice` | 56.915 | 51.139 | 1.11 |
+| backend | `handlers::login_approval::tests::app_identity_creates_no_session_or_extra_mfa_challenge_for_request_only_verification` | 56.534 | 52.231 | 1.08 |
+| backend | `services::destination_routing::tests::auto_activation::google_incompatible_requirements_and_custom_policies_remain_unchanged` | 53.855 | 45.957 | 1.17 |
+| backend | `handlers::service_pool_ai_tests::pool_ai_codex_catalog_with_custom_connection_slug_uses_local_destination` | 53.573 | 50.532 | 1.06 |
+| backend | `handlers::catalog_editor_tests::key_updates::key_put_revocation_during_transaction_leaves_no_partial_write` | 51.752 | 40.123 | 1.29 |
+| backend | `handlers::service_pool_ai_tests::operation_scopes::service_pool_alias_discovery_intersects_native_member_operations` | 51.673 | 51.403 | 1.01 |
+| backend | `handlers::service_pool_proxy_tests::pool_proxy_attempt_deadline_bounds_headers_first_body_and_rejection_drain` | 48.367 | 42.495 | 1.14 |
+| backend | `services::billing::machine_runtime::tests::fractional_windows_finalize_atomically_once_and_drop_the_final_fraction` | 47.807 | 41.751 | 1.15 |
+| backend | `services::platform_manager_transport::journey_tests::default_and_configured_signup_login_mfa_review_and_same_chat_confirmation` | 45.501 | 55.793 | 0.82 |
+| backend | `services::platform_public_contract_service::tests::handshake::concurrent_ingress_refresh_shares_one_durable_probe_and_failed_refresh_stays_unavailable` | 45.450 | 30.719 | 1.48 |
+| backend | `handlers::service_pool_ai_tests::pool_ai_slug_and_gateway_preserve_destination_and_translate_each_member` | 45.350 | 37.070 | 1.22 |
+| backend | `handlers::service_pool_ai_tests::pool_ai_native_stream_error_never_becomes_an_empty_success` | 44.575 | 26.290 | 1.70 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_hung_403_body_keeps_configured_health_and_retry_policy` | 41.912 | 31.115 | 1.35 |
+| backend | `handlers::service_pool_proxy_tests::operation_scopes::service_pool_selected_member_does_not_intersect_sibling_scopes` | 41.902 | 40.585 | 1.03 |
+| backend | `services::channel_adapters::aurinko::tests::aurinko_batch_timeout_cursor_allows_later_messages_progress` | 41.427 | 40.764 | 1.02 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_proxy_denied_earlier_org_service_cannot_hide_later_priority_pool` | 40.990 | 42.129 | 0.97 |
+| backend | `services::billing::exact_tests::account_check_uses_constant_work_after_many_postings` | 40.531 | 25.891 | 1.57 |
+| backend | `handlers::service_pool_proxy_tests::runtime::machine_buffered_pool_request_fails_over_with_declared_pool_authority` | 39.931 | 26.138 | 1.53 |
+| backend | `handlers::login_approval::tests::persistent_mfa_creates_session_only_after_second_factor` | 38.889 | 55.041 | 0.71 |
+| backend | `services::platform_key_service::tests::inactive_personal_rows_preserve_disabled_connections_and_replace_tombstones` | 38.534 | 25.719 | 1.50 |
+| backend | `services::platform_key_service::tests::inactive_org_rows_preserve_disabled_connections_and_replace_tombstones` | 38.496 | 26.335 | 1.46 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_health_403_requires_explicit_trigger_on_repeated_requests` | 38.132 | 28.941 | 1.32 |
+| backend | `handlers::login_approval::tests::request_only_mfa_is_required_before_authorization` | 37.643 | 53.456 | 0.70 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_encoding_identity_is_final_and_compressed_rejection_still_retries` | 37.401 | 27.645 | 1.35 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_529_default_post_cools_without_replay_and_opt_in_retries` | 37.287 | 26.669 | 1.40 |
+| backend | `handlers::service_pool_proxy_tests::runtime::pool_committed_caller_drop_does_not_cool_but_upstream_failure_does` | 37.111 | 27.266 | 1.36 |
+| backend | `services::platform_public_contract_service::tests::handshake::failed_readiness_recovery_releases_real_funded_and_pre_funding_holds` | 36.752 | 21.991 | 1.67 |
+| backend | `services::exact_service_approval_service::destination_approval_tests::google_corrected_contracts_drift_pending_exact_approvals_then_reapprove_normally` | 35.821 | 29.067 | 1.23 |
+| backend | `services::platform_public_contract_service::tests::handshake::rejected_or_mismatched_model_never_persists_ready` | 34.795 | 23.948 | 1.45 |
+| backend | `services::mfa_service::tests::test_verify_totp_setup_with_valid_code` | 33.972 | 46.828 | 0.73 |
+| coverage | `services::remote_machine_runtime::tests::journeys::local_journey_paid_http_manager_billing` | 209.041 | 212.422 | 0.98 |
+| coverage | `services::mfa_service::tests::w8_id_mfa_enable_disable_rollback_and_secret_free_events` | 101.071 | new/unavailable | — |
+| coverage | `handlers::assistant_nyxagent::tests::capacity_refusals_recover_after_old_retry_limit_and_slow_proof_respects_first_byte_bound` | 87.960 | 88.698 | 0.99 |
+| coverage | `handlers::service_pool_ai_tests::operation_scopes::service_pool_operation_scope_checks_translated_backup_on_every_entry` | 81.917 | 82.336 | 0.99 |
+| coverage | `handlers::service_pool_proxy_tests::operation_scopes::service_pool_credential_fallback_checks_selected_member_scope` | 79.123 | 78.938 | 1.00 |
+| coverage | `services::destination_routing::tests::auto_activation::google_concurrent_sync_inserts_editors_and_updates_old_contracts_once` | 74.465 | 58.940 | 1.26 |
+| coverage | `services::channel_x_tests::review::oversized_backlog_advances_with_notice_and_does_not_fail` | 69.913 | 56.722 | 1.23 |
+| coverage | `handlers::service_pool_ai_tests::pool_ai_custom_api_prefixes_match_actual_native_dispatch` | 66.881 | 63.169 | 1.06 |
+| coverage | `handlers::assistant_nyxagent::tests::capacity_wait_beyond_31_seconds_keeps_heartbeat_and_owner_slot` | 61.109 | 61.933 | 0.99 |
+| coverage | `services::platform_manager_transport::journey_tests::default_and_configured_signup_login_mfa_review_and_same_chat_confirmation` | 60.459 | 55.793 | 1.08 |
+| coverage | `services::destination_routing::tests::auto_activation::google_incompatible_requirements_and_custom_policies_remain_unchanged` | 59.302 | 45.957 | 1.29 |
+| coverage | `handlers::login_approval::tests::app_identity_creates_a_browser_session_only_for_the_persistent_choice` | 58.964 | 51.139 | 1.15 |
+| coverage | `handlers::login_approval::tests::app_identity_creates_no_session_or_extra_mfa_challenge_for_request_only_verification` | 58.691 | 52.231 | 1.12 |
+| coverage | `handlers::login_approval::tests::persistent_mfa_creates_session_only_after_second_factor` | 55.195 | 55.041 | 1.00 |
+| coverage | `handlers::login_approval::tests::request_only_mfa_is_required_before_authorization` | 52.519 | 53.456 | 0.98 |
+| coverage | `handlers::service_pool_ai_tests::pool_ai_codex_catalog_with_custom_connection_slug_uses_local_destination` | 52.399 | 50.532 | 1.04 |
+| coverage | `services::platform_public_contract_service::tests::handshake::expired_consent_and_changed_signed_body_prevent_funding_and_provider_effects` | 52.344 | 54.892 | 0.95 |
+| coverage | `handlers::service_pool_ai_tests::operation_scopes::service_pool_alias_discovery_intersects_native_member_operations` | 49.907 | 51.403 | 0.97 |
+| coverage | `services::mfa_service::tests::test_verify_totp_setup_already_verified` | 48.266 | 45.161 | 1.07 |
+| coverage | `services::mfa_service::tests::test_verify_totp_login_with_valid_code` | 48.030 | 44.872 | 1.07 |
+| coverage | `services::mfa_service::tests::test_verify_totp_setup_with_valid_code` | 47.427 | 46.828 | 1.01 |
+| coverage | `handlers::catalog_editor_tests::key_updates::key_put_revocation_during_transaction_leaves_no_partial_write` | 43.018 | 40.123 | 1.07 |
+| coverage | `services::mfa_service::tests::w8_id_mfa_pending_login_has_one_winner_and_rechecks_factor` | 41.968 | new/unavailable | — |
+| coverage | `services::billing::machine_runtime::tests::fractional_windows_finalize_atomically_once_and_drop_the_final_fraction` | 41.665 | 41.751 | 1.00 |
+| coverage | `handlers::service_pool_proxy_tests::pool_proxy_attempt_deadline_bounds_headers_first_body_and_rejection_drain` | 41.371 | 42.495 | 0.97 |
+| coverage | `services::channel_adapters::aurinko::tests::aurinko_batch_timeout_cursor_allows_later_messages_progress` | 40.902 | 40.764 | 1.00 |
+| coverage | `handlers::service_pool_proxy_tests::operation_scopes::service_pool_selected_member_does_not_intersect_sibling_scopes` | 40.832 | 40.585 | 1.01 |
+| coverage | `handlers::service_pool_ai_tests::pool_ai_slug_and_gateway_preserve_destination_and_translate_each_member` | 39.496 | 37.070 | 1.07 |
+| coverage | `handlers::service_pool_proxy_tests::runtime::pool_proxy_denied_earlier_org_service_cannot_hide_later_priority_pool` | 37.340 | 42.129 | 0.89 |
+| coverage | `services::exact_service_approval_service::destination_approval_tests::google_corrected_contracts_drift_pending_exact_approvals_then_reapprove_normally` | 36.550 | 29.067 | 1.26 |
+| coverage | `handlers::service_pool_proxy_tests::billing::pool_proxy_paused_consumer_renews_lease_and_lease_loss_closes_provider` | 34.425 | 32.734 | 1.05 |
+| coverage | `services::assistant_service_execution::tests::compaction::org_stateful_model_transport_full_access_and_auto_resume_keep_exact_consent_without_tool_grant` | 34.343 | 27.581 | 1.25 |
+| coverage | `services::assistant_skill_authoring::tests::pending_source_read_keeps_one_retryable_proposal_without_a_card` | 31.951 | 31.872 | 1.00 |
+| coverage | `services::assistant_skill_authoring::tests::pending_source_read_timeout_keeps_retryable_reservation_without_a_card` | 31.722 | 31.691 | 1.00 |
+| coverage | `handlers::nyxbot::tests::late_delivery_tests::image_delivery_tests::nyxbot_unknown_image_skips_rest_and_claim_survives_retry` | 31.534 | 31.353 | 1.01 |
+| coverage | `services::token_service::tests::w8_id_session_and_mfa_c2_tier_cells` | 31.459 | new/unavailable | — |
+| coverage | `services::platform_public_contract_service::tests::handshake::concurrent_ingress_refresh_shares_one_durable_probe_and_failed_refresh_stays_unavailable` | 31.368 | 30.719 | 1.02 |
+| coverage | `services::assistant_service_execution::tests::managed::actual_managed_http_and_mcp_success_settles_once_and_records_one_receipt` | 30.873 | 27.818 | 1.11 |
+| coverage | `services::platform_key_service::tests::inactive_org_rows_preserve_disabled_connections_and_replace_tombstones` | 29.954 | 26.335 | 1.14 |
+| coverage | `services::platform_key_service::tests::inactive_personal_rows_preserve_disabled_connections_and_replace_tombstones` | 29.759 | 25.719 | 1.16 |
