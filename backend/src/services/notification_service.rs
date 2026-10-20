@@ -286,15 +286,35 @@ pub mod delivery {
             status: Option<u16>,
             invalid_destination: bool,
         },
+        /// A response was received, but it does not prove non-delivery. Use
+        /// uncertain_response to validate the status before returning this value.
+        UncertainResponse {
+            status: u16,
+        },
         Uncertain,
     }
 
     impl<T> SendOutcome<T> {
+        pub fn uncertain_response(status: u16) -> AppResult<Self> {
+            let outcome = Self::UncertainResponse { status };
+            outcome.validate()?;
+            Ok(outcome)
+        }
+
+        fn validate(&self) -> AppResult<()> {
+            if let Self::UncertainResponse { status } = self
+                && !(100..=599).contains(status)
+            {
+                return Err(AppError::AuditIntegrityConflict);
+            }
+            Ok(())
+        }
+
         pub fn delivery_outcome(&self) -> DeliveryOutcome {
             match self {
                 Self::Accepted(_) => DeliveryOutcome::Succeeded,
                 Self::Rejected { .. } => DeliveryOutcome::DefinitiveFailure,
-                Self::Uncertain => DeliveryOutcome::Uncertain,
+                Self::Uncertain | Self::UncertainResponse { .. } => DeliveryOutcome::Uncertain,
             }
         }
     }
@@ -404,6 +424,19 @@ pub mod delivery {
         operation_id: Uuid,
         outcome: DeliveryOutcome,
     ) -> AppResult<()> {
+        finish_with_detail_in_session(db, session, runtime, operation_id, outcome, None).await
+    }
+
+    /// The core alone validates the centrally reviewed terminal detail variants.
+    /// It cannot replace an intent's existing decision or grant a new send.
+    pub async fn finish_with_detail_in_session(
+        db: &Database,
+        session: &mut ClientSession,
+        runtime: &AuditRuntime,
+        operation_id: Uuid,
+        outcome: DeliveryOutcome,
+        detail: Option<crate::models::audit_outbox::AuditDetail>,
+    ) -> AppResult<()> {
         require_v4(operation_id)?;
         let record = db
             .collection::<QueuedDelivery>(COLLECTION_NAME)
@@ -419,7 +452,7 @@ pub mod delivery {
             DeliveryOutcome::Uncertain => AuditStage::Uncertain,
         };
         runtime
-            .finish_effect_in_session(db, session, &record.operation_id, stage)
+            .finish_effect_with_detail_in_session(db, session, &record.operation_id, stage, detail)
             .await
     }
 

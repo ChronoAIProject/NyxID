@@ -112,8 +112,18 @@ no automatic queue scan or recovered envelope grants dispatch authority:
 | --- | --- |
 | `DeliveryBinding { destination_id: Uuid, payload: PayloadRef }` | ID's ConnectLink/Connection resolvers, and other producer-owned resolvers, return the exact server-loaded immutable payload/destination binding. It contains no dispatch authority. |
 | `DeliveryPermit::run_bound(binding, channel, effect)` | The sink checks the queued destination, payload reference and channel against that independently resolved binding before consuming the existing one-shot permit. A mismatch refuses the send. |
-| `SendOutcome<T>` | A sink returns `Accepted(T)` for positive provider acceptance, `Rejected { status: Option<u16>, invalid_destination: bool }` only for positive rejection, or `Uncertain` for ambiguous delivery. Provider receipt `T` stays in protected product storage; no free-form response enters audit detail. |
+| `SendOutcome<T>` | A sink returns `Accepted(T)` for positive provider acceptance, `Rejected { status: Option<u16>, invalid_destination: bool }` only for positive rejection, or `Uncertain` for transport ambiguity. `UncertainResponse { status }` preserves an HTTP response that does not prove non-delivery; construct it through `SendOutcome::uncertain_response(status)`. Provider receipt `T` stays in protected product storage; no free-form response enters audit detail. |
 | `SendOutcome::delivery_outcome()` | The worker maps those outcomes to Succeeded, DefinitiveFailure or Uncertain and commits the product receipt plus the reviewed core terminal completion together. Webhook failure detail uses `finish_effect_with_detail_in_session`; mapping never grants retry authority. |
+
+`SendOutcome::uncertain_response(status)` accepts only 100–599. Completion
+validates the status again before product writes or freezing detail, including
+hand-constructed public enum values. `UncertainResponse` maps to the existing
+Uncertain stage and grants no retry authority. A generic webhook 5xx can follow
+an already performed effect; it cannot establish definitive non-delivery.
+The consumer preserves its status, fixed failure reason and attempt count through
+the reviewed `AuditDetail::WebhookDeliveryFailure` variant. A different status
+on terminal replay conflicts. Transport errors use plain `Uncertain` with no
+HTTP status.
 
 `execution::DeliveryConsumer` supplies `resolve`, `send`,
 `record_outcome_in_session` and `terminal_detail`. `resolve` loads and authorizes
@@ -198,21 +208,22 @@ Request needed variant names, fields, types, bounds and example sites through
 PM. Mark conversions `detail-pending` until the reviewed variants are available,
 then backfill them without dropping the corresponding legacy assertions.
 
-The following CORE variant requests are `detail-pending` for workflow 42,
-not additional local variants or prerequisites for publishing this interface:
+CORE has supplied the following reviewed variants and terminal-detail API.
+Their remaining caller/sink conversions are `detail-pending` for workflow 42;
+these are shared core variants, not additional local event schemas.
 
-| Requested variant | Fields, types and bounds | Existing example site |
+| Variant | Fields, types and bounds | Existing example site |
 | --- | --- | --- |
 | `NotificationSettingsChange` | `old/new: NotificationSettingsDecision`, each with `telegram_enabled`, `push_enabled`, `approval_suspended` and `approval_delivery_configured` booleans; `global_approval_mode: AuditApprovalMode`; `approval_timeout_secs: u32` in 10–300; `grant_expiry_days: u32` in 1–365. Preserve the legacy `approval_required` tri-state through the existing WritesOnly/All/Off mapping. Values come from the authorized transaction snapshot, not request input. | `handlers/notifications.rs::update_settings` currently records settings, effective approval mode and delivery readiness. |
 | `WebhookDeliveryFailure` | `event: WebhookEventKind`, `reason: WebhookFailureKind`, `attempts: u8` in 0–3 and `last_http_status: Option<u16>` in 100–599. Event kinds: ConnectionExpired, ConnectLinkCompleted, ConnectLinkCancelled, ConnectLinkExpired. Failure kinds: TenantIdentityMissing, ConfigurationLoadFailed, RateLimitUnavailable, AppRateLimited, KeyIdLoadFailed, KeyIdStoreFailed, SecretDecryptFailed, SerializationFailed, BodyTooLarge, DestinationUnavailable, SendFailed, NonSuccessStatus. No provider text or identity/content fields. | `services/developer_webhook_service.rs::record_final_failure_for_app` and its existing failure-audit assertions. |
 
-The webhook request requires CORE's reviewed terminal-detail API because the
-failure class is known after the effect; today's terminal helper preserves the
-intent's existing detail. The 0–3 bound preserves the legacy bounded attempt
+The webhook variant uses CORE's reviewed terminal-detail API because the
+failure class is known after the effect. The helper preserves existing intent
+policy detail and validates the allowed terminal detail and its exact replay. The 0–3 bound preserves the legacy bounded attempt
 counter and grants no authority to retry a consumed delivery permit. The
 terminal stage already supplies Succeeded/Failed/Cancelled/Uncertain; do not
-invent another outcome state machine. CORE reviews the requested variants and
-their validation centrally before the conversion uses them.
+invent another outcome state machine. CORE validates these variants centrally; converters preserve the legacy
+enumerable assertions while adopting them.
 
 Core completion is authoritative. The product queue is immutable and deliberately
 does not maintain a competing claim/lease/outcome state machine. A product receipt

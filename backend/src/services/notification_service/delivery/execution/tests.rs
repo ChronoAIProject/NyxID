@@ -29,6 +29,7 @@ const RECEIPTS: &str = "test_private_delivery_receipts";
 #[derive(Clone, Copy)]
 enum ResultKind {
     Accepted,
+    UncertainResponse,
     Rejected,
     Uncertain,
 }
@@ -94,7 +95,7 @@ impl DeliveryConsumer for Consumer {
     ) -> SendOutcome<Self::Receipt> {
         self.sends.fetch_add(1, Ordering::SeqCst);
         match self.kind {
-            ResultKind::Accepted => {
+            ResultKind::Accepted | ResultKind::UncertainResponse => {
                 match reqwest::Client::new()
                     .post(&self.url)
                     .body(prepared.to_string())
@@ -105,7 +106,9 @@ impl DeliveryConsumer for Consumer {
                         Ok(receipt) => SendOutcome::Accepted(receipt),
                         Err(_) => SendOutcome::Uncertain,
                     },
-                    _ => SendOutcome::Uncertain,
+                    Ok(response) => SendOutcome::uncertain_response(response.status().as_u16())
+                        .unwrap_or(SendOutcome::Uncertain),
+                    Err(_) => SendOutcome::Uncertain,
                 }
             }
             ResultKind::Rejected => SendOutcome::Rejected {
@@ -140,6 +143,10 @@ impl DeliveryConsumer for Consumer {
             SendOutcome::Uncertain => {
                 record.insert("status", "uncertain");
             }
+            SendOutcome::UncertainResponse { status } => {
+                record.insert("status", "uncertain");
+                record.insert("http_status", i32::from(*status));
+            }
         }
         let receipts = db.collection::<bson::Document>(RECEIPTS);
         if let Some(prior) = receipts
@@ -173,6 +180,14 @@ impl DeliveryConsumer for Consumer {
                 attempts: 1,
                 last_http_status: *status,
             }),
+            SendOutcome::UncertainResponse { status } => {
+                Some(AuditDetail::WebhookDeliveryFailure {
+                    event: WebhookEventKind::ConnectLinkCompleted,
+                    reason: WebhookFailureKind::NonSuccessStatus,
+                    attempts: 1,
+                    last_http_status: Some(*status),
+                })
+            }
             SendOutcome::Uncertain => Some(AuditDetail::WebhookDeliveryFailure {
                 event: WebhookEventKind::ConnectLinkCompleted,
                 reason: WebhookFailureKind::SendFailed,
@@ -250,7 +265,12 @@ async fn fixture(
             async move {
                 assert_eq!(body, "PRIVATE_DELIVERY_BODY");
                 calls.fetch_add(1, Ordering::SeqCst);
-                "PRIVATE_PROVIDER_RECEIPT"
+                let status = if matches!(kind, ResultKind::UncertainResponse) {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    axum::http::StatusCode::OK
+                };
+                (status, "PRIVATE_PROVIDER_RECEIPT")
             }
         }),
     );
@@ -451,4 +471,161 @@ async fn audit_delivery_execution_configured_unreachable_witness_never_dispatche
     assert_eq!(intent(&db, operation).await.phase, EffectPhase::Pending);
     assert_eq!(consumer.sends.load(Ordering::SeqCst), 0);
     assert_eq!(network.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn audit_delivery_execution_http_5xx_preserves_uncertain_status_and_refuses_changed_replay() {
+    let (db, runtime, operation, consumer, network) =
+        fixture(false, ResultKind::UncertainResponse).await;
+    let outcome = dispatch_one(&db, &runtime, operation, &consumer)
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        SendOutcome::UncertainResponse { status: 503 }
+    ));
+    assert_eq!(outcome.delivery_outcome(), DeliveryOutcome::Uncertain);
+    let saved = intent(&db, operation).await;
+    assert_eq!(saved.terminal_stage, Some(AuditStage::Uncertain));
+    assert_eq!(
+        saved.terminal_detail,
+        Some(AuditDetail::WebhookDeliveryFailure {
+            event: WebhookEventKind::ConnectLinkCompleted,
+            reason: WebhookFailureKind::NonSuccessStatus,
+            attempts: 1,
+            last_http_status: Some(503),
+        })
+    );
+    let terminal = db
+        .collection::<crate::models::audit_outbox::PendingAuditEvent>(
+            crate::models::audit_outbox::PENDING_COLLECTION_NAME,
+        )
+        .find_one(doc! {"event.operation_id": operation.to_string(), "event.stage": "uncertain"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.event.detail, saved.terminal_detail);
+    let safe_evidence = serde_json::to_string(&terminal).unwrap();
+    for private in [
+        "PRIVATE_DELIVERY_BODY",
+        "PRIVATE_PROVIDER_RECEIPT",
+        consumer.url.as_str(),
+    ] {
+        assert!(!safe_evidence.contains(private));
+    }
+    let queued = load(&db, operation).await.unwrap();
+    commit_outcome(&db, &runtime, &queued, &consumer, &outcome)
+        .await
+        .unwrap();
+    let changed = SendOutcome::uncertain_response(502).unwrap();
+    assert!(matches!(
+        commit_outcome(&db, &runtime, &queued, &consumer, &changed).await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+    // The core detail fence independently refuses a different status even when
+    // no product receipt callback can reject it first.
+    let detail = consumer.terminal_detail(&changed).unwrap();
+    let context = (&db, &runtime, operation.to_string(), detail);
+    assert!(matches!(
+        transaction::run(
+            &db,
+            &context,
+            |session, (db, runtime, operation, detail)| {
+                Box::pin(async move {
+                    runtime
+                        .finish_effect_with_detail_in_session(
+                            db,
+                            session,
+                            operation,
+                            AuditStage::Uncertain,
+                            detail.clone(),
+                        )
+                        .await
+                })
+            }
+        )
+        .await,
+        Err(AppError::AuditIntegrityConflict)
+    ));
+    assert_eq!(
+        intent(&db, operation).await.terminal_detail,
+        saved.terminal_detail
+    );
+    assert!(
+        dispatch_one(&db, &runtime, operation, &consumer)
+            .await
+            .is_err()
+    );
+    assert_eq!(consumer.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(network.load(Ordering::SeqCst), 1);
+    crate::test_utils::teardown_test_database(&db).await;
+}
+
+#[tokio::test]
+async fn audit_delivery_execution_invalid_uncertain_status_never_writes_a_completion() {
+    for status in [0, 99, 600, u16::MAX] {
+        assert!(matches!(
+            SendOutcome::<String>::uncertain_response(status),
+            Err(AppError::AuditIntegrityConflict)
+        ));
+    }
+    for status in [100, 599] {
+        assert_eq!(
+            SendOutcome::<String>::uncertain_response(status)
+                .unwrap()
+                .delivery_outcome(),
+            DeliveryOutcome::Uncertain
+        );
+    }
+    let (db, runtime, operation, consumer, network) = fixture(false, ResultKind::Rejected).await;
+    let queued = load(&db, operation).await.unwrap();
+    for status in [99, 600] {
+        let invalid = SendOutcome::UncertainResponse { status };
+        assert!(matches!(
+            commit_outcome(&db, &runtime, &queued, &consumer, &invalid).await,
+            Err(AppError::AuditIntegrityConflict)
+        ));
+    }
+    assert_eq!(intent(&db, operation).await.phase, EffectPhase::Pending);
+    assert_eq!(
+        db.collection::<bson::Document>(RECEIPTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(consumer.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(network.load(Ordering::SeqCst), 0);
+    crate::test_utils::teardown_test_database(&db).await;
+}
+
+#[tokio::test]
+async fn audit_delivery_execution_transport_failure_stays_uncertain_without_status() {
+    let (db, runtime, operation, mut consumer, network) =
+        fixture(false, ResultKind::Accepted).await;
+    let broken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    consumer.url = format!("http://{}", broken.local_addr().unwrap());
+    let close_without_response = tokio::spawn(async move {
+        let (connection, _) = broken.accept().await.unwrap();
+        drop(connection);
+    });
+    let outcome = dispatch_one(&db, &runtime, operation, &consumer)
+        .await
+        .unwrap();
+    close_without_response.await.unwrap();
+    assert!(matches!(outcome, SendOutcome::Uncertain));
+    let saved = intent(&db, operation).await;
+    assert_eq!(saved.terminal_stage, Some(AuditStage::Uncertain));
+    assert_eq!(
+        saved.terminal_detail,
+        Some(AuditDetail::WebhookDeliveryFailure {
+            event: WebhookEventKind::ConnectLinkCompleted,
+            reason: WebhookFailureKind::SendFailed,
+            attempts: 1,
+            last_http_status: None,
+        })
+    );
+    assert_eq!(consumer.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(network.load(Ordering::SeqCst), 0);
+    crate::test_utils::teardown_test_database(&db).await;
 }

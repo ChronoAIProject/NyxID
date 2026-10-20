@@ -295,3 +295,8 @@
 
 - Return the configured or rotated signing secret as Zeroizing<String> and retain that wrapper in the response DTO through serialization. The secret is still returned only after the configuration and audit transaction commits.
 - Validation: corrected TEST no-run exit0; direct webhooks:8, all passed with no failures/ignored. Actual both-KMS all-target Clippy exit101 is retained: sole foreign B admin.rs2979 Json lint, PM-qualified unaffected C paths. Broader workflow42 remains pending.
+
+### CORE-B C2: preserve ambiguous delivery response status
+
+- Validate UncertainResponse status at construction and again before terminal completion. Preserve checked HTTP status in uncertain terminal detail and reject changed replay without granting another send; transport errors keep plain Uncertain.
+- Validation: corrected TEST no-run exit0; direct delivery:11, execution:8, all passed with no failures/ignored. Actual both-KMS all-target Clippy exit101 is retained: sole foreign B admin.rs2979 Json lint, PM-qualified unaffected C paths. Broader workflow42 remains pending.

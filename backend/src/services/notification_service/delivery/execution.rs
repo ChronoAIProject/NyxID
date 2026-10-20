@@ -96,6 +96,9 @@ pub async fn commit_outcome<C: DeliveryConsumer>(
     consumer: &C,
     outcome: &SendOutcome<C::Receipt>,
 ) -> AppResult<()> {
+    // Validate even hand-constructed public enum values before product writes
+    // or freezing terminal evidence. Invalid status is never a valid completion.
+    outcome.validate()?;
     // Freeze evidence once, outside all DB callback retries. It cannot depend
     // on mutable configuration or replace an existing intent policy detail.
     let detail = consumer.terminal_detail(outcome)?;
