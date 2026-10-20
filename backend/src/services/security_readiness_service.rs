@@ -36,6 +36,7 @@ use crate::{
 };
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
+pub const AUDIT_DURABLE: &str = "audit:durable-v1";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
     "assistant:operation-scopes",
@@ -44,6 +45,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
     "approval:required-web-v1",
+    AUDIT_DURABLE,
 ];
 const MAX_AGE_SECS: i64 = 45;
 
@@ -238,6 +240,38 @@ async fn rows(db: &Database) -> AppResult<Vec<SecurityReplica>> {
 
 pub async fn report(db: &Database, capability: &str) -> AppResult<Readiness> {
     report_for(db, runtime()?, capability).await
+}
+
+/// First adoption only: the caller persists the adopted boundary atomically
+/// with the new head. Existing heads must not require another drain on reboot.
+pub async fn audit_cutover_report(db: &Database, drained: bool) -> AppResult<Readiness> {
+    audit_cutover_report_for(db, runtime()?, drained).await
+}
+
+async fn audit_cutover_report_for(
+    db: &Database,
+    local: &Runtime,
+    drained: bool,
+) -> AppResult<Readiness> {
+    let mut report = report_for(db, local, AUDIT_DURABLE).await?;
+    if !drained {
+        report
+            .blockers
+            .push("audit_cutover_not_acknowledged".into());
+        report.ready = false;
+    }
+    Ok(report)
+}
+
+pub async fn require_audit_cutover(db: &Database, drained: bool) -> AppResult<()> {
+    let report = match audit_cutover_report(db, drained).await {
+        Err(AppError::SecurityReadinessUnavailable) => return Err(AppError::AuditCutoverRequired),
+        result => result?,
+    };
+    if !report.ready {
+        return Err(AppError::AuditCutoverRequired);
+    }
+    Ok(())
 }
 
 async fn platform_cutover_required(db: &Database) -> AppResult<bool> {

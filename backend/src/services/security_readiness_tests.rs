@@ -83,6 +83,74 @@ fn readiness_binds_executing_generation_roster_and_observation() {
     assert!(!assess(&good, &restarted, CAPABILITIES[0], false, now).ready);
 }
 
+#[test]
+fn audit_cutover_requires_complete_compatible_drained_executing_roster() {
+    let now = Utc::now();
+    let a = local("a", "a1", &["a", "b"], false);
+    let b = local("b", "b1", &["a", "b"], false);
+    let good = vec![row(&a, now), row(&b, now)];
+    assert!(assess(&good, &a, AUDIT_DURABLE, false, now).ready);
+    for change in 0..10 {
+        let mut rows = good.clone();
+        match change {
+            0 => {
+                rows.remove(0);
+            }
+            1 => {
+                rows.remove(1);
+            }
+            2 => rows[1].observed_at = now - Duration::seconds(MAX_AGE_SECS + 1),
+            3 => rows.push(row(&local("a", "a2", &["a", "b"], false), now)),
+            4 => rows[1].capabilities.retain(|c| c != AUDIT_DURABLE),
+            5 => rows[1].protocol = 2,
+            6 => rows[1].expected_replicas = vec!["b".into()],
+            7 => rows[1].drained = false,
+            8 => rows.push(row(&local("other", "other1", &["a", "b"], false), now)),
+            _ => rows[1].observed_at = now + Duration::seconds(6),
+        }
+        assert!(
+            !assess(&rows, &a, AUDIT_DURABLE, false, now).ready,
+            "case {change}"
+        );
+    }
+    let mut undrained = a.clone();
+    undrained.config.drained = false;
+    assert!(!assess(&good, &undrained, AUDIT_DURABLE, false, now).ready);
+    let restarted = local("a", "a2", &["a", "b"], false);
+    assert!(!assess(&good, &restarted, AUDIT_DURABLE, false, now).ready);
+    let empty = local("a", "a1", &[], false);
+    assert!(!assess(&[row(&empty, now)], &empty, AUDIT_DURABLE, false, now).ready);
+}
+
+#[tokio::test]
+async fn audit_cutover_acknowledgment_is_separate_from_existing_capability_gates() {
+    let db = crate::test_utils::connect_transaction_test_database("audit_readiness").await;
+    let a = local("audit-a", "audit-generation", &["audit-a"], false);
+    observe(&db, &a.identity, &a.config, false).await.unwrap();
+    assert!(audit_cutover_report_for(&db, &a, true).await.unwrap().ready);
+    let denied = audit_cutover_report_for(&db, &a, false).await.unwrap();
+    assert!(!denied.ready);
+    assert!(
+        denied
+            .blockers
+            .iter()
+            .any(|b| b == "audit_cutover_not_acknowledged")
+    );
+    // The audit acknowledgment never becomes an extra ongoing requirement for
+    // existing features, and an old replica supporting those features is still
+    // insufficient to perform the one-time audit cutover.
+    assert!(report_for(&db, &a, CAPABILITIES[0]).await.unwrap().ready);
+    db.collection::<SecurityReplica>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &a.identity.generation_id},
+            doc! {"$pull": {"capabilities": AUDIT_DURABLE}},
+        )
+        .await
+        .unwrap();
+    assert!(!audit_cutover_report_for(&db, &a, true).await.unwrap().ready);
+    assert!(report_for(&db, &a, CAPABILITIES[0]).await.unwrap().ready);
+}
+
 #[tokio::test]
 async fn effective_flag_rechecks_existing_override_and_clear_without_legacy_fallback() {
     let db = crate::test_utils::connect_test_database("readiness_effective")

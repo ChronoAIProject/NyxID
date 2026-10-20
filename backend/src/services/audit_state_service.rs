@@ -182,6 +182,10 @@ async fn initialize_once(db: &Database, key: &[u8], config: &AuditConfig) -> App
     if tail.is_some() && !config.cutover_drained {
         return Err(AppError::AuditCutoverRequired);
     }
+    if tail.is_some() {
+        super::security_readiness_service::require_audit_cutover(db, config.cutover_drained)
+            .await?;
+    }
     let mut from = None;
     loop {
         let report = chain::verify_chain(db, key, from, None, None).await?;

@@ -3,8 +3,8 @@
 The reference executable is `nyxid-audit-witness`, built from the backend package.
 It runs independently of MongoDB and of the NyxID application host. This batch
 provides the protocol, client and sink. W8-4 adds the opt-in application relay and
-local durable allocation and intent/claim foundation. Replica cutover readiness,
-retained verification, retention, HMAC transitions and complete caller admission
+local durable allocation, replica cutover readiness and intent/claim foundation.
+Retained verification, retention, HMAC transitions and complete caller admission
 remain tracked W8 integrations; installing this executable alone does not activate
 them.
 
@@ -18,9 +18,15 @@ local HMAC continuity is not external verification. Tests use the same local
 mode unless they explicitly provision a witness. No test constructor creates a
 fresh witness proof or overrides configured-witness admission.
 
-The first adoption of an existing v1 chain requires draining every old writer
-and setting `AUDIT_CUTOVER_DRAINED=true`. Initialization verifies the original
-chain and atomically records its unchanged boundary. The acknowledgment is
+The first adoption of an existing v1 chain requires draining every old writer,
+setting `AUDIT_CUTOVER_DRAINED=true`, and declaring the complete identical
+`SECURITY_ROLLOUT_REPLICAS` roster with `SECURITY_ROLLOUT_DRAINED=true` on every
+replica. Each executing generation must publish a fresh compatible
+`audit:durable-v1` observation; missing, duplicate, undeclared, undrained or
+incompatible replicas block adoption. Startup continues publishing observations
+while waiting for this initial roster to converge, before compatibility migrations
+or business writers run. Initialization verifies the original chain and atomically
+records its unchanged boundary. The audit acknowledgment and assessment are
 consumed by this cutover, rather than required on each subsequent boot. A fresh
 database needs no drain acknowledgment. Old binaries cannot safely be restarted
 against the persistent head/outbox protocol. Their absence is an operator
@@ -105,8 +111,8 @@ pending time independently of local continuity. A stored enrolled cursor is
 is `unavailable`, including an empty local history. Older responses without an
 evidence field display as unavailable; neither local success nor a missing field
 produces a fully verified success message.
-Replica/protocol cutover observations, protected retained verification and caller
-conversions remain explicit integration work. The local
+Replica/protocol observations gate first adoption only. Protected retained
+verification and caller conversions remain explicit integration work. The local
 head detects disagreement with a deleted tail, but a coordinated Mongo rollback
 still requires independently authenticated witness evidence. Until W8-5 adds a
 protected retention boundary, deleting the head row is corruption, including
@@ -459,8 +465,8 @@ counts are in [SECURITY_W8_LOG.md](SECURITY_W8_LOG.md).
 W8-4 adds application configuration, relay, local-row comparisons, AppErrors,
 outbox/lag diagnostics and one-shot intent/claim consumption. Its signed-provider
 tests exercise restored Mongo, response loss and paused/restarted dispatch at
-the foundation boundary. Pending: replica capability/drain integration, protected
-retained verification/checkpoints and key transitions, independent production
+the foundation boundary. Pending: protected retained verification/checkpoints
+and key transitions, independent production
 provisioning, the Object Lock provider, scoped audit UI, and every remaining
 critical workflow's adoption and provider-specific reconciliation/crash tests.
 Keep these pending in the living inventory.

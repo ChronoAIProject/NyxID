@@ -438,13 +438,73 @@ async fn server_main() {
     );
     services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
     let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
-    let audit_state = services::audit_state_service::initialize(
+    let replica_identity = Arc::new(services::node_owner_service::ReplicaIdentity::new(
+        config.instance_name.clone(),
+        config.internal_advertise_url.clone(),
+    ));
+    // Register before serving. Reuse the process generation, not node socket
+    // heartbeats: a replica can enforce policy without owning any node sockets.
+    services::security_readiness_service::ensure_indexes(&db)
+        .await
+        .expect("security replica indexes failed");
+    services::security_readiness_service::initialize(
+        services::security_readiness_service::Runtime {
+            identity: (*replica_identity).clone(),
+            config: config.security_rollout.clone(),
+            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
+        },
+    );
+    services::security_readiness_service::observe(
         &db,
-        audit_chain_hmac_key.as_ref().as_ref(),
-        &audit_config,
+        &replica_identity,
+        &config.security_rollout,
+        services::proxy_service::actor_addressed_policy_required(),
     )
     .await
-    .expect("Durable audit initialization failed; inspect audit cutover diagnostics");
+    .expect("security replica observation failed");
+    let readiness_db = db.clone();
+    let readiness_identity = replica_identity.clone();
+    let readiness_config = config.security_rollout.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(error) = services::security_readiness_service::observe(
+                &readiness_db,
+                &readiness_identity,
+                &readiness_config,
+                services::proxy_service::actor_addressed_policy_required(),
+            )
+            .await
+            {
+                tracing::error!(%error, "Security replica observation failed");
+            }
+        }
+    });
+    // Keep publishing this generation while an initial multi-replica cutover
+    // waits for its complete compatible roster. Fresh/persisted heads do not
+    // require the cutover gate, and witness contact never blocks startup.
+    let audit_state = loop {
+        match services::audit_state_service::initialize(
+            &db,
+            audit_chain_hmac_key.as_ref().as_ref(),
+            &audit_config,
+        )
+        .await
+        {
+            Ok(state) => break state,
+            Err(errors::AppError::AuditCutoverRequired) if audit_config.cutover_drained => {
+                let report = services::security_readiness_service::audit_cutover_report(&db, true)
+                    .await
+                    .expect("Audit replica assessment failed");
+                tracing::warn!(blockers = ?report.blockers, "Initial audit adoption waiting for compatible drained replicas");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            Err(error) => {
+                panic!("Durable audit initialization failed; inspect cutover diagnostics: {error}")
+            }
+        }
+    };
     let audit_runtime = Arc::new(services::audit_runtime::AuditRuntime::new(
         audit_config.admission.clone(),
         audit_config.witness.is_some(),
@@ -473,6 +533,14 @@ async fn server_main() {
         tracing::warn!("Audit witness is not configured; durable local audit is unwitnessed");
         None
     };
+    audit_runtime
+        .bind_effects(
+            uuid::Uuid::parse_str(&replica_identity.generation_id)
+                .expect("process generation UUID"),
+            audit_chain_hmac_key.clone(),
+            audit_relay.as_ref(),
+        )
+        .expect("Failed to initialize effect process custody");
     // Index setup also contains compatibility data migrations. None may run
     // before the common audit allocator and process key are available.
     db::ensure_indexes(&db)
@@ -787,57 +855,6 @@ async fn server_main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
-    let replica_identity = Arc::new(services::node_owner_service::ReplicaIdentity::new(
-        config.instance_name.clone(),
-        config.internal_advertise_url.clone(),
-    ));
-    audit_runtime
-        .bind_effects(
-            uuid::Uuid::parse_str(&replica_identity.generation_id)
-                .expect("process generation UUID"),
-            audit_chain_hmac_key.clone(),
-            audit_relay.as_ref(),
-        )
-        .expect("Failed to initialize effect process custody");
-    // Register before serving. Reuse the process generation, not node socket
-    // heartbeats: a replica can enforce policy without owning any node sockets.
-    services::security_readiness_service::ensure_indexes(&db)
-        .await
-        .expect("security replica indexes failed");
-    services::security_readiness_service::initialize(
-        services::security_readiness_service::Runtime {
-            identity: (*replica_identity).clone(),
-            config: config.security_rollout.clone(),
-            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
-        },
-    );
-    services::security_readiness_service::observe(
-        &db,
-        &replica_identity,
-        &config.security_rollout,
-        services::proxy_service::actor_addressed_policy_required(),
-    )
-    .await
-    .expect("security replica observation failed");
-    let readiness_db = db.clone();
-    let readiness_identity = replica_identity.clone();
-    let readiness_config = config.security_rollout.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            if let Err(error) = services::security_readiness_service::observe(
-                &readiness_db,
-                &readiness_identity,
-                &readiness_config,
-                services::proxy_service::actor_addressed_policy_required(),
-            )
-            .await
-            {
-                tracing::error!(%error, "Security replica observation failed");
-            }
-        }
-    });
     let internal_auth = services::internal_auth::InternalAuth::new(
         db.clone(),
         internal_dispatch_hmac_key,

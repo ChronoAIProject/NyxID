@@ -193,18 +193,24 @@ async fn v1_adoption_requires_drain_once_and_preserves_original_bytes() {
             .unwrap(),
         0
     );
-    let adopted = initialize(
-        &db,
-        &KEY,
-        &AuditConfig {
-            cutover_drained: true,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let config = AuditConfig {
+        cutover_drained: true,
+        ..Default::default()
+    };
+    // Acknowledgment alone cannot adopt while the executing roster is absent.
+    assert!(matches!(
+        initialize(&db, &KEY, &config).await,
+        Err(AppError::AuditCutoverRequired)
+    ));
+    super::super::security_readiness_service::ready_test_replica(&db).await;
+    let adopted = initialize(&db, &KEY, &config).await.unwrap();
     assert_eq!(adopted.adopted_v1_seq, 1);
     assert_eq!(adopted.head_hash, old.entry_hash.clone().unwrap());
+    db.collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    // Persisted adoption needs neither observations nor a repeated drain flag.
     initialize(&db, &KEY, &AuditConfig::default())
         .await
         .unwrap();
