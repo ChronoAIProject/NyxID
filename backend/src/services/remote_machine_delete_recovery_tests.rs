@@ -4186,7 +4186,7 @@ async fn sandbox_cascade_delete_follows_durable_original_stop_and_namespace_obse
     let mut f = recovery_fixture("delete_cascade_durable_proof", true).await;
     let proxy = proxy_with_pre_delete_database_proof(&mut f).await;
     assert!(f.step().await.is_err());
-    let proofs = proxy.proofs.lock().unwrap();
+    let proofs = proxy.proofs.lock().unwrap().clone();
     assert_eq!(proofs.len(), 1);
     let proof = &proofs[0];
     assert!(proof.path.contains("/sandboxes/"));
@@ -4207,7 +4207,6 @@ async fn sandbox_cascade_delete_follows_durable_original_stop_and_namespace_obse
                     && path == &format!("/api/v1/namespaces/nyxid-machine/{resource}"))
         );
     }
-    drop(proofs);
     f.slot_retained().await;
     f.db.drop().await.unwrap();
 }
