@@ -165,6 +165,13 @@ pub async fn filter_discovery(
     chat: Option<&ChatAuthority>,
     services: &mut [McpToolService],
 ) -> AppResult<()> {
+    if !services
+        .iter()
+        .flat_map(|service| &service.endpoints)
+        .any(is_attachment_operation)
+    {
+        return Ok(());
+    }
     let enabled = writes_enabled(db, chat).await?;
     for service in services {
         service.endpoints.retain(|endpoint| {
