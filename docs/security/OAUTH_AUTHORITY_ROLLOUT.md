@@ -1,9 +1,9 @@
 # OAuth authority cutover
 
-This runbook describes the authority changes under local review. Runtime
-acceptance is recorded in the [W1–W4 tracker](../SECURITY_REMEDIATION_W1_W4.md).
-No deployment, production revocation or client reauthorization has been
-performed by this work.
+This runbook describes the shipped OAuth authority checks and the coordinated
+deployment required to activate them across participating writers and verifiers.
+See [implemented security controls](../SECURITY_REMEDIATION_W1_W4.md) for related
+changes and remaining limits.
 
 ## Compatibility boundary
 
