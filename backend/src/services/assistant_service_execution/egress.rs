@@ -15,6 +15,11 @@ struct AttachmentEgress<'a> {
 }
 
 enum EgressAuthority<'a> {
+    Lark {
+        guard: &'a super::LarkManagedGuard<'a>,
+        row: &'a crate::models::lark_base_write::LarkBaseWrite,
+        phase: crate::models::lark_base_write::WriteState,
+    },
     AttachmentOnly,
     Managed(
         &'a OwnedHttpEgressGuard,
@@ -257,6 +262,16 @@ impl Admission {
     }
 }
 impl<'a> HttpEgressGuard<'a> {
+    pub(super) fn for_lark(
+        guard: &'a super::LarkManagedGuard<'a>,
+        row: &'a crate::models::lark_base_write::LarkBaseWrite,
+        phase: crate::models::lark_base_write::WriteState,
+    ) -> Self {
+        Self {
+            attachment: None,
+            authority: EgressAuthority::Lark { guard, row, phase },
+        }
+    }
     pub(crate) fn with_attachment(
         base: Option<Self>,
         db: &'a Database,
@@ -329,6 +344,9 @@ impl<'a> HttpEgressGuard<'a> {
     pub(crate) fn revalidate(&self) -> futures::future::BoxFuture<'_, AppResult<()>> {
         Box::pin(async move {
             match &self.authority {
+                EgressAuthority::Lark { guard, row, phase } => {
+                    guard.revalidate_effect(row, *phase).await
+                }
                 EgressAuthority::AttachmentOnly => Ok(()),
                 EgressAuthority::Managed(guard, target) => guard.revalidate(target).await,
                 EgressAuthority::Assistant(guard) => guard.revalidate_inner().await,

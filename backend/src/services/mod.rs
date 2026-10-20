@@ -460,3 +460,5 @@ pub(crate) mod platform_entry_scope;
 pub(crate) mod platform_faq_service;
 
 pub(crate) mod platform_native_reply_service;
+
+pub mod lark_base_writes;

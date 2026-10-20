@@ -24,7 +24,7 @@ fn filename(value: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub(super) fn fields(args: &Value, label: &str, size: usize) -> AppResult<Vec<(String, String)>> {
+pub(crate) fn fields(args: &Value, label: &str, size: usize) -> AppResult<Vec<(String, String)>> {
     let object = args.as_object().ok_or_else(invalid)?;
     if object.keys().any(|key| {
         !matches!(
@@ -80,7 +80,7 @@ fn quote(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-pub(super) fn encode(
+pub(crate) fn encode(
     fields: &[(String, String)],
     content_type: &str,
     file: &[u8],

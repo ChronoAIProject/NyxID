@@ -3602,6 +3602,7 @@ impl AutomaticReceipt {
 }
 
 pub struct PreparedProxyCall {
+    managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
     resource_source: Option<crate::models::assistant_resource::ResourceSource>,
     automatic_receipt: Option<AutomaticReceipt>,
@@ -3907,6 +3908,7 @@ pub(crate) fn http_carries_method_override(
         return true;
     };
     PreparedProxyCall {
+        managed_base: None,
         attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
@@ -4011,6 +4013,7 @@ fn prepare_proxy_tool_call_inner(
     };
 
     Ok(PreparedProxyCall {
+        managed_base: None,
         attachment_binding: None,
         resource_source: None,
         automatic_receipt: None,
@@ -4046,6 +4049,40 @@ pub async fn prepare_chat_proxy_tool_call(
 ) -> AppResult<PreparedProxyCall> {
     if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
         return prepare_proxy_tool_call(service, endpoint, args);
+    }
+    if matches!(
+        endpoint.attachment_input,
+        Some(super::lark_attachment_tool::Projection::Managed(_))
+    ) {
+        let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
+        let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+        let key = db
+            .collection::<crate::models::api_key::ApiKey>("api_keys")
+            .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
+            .await?
+            .ok_or_else(super::lark_attachment_tool::refused)?;
+        let body: serde_json::Value =
+            serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
+                .map_err(|_| super::lark_attachment_tool::refused())?;
+        prepared.body = Some(
+            serde_json::to_vec(&canonical_json(body.clone()))
+                .map_err(|_| super::lark_attachment_tool::refused())?
+                .into(),
+        );
+        prepared.authorize_agent_operations(&key.assistant_operation_scopes, service, endpoint)?;
+        prepared.managed_base = Some(
+            Box::pin(super::lark_base_writes::prepare(
+                db,
+                keys,
+                Some(chat),
+                service,
+                endpoint,
+                args,
+                &body,
+            ))
+            .await?,
+        );
+        return Ok(prepared);
     }
     let materialized = Box::pin(super::lark_attachment_tool::materialize(
         db, keys, chat, service, endpoint, args,
@@ -4871,8 +4908,10 @@ pub fn execute_tool_response<'a>(
         .await?
         {
             McpToolExecutionOutcome::Response(response) => {
-                if super::lark_attachment_tool::is_attachment_operation(endpoint)
-                    && matches!(response.origin, ToolResponseOrigin::Downstream)
+                if matches!(
+                    endpoint.attachment_input,
+                    Some(super::lark_attachment_tool::Projection::Stored(_))
+                ) && matches!(response.origin, ToolResponseOrigin::Downstream)
                 {
                     super::lark_attachment_tool::validate_response(
                         response.status,
@@ -5270,7 +5309,9 @@ async fn execute_tool_resolved_inner(
     catalog_service_slug: Option<&str>,
     service_lease: Option<super::service_concurrency_service::Lease>,
 ) -> AppResult<McpToolExecutionOutcome> {
-    if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+    if super::lark_attachment_tool::is_attachment_operation(endpoint)
+        && prepared.managed_base.is_none()
+    {
         let binding = prepared
             .attachment_binding
             .as_ref()
@@ -5282,6 +5323,16 @@ async fn execute_tool_resolved_inner(
             return Err(super::lark_attachment_tool::refused());
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
+    }
+    if let Some(base) = &prepared.managed_base {
+        if base.chat.user_id != user_id
+            || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+            || node_route.is_some()
+        {
+            return Err(super::lark_attachment_tool::refused());
+        }
     }
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -5476,6 +5527,7 @@ async fn execute_tool_resolved_inner(
 
     box_mcp_forwarding(move || async move {
         let PreparedProxyCall {
+            managed_base,
             attachment_binding,
             resource_source: _,
             automatic_receipt,
@@ -5790,6 +5842,35 @@ async fn execute_tool_resolved_inner(
             .await
             .inspect_err(|error| request_audit.admission_error(error))?;
         let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
+
+        if let Some(base)=managed_base.as_ref() {
+            let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
+            let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
+                &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
+            guard.revalidate().await?;
+            billing.mark_forwarded(&metered).await?;
+            destination_audit.dispatch();
+            let result=Box::pin(super::lark_base_writes::execute(db,encryption_keys,base,&guard,
+                super::lark_base_writes::transport::Transport {
+                    target:&target,tokens:token_exchange_cache,cache:cloud_response_cache,
+                    permit:billing_egress_permit,identity:identity_headers,delegated,caller:exec_ctx.caller_token,
+                })).await;
+            let (status,text)=match result {
+                Ok(value)=>(200,serde_json::to_string(&value).map_err(|_|AppError::Internal("Invalid Base result".into()))?),
+                Err(error)=>{
+                    billing.settle(&metered,mcp_platform_usage_for_path(&[],request_len,&target.service,&path,409),None,None).await?;
+                    return Err(error);
+                }
+            };
+            billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
+            destination_audit.complete(status);
+            request_audit.response(status);
+            if let Some(chat)=assistant_chat.as_ref() {
+                if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
+                else {admission.receipt(db,chat,assistant_auto).await;}
+            }
+            return Ok(McpToolExecutionOutcome::Response(tool_response(status,Some("application/json"),text.as_bytes())));
+        }
 
         // -------------------------------------------------------------------
         // Route through node when a node route exists (primary + fallbacks).

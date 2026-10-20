@@ -52,6 +52,16 @@ pub fn refused() -> AppError {
     )
 }
 
+/// The managed route is an internal invocation identity, never a provider path.
+pub(crate) fn refuse_reserved_path(path: &str) -> AppResult<()> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = path.strip_prefix("open-apis/").unwrap_or(path);
+    if path.starts_with("nyxid/managed/bitable/") {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub fn is_attachment_operation(endpoint: &McpToolEndpoint) -> bool {
     endpoint.attachment_input.is_some()
         || endpoint.name == UPLOAD_OPERATION
@@ -225,7 +235,7 @@ pub fn stored_projections(catalog: Option<&DownstreamService>, endpoints: &mut [
     }
 }
 
-mod multipart;
+pub(super) mod multipart;
 use super::assistant_acknowledgement_service::ChatAuthority;
 use super::assistant_upload_service::{self as uploads, byte_budget};
 use super::mcp_service::{McpToolService, McpToolSource};
@@ -272,7 +282,11 @@ pub async fn filter_discovery(
     for service in services {
         service.endpoints.retain(|endpoint| {
             !is_attachment_operation(endpoint)
-                || (enabled && matches!(endpoint.attachment_input, Some(Projection::Stored(_))))
+                || (enabled
+                    && matches!(
+                        endpoint.attachment_input,
+                        Some(Projection::Stored(_) | Projection::Managed(_))
+                    ))
         });
     }
     Ok(())

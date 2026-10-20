@@ -9406,3 +9406,7 @@ mod resource_tests;
 #[cfg(test)]
 #[path = "mcp_attachment_upload_tests.rs"]
 mod attachment_upload_tests;
+
+#[cfg(test)]
+#[path = "mcp_lark_base_tests.rs"]
+mod lark_base_tests;
