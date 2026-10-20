@@ -1596,10 +1596,7 @@ fn stored_service_endpoints_to_mcp(
     catalog: Option<&DownstreamService>,
 ) -> Vec<McpToolEndpoint> {
     let mut endpoints = service_endpoints_to_mcp(eps);
-    for endpoint in &mut endpoints {
-        endpoint.attachment_input =
-            super::lark_attachment_tool::stored_projection(catalog, endpoint);
-    }
+    super::lark_attachment_tool::stored_projections(catalog, &mut endpoints);
     endpoints
 }
 

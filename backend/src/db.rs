@@ -118,6 +118,7 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    ensure_lark_base_write_indexes(db).await?;
     db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
     )
@@ -177,6 +178,46 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     backfill_org_scope_sources(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
+    Ok(())
+}
+
+pub(crate) async fn ensure_lark_base_write_indexes(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    for (collection, identity) in [
+        (crate::models::lark_base_write::COLLECTION_NAME, "key"),
+        (
+            crate::models::lark_base_write_photo::COLLECTION_NAME,
+            "photo_key",
+        ),
+    ] {
+        db.collection::<Document>(collection)
+            .create_indexes([
+                IndexModel::builder()
+                    .keys(doc! {identity: 1})
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+                IndexModel::builder().keys(doc! {"user_id": 1}).build(),
+                // Cleanup is transactional with the parent; no independent TTL
+                // may remove a photo reservation or an active dispatch barrier.
+                IndexModel::builder().keys(doc! {"expires_at": 1}).build(),
+            ])
+            .await?;
+    }
+    db.collection::<Document>(crate::models::lark_base_write::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"state": 1, "deadline_at": 1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::models::lark_base_write_photo::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"write_id": 1, "attempt": 1})
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 

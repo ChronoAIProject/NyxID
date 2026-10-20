@@ -10,6 +10,11 @@ use serde_json::{Value, json};
 
 pub const UPLOAD_OPERATION: &str = "bitable_media_upload";
 pub const UPLOAD_PATH: &str = "/drive/v1/medias/upload_all";
+pub const COMPOSITE_OPERATION: &str = "bitable_record_create_with_attachments";
+pub const COMPOSITE_PATH: &str =
+    "/nyxid/managed/bitable/apps/{app_token}/tables/{table_id}/records";
+pub const FIELDS_OPERATION: &str = "bitable_fields_list";
+pub const CREATE_OPERATION: &str = "bitable_record_create";
 const MARK: &str = "x-nyxid-attachment-input";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +30,20 @@ pub struct AttachmentInput {
 #[serde(tag = "provenance", content = "contract", rename_all = "snake_case")]
 pub enum Projection {
     Stored(AttachmentInput),
+    Managed(ManagedOperation),
     Refused,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedOperation {
+    pub kind: String,
+    pub version: u32,
+    pub fields_operation: String,
+    pub upload_operation: String,
+    pub create_operation: String,
+    #[serde(default)]
+    pub contract_digests: std::collections::BTreeMap<String, String>,
 }
 
 pub fn refused() -> AppError {
@@ -39,6 +57,9 @@ pub fn is_attachment_operation(endpoint: &McpToolEndpoint) -> bool {
         || endpoint.name == UPLOAD_OPERATION
         || endpoint.path == UPLOAD_PATH
         || endpoint.path == format!("/open-apis{UPLOAD_PATH}")
+        || endpoint.name == COMPOSITE_OPERATION
+        || endpoint.path == COMPOSITE_PATH
+        || endpoint.path == format!("/open-apis{COMPOSITE_PATH}")
 }
 
 /// Name/route matching only identifies operations that must refuse ordinary
@@ -127,6 +148,81 @@ pub fn stored_projection(
         Some(Projection::Stored(contract))
     })();
     Some(trusted.unwrap_or(candidate))
+}
+
+/// Composite authority requires the complete stored dependency set. A caller
+/// loading just the reserved endpoint retains the refusal projection.
+pub fn stored_projections(catalog: Option<&DownstreamService>, endpoints: &mut [McpToolEndpoint]) {
+    for endpoint in endpoints.iter_mut() {
+        endpoint.attachment_input = stored_projection(catalog, endpoint);
+    }
+    let managed = (|| {
+        let catalog = catalog.filter(|catalog| {
+            catalog.created_by == "system"
+                && !catalog.tools_manager_created
+                && matches!(
+                    catalog_spec_registry::spec_key_for_slug(&catalog.slug),
+                    Some("lark" | "lark-bot")
+                )
+        })?;
+        let spec = catalog_spec_registry::spec_for_slug(&catalog.slug)?;
+        let compiled = catalog_spec_sync::destination_endpoint_inputs(catalog, &spec).ok()?;
+        let mut mark: ManagedOperation = serde_json::from_value(
+            spec["paths"][COMPOSITE_PATH]["post"]["x-nyxid-managed-operation"].clone(),
+        )
+        .ok()?;
+        if mark.kind != "lark_bitable_record_with_attachments"
+            || mark.version != 1
+            || mark.fields_operation != FIELDS_OPERATION
+            || mark.upload_operation != UPLOAD_OPERATION
+            || mark.create_operation != CREATE_OPERATION
+            || !mark.contract_digests.is_empty()
+        {
+            return None;
+        }
+        for name in [
+            COMPOSITE_OPERATION,
+            FIELDS_OPERATION,
+            UPLOAD_OPERATION,
+            CREATE_OPERATION,
+        ] {
+            let mut matches = endpoints.iter().filter(|endpoint| endpoint.name == name);
+            let actual = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            let expected = compiled.iter().find(|endpoint| endpoint.name == name)?;
+            let expected = McpToolEndpoint {
+                name: expected.name.clone(),
+                method: expected.method.clone(),
+                path: expected.path.clone(),
+                target_id: expected.target_id.clone(),
+                parameters: expected.parameters.clone(),
+                request_body_schema: expected.request_body_schema.clone(),
+                request_content_type: expected.request_content_type.clone(),
+                request_body_required: expected.request_body_required,
+                async_operation: expected.async_operation.clone(),
+                ..Default::default()
+            };
+            if inputs(actual) != inputs(&expected) {
+                return None;
+            }
+            if name != COMPOSITE_OPERATION {
+                mark.contract_digests.insert(
+                    name.into(),
+                    super::mcp_service::endpoint_contract_digest(actual),
+                );
+            }
+        }
+        Some(mark)
+    })();
+    if let Some(managed) = managed {
+        for endpoint in endpoints {
+            if endpoint.name == COMPOSITE_OPERATION {
+                endpoint.attachment_input = Some(Projection::Managed(managed.clone()));
+            }
+        }
+    }
 }
 
 mod multipart;
@@ -384,6 +480,95 @@ mod tests {
             ..Default::default()
         };
         (catalog, endpoint)
+    }
+
+    fn composite_endpoints(slug: &str) -> (DownstreamService, Vec<McpToolEndpoint>) {
+        let (catalog, _) = compiled(slug);
+        let endpoints = catalog_spec_sync::destination_endpoint_inputs(
+            &catalog,
+            &catalog_spec_registry::spec_for_slug(slug).unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|input| McpToolEndpoint {
+            endpoint_id: input.name.clone(),
+            name: input.name,
+            method: input.method,
+            path: input.path,
+            target_id: input.target_id,
+            parameters: input.parameters,
+            request_body_schema: input.request_body_schema,
+            request_content_type: input.request_content_type,
+            request_body_required: input.request_body_required,
+            response: input.response,
+            async_operation: input.async_operation,
+            ..Default::default()
+        })
+        .collect();
+        (catalog, endpoints)
+    }
+
+    #[test]
+    fn lark_base_write_projection_binds_every_dependency_and_rejects_missing_or_edited_inputs() {
+        for slug in ["api-lark", "api-lark-bot", "api-feishu", "api-feishu-bot"] {
+            let (catalog, raw) = composite_endpoints(slug);
+            let mut endpoints = raw.clone();
+            stored_projections(Some(&catalog), &mut endpoints);
+            let composite = endpoints
+                .iter()
+                .find(|ep| ep.name == COMPOSITE_OPERATION)
+                .unwrap();
+            let Some(Projection::Managed(mark)) = &composite.attachment_input else {
+                panic!("missing trusted composite")
+            };
+            assert_eq!(mark.contract_digests.len(), 3);
+            assert!(prepare_proxy_tool_call(&service(), composite, &json!({})).is_err());
+            for name in [
+                COMPOSITE_OPERATION,
+                FIELDS_OPERATION,
+                UPLOAD_OPERATION,
+                CREATE_OPERATION,
+            ] {
+                let mut edited = raw.clone();
+                edited
+                    .iter_mut()
+                    .find(|ep| ep.name == name)
+                    .unwrap()
+                    .request_body_required ^= true;
+                stored_projections(Some(&catalog), &mut edited);
+                assert_eq!(
+                    edited
+                        .iter()
+                        .find(|ep| ep.name == COMPOSITE_OPERATION)
+                        .unwrap()
+                        .attachment_input,
+                    Some(Projection::Refused)
+                );
+                if name != COMPOSITE_OPERATION {
+                    let mut missing = raw.clone();
+                    missing.retain(|ep| ep.name != name);
+                    stored_projections(Some(&catalog), &mut missing);
+                    assert_eq!(
+                        missing
+                            .iter()
+                            .find(|ep| ep.name == COMPOSITE_OPERATION)
+                            .unwrap()
+                            .attachment_input,
+                        Some(Projection::Refused)
+                    );
+                }
+            }
+            let mut untrusted = raw;
+            stored_projections(None, &mut untrusted);
+            assert_eq!(
+                untrusted
+                    .iter()
+                    .find(|ep| ep.name == COMPOSITE_OPERATION)
+                    .unwrap()
+                    .attachment_input,
+                Some(Projection::Refused)
+            );
+        }
     }
 
     #[test]

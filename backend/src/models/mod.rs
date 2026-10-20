@@ -172,6 +172,8 @@ pub mod trigger_schedule;
 
 pub mod assistant_upload;
 pub mod assistant_upload_retention;
+pub mod lark_base_write;
+pub mod lark_base_write_photo;
 pub mod permission_policy;
 
 pub mod assistant_voice;
