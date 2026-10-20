@@ -245,3 +245,29 @@ explicitly unwitnessed; this adapter adds no independent rollback protection.
 Worker scheduling, provider-specific resolvers, sink conversion, startup wiring
 and product reconciliation belong to the following workflow-42 implementation
 unit and its participating lanes.
+
+## Single-request provider adapters
+
+`delivery::sinks::PreparedSend` prepares one Webhook, Telegram, FCM or APNs
+request from the producer's independently loaded `DeliveryBinding`. Its private
+fields retain the destination, protected body and credentials. The producer's
+`DeliveryConsumer::resolve` returns `prepared.resolved()`; its `send` method
+consumes `prepared.send_once(&queued)` inside the executor's bound permit.
+The producer retains immutable payload versions, live owner/revision fences,
+protected receipt persistence, terminal detail and dispatch/recovery wiring.
+
+Each adapter uses a private client with proxies, redirects and retries disabled,
+bounded connection/total timeouts and one provider request. Webhooks pass the
+shared public-HTTPS validator before the exact pinned address set is checked
+again; private, mixed, empty and IPv4-mapped private answers refuse preparation.
+Authentication refresh belongs to resolution before a claim. A timeout or
+transport failure stays Uncertain, and an ambiguous HTTP response preserves only
+its checked status through UncertainResponse. Neither grants another send.
+
+Provider responses produce a protected `ProviderReceipt` only for documented
+acceptance. Rejection evidence contains numeric status and closed destination
+classification; receipts and audit never receive provider error text. FCM/APNs
+destination removal requires the exact documented invalid-token evidence.
+The Email channel remains explicitly unconfigured with no transport or payload
+store. Existing producer conversions use the shared `DeliveryConsumer` contract;
+this adapter API introduces no additional receipt collection or delivery worker.

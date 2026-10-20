@@ -39,6 +39,7 @@ pub mod delivery {
     };
 
     pub mod execution;
+    pub mod sinks;
 
     pub const COLLECTION_NAME: &str = "notification_deliveries_v1";
     const DEDUPE_INDEX: &str = "notification_delivery_product_destination";
