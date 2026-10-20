@@ -769,7 +769,7 @@ mod tests {
                 .iter()
                 .all(|row| row.publication == PublicationState::Published
                     && row.operation_generation == 1
-                    && row.path == "/open-apis/drive/v1/medias/upload_all")
+                    && row.path == "/drive/v1/medias/upload_all")
         );
         sync_seeded_service_endpoints(&db).await.unwrap();
         assert_eq!(

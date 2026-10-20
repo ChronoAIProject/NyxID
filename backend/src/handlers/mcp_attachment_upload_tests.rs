@@ -102,14 +102,15 @@ fn setup(name: &'static str) -> futures::future::BoxFuture<'static, UploadFixtur
         catalog.name = "Lark".into();
         catalog.slug = "api-lark".into();
         catalog.created_by = "system".into();
-        catalog.base_url = server.uri();
+        let base_url = format!("{}/open-apis", server.uri());
+        catalog.base_url = base_url.clone();
         f.state
             .db
             .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
             .insert_one(&catalog)
             .await
             .unwrap();
-        let instance = connected(&f.state.db, &f.owner, "receipts", &server.uri()).await;
+        let instance = connected(&f.state.db, &f.owner, "receipts", &base_url).await;
         f.state
             .db
             .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
@@ -598,7 +599,12 @@ async fn lark_attachment_origin_access_refuses_cross_owner_conversation_guest_st
         .await
         .unwrap();
     for meta in [false, true] {
-        assert_error(&call(&u, &auth, meta, args(&u.attachment_id)).await);
+        let response = call(&u, &auth, meta, args(&u.attachment_id)).await;
+        assert_eq!(response["error"]["code"], -32603, "{response}");
+        assert_eq!(
+            response["error"]["message"], "Assistant turn is no longer active",
+            "{response}"
+        );
     }
     u.f.state
         .db
@@ -1160,7 +1166,7 @@ async fn lark_attachment_actual_send_revalidates_after_delayed_credential_prepar
             .await
             .unwrap();
         let config = crate::models::downstream_service::TokenExchangeConfig {
-            endpoint: "{base_url}/token".into(),
+            endpoint: format!("{}/token", u.server.uri()),
             request_encoding: "json".into(),
             request_template: json!({}),
             token_response_path: "token".into(),
