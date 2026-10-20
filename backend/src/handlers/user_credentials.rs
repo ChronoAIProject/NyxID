@@ -313,6 +313,11 @@ mod tests {
             .insert_one(test_provider(&provider_id, "user", true))
             .await
             .unwrap();
+        // Credential writes require the authenticated owner to be a live account.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
 
         let state = test_app_state(db);
 
@@ -356,6 +361,11 @@ mod tests {
 
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(test_provider(&provider_id, "both", true))
+            .await
+            .unwrap();
+        // Credential writes require the authenticated owner to be a live account.
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, crate::models::user::UserType::Person))
             .await
             .unwrap();
 

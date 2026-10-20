@@ -1831,10 +1831,18 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .await
         .unwrap()
         .unwrap();
+    // Edits are exact-source CAS writes; scheduling has advanced the stored row.
+    let current = state
+        .db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .await
+        .unwrap()
+        .unwrap();
     let changed = trigger_service::update(
         &state.db,
         &state.encryption_keys,
-        &trigger,
+        &current,
         trigger_service::UpdateInput {
             label: Some("Edited".into()),
             status: None,
@@ -1848,7 +1856,7 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
     let claim = schedules::TurnClaim {
         run_id: pending.id,
         fence: job.get_str("fence").unwrap().into(),
-        trigger_updated_at: trigger.updated_at,
+        trigger_updated_at: current.updated_at,
         continuation: false,
     };
     let db = state.db.clone();
@@ -3218,6 +3226,7 @@ async fn persisted_failure_streak_resets_on_success_transient_and_edit() {
             .unwrap();
         assert_eq!(saved.status, TriggerStatus::Active);
         assert_eq!(saved.schedule_state.terminal_failure_count, count);
+        trigger = saved;
     }
     trigger = trigger_service::update(
         &state.db,
