@@ -184,11 +184,9 @@ bodies, tool arguments, input-limit values, secrets or credential material.
 
 ## Receipt-Bot recipe
 
-This example describes the managed Lark Base receipt-write contract. At this
-revision the standalone `bitable_media_upload` is implemented; the field-list
-and managed-create operations are being added separately. Apply the recipe
-only after both selected operations are published on your deployed server.
-The connection and rollout guide is [Lark Base](site/cli/guides/connect-a-service.md#lark-base).
+This example restricts the managed Lark Base receipt-write workflow using the
+published field-list and managed-create operations. The connection and rollout
+guide is [Lark Base](site/cli/guides/connect-a-service.md#lark-base).
 
 Grant one Lark/Feishu UserService to a specialist, then select only
 `bitable_fields_list` and `bitable_record_create_with_attachments`. A grant
@@ -276,8 +274,8 @@ Every `object` in this vocabulary is closed without an
 unknown fields or top-level properties, unknown dropdown options, a different
 Base/table, Amount `12.345`, and more than ten photo IDs. Amount `12.34` is a
 number, not a quoted string. The scope vocabulary's `array` has a maximum but
-no minimum length; the managed composite must separately refuse empty photo
-arrays, repeated IDs, incomplete inbound photo sets, and inaccessible uploads
+no minimum length; the managed composite separately refuses empty photo
+arrays, repeated IDs/content, incomplete inbound photo sets, and inaccessible uploads
 before any provider call. The required `Receipt Photos` property makes an
 empty `attachments` object fail the scope itself.
 
@@ -303,11 +301,18 @@ this nested JSON. Configuration requires `assistant:operation-scopes` for the
 acting person; execution also needs `assistant:attachment-writes` and a live,
 non-guest owner turn. Upgrade all replicas before saving the Number rule.
 
-If a managed create reports `uncertain`, check the Base and stop. Never call
-plain create or standalone upload to evade the scope or replay decision. A
-duplicate refusal names the stored record or write state; it is not a request
-to send the same photos again. See the guide for the 400-day protection horizon
-and [compatibility](#compatibility) for scope removal before rollback.
+Success returns `{record_id, already_created:false}`; an authorized identical
+replay returns `{record_id, already_created:true}`, even after credential
+rotation. Active writes report `in progress; try again shortly`. For
+`uncertain`, follow `outcome unknown; check the Base; NyxID will not create it
+again`. Never call plain create or standalone upload to evade that decision.
+A succeeded-photo conflict names the existing record and directs field changes
+to `bitable_record_update`. An incomplete source set reports `N of M photos
+from that message could not be read; ask the owner to resend`. Definite
+non-application releases reservations; `failed_definite` / `not_sent` proves
+the create request did not leave NyxID, permitting one create on a corrected
+new call. See the guide for all outcomes, the 400-day protection horizon, and
+[compatibility](#compatibility) for scope removal before rollback.
 
 ## Relationship to permission-bound keys
 

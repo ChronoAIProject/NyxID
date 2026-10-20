@@ -154,11 +154,35 @@ db.lark_base_writes.countDocuments({
 Without the admin conversion, queue conversion becomes eligible after six days.
 Orphan recovery uses the existing 75-second stale-heartbeat threshold; stale
 managed writes become eligible after their 180-second deadline. Bounded sweeps
-must finish; no fixed waiting period proves completion. Before deploying the old
-binary, also remove the new attachment operation rows
-(`bitable_media_upload`, `bitable_record_create_with_attachments`) through catalog
-administration and remove all scopes using `JsonShape::Number`, including key
-copies. See [operation-scope compatibility](../AGENT_OPERATION_SCOPES.md#compatibility)
+must finish; no fixed waiting period proves completion.
+
+After all three gates are zero, a human platform admin must delete the two
+attachment operation rows, `bitable_media_upload` and
+`bitable_record_create_with_attachments`, for **each** catalog slug `api-lark`,
+`api-lark-bot`, `api-feishu`, and `api-feishu-bot`. List each catalog's rows with:
+
+```bash
+nyxid catalog endpoint list <catalog-slug> --output json
+```
+
+Match the two operation names and retain their endpoint UUIDs. The listing's
+`service_id` is the catalog service UUID, not a UserService/connection UUID.
+Delete each matching row through the authenticated admin API:
+
+```http
+DELETE /api/v1/services/{service_id}/endpoints/{endpoint_id}
+```
+
+This physically deletes the operation row. The catalog CLI's `endpoint disable`
+command only pauses publication and is not this deletion step. Repeat the list
+for all four slugs and verify both names are absent. Keep the drained new
+replicas running until deletion is complete, then cut over to the old release
+without restarting a new replica or running new-release spec synchronization:
+startup additively upserts these compiled overlay rows and would recreate them.
+
+Before the old binary starts, also remove every scope using `JsonShape::Number`,
+including compiled key copies. See
+[operation-scope compatibility](../AGENT_OPERATION_SCOPES.md#compatibility)
 and the managed Base-write rollout in [API discovery](../API_DISCOVERY.md).
 
 ## Retention

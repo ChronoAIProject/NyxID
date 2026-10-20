@@ -271,7 +271,7 @@ sequenceDiagram
     participant AG as AI Agent (callback URL)
 
     U->>P: Send message
-    P->>W: POST /api/v1/webhooks/channel/{platform}
+    P->>W: POST /api/v1/webhooks/channel/{platform}/{bot_id}
     W->>A: verify_webhook(headers, body)
     A-->>W: OK (signature valid)
     W->>A: parse_inbound(body)
@@ -493,7 +493,7 @@ graph TD
 
 ### Integration with Agent Isolation (PR #132)
 
-The callback URL lives on the **ApiKey** (the agent), not on individual conversation routes. When a user sets up an agent on NyxID (`nyxid ai-setup agent create --platform claude-code`), they register the agent's callback URL as part of the agent configuration. Conversation routes then just say "send to this agent" -- NyxID already knows how to reach it.
+The callback URL lives on the **ApiKey** (the agent), not on individual conversation routes. When a user sets up an agent on NyxID (`nyxid api-key create --platform claude-code --callback-url "https://my-agent.example.com/webhook"`), they register the agent's callback URL as part of the agent configuration. Conversation routes then just say "send to this agent" -- NyxID already knows how to reach it.
 
 This means:
 - **`ApiKey.callback_url`** (new field) -- where NyxID sends channel messages for this agent
