@@ -3,10 +3,6 @@ use crate::test_utils::connect_transaction_test_database;
 use futures::TryStreamExt;
 
 const KEY: [u8; 32] = [2; 32];
-// Compatibility for lanes migrating their existing scripts; new scripts use
-// test_utils::fail_command::Guard, which owns the scoped client and reset.
-pub(crate) use crate::test_utils::fail_command::PROCESS_LOCK as FAIL_COMMAND;
-
 fn entry() -> AuditLog {
     AuditLog {
         id: Uuid::new_v4().to_string(),

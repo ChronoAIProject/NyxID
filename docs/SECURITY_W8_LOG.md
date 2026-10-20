@@ -238,3 +238,10 @@
 - CORE runtime/state/service-history users now route their complete fault scripts through the scoped guard. On the same executable their filters passed sequentially 5/0/0 and in three concurrent processes 5/0/0; unchanged 32-body/8-commit exhaustion assertions passed. No retry-budget or fault-assertion reduction.
 - Reused backend all-target both-KMS Clippy (-D warnings), ID backend compilers 7529/7618 started 21:23:49/53: exit 0 at 21:32:44, before the test-lifetime correction. Successor matching Clippy compilers 19432/19436 began 21:50:28/29; corrected test Cargo 19120 queued. Host restart interrupted these gates and cleared /tmp, including the target, executable, logs, Mongo binary and dbpath. Pre-restart counts are session observations; do not claim a post-correction green gate.
 - Owned rustfmt/whitespace checks pass. RSA refresh and working-tree surface validation passed with no pin delta before restart; only the fail_command module registration is staged from test_utils.rs. Heartbeat, performance, delivery and production-contention changes remain separate slices.
+
+## W8 coordinator — remove completed fault-helper compatibility alias (2026-10-20)
+
+- Removed the unused FAIL_COMMAND re-export after the last lane migrated; every fault script must own a scoped Guard. No fault test, retry budget or production behavior changed.
+- Reused C's shared backend all-target both-KMS Clippy with -D warnings; drivers 14811/14815 began 22:05:52/53 after CORE freeze 22:05:04, exit 0 at 22:10:20 (4m30s), zero diagnostics. Required shared build env, nofile 60000.
+- Command: cargo clippy --locked -p nyxid --all-targets --features aws-kms,gcp-kms --no-deps -- -D warnings. Persistent log: ~/Library/Caches/nyxid-coreb/gates/post-reboot-shared-rerun-clippy.log.
+- rustfmt/check and git diff --check pass. One shared test no-run follows; post-reboot helper execution remains pending that binary. PM requested this small prerequisite commit immediately after Clippy.
