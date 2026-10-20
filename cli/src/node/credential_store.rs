@@ -146,7 +146,7 @@ impl ServiceCredential {
 
 /// In-memory credential store loaded from the config file.
 /// All values are decrypted at load time and held in memory.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CredentialStore {
     credentials: Arc<HashMap<String, ServiceCredential>>,
 }

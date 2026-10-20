@@ -16,6 +16,15 @@ pub struct LocalEncryption {
 }
 
 impl LocalEncryption {
+    pub(crate) fn try_clone(&self) -> Result<Self> {
+        let _writer = self.directory.writer_lock()?;
+        self.check_available()?;
+        Ok(Self {
+            key: self.key.clone(),
+            directory: self.directory.try_clone()?,
+        })
+    }
+
     /// Open an existing key without creation, repair, or backend fallback.
     pub fn open_existing(config_dir: &Path) -> Result<Self> {
         let directory = super::storage::Directory::open(config_dir)?;

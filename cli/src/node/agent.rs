@@ -101,7 +101,7 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     let config_file = config_dir.join("config.toml");
 
     let node_config = NodeConfig::load(&config_file)?;
-    let backend = SecretBackend::from_config(&node_config, &config_dir)?;
+    let backend = SecretBackend::reader(&node_config, &config_dir)?;
 
     let auth_token = backend.load_auth_token(&node_config)?;
     let signing_secret = backend.load_signing_secret(&node_config)?;
@@ -119,14 +119,6 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
         credentials = shared_creds.snapshot().count(),
         "Starting node agent"
     );
-
-    // Spawn background task that reloads credentials when config file changes
-    let reload_handle = tokio::spawn(credential_reload_loop(
-        config_file.clone(),
-        cred_sender.clone(),
-        Duration::from_secs(5),
-        std::sync::Arc::clone(&backend),
-    ));
 
     // Spawn OAuth refresh loop (check every 60 seconds)
     let refresh_handle = tokio::spawn(oauth_refresh_loop(
@@ -146,7 +138,6 @@ pub async fn cmd_start(config_path: Option<&str>, log_level: Option<&str>) -> Re
     )
     .await;
 
-    reload_handle.abort();
     refresh_handle.abort();
     Ok(())
 }
@@ -1190,59 +1181,37 @@ fn init_cli_tracing() {
 // Internal helpers (from node-agent main.rs)
 // ---------------------------------------------------------------------------
 
-/// Poll the config file mtime and reload credentials when it changes.
-async fn credential_reload_loop(
-    config_file: std::path::PathBuf,
+/// Revalidate custody even if config bytes/mtime did not change. A failure
+/// empties cached credentials and terminates the serving runtime.
+pub(super) async fn credential_reload_loop(
     sender: std::sync::Arc<SharedCredentialsSender>,
     interval: Duration,
     backend: std::sync::Arc<SecretBackend>,
-) {
-    let mut last_modified = std::fs::metadata(&config_file)
-        .and_then(|m| m.modified())
-        .ok();
-
+) -> Result<()> {
     loop {
         tokio::time::sleep(interval).await;
+        reload_credentials(&backend, &sender)?;
+    }
+}
 
-        let current_modified = match std::fs::metadata(&config_file).and_then(|m| m.modified()) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to stat config file for credential reload");
-                continue;
-            }
-        };
-
-        if Some(current_modified) == last_modified {
-            continue;
+pub(super) fn reload_credentials(
+    backend: &SecretBackend,
+    sender: &SharedCredentialsSender,
+) -> Result<()> {
+    let loaded = (|| {
+        let (config, reader) = backend.current_reader()?;
+        let credentials = CredentialStore::from_config_with_backend(&config, &reader)?;
+        reader.refresh()?;
+        Ok(credentials)
+    })();
+    match loaded {
+        Ok(credentials) => {
+            sender.update(credentials);
+            Ok(())
         }
-
-        let node_config = match NodeConfig::load(&config_file) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to reload config, keeping existing credentials");
-                continue;
-            }
-        };
-
-        // Refresh in-memory vault cache so newly-added keychain secrets are visible.
-        if let Err(e) = backend.refresh() {
-            tracing::error!(error = %e, "Failed to refresh secret backend, keeping existing");
-            continue;
-        }
-
-        match CredentialStore::from_config_with_backend(&node_config, &backend) {
-            Ok(new_store) => {
-                // Only mark as processed after successful reload so that a
-                // transient failure (e.g. keychain vault not yet flushed by
-                // another process) retries on the next tick.
-                last_modified = Some(current_modified);
-                let count = new_store.count();
-                sender.update(new_store);
-                tracing::info!(credentials = count, "Credentials reloaded from config");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to reload credentials, will retry");
-            }
+        Err(error) => {
+            sender.update(CredentialStore::default());
+            Err(error)
         }
     }
 }
@@ -1256,9 +1225,39 @@ async fn oauth_refresh_loop(
     loop {
         tokio::time::sleep(interval).await;
 
-        let node_config = match NodeConfig::load(&config_file) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let node_config = match backend.current_reader() {
+            Ok((config, _)) => config,
+            Err(error) => {
+                tracing::error!(%error, "OAuth refresh refused invalid node custody");
+                return;
+            }
+        };
+
+        if !node_config
+            .credentials
+            .values()
+            .any(|credential| credential.oauth_managed)
+        {
+            continue;
+        }
+        // This legacy loop is replaced by returned-token recovery in the next
+        // checkpoint. Refuse unsupported formats before contacting a provider;
+        // a read-only adapter must never rotate a token it cannot persist.
+        if node_config.storage_backend == "keychain" {
+            tracing::error!(
+                "OAuth refresh requires the node token-recovery upgrade; refusing before provider contact"
+            );
+            return;
+        }
+        let backend = match SecretBackend::from_config(
+            &node_config,
+            config_file.parent().unwrap_or(Path::new(".")),
+        ) {
+            Ok(backend) => backend,
+            Err(error) => {
+                tracing::error!(%error, "OAuth refresh requires the node storage recovery integration");
+                return;
+            }
         };
 
         let mut config_changed = false;
@@ -2929,11 +2928,164 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("stopped-daemon migration"));
+        assert!(
+            error
+                .to_string()
+                .contains("nyxid node migrate --to keychain")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(
             Directory::open(directory.path()).unwrap().names().unwrap(),
             names
         );
+    }
+
+    #[test]
+    fn runtime_reload_tracks_generations_and_invalidates_deleted_keychain_objects() {
+        use super::super::secret_transaction::{ObjectRef, ObjectStore};
+        let fixture = modern_fixture();
+        let path = fixture.directory.path().join("config.toml");
+        let runtime = SecretBackend::reader_with_keychain(
+            &fixture.config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let initial = CredentialStore::from_config_with_backend(&fixture.config, &runtime).unwrap();
+        let (sender, credentials) = SharedCredentials::new(initial);
+        let (mut config, writer) = runtime.current_writer().unwrap();
+        config
+            .add_header_credential_via("new", "X-Key", "synthetic-new", None, &writer)
+            .unwrap();
+        writer.publish(&config, &path).unwrap();
+        reload_credentials(&runtime, &sender).unwrap();
+        assert_eq!(
+            credentials
+                .snapshot()
+                .get("new")
+                .unwrap()
+                .header()
+                .unwrap()
+                .1,
+            "synthetic-new"
+        );
+        let config = NodeConfig::load(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let reference = ObjectRef::parse(
+            config.credentials["new"]
+                .header_value_encrypted
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        ObjectStore::delete(&fixture.store, reference).unwrap();
+        assert!(reload_credentials(&runtime, &sender).is_err());
+        assert_eq!(credentials.snapshot().count(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+
+    #[test]
+    fn runtime_file_custody_or_identity_changes_clear_cached_credentials() {
+        for change in [
+            "missing-key",
+            "replacement-key",
+            "backend",
+            "owner",
+            "server",
+            "auth",
+            "signing",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.toml");
+            let file =
+                super::super::encryption::LocalEncryption::initialize(directory.path()).unwrap();
+            let mut config =
+                NodeConfig::new("wss://example.invalid".into(), "node".into(), "file".into());
+            config.set_auth_token("synthetic-auth", &file).unwrap();
+            config
+                .add_header_credential("service", "X-Key", "synthetic-key", &file)
+                .unwrap();
+            config.save(&path).unwrap();
+            let config = NodeConfig::load(&path).unwrap();
+            let runtime = SecretBackend::reader(&config, directory.path()).unwrap();
+            let initial = CredentialStore::from_config_with_backend(&config, &runtime).unwrap();
+            let (sender, credentials) = SharedCredentials::new(initial);
+            let mut changed = config.clone();
+            match change {
+                "missing-key" => std::fs::remove_file(directory.path().join(".keyfile")).unwrap(),
+                "replacement-key" => {
+                    std::fs::write(directory.path().join(".keyfile"), [82; 32]).unwrap()
+                }
+                "backend" => {
+                    changed.storage_backend = "keychain".into();
+                    changed.node.auth_token_encrypted.clear();
+                    changed.credentials.clear();
+                    changed.save(&path).unwrap();
+                }
+                "owner" => {
+                    changed.node.id = "other".into();
+                    changed.save(&path).unwrap();
+                }
+                "server" => {
+                    changed.server.url = "wss://other.invalid".into();
+                    changed.save(&path).unwrap();
+                }
+                "auth" => {
+                    changed.set_auth_token("synthetic-rotated", &file).unwrap();
+                    changed.save(&path).unwrap();
+                }
+                "signing" => {
+                    changed
+                        .set_signing_secret("synthetic-signing", &file)
+                        .unwrap();
+                    changed.save(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(reload_credentials(&runtime, &sender).is_err(), "{change}");
+            assert_eq!(credentials.snapshot().count(), 0, "{change}");
+            assert!(runtime.current_writer().is_err(), "{change}");
+            if change == "missing-key" {
+                assert!(!directory.path().join(".keyfile").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn custody_monitor_terminates_and_clears_cached_credentials_without_config_change() {
+        let fixture = modern_fixture();
+        let runtime = SecretBackend::reader_with_keychain(
+            &fixture.config,
+            fixture.directory.path(),
+            fixture.store.clone(),
+        )
+        .unwrap();
+        let initial = CredentialStore::from_config_with_backend(&fixture.config, &runtime).unwrap();
+        let (sender, credentials) = SharedCredentials::new(initial);
+        let reference = super::super::secret_transaction::ObjectRef::parse(
+            &fixture.config.node.auth_token_encrypted,
+        )
+        .unwrap()
+        .unwrap();
+        super::super::secret_transaction::ObjectStore::delete(&fixture.store, reference).unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            credential_reload_loop(
+                std::sync::Arc::new(sender),
+                Duration::from_millis(1),
+                std::sync::Arc::new(runtime),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(credentials.snapshot().count(), 0);
     }
 
     #[test]
@@ -3262,11 +3414,17 @@ mod tests {
         assert!(store.get("auth_token").unwrap() == "synthetic-stale-auth");
         assert!(std::fs::read(&path).unwrap() == bytes);
         assert_eq!(Directory::open(dir.path()).unwrap().names().unwrap(), names);
+        let initial = CredentialStore::from_config_with_backend(&config, &reader).unwrap();
+        let (sender, credentials) = SharedCredentials::new(initial);
+        reload_credentials(&reader, &sender).unwrap();
+        assert_eq!(credentials.snapshot().count(), 1);
         store.delete("vault").unwrap();
         assert!(reader.load_auth_token(&config).is_err());
         assert!(reader.refresh().is_err());
         assert!(store.get_optional("vault").unwrap().is_none());
         assert!(store.get("auth_token").unwrap() == "synthetic-stale-auth");
+        assert!(reload_credentials(&reader, &sender).is_err());
+        assert_eq!(credentials.snapshot().count(), 0);
     }
 
     #[test]

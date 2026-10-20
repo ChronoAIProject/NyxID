@@ -1625,7 +1625,7 @@ All four reported needless borrows are fixed. Initial Clippy also found snapshot
 Runtime startup/reload and ordinary writers still use the legacy factory and refuse immutable configs. OAuth returned-token recovery/redaction, all writers, resumable migration and enforced old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not closed.
 Artifacts additionally include .registration.lock and .storage-writer.lock; keychain namespaces unchanged. Mock key service/native file controls only; Linux and actual OS/separate-UID custody remain unverified. Logs:/tmp/nyxid-w5w9-codex-b0.SPJwrX/w96-reader-*.log. No push.
 
-## W9.6 checkpoint 2 — guarded command writers and owned cleanup, 2026-10-20 (awaiting PM review)
+## W9.6 checkpoint 2 — guarded command writers and owned cleanup, 2026-10-20 (PM accepted)
 
 PM accepted foundation/readers3b2b27459 and shared docsfa4f09ac3; EXECUTION/REVIEW remain local/untracked.
 Wired rekey, credential add/remove/accept/setup, SSH mutations and OpenClaw writers to typed, pinned snapshot/operation/publication; read-only commands use strict readers.
@@ -1638,3 +1638,19 @@ Seven new command/writer/custody controls pass; every existing test is preserved
 Startup/reload, WebSocket writers, managed registration, OAuth retention/redaction, resumable migration and old-daemon stop/status/wait/manual cutover remain open; PRE-08 is not complete.
 Artifact/keychain namespace contract unchanged. Native file/mock object-service tests only; Linux and actual OS custody unverified. Logs:/tmp/nyxid-w96-writers-{check,tests,clippy}.log. No push.
 PM hosted resolution: run39362062126/head8589cfd8 passes Coverage (Backend) and Backend Test, including writes-only invocation. capacity_wait fails only Coverage (Backend Base) on mainaaa3d772; PM closes the capacity investigation as an upstream baseline flake.
+
+## W9.6 checkpoint 3 — pinned runtime activation and WebSocket callers, 2026-10-20 (awaiting PM review)
+
+PM accepted command-writer checkpoint3d0424027; EXECUTION/REVIEW remain local/untracked.
+Startup uses strict readers; runtime observations retain the original directory/file key/legacy anchor while following credential generations and refusing owner/server/backend/auth/signing changes.
+The five-second monitor checks custody without an mtime shortcut, clears cached credentials on failure and stops serving; new proxy/upload/SSH/machine execution revalidates before dispatch.
+WebSocket credential update/remove, pending RCI preparation/decrypt/cleanup and node-key SSH/browser readers use pinned typed operations; publication precedes success acknowledgement and live-store replacement.
+Legacy-keychain writer refusal now names nyxid node migrate --to keychain with matching profile/config and the required migration-capable upgrade. No implicit conversion was enabled.
+Keychain background OAuth refuses before provider contact until returned-token recovery is wired; the file OAuth loop and its known recovery/redaction issues remain for the next checkpoint.
+Shared Cargo policy used exactly: /tmp/nyxid-shared-target, jobs4, incremental0, dev/test debug0; other streams' target locks honored.
+Executed cargo check --locked -p nyxid-cli --all-targets --features node-proxy-test:exit0,zero warnings before later machine WIP.
+Executed cargo test --locked -p nyxid-cli --features node-proxy-test --bin nyxid node:: -- --test-threads=2:529/1/3 in43.27s (two D warnings); retry530/1/3 in38.00s,zero warnings.
+Both node runs fail only D-owned browser_layout::tests::package_layouts_follow_resolved_executables_and_reject_unknowns: prefix not found, initially:86 then:144. No machine paths edited or tests skipped.
+All six new runtime controls pass both runs, including actual forwarding followed by key-removal/no-forwarding shutdown, immutable pushes/RCI and pinned SSH after directory retargeting.
+Executed cargo clippy --locked -p nyxid-cli --all-targets --features node-proxy-test -- -D warnings:exit0,zero diagnostics; owned rustfmt/diff checks pass. No controls/bounds weakened.
+Managed registration, OAuth durability/redaction, resumable migration, enforced old-daemon stop/status/wait/manual cutover and W9.5 OS custody remain open; artifact/keychain namespace unchanged. Logs:/tmp/nyxid-w96-runtime-{check,tests,tests-retry,clippy}.log. No push.

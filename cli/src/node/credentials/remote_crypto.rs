@@ -172,7 +172,7 @@ fn decrypt_and_store_inner(
             );
             RemoteCryptoFailure::DecryptOrStore
         })?;
-    config.save(config_path).map_err(|error| {
+    backend.publish(config, config_path).map_err(|error| {
         tracing::warn!(
             pending_credential_id = %message.pending_id,
             %error,
@@ -251,6 +251,20 @@ mod tests {
         SecretBackend::File(LocalEncryption::load_or_generate(dir).unwrap())
     }
 
+    fn decrypt_fixture(
+        config: &mut NodeConfig,
+        path: &Path,
+        backend: &SecretBackend,
+        sender: Option<&Arc<SharedCredentialsSender>>,
+        message: &PendingCredentialCiphertext,
+    ) -> RemoteCredentialCryptoOutbound {
+        backend.store_auth_token(config, "fixture-auth").unwrap();
+        config.save(path).unwrap();
+        *config = NodeConfig::load(path).unwrap();
+        let writer = SecretBackend::writer(config, path.parent().unwrap()).unwrap();
+        decrypt_and_store_ciphertext(config, path, &writer, sender, message)
+    }
+
     fn config() -> NodeConfig {
         NodeConfig::new(
             "ws://localhost:3001/api/v1/nodes/ws".to_string(),
@@ -320,7 +334,7 @@ mod tests {
         let node_pubkey = pubkey_from(prepare_pubkey(&mut cfg, &backend, &meta).unwrap());
         let message = ciphertext_for(&meta, &node_pubkey, "Bearer sk-rci");
 
-        let result = decrypt_and_store_ciphertext(&mut cfg, &config_path, &backend, None, &message);
+        let result = decrypt_fixture(&mut cfg, &config_path, &backend, None, &message);
 
         assert_eq!(
             result,
@@ -360,8 +374,7 @@ mod tests {
             let pubkey = pubkey_from(prepare_pubkey(&mut cfg, &backend, &meta).unwrap());
             let key = "ifttt_remote_test-NOT_REAL";
             let message = ciphertext_for(&meta, &pubkey, key);
-            let result =
-                decrypt_and_store_ciphertext(&mut cfg, &config_path, &backend, None, &message);
+            let result = decrypt_fixture(&mut cfg, &config_path, &backend, None, &message);
             assert!(!format!("{result:?}").contains(key));
             let store = CredentialStore::from_config_with_backend(&cfg, &backend).unwrap();
             if target == Some("https://other.invalid") {
@@ -396,7 +409,7 @@ mod tests {
         let node_pubkey = pubkey_from(prepare_pubkey(&mut cfg, &backend, &meta).unwrap());
         let message = ciphertext_for(&wrong_meta, &node_pubkey, "Bearer sk-secret-plaintext");
 
-        let result = decrypt_and_store_ciphertext(&mut cfg, &config_path, &backend, None, &message);
+        let result = decrypt_fixture(&mut cfg, &config_path, &backend, None, &message);
         let debug = format!("{result:?}");
 
         assert_eq!(
@@ -422,7 +435,7 @@ mod tests {
         let mut message = ciphertext_for(&meta, &node_pubkey, "Bearer sk-rci");
         message.version = "v2".to_string();
 
-        let result = decrypt_and_store_ciphertext(&mut cfg, &config_path, &backend, None, &message);
+        let result = decrypt_fixture(&mut cfg, &config_path, &backend, None, &message);
 
         assert_eq!(
             result,

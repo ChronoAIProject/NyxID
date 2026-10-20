@@ -88,9 +88,7 @@ impl SecretBackend {
         keychain: KeychainBackend,
     ) -> Result<Self> {
         if config.storage_backend == "keychain" && config.keychain_format.is_none() {
-            return Err(Error::Config(
-                "Legacy keychain storage requires an explicit stopped-daemon migration before writing".into(),
-            ));
+            return Err(legacy_migration_required());
         }
         let baseline = config.clone();
         let operation = SecretOperation::open(config, &config_dir.join("config.toml"), keychain)?;
@@ -99,6 +97,33 @@ impl SecretBackend {
             operation,
             baseline,
         })))
+    }
+
+    pub(crate) fn current_reader(&self) -> Result<(NodeConfig, Self)> {
+        let Self::Observed(reader) = self else {
+            return Err(guarded_write_required());
+        };
+        let (config, operation) = reader.operation.current()?;
+        let backend = Self::Observed(Box::new(ObservedSecrets {
+            operation,
+            baseline: config.clone(),
+        }));
+        Ok((config, backend))
+    }
+
+    pub(crate) fn current_writer(&self) -> Result<(NodeConfig, Self)> {
+        if let Self::Observed(reader) = self
+            && reader.baseline.storage_backend == "keychain"
+            && reader.baseline.keychain_format.is_none()
+        {
+            return Err(legacy_migration_required());
+        }
+        let (mut config, backend) = self.current_reader()?;
+        let Self::Observed(writer) = backend else {
+            return Err(guarded_write_required());
+        };
+        writer.operation.prepare(&mut config)?;
+        Ok((config, Self::Writer(writer)))
     }
 
     pub(crate) fn publish(&self, config: &NodeConfig, path: &Path) -> Result<()> {
@@ -168,6 +193,7 @@ impl SecretBackend {
 
     /// Build the backend from just the storage type string and config dir.
     /// For keychain, loads the config first to get the node_id.
+    #[cfg(test)]
     pub fn from_storage_backend_str(backend: &str, config_dir: &Path) -> Result<Self> {
         match backend {
             "keychain" => {
@@ -375,6 +401,12 @@ impl SecretBackend {
 
 fn guarded_write_required() -> Error {
     Error::Config("Immutable node secret storage requires a guarded write operation".into())
+}
+
+fn legacy_migration_required() -> Error {
+    Error::Config(
+        "Legacy keychain storage requires an explicit stopped-daemon migration. Upgrade to the release supporting resumable node storage migration, stop the node daemon, then run `nyxid node migrate --to keychain` with the same --profile/--config.".into(),
+    )
 }
 
 fn unknown_backend() -> Error {

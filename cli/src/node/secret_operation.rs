@@ -41,6 +41,63 @@ impl std::fmt::Debug for SecretOperation {
     }
 }
 impl SecretOperation {
+    /// Observe a new generation through the original directory and custody.
+    /// Credential edits may advance; runtime identity/backend changes require
+    /// a stopped daemon and explicit restart rather than cached-key fallback.
+    pub(crate) fn current(&self) -> Result<(NodeConfig, Self)> {
+        let baseline = NodeConfig::load_in(&self.directory, &self.path)?;
+        if baseline.node.id != self.baseline.node.id
+            || baseline.storage_backend != self.baseline.storage_backend
+            || baseline.keychain_format != self.baseline.keychain_format
+            || baseline.server.url != self.baseline.server.url
+        {
+            return Err(Error::Config(
+                "Node storage or identity changed; stop the daemon and restart it with the selected configuration".into(),
+            ));
+        }
+        let snapshot = SecretSnapshot::read_in(
+            &self.directory,
+            &baseline,
+            &self.path,
+            Some(&self.keychain),
+            self.source.as_ref().and_then(SecretSnapshot::legacy_anchor),
+            self.file.as_ref(),
+        )?;
+        let source = self.source.as_ref().ok_or_else(invalid)?;
+        for field in [SecretField::AuthToken, SecretField::SigningSecret] {
+            let original = if field.encoded(&self.baseline)?.is_some() {
+                source.get(&field)?
+            } else {
+                None
+            };
+            let current = if field.encoded(&baseline)?.is_some() {
+                snapshot.get(&field)?
+            } else {
+                None
+            };
+            if current != original {
+                return Err(Error::Config(
+                    "Node authentication material changed; restart the daemon before serving requests".into(),
+                ));
+            }
+        }
+        let operation = Self {
+            path: self.path.clone(),
+            directory: self.directory.try_clone()?,
+            baseline: baseline.clone(),
+            source: Some(snapshot),
+            file: self
+                .file
+                .as_ref()
+                .map(LocalEncryption::try_clone)
+                .transpose()?,
+            keychain: self.keychain.clone(),
+            _registration_lease: None,
+            state: Mutex::new(State::default()),
+        };
+        Ok((baseline, operation))
+    }
+
     pub(crate) fn open(
         config: &NodeConfig,
         path: &Path,

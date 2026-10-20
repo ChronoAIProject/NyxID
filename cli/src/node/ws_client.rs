@@ -362,7 +362,6 @@ pub async fn run_with_shutdown(
         .parent()
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf();
-    let storage_backend = config.storage_backend.clone();
     let managed_binding = config.managed_runtime.clone();
     let managed_directory = config_dir.clone();
     let pending_poll_shutdown_rx = shutdown_rx.clone();
@@ -370,7 +369,8 @@ pub async fn run_with_shutdown(
     let pending_poll_server_url = config.server.url.clone();
     let pending_poll_node_id = config.node.id.clone();
     let pending_poll_auth_token = auth_token.clone();
-    drop(backend);
+    let serving_backend = backend.clone();
+    let monitor_sender = credential_sender.clone();
     let pending_poll_task = tokio::spawn(async move {
         pending_credential_poll_loop(
             pending_poll_server_url,
@@ -387,13 +387,13 @@ pub async fn run_with_shutdown(
                 &config,
                 &config_path,
                 &config_dir,
-                &storage_backend,
                 &auth_token,
                 signing_secret,
                 &credentials,
                 &credential_sender,
                 in_flight,
                 connection_shutdown_rx,
+                serving_backend,
             )
             .await;
         }
@@ -418,6 +418,11 @@ pub async fn run_with_shutdown(
             tokio::select! {
                 _ = shutdown_signal() => {},
                 _ = super::managed_runtime::wait_for_runtime_end(&managed_directory, managed_binding.as_ref()) => {},
+                result = super::agent::credential_reload_loop(monitor_sender, Duration::from_secs(5), backend) => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, "Node secret custody failed; stopping daemon, restart after storage recovery");
+                    }
+                },
             }
         } => {
             tracing::info!("Shutdown signal received, draining in-flight requests and SSH tunnels...");
@@ -560,8 +565,7 @@ async fn handle_pending_credentials_available(
     server_ws_url: &str,
     auth_token: &str,
     config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(server_ws_url);
     let Ok(client) = crate::tls::client_builder()
@@ -584,24 +588,21 @@ async fn handle_pending_credentials_available(
         }
     };
 
-    let crypto_pending = pending
-        .iter()
-        .filter_map(|item| pending_crypto_metadata_from_poll_item(config_path, item))
-        .collect::<Vec<_>>();
-    if crypto_pending.is_empty() {
+    if !pending.iter().any(|item| item.crypto.is_some()) {
         return;
     }
 
-    let (mut config, backend) = match (
-        NodeConfig::load(config_path),
-        SecretBackend::from_storage_backend_str(storage_backend, config_dir),
-    ) {
-        (Ok(config), Ok(backend)) => (config, backend),
-        (Err(error), _) | (_, Err(error)) => {
+    let (mut config, backend) = match backend.current_writer() {
+        Ok(pair) => pair,
+        Err(error) => {
             tracing::warn!(%error, "Failed to load node config for pending credential pubkey");
             return;
         }
     };
+    let crypto_pending = pending
+        .iter()
+        .filter_map(|item| pending_crypto_metadata_from_poll_item(&config, item))
+        .collect::<Vec<_>>();
 
     let mut config_changed = false;
     let mut outbound = Vec::new();
@@ -629,7 +630,7 @@ async fn handle_pending_credentials_available(
         }
     }
 
-    if config_changed && let Err(error) = config.save(config_path) {
+    if config_changed && let Err(error) = backend.publish(&config, config_path) {
         tracing::warn!(%error, "Failed to save pending credential pubkey metadata");
         return;
     }
@@ -642,17 +643,16 @@ async fn handle_pending_credentials_available(
 }
 
 fn pending_crypto_metadata_from_poll_item(
-    config_path: &std::path::Path,
+    config: &NodeConfig,
     item: &PendingCredentialPollItem,
 ) -> Option<rci_crypto::PendingCredentialCryptoMetadata> {
     let crypto = item.crypto.as_ref()?;
     let injection_method = item.injection_method.as_ref()?;
     let field_name = item.field_name.as_ref()?;
     let expires_at = item.expires_at.as_ref()?;
-    let node_id = NodeConfig::load(config_path).ok()?.node.id;
     Some(rci_crypto::PendingCredentialCryptoMetadata {
         pending_id: item.id.clone(),
-        node_id,
+        node_id: config.node.id.clone(),
         service_slug: item.service_slug.clone(),
         injection_method: injection_method.clone(),
         field_name: field_name.clone(),
@@ -687,16 +687,11 @@ async fn handle_pending_credential_ciphertext_frame(
     tx: &mpsc::Sender<NodeWsMessage>,
     credential_sender: &Arc<SharedCredentialsSender>,
     config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
 ) {
-    if let Some(outbound) = pending_credential_ciphertext_outbound(
-        parsed,
-        credential_sender,
-        config_path,
-        config_dir,
-        storage_backend,
-    ) {
+    if let Some(outbound) =
+        pending_credential_ciphertext_outbound(parsed, credential_sender, config_path, backend)
+    {
         let _ = send_ws_message(tx, outbound.to_ws_json().to_string()).await;
     }
 }
@@ -705,22 +700,18 @@ fn pending_credential_ciphertext_outbound(
     parsed: &serde_json::Value,
     credential_sender: &Arc<SharedCredentialsSender>,
     config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
 ) -> Option<rci_crypto::RemoteCredentialCryptoOutbound> {
     match serde_json::from_value::<rci_crypto::PendingCredentialCiphertext>(parsed.clone()) {
-        Ok(message) => match (
-            NodeConfig::load(config_path),
-            SecretBackend::from_storage_backend_str(storage_backend, config_dir),
-        ) {
-            (Ok(mut cfg), Ok(be)) => Some(remote_crypto::decrypt_and_store_ciphertext(
+        Ok(message) => match backend.current_writer() {
+            Ok((mut cfg, be)) => Some(remote_crypto::decrypt_and_store_ciphertext(
                 &mut cfg,
                 config_path,
                 &be,
                 Some(credential_sender),
                 &message,
             )),
-            (Err(error), _) | (_, Err(error)) => {
+            Err(error) => {
                 tracing::warn!(
                     %error,
                     "Failed to load node config for pending credential ciphertext"
@@ -745,40 +736,35 @@ fn pending_credential_ciphertext_outbound(
 fn handle_pending_credential_cleanup_frame(
     parsed: &serde_json::Value,
     config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
 ) -> bool {
     let Some(pending_id) = parsed["pending_id"].as_str() else {
         return false;
     };
 
-    let evicted = match (
-        NodeConfig::load(config_path),
-        SecretBackend::from_storage_backend_str(storage_backend, config_dir),
-    ) {
-        (Ok(mut cfg), Ok(be)) => {
-            match remote_crypto::evict_pending_key(&mut cfg, &be, pending_id) {
-                Ok(evicted) => {
-                    if evicted && let Err(error) = cfg.save(config_path) {
-                        tracing::warn!(
-                            %error,
-                            pending_credential_id = %pending_id,
-                            "Failed to save config after pending key cleanup"
-                        );
-                    }
-                    evicted
-                }
-                Err(error) => {
+    let evicted = match backend.current_writer() {
+        Ok((mut cfg, be)) => match remote_crypto::evict_pending_key(&mut cfg, &be, pending_id) {
+            Ok(evicted) => {
+                if evicted && let Err(error) = be.publish(&cfg, config_path) {
                     tracing::warn!(
                         %error,
                         pending_credential_id = %pending_id,
-                        "Failed to clean up pending credential key"
+                        "Failed to save config after pending key cleanup"
                     );
-                    false
+                    return false;
                 }
+                evicted
             }
-        }
-        (Err(error), _) | (_, Err(error)) => {
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    pending_credential_id = %pending_id,
+                    "Failed to clean up pending credential key"
+                );
+                false
+            }
+        },
+        Err(error) => {
             tracing::warn!(
                 %error,
                 pending_credential_id = %pending_id,
@@ -820,13 +806,13 @@ async fn run_connection_loop(
     config: &NodeConfig,
     config_path: &std::path::Path,
     config_dir: &std::path::Path,
-    storage_backend: &str,
     auth_token: &str,
     signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     shutdown: watch::Receiver<bool>,
+    backend: Arc<SecretBackend>,
 ) {
     let mut backoff = ReconnectBackoff::new();
     let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
@@ -859,11 +845,14 @@ async fn run_connection_loop(
             break;
         }
 
+        if let Err(error) = super::agent::reload_credentials(&backend, credential_sender) {
+            tracing::error!(%error, "Node storage unavailable before connection; stopping");
+            break;
+        }
         let result = connect_and_serve(
             config,
             config_path,
             config_dir,
-            storage_backend,
             auth_token,
             signing_secret.clone(),
             credentials,
@@ -873,6 +862,7 @@ async fn run_connection_loop(
             &mut machine,
             proxy_uploads.clone(),
             replay_guard.clone(),
+            &backend,
         )
         .await;
         proxy_uploads.disconnect().await;
@@ -908,7 +898,6 @@ async fn connect_and_serve(
     config: &NodeConfig,
     config_path: &std::path::Path,
     config_dir: &std::path::Path,
-    storage_backend: &str,
     auth_token: &str,
     signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
@@ -918,6 +907,7 @@ async fn connect_and_serve(
     machine_state: &mut Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+    backend: &Arc<SecretBackend>,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
@@ -1279,6 +1269,27 @@ async fn connect_and_serve(
             }
         };
 
+        if matches!(
+            parsed["type"].as_str(),
+            Some(
+                "proxy_request"
+                    | "proxy_upload"
+                    | "proxy_upload_v2"
+                    | "ws_proxy_open"
+                    | "ssh_exec"
+                    | "ssh_node_exec_open"
+                    | "web_terminal_open"
+                    | "ssh_tunnel_open"
+                    | "machine_request"
+                    | "machine_request_v2"
+                    | "machine_request_v3"
+            )
+        ) && let Err(error) = super::agent::reload_credentials(backend, credential_sender)
+        {
+            tracing::error!(%error, "Node secret custody failed before execution");
+            break true;
+        }
+
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
                 if let Some(machine) = &machine {
@@ -1490,16 +1501,12 @@ async fn connect_and_serve(
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 let cert_host_key_store = cert_host_key_store.clone();
-                let config_path = config_path.to_path_buf();
-                let config_dir = config_dir.to_path_buf();
-                let storage_backend = storage_backend.to_string();
+                let backend = backend.clone();
                 tokio::spawn(async move {
                     handle_web_terminal_open(
                         &parsed,
                         &ssh_config,
-                        &config_path,
-                        &config_dir,
-                        &storage_backend,
+                        &backend,
                         tx_clone,
                         terminals,
                         cert_host_key_store,
@@ -1545,9 +1552,7 @@ async fn connect_and_serve(
             Some("ssh_node_exec_open") => {
                 let tx_clone = tx.clone();
                 let ssh_config = config.ssh.clone();
-                let config_path = config_path.to_path_buf();
-                let config_dir = config_dir.to_path_buf();
-                let storage_backend = storage_backend.to_string();
+                let backend = backend.clone();
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 let execs = active_ssh_execs.clone();
@@ -1557,9 +1562,7 @@ async fn connect_and_serve(
                     handle_ssh_node_exec_open(
                         &parsed,
                         &ssh_config,
-                        &config_path,
-                        &config_dir,
-                        &storage_backend,
+                        &backend,
                         tx_clone,
                         secret,
                         replay,
@@ -1574,43 +1577,16 @@ async fn connect_and_serve(
                 handle_ssh_exec_cancel(&parsed, &active_ssh_execs).await;
             }
             Some("credential_update") => {
-                // Process credential update synchronously (SecretBackend is
-                // not Send/Sync, so we reconstruct it within this block and
-                // ensure it's dropped before any .await).
-                let ack_msg = {
-                    match SecretBackend::from_storage_backend_str(storage_backend, config_dir) {
-                        Ok(be) => {
-                            process_credential_update(&parsed, credential_sender, config_path, &be)
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to init secret backend for credential update");
-                            None
-                        }
-                    }
-                };
-                // Send ack after backend is dropped (so we can .await)
-                if let Some(ack) = ack_msg {
+                if let Some(ack) =
+                    process_credential_update(&parsed, credential_sender, config_path, backend)
+                {
                     let _ = send_ws_message(&tx, ack).await;
                 }
             }
             Some("credential_remove") => {
-                // Drop the locally-stored credential for this slug. Sent
-                // when a service's `node_id` is reassigned so the prior
-                // node stops holding the secret. SecretBackend is not
-                // Send/Sync, so we scope its lifetime here and do any
-                // awaits after.
-                let ack_msg = {
-                    match SecretBackend::from_storage_backend_str(storage_backend, config_dir) {
-                        Ok(be) => {
-                            process_credential_remove(&parsed, credential_sender, config_path, &be)
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to init secret backend for credential remove");
-                            None
-                        }
-                    }
-                };
-                if let Some(ack) = ack_msg {
+                if let Some(ack) =
+                    process_credential_remove(&parsed, credential_sender, config_path, backend)
+                {
                     let _ = send_ws_message(&tx, ack).await;
                 }
             }
@@ -1620,8 +1596,7 @@ async fn connect_and_serve(
                     &config.server.url,
                     auth_token,
                     config_path,
-                    config_dir,
-                    storage_backend,
+                    backend,
                 )
                 .await;
             }
@@ -1631,8 +1606,7 @@ async fn connect_and_serve(
                     &tx,
                     credential_sender,
                     config_path,
-                    config_dir,
-                    storage_backend,
+                    backend,
                 )
                 .await;
             }
@@ -1643,12 +1617,7 @@ async fn connect_and_serve(
                 | "pending_credential_cancelled"
                 | "pending_credential_expired",
             ) => {
-                handle_pending_credential_cleanup_frame(
-                    &parsed,
-                    config_path,
-                    config_dir,
-                    storage_backend,
-                );
+                handle_pending_credential_cleanup_frame(&parsed, config_path, backend);
             }
             Some("ws_proxy_open") => {
                 let tx_clone = tx.clone();
@@ -2559,35 +2528,23 @@ async fn verify_signed_ssh_exec(
 }
 
 fn load_ssh_node_key_entry(
-    config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
     service_slug: &str,
     principal: &str,
 ) -> Result<ssh_keys::SshKeyEntry> {
-    NodeConfig::load(config_path).and_then(|config| {
-        if config.storage_backend != storage_backend {
-            return Err(Error::Config(
-                "Node storage selection changed; reload before SSH execution".into(),
-            ));
-        }
-        let backend = SecretBackend::reader(&config, config_dir)?;
-        match ssh_keys::config_find(&config, service_slug, principal) {
-            Some(stored) => ssh_keys::load_entry(&config, stored, &backend),
-            None => Err(Error::Config(format!(
-                "SSH key missing for service '{service_slug}' principal '{principal}'"
-            ))),
-        }
-    })
+    let (config, reader) = backend.current_reader()?;
+    match ssh_keys::config_find(&config, service_slug, principal) {
+        Some(stored) => ssh_keys::load_entry(&config, stored, &reader),
+        None => Err(Error::Config(format!(
+            "SSH key missing for service '{service_slug}' principal '{principal}'"
+        ))),
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_ssh_node_exec_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
     tx: mpsc::Sender<NodeWsMessage>,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
@@ -2680,13 +2637,7 @@ async fn handle_ssh_node_exec_open(
     let timeout_secs = parsed["timeout_secs"].as_u64().unwrap_or(30).clamp(1, 300);
 
     let entry = {
-        let loaded = load_ssh_node_key_entry(
-            config_path,
-            config_dir,
-            storage_backend,
-            &service_slug,
-            &principal,
-        );
+        let loaded = load_ssh_node_key_entry(backend, &service_slug, &principal);
         match loaded {
             Ok(entry) => entry,
             Err(Error::Config(message)) if message.contains("SSH key missing") => {
@@ -3047,9 +2998,7 @@ async fn send_ssh_exec_result_with_code(
 async fn handle_web_terminal_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
     tx: mpsc::Sender<NodeWsMessage>,
     active_terminals: ActiveWebTerminalMap,
     cert_host_key_store: SharedCertHostKeyStore,
@@ -3106,9 +3055,7 @@ async fn handle_web_terminal_open(
         handle_node_key_web_terminal_open(
             parsed,
             ssh_config,
-            config_path,
-            config_dir,
-            storage_backend,
+            backend,
             tx,
             active_terminals,
             session_id,
@@ -3294,9 +3241,7 @@ async fn start_russh_web_terminal(
 async fn handle_node_key_web_terminal_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
-    config_path: &std::path::Path,
-    config_dir: &std::path::Path,
-    storage_backend: &str,
+    backend: &SecretBackend,
     tx: mpsc::Sender<NodeWsMessage>,
     active_terminals: ActiveWebTerminalMap,
     session_id: String,
@@ -3318,13 +3263,7 @@ async fn handle_node_key_web_terminal_open(
         .to_string();
 
     let entry = {
-        let loaded = load_ssh_node_key_entry(
-            config_path,
-            config_dir,
-            storage_backend,
-            &service_slug,
-            &principal,
-        );
+        let loaded = load_ssh_node_key_entry(backend, &service_slug, &principal);
         match loaded {
             Ok(entry) => entry,
             Err(Error::Config(message)) if message.contains("SSH key missing") => {
@@ -3600,212 +3539,65 @@ async fn send_web_terminal_closed_with_code(
 // Credential update handlers (server push)
 // ---------------------------------------------------------------------------
 
-/// Process a credential update synchronously. Returns an optional JSON ack
-/// message to send over the WebSocket (avoids holding `&SecretBackend` across
-/// an .await, since `SecretBackend` is not `Send`/`Sync`).
+/// Publish one complete server-pushed mutation before acknowledging it or
+/// replacing the live credential view. The runtime supplies pinned authority.
 fn process_credential_update(
     parsed: &serde_json::Value,
     credential_sender: &Arc<SharedCredentialsSender>,
     config_path: &std::path::Path,
     backend: &SecretBackend,
 ) -> Option<String> {
-    // Echo back `request_id` so strict-push callers on the backend can
-    // correlate the `credential_update_ack` to their pending waiter.
-    // Omitted/None preserves backward compatibility with older servers
-    // that don't attach a request id.
     let request_id = parsed["request_id"].as_str();
-    let service_slug = match parsed["service_slug"].as_str() {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            tracing::warn!("credential_update missing service_slug");
-            return None;
-        }
-    };
-
-    let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
-
-    let result = match injection_method {
-        "ifttt_webhook" => (|| {
-            let key = parsed["header_value"]
+    let service_slug = parsed["service_slug"].as_str().filter(|s| !s.is_empty())?;
+    let result = (|| {
+        let (mut config, writer) = backend.current_writer()?;
+        let target = parsed["target_url"].as_str();
+        let required = |field: &str| {
+            parsed[field]
                 .as_str()
-                .ok_or_else(|| super::error::Error::Validation("IFTTT key missing".into()))?;
-            let mut config = NodeConfig::load(config_path)?;
-            config.add_ifttt_credential_via(
+                .ok_or_else(|| Error::Validation(format!("credential_update missing {field}")))
+        };
+        match parsed["injection_method"].as_str().unwrap_or("header") {
+            "ifttt_webhook" => config.add_ifttt_credential_via(
                 service_slug,
-                key,
-                parsed["target_url"].as_str(),
-                backend,
-            )?;
-            config.save(config_path)?;
-            let credentials = CredentialStore::from_config_with_backend(&config, backend)?;
-            credential_sender.update(credentials);
-            Ok(())
-        })(),
-        "header" => {
-            let header_name = parsed["header_name"].as_str().unwrap_or("Authorization");
-            let header_value = match parsed["header_value"].as_str() {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(slug = %service_slug, "credential_update missing header_value");
-                    return Some(build_credential_ack(
-                        request_id,
-                        service_slug,
-                        "error",
-                        Some("missing header_value"),
-                    ));
-                }
-            };
-            let target_url = parsed["target_url"].as_str();
-
-            update_header_credential(
+                required("header_value")?,
+                target,
+                &writer,
+            )?,
+            "header" => config.add_header_credential_via(
                 service_slug,
-                header_name,
-                header_value,
-                target_url,
-                credential_sender,
-                config_path,
-                backend,
-            )
-        }
-        "query_param" => {
-            let param_name = match parsed["param_name"].as_str() {
-                Some(n) => n,
-                None => {
-                    tracing::warn!(slug = %service_slug, "credential_update missing param_name");
-                    return Some(build_credential_ack(
-                        request_id,
-                        service_slug,
-                        "error",
-                        Some("missing param_name"),
-                    ));
-                }
-            };
-            let param_value = match parsed["param_value"].as_str() {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(slug = %service_slug, "credential_update missing param_value");
-                    return Some(build_credential_ack(
-                        request_id,
-                        service_slug,
-                        "error",
-                        Some("missing param_value"),
-                    ));
-                }
-            };
-            let target_url = parsed["target_url"].as_str();
-
-            update_query_param_credential(
+                parsed["header_name"].as_str().unwrap_or("Authorization"),
+                required("header_value")?,
+                target,
+                &writer,
+            )?,
+            "query_param" => config.add_query_param_credential_via(
                 service_slug,
-                param_name,
-                param_value,
-                target_url,
-                credential_sender,
-                config_path,
-                backend,
-            )
-        }
-        "path_prefix" => {
-            let prefix = parsed["header_name"].as_str().unwrap_or("bot");
-            let credential = match parsed["header_value"].as_str() {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(slug = %service_slug, "credential_update missing header_value for path_prefix");
-                    return Some(build_credential_ack(
-                        request_id,
-                        service_slug,
-                        "error",
-                        Some("missing header_value"),
-                    ));
-                }
-            };
-            let target_url = parsed["target_url"].as_str();
-
-            update_path_prefix_credential(
+                required("param_name")?,
+                required("param_value")?,
+                target,
+                &writer,
+            )?,
+            "path_prefix" => config.add_path_prefix_credential_via(
                 service_slug,
-                prefix,
-                credential,
-                target_url,
-                credential_sender,
-                config_path,
-                backend,
-            )
-        }
-        "aws_sigv4" => {
-            // Cloud-billing credential push (NyxID#716 + Codex review
-            // BLOCKER 6). The credential payload is a JSON blob carried
-            // in `header_value`; the node config stores it on the
-            // `header_value_encrypted` field via the cloud-specific
-            // CredentialConfig constructors, so proxy_executor can later
-            // re-parse it at signing time.
-            let credential_json = match parsed["header_value"].as_str() {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(
-                        slug = %service_slug,
-                        method = %injection_method,
-                        "credential_update missing header_value for cloud billing method"
-                    );
-                    return Some(build_credential_ack(
-                        request_id,
-                        service_slug,
-                        "error",
-                        Some("missing header_value"),
-                    ));
-                }
-            };
-            let target_url = parsed["target_url"].as_str();
-            update_cloud_billing_credential(
+                parsed["header_name"].as_str().unwrap_or("bot"),
+                required("header_value")?,
+                target,
+                &writer,
+            )?,
+            "aws_sigv4" => config.add_aws_sigv4_credential_via(
                 service_slug,
-                injection_method,
-                credential_json,
-                target_url,
-                credential_sender,
-                config_path,
-                backend,
-            )
+                required("header_value")?,
+                target,
+                &writer,
+            )?,
+            "none" => config.set_no_auth_via(service_slug, target, &writer)?,
+            _ => return Err(Error::Validation("unknown injection_method".into())),
         }
-        "none" => {
-            // No-auth placeholder push: drops any stored secret for
-            // this slug but preserves `target_url`, so the proxy
-            // executor can still resolve the downstream without
-            // 502ing on a missing entry. Used when NyxID downgrades
-            // `auth_method` to `none` on a server-held service
-            // (thirty-third-round Codex P1).
-            let target_url = parsed["target_url"].as_str();
-            update_no_auth_credential(
-                service_slug,
-                target_url,
-                credential_sender,
-                config_path,
-                backend,
-            )
-        }
-        other => {
-            tracing::warn!(method = %other, "Unknown injection_method in credential_update");
-            return Some(build_credential_ack(
-                request_id,
-                service_slug,
-                "error",
-                Some("unknown injection_method"),
-            ));
-        }
-    };
-
-    match result {
-        Ok(()) => {
-            tracing::info!(slug = %service_slug, "Credential updated via server push");
-            Some(build_credential_ack(request_id, service_slug, "ok", None))
-        }
-        Err(e) => {
-            tracing::error!(slug = %service_slug, error = %e, "Failed to update credential");
-            Some(build_credential_ack(
-                request_id,
-                service_slug,
-                "error",
-                Some(&e.to_string()),
-            ))
-        }
-    }
+        writer.publish(&config, config_path)?;
+        super::agent::reload_credentials(backend, credential_sender)
+    })();
+    credential_mutation_ack(request_id, service_slug, result)
 }
 
 fn process_credential_remove(
@@ -3815,165 +3607,37 @@ fn process_credential_remove(
     backend: &SecretBackend,
 ) -> Option<String> {
     let request_id = parsed["request_id"].as_str();
-    let service_slug = match parsed["service_slug"].as_str() {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            tracing::warn!("credential_remove missing service_slug");
-            return None;
+    let service_slug = parsed["service_slug"].as_str().filter(|s| !s.is_empty())?;
+    let result = (|| {
+        let (current, _) = backend.current_reader()?;
+        if !current.credentials.contains_key(service_slug) {
+            return super::agent::reload_credentials(backend, credential_sender);
         }
-    };
-
-    let result = (|| -> Result<()> {
-        let mut config = NodeConfig::load(config_path)?;
-        // Check presence *before* calling `remove_credential_via` so
-        // we can distinguish "nothing to remove" (slug absent — this
-        // node never held the credential, which is fine on a
-        // reassignment) from a real backend failure (keyring /
-        // filesystem deletion error). Swallowing real errors would
-        // leave the old node still serving the secret while NyxID
-        // thinks it's gone (eighteenth-round Codex P2).
-        if !config.credentials.contains_key(service_slug) {
-            return Ok(());
-        }
-        config.remove_credential_via(service_slug, backend)?;
-        config.save(config_path)?;
-        let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-        credential_sender.update(new_store);
-        Ok(())
+        let (mut config, writer) = backend.current_writer()?;
+        config.remove_credential_via(service_slug, &writer)?;
+        writer.publish(&config, config_path)?;
+        super::agent::reload_credentials(backend, credential_sender)
     })();
+    credential_mutation_ack(request_id, service_slug, result)
+}
 
+fn credential_mutation_ack(
+    request_id: Option<&str>,
+    service_slug: &str,
+    result: Result<()>,
+) -> Option<String> {
     match result {
-        Ok(()) => {
-            tracing::info!(slug = %service_slug, "Removed credential via server push");
-            Some(build_credential_ack(request_id, service_slug, "ok", None))
-        }
-        Err(e) => {
-            tracing::error!(slug = %service_slug, error = %e, "Failed to remove credential");
+        Ok(()) => Some(build_credential_ack(request_id, service_slug, "ok", None)),
+        Err(error) => {
+            tracing::error!(%error, "Node credential mutation refused");
             Some(build_credential_ack(
                 request_id,
                 service_slug,
                 "error",
-                Some(&e.to_string()),
+                Some("Node credential mutation refused; check storage and daemon status"),
             ))
         }
     }
-}
-
-fn update_header_credential(
-    service_slug: &str,
-    header_name: &str,
-    header_value: &str,
-    target_url: Option<&str>,
-    credential_sender: &Arc<SharedCredentialsSender>,
-    config_path: &std::path::Path,
-    backend: &SecretBackend,
-) -> Result<()> {
-    // 1. Update config on disk
-    let mut config = NodeConfig::load(config_path)?;
-    config.add_header_credential_via(
-        service_slug,
-        header_name,
-        header_value,
-        target_url,
-        backend,
-    )?;
-    config.save(config_path)?;
-
-    // 2. Rebuild credential store from updated config and push to watch channel
-    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-    credential_sender.update(new_store);
-
-    Ok(())
-}
-
-fn update_query_param_credential(
-    service_slug: &str,
-    param_name: &str,
-    param_value: &str,
-    target_url: Option<&str>,
-    credential_sender: &Arc<SharedCredentialsSender>,
-    config_path: &std::path::Path,
-    backend: &SecretBackend,
-) -> Result<()> {
-    // 1. Update config on disk
-    let mut config = NodeConfig::load(config_path)?;
-    config.add_query_param_credential_via(
-        service_slug,
-        param_name,
-        param_value,
-        target_url,
-        backend,
-    )?;
-    config.save(config_path)?;
-
-    // 2. Rebuild credential store from updated config and push to watch channel
-    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-    credential_sender.update(new_store);
-
-    Ok(())
-}
-
-fn update_path_prefix_credential(
-    service_slug: &str,
-    prefix: &str,
-    credential: &str,
-    target_url: Option<&str>,
-    credential_sender: &Arc<SharedCredentialsSender>,
-    config_path: &std::path::Path,
-    backend: &SecretBackend,
-) -> Result<()> {
-    let mut config = NodeConfig::load(config_path)?;
-    config.add_path_prefix_credential_via(service_slug, prefix, credential, target_url, backend)?;
-    config.save(config_path)?;
-
-    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-    credential_sender.update(new_store);
-
-    Ok(())
-}
-
-fn update_no_auth_credential(
-    service_slug: &str,
-    target_url: Option<&str>,
-    credential_sender: &Arc<SharedCredentialsSender>,
-    config_path: &std::path::Path,
-    backend: &SecretBackend,
-) -> Result<()> {
-    let mut config = NodeConfig::load(config_path)?;
-    config.set_no_auth_via(service_slug, target_url, backend)?;
-    config.save(config_path)?;
-
-    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-    credential_sender.update(new_store);
-
-    Ok(())
-}
-
-/// Persist an `aws_sigv4` credential blob pushed by the backend. The
-/// credential JSON itself is opaque to the node until proxy_executor
-/// re-parses it at signing time. NyxID#716 + Codex review BLOCKER 6.
-fn update_cloud_billing_credential(
-    service_slug: &str,
-    injection_method: &str,
-    credential_json: &str,
-    target_url: Option<&str>,
-    credential_sender: &Arc<SharedCredentialsSender>,
-    config_path: &std::path::Path,
-    backend: &SecretBackend,
-) -> Result<()> {
-    let mut config = NodeConfig::load(config_path)?;
-    if injection_method != "aws_sigv4" {
-        return Err(super::error::Error::Config(format!(
-            "update_cloud_billing_credential called with non-cloud injection_method '{injection_method}'"
-        )));
-    }
-    config.add_aws_sigv4_credential_via(service_slug, credential_json, target_url, backend)?;
-    config.save(config_path)?;
-
-    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
-    credential_sender.update(new_store);
-
-    Ok(())
 }
 
 fn build_credential_ack(
@@ -4858,6 +4522,17 @@ mod tests {
         NodeConfig::new(server_url, "node-1".to_string(), "file".to_string())
     }
 
+    fn persisted_runtime(config: &mut NodeConfig, dir: &std::path::Path) -> Arc<SecretBackend> {
+        let encryption = LocalEncryption::open_existing(dir).unwrap();
+        if config.node.auth_token_encrypted.is_empty() {
+            config.set_auth_token("fixture-auth", &encryption).unwrap();
+        }
+        let path = dir.join("config.toml");
+        config.save(&path).unwrap();
+        *config = NodeConfig::load(&path).unwrap();
+        Arc::new(SecretBackend::reader(config, dir).unwrap())
+    }
+
     #[tokio::test]
     async fn managed_handshake_refuses_missing_or_stale_fence_before_runtime_start() {
         for stale in [false, true] {
@@ -4878,6 +4553,9 @@ mod tests {
                 "file".into(),
             );
             config.managed_runtime = Some(binding.clone());
+            config.machine =
+                super::super::managed_config::machine_config(&["files".into(), "shell".into()])
+                    .unwrap();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -4901,6 +4579,7 @@ mod tests {
             });
             let dir = tempfile::tempdir().unwrap();
             let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let runtime = persisted_runtime(&mut config, dir.path());
             let (sender, credentials) =
                 SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
             let (_shutdown, receiver) = watch::channel(false);
@@ -4911,7 +4590,6 @@ mod tests {
                     &config,
                     &dir.path().join("config.toml"),
                     dir.path(),
-                    "file",
                     "fixture-auth",
                     Some(shared_signing_secret(&"a".repeat(64))),
                     &credentials,
@@ -4921,6 +4599,7 @@ mod tests {
                     &mut machine,
                     Arc::new(super::super::proxy_upload::Uploads::default()),
                     replay_guard(),
+                    &runtime,
                 ),
             )
             .await
@@ -5641,9 +5320,10 @@ mod tests {
 
     async fn assert_short_connections_back_off(authenticated: bool, clean_close: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let config = rci_test_config(format!("ws://{}/ws", listener.local_addr().unwrap()));
+        let mut config = rci_test_config(format!("ws://{}/ws", listener.local_addr().unwrap()));
         let dir = tempfile::tempdir().unwrap();
         let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+        let runtime = persisted_runtime(&mut config, dir.path());
         let (sender, credentials) =
             SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -5652,13 +5332,13 @@ mod tests {
                 &config,
                 &dir.path().join("config.toml"),
                 dir.path(),
-                "file",
                 "test-auth",
                 None,
                 &credentials,
                 &Arc::new(sender),
                 Arc::new(AtomicUsize::new(0)),
                 shutdown_rx,
+                runtime,
             )
             .await;
         });
@@ -5895,8 +5575,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         LocalEncryption::initialize(dir.path()).unwrap();
         let config_path = dir.path().join("config.toml");
-        let config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
-        config.save(&config_path).unwrap();
+        let mut config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
+        let runtime = persisted_runtime(&mut config, dir.path());
         let (tx, mut rx) = mpsc::channel(4);
 
         handle_pending_credentials_available(
@@ -5904,8 +5584,7 @@ mod tests {
             &config.server.url,
             "node-token",
             &config_path,
-            dir.path(),
-            "file",
+            &runtime,
         )
         .await;
 
@@ -5949,9 +5628,11 @@ mod tests {
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
+        LocalEncryption::initialize(dir.path()).unwrap();
         let config_path = dir.path().join("config.toml");
-        let config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
-        config.save(&config_path).unwrap();
+        let mut config = rci_test_config(format!("ws://{}/api/v1/nodes/ws", server.address()));
+        let runtime = persisted_runtime(&mut config, dir.path());
+        std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
         assert!(matches!(
             SecretBackend::from_storage_backend_str("file", dir.path()),
             Err(crate::node::error::Error::Io(error))
@@ -5976,8 +5657,7 @@ mod tests {
                 &config.server.url,
                 "node-token",
                 &config_path,
-                dir.path(),
-                "file",
+                &runtime,
             ),
         )
         .await
@@ -6011,7 +5691,7 @@ mod tests {
         let node_pubkey =
             node_pubkey_from(remote_crypto::prepare_pubkey(&mut config, &backend, &meta).unwrap());
         let message = rci_ciphertext_for(&meta, &node_pubkey, "Bearer sk-rci");
-        config.save(&config_path).unwrap();
+        let runtime = persisted_runtime(&mut config, dir.path());
         let initial_store = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
         let (credential_sender, shared_credentials) = SharedCredentials::new(initial_store);
         let credential_sender = Arc::new(credential_sender);
@@ -6024,8 +5704,7 @@ mod tests {
             &tx,
             &credential_sender,
             &config_path,
-            dir.path(),
-            "file",
+            &runtime,
         )
         .await;
 
@@ -6060,8 +5739,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
-        let cfg = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
-        cfg.save(&config_path).unwrap();
+        let mut cfg = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        let runtime = persisted_runtime(&mut cfg, dir.path());
         let store = CredentialStore::from_config_with_backend(&cfg, &backend).unwrap();
         let (sender, credentials) = SharedCredentials::new(store);
         let sender = Arc::new(sender);
@@ -6071,7 +5750,7 @@ mod tests {
             "injection_method": "ifttt_webhook", "header_value": key,
             "target_url": "https://maker.ifttt.com",
         });
-        let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+        let ack = process_credential_update(&frame, &sender, &config_path, &runtime).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
             "ok"
@@ -6103,7 +5782,7 @@ mod tests {
             frame["injection_method"] = method.into();
             frame["header_value"] = replacement.into();
             frame["target_url"] = destination.into();
-            let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+            let ack = process_credential_update(&frame, &sender, &config_path, &runtime).unwrap();
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
                 "error"
@@ -6118,6 +5797,292 @@ mod tests {
     }
 
     #[test]
+    fn runtime_server_push_refuses_removed_key_without_acknowledging_or_recreating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        LocalEncryption::initialize(dir.path()).unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = rci_test_config("wss://example.invalid".into());
+        let runtime = persisted_runtime(&mut config, dir.path());
+        let (sender, credentials) = SharedCredentials::new(CredentialStore::default());
+        let sender = Arc::new(sender);
+        let before = std::fs::read(&path).unwrap();
+        std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
+        let ack = process_credential_update(
+            &serde_json::json!({
+                "service_slug":"new", "header_value":"synthetic-forbidden", "request_id":"failed-1",
+            }),
+            &sender,
+            &path,
+            &runtime,
+        )
+        .unwrap();
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["status"], "error");
+        assert_eq!(ack["request_id"], "failed-1");
+        assert!(!ack.to_string().contains("synthetic-forbidden"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join(".keyfile").exists());
+        assert_eq!(credentials.snapshot().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn serving_runtime_stops_before_dispatch_after_selected_key_disappears() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/probe"))
+            .and(header("x-key", "synthetic-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("forwarded"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = LocalEncryption::initialize(dir.path()).unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = rci_test_config(format!(
+            "ws://{}/api/v1/nodes/ws",
+            listener.local_addr().unwrap()
+        ));
+        config
+            .add_header_credential("service", "X-Key", "synthetic-key", &file)
+            .unwrap();
+        let runtime = persisted_runtime(&mut config, dir.path());
+        let initial = CredentialStore::from_config_with_backend(&config, &runtime).unwrap();
+        let (sender, credentials) = SharedCredentials::new(initial);
+        let sender = Arc::new(sender);
+        let task = tokio::spawn(run_with_shutdown(
+            config,
+            path.clone(),
+            "fixture-auth".into(),
+            None,
+            credentials.clone(),
+            sender,
+            runtime,
+        ));
+        let stream = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut prefix = [0; 1024];
+                let read = stream.peek(&mut prefix).await.unwrap();
+                if prefix[..read].starts_with(b"GET /api/v1/node-agent/pending-credentials ") {
+                    let body = r#"{"pending_credentials":[]}"#;
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len(),
+                    ).as_bytes()).await.unwrap();
+                } else {
+                    break stream;
+                }
+            }
+        }).await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let auth = socket.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(auth.to_text().unwrap()).unwrap()["type"],
+            "auth"
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({"type":"auth_ok"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let capabilities = socket.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(capabilities.to_text().unwrap()).unwrap()["type"],
+            "status_update"
+        );
+        let mut request = serde_json::json!({
+            "type":"proxy_request", "request_id":"healthy", "service_slug":"service",
+            "method":"GET", "path":"/probe", "base_url":upstream.uri(),
+            "headers":{}, "query":"", "body":"",
+        });
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(response["request_id"], "healthy");
+        assert_eq!(response["status"], 200);
+        assert_eq!(credentials.snapshot().count(), 1);
+        let before = std::fs::read(&path).unwrap();
+        std::fs::remove_file(dir.path().join(".keyfile")).unwrap();
+        request["request_id"] = "must-not-dispatch".into();
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credentials.snapshot().count(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join(".keyfile").exists());
+        // No proxy response is emitted: custody failed before proxy parsing
+        // and dispatch. The runtime closes its socket during orderly teardown.
+        while let Some(message) = socket.next().await {
+            if let Ok(Message::Text(text)) = message {
+                assert!(!text.contains("must-not-dispatch"));
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_keychain_server_push_and_rci_publish_before_ack_and_reload() {
+        use super::super::keychain::KeychainBackend;
+        use super::super::secret_fields::SecretField;
+        use super::super::secret_operation::SecretOperation;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = NodeConfig::new(
+            "wss://example.invalid".into(),
+            "node-1".into(),
+            "keychain".into(),
+        );
+        let keychain = KeychainBackend::new_mock("node-1");
+        let registration = SecretOperation::registration(&config, &path, keychain.clone()).unwrap();
+        registration.prepare(&mut config).unwrap();
+        config.node.auth_token_encrypted = registration
+            .store(SecretField::AuthToken, "synthetic-auth")
+            .unwrap();
+        registration.publish(&config, &path).unwrap();
+        let config = NodeConfig::load(&path).unwrap();
+        let runtime = SecretBackend::reader_with_keychain(&config, dir.path(), keychain).unwrap();
+        let (sender, credentials) = SharedCredentials::new(CredentialStore::default());
+        let sender = Arc::new(sender);
+        for frame in [
+            serde_json::json!({"service_slug":"header", "injection_method":"header", "header_name":"X-Key", "header_value":"synthetic-header"}),
+            serde_json::json!({"service_slug":"query", "injection_method":"query_param", "param_name":"api_key", "param_value":"synthetic-query"}),
+            serde_json::json!({"service_slug":"path", "injection_method":"path_prefix", "header_name":"bot", "header_value":"synthetic-path"}),
+            serde_json::json!({"service_slug":"ifttt", "injection_method":"ifttt_webhook", "header_value":"synthetic_ifttt"}),
+            serde_json::json!({"service_slug":"aws", "injection_method":"aws_sigv4", "header_value":r#"{"access_key_id":"synthetic-access","secret_access_key":"synthetic-secret","region":"us-east-1","service":"bedrock"}"#}),
+        ] {
+            let ack = process_credential_update(&frame, &sender, &path, &runtime).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                "ok"
+            );
+            assert!(
+                credentials
+                    .snapshot()
+                    .get(frame["service_slug"].as_str().unwrap())
+                    .is_some()
+            );
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(!saved.contains("synthetic-"));
+            assert!(!ack.contains("synthetic"));
+        }
+        assert_eq!(credentials.snapshot().count(), 5);
+        let no_auth = serde_json::json!({"service_slug":"header", "injection_method":"none", "target_url":"https://example.invalid"});
+        let ack = process_credential_update(&no_auth, &sender, &path, &runtime).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+            "ok"
+        );
+        assert!(matches!(
+            credentials.snapshot().get("header").unwrap().injection,
+            CredentialInjection::NoAuth
+        ));
+        let ack = process_credential_remove(
+            &serde_json::json!({"service_slug":"query", "request_id":"remove-1"}),
+            &sender,
+            &path,
+            &runtime,
+        )
+        .unwrap();
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["status"], "ok");
+        assert_eq!(ack["request_id"], "remove-1");
+        assert!(credentials.snapshot().get("query").is_none());
+
+        let (mut config, writer) = runtime.current_writer().unwrap();
+        let meta = rci_metadata("pending-1");
+        let public =
+            node_pubkey_from(remote_crypto::prepare_pubkey(&mut config, &writer, &meta).unwrap());
+        writer.publish(&config, &path).unwrap();
+        let message = rci_ciphertext_for(&meta, &public, "synthetic-rci");
+        let result = pending_credential_ciphertext_outbound(
+            &serde_json::to_value(message).unwrap(),
+            &sender,
+            &path,
+            &runtime,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, rci_crypto::RemoteCredentialCryptoOutbound::DecryptResult { error_code: None, ref status, .. } if status == "ok")
+        );
+        assert_eq!(
+            credentials
+                .snapshot()
+                .get("openai")
+                .unwrap()
+                .header()
+                .unwrap()
+                .1,
+            "synthetic-rci"
+        );
+        assert!(
+            !NodeConfig::load(&path)
+                .unwrap()
+                .pending_crypto_keys
+                .contains_key("pending-1")
+        );
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("synthetic")
+        );
+
+        let (mut config, writer) = runtime.current_writer().unwrap();
+        remote_crypto::prepare_pubkey(&mut config, &writer, &meta).unwrap();
+        writer.publish(&config, &path).unwrap();
+        assert!(handle_pending_credential_cleanup_frame(
+            &serde_json::json!({"pending_id":"pending-1"}),
+            &path,
+            &runtime
+        ));
+        assert!(
+            !NodeConfig::load(&path)
+                .unwrap()
+                .pending_crypto_keys
+                .contains_key("pending-1")
+        );
+        let (mut config, writer) = runtime.current_writer().unwrap();
+        ssh_keys::add_entry(
+            &mut config,
+            &writer,
+            ssh_keys::NewSshKeyEntry {
+                service_slug: "ssh".into(),
+                principal: "alice".into(),
+                private_key_pem: Zeroizing::new("synthetic-private".into()),
+                passphrase: Some(Zeroizing::new("synthetic-passphrase".into())),
+                target_host: "example.invalid".into(),
+                target_port: 22,
+                host_key_sha256: None,
+                algorithms: None,
+            },
+        )
+        .unwrap();
+        writer.publish(&config, &path).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::rename(dir.path(), parent.path().join("pinned")).unwrap();
+        super::super::storage::Directory::create_private(dir.path()).unwrap();
+        let ssh = load_ssh_node_key_entry(&runtime, "ssh", "alice").unwrap();
+        assert_eq!(ssh.private_key_pem.as_str(), "synthetic-private");
+        assert_eq!(
+            ssh.passphrase.as_deref().map(String::as_str),
+            Some("synthetic-passphrase")
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn pending_credential_consumed_frame_evicts_pending_key_and_saves_config() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -6125,7 +6090,7 @@ mod tests {
         let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
         let meta = rci_metadata("pending-1");
         remote_crypto::prepare_pubkey(&mut config, &backend, &meta).unwrap();
-        config.save(&config_path).unwrap();
+        let runtime = persisted_runtime(&mut config, dir.path());
 
         let evicted = handle_pending_credential_cleanup_frame(
             &serde_json::json!({
@@ -6133,8 +6098,7 @@ mod tests {
                 "pending_id": "pending-1",
             }),
             &config_path,
-            dir.path(),
-            "file",
+            &runtime,
         );
 
         assert!(evicted);
