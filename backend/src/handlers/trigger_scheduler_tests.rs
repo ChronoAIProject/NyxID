@@ -963,10 +963,15 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
         "owner_timezone": "Asia/Singapore",
         "schedule": { "kind": "cron", "expression": "0 8 * * 1-5", "timezone": "Asia/Singapore" },
     });
-    let created =
-        crate::handlers::assistant_schedules::dispatch(&state, OWNER, "create_schedule", &args)
-            .await
-            .unwrap();
+    let created = crate::handlers::assistant_schedules::dispatch(
+        &state,
+        OWNER,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
+        "create_schedule",
+        &args,
+    )
+    .await
+    .unwrap();
     assert_eq!(created["timezone"], "Asia/Singapore");
     assert_eq!(
         created["schedule"]["next_runs"].as_array().unwrap().len(),
@@ -978,6 +983,7 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
     let changed = crate::handlers::assistant_schedules::dispatch(
         &state,
         OWNER,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
         "update_schedule",
         &json!({ "id": id, "paused": true, "label": "Paused report" }),
     )
@@ -994,6 +1000,7 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
         crate::handlers::assistant_schedules::dispatch(
             &state,
             OWNER,
+            &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
             "run_schedule_now",
             &json!({ "id": id })
         )
@@ -1003,6 +1010,7 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
     crate::handlers::assistant_schedules::dispatch(
         &state,
         OWNER,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
         "update_schedule",
         &json!({ "id": id, "paused": false }),
     )
@@ -1011,6 +1019,7 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
     crate::handlers::assistant_schedules::dispatch(
         &state,
         OWNER,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
         "run_schedule_now",
         &json!({ "id": id }),
     )
@@ -1033,9 +1042,22 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
         .insert_many(extra)
         .await
         .unwrap();
+    let principal = crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() };
     let (a, b) = tokio::join!(
-        crate::handlers::assistant_schedules::dispatch(&state, OWNER, "create_schedule", &args),
-        crate::handlers::assistant_schedules::dispatch(&state, OWNER, "create_schedule", &args)
+        crate::handlers::assistant_schedules::dispatch(
+            &state,
+            OWNER,
+            &principal,
+            "create_schedule",
+            &args
+        ),
+        crate::handlers::assistant_schedules::dispatch(
+            &state,
+            OWNER,
+            &principal,
+            "create_schedule",
+            &args
+        )
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert_eq!(
@@ -1050,6 +1072,7 @@ async fn schedule_tools_controls_limits_and_owner_timezone() {
     crate::handlers::assistant_schedules::dispatch(
         &state,
         OWNER,
+        &crate::models::audit_outbox::AuditPrincipal::Person { id: OWNER.into() },
         "delete_schedule",
         &json!({ "id": id }),
     )
