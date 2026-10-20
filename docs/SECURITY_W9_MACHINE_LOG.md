@@ -62,3 +62,13 @@
 - Linux `sudo python3 /tmp/nyxid-w94-d2r-guest-extra.py`: 6/0 real setup cases; post-provision probe failure yes/no/required preserves the expected config choice; node-only absent/automatic/required refuse before registration with separated_requires_managed_browser.
 - Guest uses fresh committed archive at /tmp/nyxid-w94-d2r plus exactly five revised source/entrypoint files, SHA256 matched to host; no writable shared mount or foreign WIP. Main fixture config unchanged, six services stopped, AppArmor userns restriction remains 1; temporary setup profiles self-cleaned.
 - Remaining: actual full/node-only Docker image startup and probe lifecycle require hosted Docker CI via C; native lifecycle/fill and hosted amd64 remain D-5 gates. D-3 is not started; await PM verdict on this revision.
+
+## D-2-C — hosted Docker CLI contract follow-up
+- Implementation: `d99acb094`; explicit pathspecs for cli/src/commands/node.rs, cli/src/cli.rs and docs/NYXID_NODE.md only.
+- New machine Docker containers explicitly use self-hosted registration (`NYXID_MACHINE_MANAGED=0`) and the reviewed separation choice; machine stop retains the container for start/restart preservation.
+- Config is /var/lib/nyxid-machine/node/config.toml, [machine].separation_choice; the Docker CLI never mounts or writes the host profile. Refused fresh selection precedes persistent container/volume creation.
+- Linux independent /tmp/nyxid-w94-d2r snapshot: `cargo test --locked -p nyxid-cli --bin nyxid commands::node::tests::docker_ -- --test-threads=1` 9/0/0 (passed/failed/ignored).
+- Linux `cargo clippy --locked -p nyxid-cli --bin nyxid --tests -- -D warnings` and `cargo build --locked -p nyxid-cli --bin nyxid` pass; scoped macOS rustfmt and owned diff checks pass.
+- `python3 /tmp/nyxid-w94-d3-live-check.py /tmp/nyxid-w94-stream-d/debug/nyxid`: 18/0 live CLI/PTY and Docker-command-fixture cases, including closed stdin, self-hosted env and stop/start/restart preservation.
+- These fixture checks are not Docker engine evidence. C's hosted job must verify image startup/TLS, registration, actual anonymous-volume cleanup and no named volumes after refusal; cleanup explicitly removes retained machine containers.
+- Registration and stream A's evolving secret-storage implementation are untouched; credential absence must include the complete fresh state/profile root and applicable keychain/vault stores.
